@@ -89,7 +89,7 @@ cmd /k
 
 @'
 # Windows portable build
-Extract to a writable folder. Double-click start.cmd to run the local console.
+Extract to a writable folder. Follow the upstream README to prepare the local game protocol before starting. Double-click start.cmd to run the local console.
 Double-click terminal.cmd to use the bundled node, npm and openssl commands.
 The original start-console.cmd can also be run from that terminal.
 Keep data/, work/ and certificates/ when upgrading. Game clients, local game
@@ -127,24 +127,51 @@ try {
     & "$testRuntime\npm.cmd" --version
     & $env:CW_OPENSSL version
     & $node --input-type=module -e "import { initCa, leafFor } from './src/platform/certificates.mjs'; initCa(); leafFor('localhost');"
-    $stdout = Join-Path $work 'console.stdout.log'
-    $stderr = Join-Path $work 'console.stderr.log'
-    $proc = Start-Process -FilePath $node -ArgumentList @('src/app.mjs','console') -WorkingDirectory $test -PassThru -RedirectStandardOutput $stdout -RedirectStandardError $stderr
-    try {
-        $healthy = $false
-        for ($i = 0; $i -lt 45; $i++) {
-            if ($proc.HasExited) { throw "Console exited with code $($proc.ExitCode)" }
-            try {
-                $page = Invoke-WebRequest 'http://127.0.0.1:17421/' -TimeoutSec 3
-                $js = Invoke-WebRequest 'http://127.0.0.1:17421/ui/console-client.js' -TimeoutSec 3
-                if ($page.StatusCode -eq 200 -and $js.StatusCode -eq 200 -and $js.RawContentLength -gt 0) { $healthy = $true; break }
-            } catch { Start-Sleep -Seconds 2 }
-        }
-        if (-not $healthy) { throw 'Extracted portable console failed HTTP smoke test' }
-        Write-Host 'Portable ZIP smoke test passed.'
-    } finally {
-        if (-not $proc.HasExited) { Stop-Process -Id $proc.Id -Force }
-        Get-Content $stdout, $stderr -ErrorAction SilentlyContinue | Write-Host
-    }
+    # The real console requires a game protocol from the user's local client.
+    # Validate its failure mode without a protocol, then use the same offline
+    # dependency-injection approach as the upstream HTTP regression tests.
+    # The smoke-test files are created AFTER compression and are never shipped.
+    @'
+import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import path from 'node:path';
+import { spawnSync } from 'node:child_process';
+
+const root = import.meta.dirname;
+process.env.CW_DATA_DIR = path.join(root, 'data');
+process.env.CW_RESOURCE_DIR = path.join(root, 'work', 'test-resources');
+process.env.CW_PROTO_BUNDLE = path.join(root, 'missing-game-protocol.js');
+const config = path.join(root, 'offline-test-config.json');
+fs.writeFileSync(config, '[]');
+process.env.CW_CONFIG_PACK = config;
+
+const startup = spawnSync(process.execPath, ['src/app.mjs', 'console'], {
+  cwd: root, env: process.env, encoding: 'utf8', timeout: 30000,
+});
+if (startup.error) throw startup.error;
+assert.equal(startup.status, 1, 'Expected real startup to reject a missing game protocol');
+assert.match(startup.stdout + startup.stderr, /ENOENT|无法加载当前协议/);
+console.log('Real startup: missing game protocol correctly rejected.');
+
+const { createConsole } = await import('./src/server.mjs');
+const app = createConsole({ port: 0, protocol: {}, resourceUpdates: false });
+const watchdog = setTimeout(() => {
+  console.error('Offline HTTP smoke test timed out');
+  process.exit(1);
+}, 30000);
+try {
+  const url = await app.listen();
+  const page = await fetch(url + '/', { signal: AbortSignal.timeout(10000) });
+  assert.equal(page.status, 200, 'Console HTML');
+  assert.ok((await page.text()).length > 0);
+  const js = await fetch(url + '/ui/console-client.js', { signal: AbortSignal.timeout(10000) });
+  assert.equal(js.status, 200, 'Bundled client JS');
+  assert.ok((await js.arrayBuffer()).byteLength > 0);
+  console.log('Portable ZIP offline HTTP smoke test passed.');
+} finally {
+  try { await app.close(); } finally { clearTimeout(watchdog); }
+}
+'@ | Set-Content (Join-Path $test 'portable-smoke-test.mjs') -Encoding utf8
+    & $node './portable-smoke-test.mjs'
 } finally { Pop-Location }
 Get-FileHash $zip -Algorithm SHA256 | Format-List
