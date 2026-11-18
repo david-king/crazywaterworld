@@ -300,10 +300,99 @@ test('所有显式父项位于同组，字段无重复且依赖无环', () => {
     ['forge.universalReserve', 'forge.universal'], ['museum.matchedFactor', 'museum.materialFactor'],
     ['merchant.autoBuyPointers', 'merchant.autoSpeedUp'], ['merchant.pointerDailyDiamondLimit', 'merchant.autoBuyPointers'],
     ['silicon.fleets.0.huntPlayers', 'silicon.fleets.0.huntEnabled'],
-    ['antique.targetStar', 'antique.star'], ['treasure.maxRepairCost', 'treasure.autoRepair'],
+    ['antique.targetStar', 'antique.star'],
     ['treasure.marchTargetSeconds', 'treasure.marchSpeedUp'], ['treasure.dailyDiamondLimit', 'treasure.marchSpeedUp'],
   ]) assert.equal(fields.get(child)?.parent, parent, child);
 });
+test('巨轮跟随后续方式仅在跟随与反复攻占同时开启时展示，切换开关保留选项', () => {
+  const f = fixture();
+  f.mount(f.groups.find(group => group.id === 'treasure').fields.filter(field => [
+    'treasure.follow', 'treasure.repeatAttack', 'treasure.followMode',
+  ].includes(field.key)));
+  const mode = f.widget('treasure.followMode');
+  assert.equal(mode.parentKey, 'treasure.follow');
+  assert.equal(mode.spec.kind, 'radio');
+  assert.deepEqual(mode.spec.options.map(option => option[0]), ['trigger', 'eachTime']);
+  assert.equal(f.editor.draft.treasure.followMode, 'trigger');
+  assert(!visible(mode.node));
+  f.set('treasure.follow', true); f.expand('treasure.follow');
+  assert(!visible(mode.node));
+  f.set('treasure.repeatAttack', true);
+  assert(visible(mode.node));
+  f.set('treasure.followMode', 'eachTime');
+  f.set('treasure.repeatAttack', false);
+  assert(!visible(mode.node));
+  f.set('treasure.repeatAttack', true); f.set('treasure.follow', false);
+  assert(!visible(mode.node));
+  f.set('treasure.follow', true);
+  assert(visible(mode.node));
+  assert.equal(f.editor.draft.treasure.followMode, 'eachTime');
+});
+
+test('设置页不再出现汽油保留量或消费上限，其他资源约束仍存在', () => {
+  const f=fixture();f.renderPage();
+  for(const key of ['worldBoss.petrolReserve','radar.petrolReserve','radar.dailyPetrolLimit','pirateHunt.petrolReserve','pirateHunt.fuelBudget','treasure.petrolReserve','treasure.maxRepairCost','treasure.dailyRepairPetrolLimit','cityWar.petrolReserve','cityWar.maxRepairCost','cityWar.dailyPetrolLimit','silicon.petrolReserve','silicon.dailyPetrolLimit','silicon.fleets.0.maxRepairCost'])assert.equal(f.widget(key),undefined,key);
+  assert(f.widget('resources.diamondDailyLimit'));assert(f.widget('cityWar.dailyDispatchLimit'));
+});
+
+test('海兽、博物馆和情报只展示统一配置，探宝单开关直接展开参数', () => {
+  const f = fixture(); f.renderPage();
+  for (const name of ['petCollect', 'petBreed', 'museumCollect', 'museumExplore', 'museumRevenue', 'museumAchievements', 'radarAuto', 'radarRepair']) {
+    assert.equal(f.widget('schedule.' + name), undefined, name + ' 不能被动态配置重新生成');
+  }
+  assert(![...f.editor.fields.values()].some(field => /沿用原规则|旧规则/.test(field.label + (field.help ?? ''))));
+  for (const key of ['museum.claim', 'museum.explore']) assert.equal(f.widget(key), undefined, '探宝不拆分领奖和派遣开关');
+  assert.match(f.widget('museum.enabled').spec.help, /领取.*奖励.*派遣/);
+  const museumFields = f.editor.groups.get('museum').fields;
+  assert.deepEqual(museumFields.filter(field => !field.parent).map(field => field.key),
+    ['museum.runEnabled', 'museum.upgrade', 'museum.revenue', 'museum.achievements', 'museum.display', 'museum.enabled']);
+  for (const [child, parent] of [['museum.factorMode', 'museum.enabled'], ['museum.factor', 'museum.enabled'], ['museum.fullRecommendedFactor', 'museum.enabled'], ['museum.partialRecommendedFactor', 'museum.enabled'], ['museum.maxDispatches', 'museum.enabled'], ['museum.materialFactor', 'museum.enabled'],
+    ['museum.noRecommendedFallback', 'museum.enabled'], ['museum.noRecommendedFactor', 'museum.noRecommendedFallback'],
+    ['museum.maps', 'museum.enabled'], ['museum.useGuide', 'museum.enabled'],
+    ['museum.dailyGuideLimit', 'museum.useGuide']]) assert.equal(f.widget(child).parentKey, parent, child);
+  assert.equal(f.widget('radar.repairIdle').parentKey, null, '空闲维修可独立于情报派遣开启');
+  assert.deepEqual(f.widget('museum.factorMode').spec.options, [['materials', '材料筛选模式'], ['recommended', '按推荐英雄选择']]);
+  for (const key of ['factor', 'matchedFactor', 'fullRecommendedFactor', 'partialRecommendedFactor', 'noRecommendedFactor']) {
+    const spec = f.widget('museum.' + key).spec;
+    assert.equal(spec.kind, 'choice'); assert.equal(spec.numeric, true);
+    assert.deepEqual(spec.options, [[1, '1倍'], [2, '2倍'], [3, '3倍']]);
+  }
+  assert.match(f.widget('pet.species').spec.empty, /不自动培育/);
+  assert.match(f.widget('radar.fleetIds').spec.empty, /选择后才派遣/);
+  assert(!visible(f.widget('museum.factor').node));
+  f.set('museum.enabled', true); f.expand('museum.enabled');
+  assert(visible(f.widget('museum.factor').node));
+  f.set('museum.factor', 3); f.set('museum.enabled', false);
+  assert(!visible(f.widget('museum.factor').node)); assert.equal(f.editor.draft.museum.factor, 3);
+  f.set('museum.enabled', true);
+  assert(visible(f.widget('museum.factor').node)); assert.equal(f.editor.draft.museum.factor, 3);
+  f.set('museum.materialFactor', true); f.expand('museum.materialFactor');
+  f.set('museum.stockThreshold', 25);
+  assert(visible(f.widget('museum.stockThreshold').node));
+  f.set('museum.factorMode', 'recommended');
+  for (const key of ['factor', 'materialFactor', 'factorMaterials', 'stockThreshold', 'matchedFactor']) {
+    assert(!visible(f.widget('museum.' + key).node), key + ' 材料参数在推荐模式隐藏');
+  }
+  for (const key of ['factorMode', 'fullRecommendedFactor', 'partialRecommendedFactor', 'noRecommendedFallback', 'maxDispatches', 'maps', 'useGuide']) assert(visible(f.widget('museum.' + key).node));
+  assert.equal(f.editor.draft.museum.fullRecommendedFactor, 3); assert.equal(f.editor.draft.museum.partialRecommendedFactor, 2);
+  assert.equal(f.editor.draft.museum.noRecommendedFallback, false); assert.equal(f.editor.draft.museum.noRecommendedFactor, 1);
+  assert(!visible(f.widget('museum.noRecommendedFactor').node));
+  f.set('museum.noRecommendedFallback', true); f.expand('museum.noRecommendedFallback');
+  assert(visible(f.widget('museum.noRecommendedFactor').node)); f.set('museum.noRecommendedFactor', 3);
+  f.set('museum.noRecommendedFallback', false);
+  assert(!visible(f.widget('museum.noRecommendedFactor').node)); assert.equal(f.editor.draft.museum.noRecommendedFactor, 3);
+  f.set('museum.fullRecommendedFactor', 2); f.set('museum.partialRecommendedFactor', 1);
+  assert.equal(f.editor.draft.museum.factor, 3); assert.equal(f.editor.draft.museum.stockThreshold, 25);
+  f.set('museum.factorMode', 'materials');
+  assert(visible(f.widget('museum.factor').node)); assert(visible(f.widget('museum.stockThreshold').node));
+  assert(!visible(f.widget('museum.fullRecommendedFactor').node)); assert(!visible(f.widget('museum.partialRecommendedFactor').node));
+  assert(!visible(f.widget('museum.noRecommendedFallback').node)); assert(!visible(f.widget('museum.noRecommendedFactor').node));
+  f.set('museum.factorMode', 'recommended');
+  assert.equal(f.editor.draft.museum.fullRecommendedFactor, 2); assert.equal(f.editor.draft.museum.partialRecommendedFactor, 1);
+  f.set('museum.noRecommendedFallback', true);
+  assert(visible(f.widget('museum.noRecommendedFactor').node)); assert.equal(f.editor.draft.museum.noRecommendedFactor, 3);
+});
+
 test('舰队职责隶属参与舰队，逐队加速合并且维修与派遣省钻仍各自嵌套',()=>{
   const f=fixture({navigation:true});f.editor.draft.cityWar.enabled=true;
   f.editor.draft.fleetSpeed.enabled=true;Object.assign(f.editor.draft.fleetSpeed.fleets[0],{repair:true,march:true});
@@ -317,7 +406,13 @@ test('舰队职责隶属参与舰队，逐队加速合并且维修与派遣省�
   global.open=true;global.ontoggle();
   assert(visible(f.widget('cityWar.targetMode').node),'展开后显示全局策略');
   const city=f.env.node('config-group-cityWar');
-  assert(city.children.indexOf(global)>city.children.indexOf(f.widget('fleetSpeed.dailyDiamondLimit').node));
+  assert(city.children.indexOf(global)>city.children.indexOf(f.widget('fleetSpeed.enabled').node));
+  assert.equal(f.widget('fleetSpeed.dailyDiamondLimit'),undefined,'城战加速不再有中间合计上限');
+  assert(f.widget('resources.diamondDailyLimit'));
+  for(const mode of ['repair','march']){
+    assert(f.widget('fleetSpeed.fleets.0.'+mode+'DailyDiamonds'));
+    assert.equal(f.widget('fleetSpeed.fleets.0.'+mode+'MaxDiamonds'),undefined,'城战加速仅保留每日钻石上限');
+  }
   const participants=f.widget('cityWar.fleetIds'),roles=f.widget('cityWar.defenceFleetIds');
   assert.equal(participants.node.parentElement,city,'参与舰队直接展示，不再套分区折叠');
   assert.equal(roles.parentKey,participants.spec.key);
@@ -336,9 +431,9 @@ test('舰队职责隶属参与舰队，逐队加速合并且维修与派遣省�
   assert(!f.editor.fields.has('fleetSpeed.fleets.0.smartSave'));
   assert.equal(f.env.saves,0);
   participants.disclosure.onclick();
-  f.errors({message:'预算无效',fields:{'fleetSpeed.fleets.0.repairMaxDiamonds':'请填写有效预算'}},{focus:false});
+  f.errors({message:'预算无效',fields:{'fleetSpeed.fleets.0.repairDailyDiamonds':'请填写有效预算'}},{focus:false});
   assert.equal(participants.disclosure.getAttribute('aria-expanded'),'true','逐队字段错误自动展开参与舰队设置');
-  assert(visible(f.widget('fleetSpeed.fleets.0.repairMaxDiamonds').node));
+  assert(visible(f.widget('fleetSpeed.fleets.0.repairDailyDiamonds').node));
   f.errors({fields:{}},{focus:false});
   participants.disclosure.onclick();
   f.renderPage();
@@ -353,7 +448,7 @@ test('舰队职责隶属参与舰队，逐队加速合并且维修与派遣省�
   assert.equal(f.env.saves,0,'展开收起不保存配置');
 });
 
-test('自动挑战阵容位于推关与试炼对应开关下，挂机迁移后仍可配置并保留管理入口', () => {
+test('自动挑战阵容位于推关与试炼对应开关下，仍可配置且不显示管理入口', () => {
   const f = fixture({ navigation: true });
   const fields = f.groups.find(group => group.id === 'progression').fields;
   const mainline = fields.findIndex(field => field.key === 'progression.mainline');
@@ -371,7 +466,7 @@ test('自动挑战阵容位于推关与试炼对应开关下，挂机迁移后�
     assert(section.contains(f.widget(key).node));
     assert(visible(f.widget(key).node));
   }
-  assert(section.querySelectorAll('button').some(button => button.textContent === '管理自定义阵容'));
+  assert(!section.querySelectorAll('button').some(button => button.textContent === '管理自定义阵容'));
   assert.equal(f.env.saves, 0);
 });
 
@@ -520,6 +615,29 @@ test('模块主控单独置顶后子项回到组级，各字段只渲染一次',
   }
 });
 
+test('世界Boss领奖只在世界分组出现，首战派遣与领奖独立控制', () => {
+  const f = fixture({ navigation: true }); f.renderPage();
+  f.env.hash = '#config-group-worldBoss'; f.applyHash();
+  assert.equal(f.editor.category, 'world');
+  const group = f.editor.groups.get('worldBoss'), section = f.env.node('config-group-worldBoss');
+  const reward = f.widget('schedule.worldBossRewards');
+  assert.equal(group.fields.filter(field => field.key === 'schedule.worldBossRewards').length, 1);
+  assert.equal([...f.editor.groups.values()].flatMap(item => item.fields).filter(field => field.key === 'schedule.worldBossRewards').length, 1);
+  assert(!f.widget('schedule.worldBossDamage'), '旧领奖开关不再显示');
+  assert.equal(reward.spec.label, '自动领取伤害达标奖励');
+  assert.equal(reward.node.parentElement, section);
+  assert(visible(reward.node));
+  assert.equal(f.editor.draft.worldBoss.enabled, false);
+  f.set('schedule.worldBossRewards', true);
+  assert.equal(f.editor.draft.worldBoss.enabled, false, '开启领奖不自动派遣');
+  f.set('worldBoss.enabled', true);
+  f.set('worldBoss.enabled', false);
+  assert.equal(f.editor.draft.schedule.worldBossRewards, true, '关闭首战不关闭领奖');
+  assert(visible(reward.node), '关闭首战后领奖仍可编辑');
+  const challenges = f.editor.groups.get('daily-challenges');
+  assert.deepEqual(challenges.fields.map(field => field.key), ['schedule.leagueCollect', 'schedule.leaguePassRewards']);
+});
+
 test('所有模块主控与参数在同组，英雄组合主控保留细项，运行安排入口移除', () => {
   const f = fixture({ navigation: true }); f.renderPage();
   for (const control of settingsUiRules().moduleControls) {
@@ -571,6 +689,9 @@ test('服务端校验错误展开关闭及手动收起的祖先并定位输入',
   assert.equal(f.editor.draft.sample.enabled, false); assert.equal(f.editor.draft.sample.purchase, false);
   assert.equal(f.env.saves, 0);
   f.set('sample.budget', 1);
+  assert(visible(budget.node)); assert.equal(budget.error.hidden, false);
+  assert.equal(f.env.focused, budget.control, '重新校验前保留提示和当前焦点');
+  f.errors({ fields: {} }, { focus: false });
   assert(!visible(budget.node)); assert.equal(budget.error.hidden, true);
   assert.equal(f.env.focused, f.widget('sample.enabled').control);
   assert(visible(f.env.focused));

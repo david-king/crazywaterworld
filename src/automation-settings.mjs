@@ -1,14 +1,16 @@
 import { automationControlFields, automationControls, idleAutomationControls, idleControlFields } from './automation-controls.mjs';
+import fs from 'node:fs';
 import path from 'node:path';
+import { randomUUID } from 'node:crypto';
 import { atomicJson, readJson, withFileLock } from './json-store.mjs';
 import { accountKey, dataDirectory } from './usage-ledger.mjs';
 export { beijingDay, createUsageLedger, usageFile } from './usage-ledger.mjs';
-import { taskSettings, retiredAutomationTasks } from './automation.mjs';
+import { taskSettings, retiredAutomationTasks, migratedAutomationTasks } from './automation.mjs';
 import { EXTENDED_DEFAULTS, EXTENDED_CONSTRAINTS, SILICON_FLEET_NUMBERS, validateSiliconFleets } from './extended-settings.mjs';
 import { treasureRewardOptions } from './treasure-reward-filter.mjs';
-import { activityAutomationDefaults } from './activity-automation.mjs';
+import { activityAutomationDefaults, activityAutomationFields } from './activity-automation.mjs';
 import { DEFAULT_APPOINTMENT_PRIORITIES, normalizeAppointmentPriorities } from './appointment-priorities.mjs';
-import { validateLineupSettings } from './saved-lineups.mjs';
+import { validateLineupSettings, validateFleetLineupBindings } from './saved-lineups.mjs';
 import { fleetSpeedDefaults, FLEET_SPEED_NUMBERS, validateFleetSpeeds } from './fleet-speed-settings.mjs';
 import { cityWarFleetStrategy, cityWarUsesGlobalStrategy, validateCityWarFleetStrategies } from './city-war-settings.mjs';
 import { WEEKLY_ACTIVITY_DEFAULTS, WEEKLY_ACTIVITY_CONSTRAINTS, validateWeeklyActivitySettings, migrateWeeklyActivitySettings } from './weekly-activity-settings.mjs';
@@ -16,7 +18,9 @@ import { WEEKLY_ACTIVITY_DEFAULTS, WEEKLY_ACTIVITY_CONSTRAINTS, validateWeeklyAc
 // 设置与登录凭据分开保存。导出只包含设置，不包含账号、凭据或用量账本。
 export const settingsFile = () => path.join(dataDirectory(), 'automation-settings.json');
 export const SETTINGS_FORMAT = 'crazywaterworld-automation';
-export const SETTINGS_SCHEMA_VERSION = 2;
+// 文件 version / 账号 settingsVersion 是格式编号，只随结构迁移调整；
+// revision 是每次保存递增的修订号，仅用于并发冲突检查，不能用作格式版本。
+export const SETTINGS_SCHEMA_VERSION = 14;
 const LEGACY_SETTINGS_FORMAT = 'crazywaterword-automation';
 export const DEMAND_SOURCES = [
   ['cargo', '贸易港口 / 货船'], ['guildRecruit', '联盟募兵'], ['museum', '博物馆探宝'],
@@ -53,7 +57,7 @@ export const DEFAULT_SETTINGS = {
   cargo: { enabled: false, dailyLoadLimit: 0 },
   events: { enabled: false, otherOption: 1 },
   pet: { release: false, releaseQualities: [], enabled: false, claim: false, breed: false, species: [], quality: 'BLUE', universal: false, feed: false, advance: false },
-  museum: { runEnabled: false, enabled: false, upgrade: false, factor: 1, materialFactor: false, factorMaterials: [], stockThreshold: 0, matchedFactor: 1, maps: [], useGuide: false, dailyGuideLimit: 0 },
+  museum: { runEnabled: false, enabled: false, revenue: false, achievements: false, display: false, maxDispatches: 1, upgrade: false, factorMode: 'materials', fullRecommendedFactor: 3, partialRecommendedFactor: 2, noRecommendedFallback: false, noRecommendedFactor: 1, factor: 1, materialFactor: false, factorMaterials: [], stockThreshold: 0, matchedFactor: 1, maps: [], useGuide: false, dailyGuideLimit: 0 },
   resources: { keepAccelerators: 0, allowDiamonds: false, diamondThreshold: 0, diamondDailyLimit: 2000 },
   // noPrivilege 仅保留旧配置/导出的兼容字段；无权益账号统一走等待领取。
   ads: { noPrivilege: true, waitSeconds: 15 },
@@ -67,25 +71,26 @@ export const DEFAULT_SETTINGS = {
   progression: { enabled: false, mainline: false, trials: false, raidIds: ['1','2','3'], maxFailures: 3 },
   lineups: { presets: [], mainlinePresetId: '', trialPresets: [] },
   trials: { paid: false, ads: false, raidIds: ['1','2','3'], paidPerRaidLimit: 1, dailyDiamondBudget: 450, maxSingleCost: 50 },
-  fleetDispatch: { priority: ['cityWar','pirateHunt','worldBoss','follow','treasure','radar','silicon'] },
-  fleetSpeed: { enabled: false, dailyDiamondLimit: 0, fleets: [1,2,3].map(id => fleetSpeedDefaults(id + '远征船')) },
-  worldBoss: { enabled: false, fleetIds: [], minDurabilityPercent: 80, petrolReserve: 0 },
-  radar: { runEnabled:false, enabled:false, fleetIds:[], types:['pirate','collect','refugee','spy','fixed'], allowMaterials:false, minDurabilityPercent:80, petrolReserve:1000, dailyPetrolLimit:10000, checkEverySeconds:30 },
+  fleetDispatch: { priority: ['cityWar','pirateHunt','worldBoss','follow','treasure','radar','silicon','resourceFields'] },
+  resourceFields: { enabled: false, preferredResource: '汽油', fleetIds: [], minDurabilityPercent: 80, reserveFleetCount: 1, minLevel: 1, checkEverySeconds: 300 },
+  fleetSpeed: { enabled: false, fleets: [1,2,3].map(id => fleetSpeedDefaults(id + '远征船')) },
+  worldBoss: { enabled: false, fleetIds: [], fleetPresets: [], minDurabilityPercent: 80 },
+  radar: { runEnabled:false, enabled:false, repairIdle:false, fleetIds:[], types:['pirate','collect','refugee','spy','fixed'], allowMaterials:false, minDurabilityPercent:80, checkEverySeconds:30 },
   pirateSweep: { type: '1' },
-  pirateHunt: { enabled: false, maxFailures: 3, fleetIds: [], types: [], maxLevel: 0, minDurabilityPercent: 80, petrolReserve: 0, fuelBudget: 10000, checkEverySeconds: 15 },
-  treasure: { enabled: false, autoJoin: false, onlyTenThousand: false, follow: false, fleetIds: [], followNames: [], followPlayerIds: [], avoidPlayerIds: [],
-    rewardItems: [], avoidNames: [], allowHostile: false, minDurabilityPercent: 80, petrolReserve: 0,
+  pirateHunt: { enabled: false, maxFailures: 3, fleetIds: [], types: [], maxLevel: 0, minDurabilityPercent: 80, checkEverySeconds: 15 },
+  treasure: { enabled: false, autoJoin: false, onlyTenThousand: false, follow: false, followMode: 'trigger', fleetIds: [], followNames: [], followPlayerIds: [], avoidPlayerIds: [],
+    rewardItems: [], avoidNames: [], allowHostile: false, minDurabilityPercent: 80,
     maxProgress: 90, personalProgressLimit: 20, dailyDispatchLimit: 0, checkEverySeconds: 15, participationMode: 'untilFull', repeatAttack: false,
-    autoRepair: false, maxRepairCost: 15000, dailyRepairPetrolLimit: 20000,
+    autoRepair: false,
     marchSpeedUp: false, marchTargetSeconds: 60, dailyDiamondLimit: 0,
     fallbackEnabled: false, fallbackAfter: '21:00', fallbackTargetRewards: 3,
     fallbackQualities: ['PURPLE', 'BLUE'], fallbackMediumRewardPriority: [], fallbackSmallRewardPriority: [] },
   // 攻守目标由跟随全局的舰队共用；每队还可独立保存两套策略。
   cityWar: { enabled: false, fleetIds: [], defenceFleetIds: [], targetMode: 'alliance', targetPriority: 'fewestAllied', cityRefs: [],
     defenceTargetMode: 'alliance', defenceTargetPriority: 'fewestAllied', defenceCityRefs: [], fleetStrategies: {}, autoRepair: false,
-    nativeCommissionLimit: -1, repairBelowPercent: 80, petrolReserve: 0, maxRepairCost: 15000, dailyPetrolLimit: 20000,
+    nativeCommissionLimit: -1, repairBelowPercent: 80,
     dailyDispatchLimit: 10, reserveDuringWar: false, checkEverySeconds: 15 },
-  forge: { decompose: false, decomposeQualities: [], enabled: false, buildingIds: [], recipeIds: [], universal: false, materialReserve: 0,
+  forge: { decompose: false, decomposeQualities: [], enabled: false, nativeAuto: false, collect: true, craft: true, buildingIds: [], recipeIds: [], universal: false, materialReserve: 0,
     universalReserve: 0, goldReserve: 0, dailyLimit: 5, dailyGoldLimit: 100000, checkEverySeconds: 30 },
   antique: { enabled: false, activate: false, activateQualities: [], star: false, starQualities: [], targetStar: 0, universal: false,
     master: false, targetMasterLevel: 0, suit: false, suitQualities: [], goldReserve: 0, dailyGoldLimit: 20000,
@@ -96,7 +101,7 @@ const int = (max = 1_000_000_000, min = 0) => ({ kind: 'number', min, max });
 const strings = (max = 300) => ({ kind: 'list', max });
 const constraints = {
   ...WEEKLY_ACTIVITY_CONSTRAINTS,
-  'fleetSpeed.dailyDiamondLimit': int(1000000), 'fleetSpeed.fleets': { kind: 'fleetSpeeds' },
+  'fleetSpeed.fleets': { kind: 'fleetSpeeds' },
   ...Object.fromEntries([0,1,2].flatMap(index => Object.entries(FLEET_SPEED_NUMBERS).map(([key, rule]) => ['fleetSpeed.fleets.' + index + '.' + key, rule]))),
   ...EXTENDED_CONSTRAINTS,
   ...Object.fromEntries([0, 1, 2].flatMap(index => Object.entries(SILICON_FLEET_NUMBERS).map(([key, rule]) => ['silicon.fleets.' + index + '.' + key, rule]))),
@@ -114,10 +119,14 @@ const constraints = {
   'merchant.monitorSeconds': int(300, 10), 'merchant.upgradeCoinValuePerDiamond': int(1000000, 1),
   'merchant.upgradeMinReturnPercent': int(10000, 100), 'merchant.upgradeMaxLevel': int(5, 1), 'merchant.upgradeDailyDiamondLimit': int(100000),
   'ads.waitSeconds':int(120,5),
-  'fleetDispatch.priority': {...strings(7),values:['cityWar','pirateHunt','worldBoss','follow','treasure','radar','silicon']},
-  'worldBoss.fleetIds': strings(10), 'worldBoss.minDurabilityPercent': int(100), 'worldBoss.petrolReserve': int(),
+  'fleetDispatch.priority': {...strings(8),values:['cityWar','pirateHunt','worldBoss','follow','treasure','radar','silicon','resourceFields']},
+  'resourceFields.preferredResource': { kind: 'choice', values: ['汽油', '种子', '公会科技点'] },
+  'resourceFields.fleetIds': strings(10), 'resourceFields.minDurabilityPercent': int(100, 1),
+  'resourceFields.reserveFleetCount': int(3), 'resourceFields.minLevel': int(100, 1), 'resourceFields.checkEverySeconds': int(3600, 30),
+  'worldBoss.fleetIds': strings(10), 'worldBoss.minDurabilityPercent': int(100),
+  'worldBoss.fleetPresets': { kind: 'fleetLineups' },
   'events.otherOption': int(2,1), 'radar.fleetIds': strings(10), 'radar.types': {...strings(5),values:['pirate','collect','refugee','spy','fixed']},
-  'radar.minDurabilityPercent':int(100), 'radar.petrolReserve':int(), 'radar.dailyPetrolLimit':int(), 'radar.checkEverySeconds':int(300,10),
+  'radar.minDurabilityPercent':int(100), 'radar.checkEverySeconds':int(300,10),
   'loop.rounds': int(100000), 'loop.everySeconds': int(86400, 1),
   'building.keepBlueprints': int(), 'building.maxBuilds': int(100), 'building.maxUpgrades': int(100),
   'building.disabledTypes': strings(), 'factory.disabledTypes': strings(), 'factory.keepStock': int(100000), 'factory.checkEverySeconds': int(300, 1),
@@ -128,7 +137,9 @@ const constraints = {
   'pet.releaseQualities': { ...strings(4), values: ['BLUE','PURPLE','ORANGE','RED'] },
   'forge.decomposeQualities': { ...strings(5), values: ['GREEN','BLUE','PURPLE','ORANGE','RED'] },
   'cargo.dailyLoadLimit': int(), 'pet.species': strings(), 'pet.quality': { kind: 'choice', values: ['BLUE', 'PURPLE', 'ORANGE', 'RED'] },
-  'museum.factor': int(3, 1), 'museum.factorMaterials': strings(), 'museum.stockThreshold': int(), 'museum.matchedFactor': int(3, 1),
+  'museum.factorMode': { kind: 'choice', values: ['materials', 'recommended'] },
+  'museum.fullRecommendedFactor': int(3, 1), 'museum.partialRecommendedFactor': int(3, 1), 'museum.noRecommendedFactor': int(3, 1),
+  'museum.maxDispatches': int(100), 'museum.factor': int(3, 1), 'museum.factorMaterials': strings(), 'museum.stockThreshold': int(), 'museum.matchedFactor': int(3, 1),
   'museum.maps': strings(), 'museum.dailyGuideLimit': int(), 'resources.keepAccelerators': int(), 'resources.diamondThreshold': int(),
   'resources.diamondDailyLimit': int(), 'gold.times': int(1000), 'heroes.heroIds': strings(), 'heroes.keepExp': int(),
   'heroes.targetLevel': int(10000), 'heroes.targetStar': int(1000),
@@ -139,14 +150,14 @@ const constraints = {
   'pirateHunt.maxFailures': int(100, 1),
   'pirateSweep.type': {kind:'choice',values:['1','2','3']},
   'pirateHunt.fleetIds': strings(10), 'pirateHunt.types': strings(20), 'pirateHunt.maxLevel': int(1000),
-  'pirateHunt.minDurabilityPercent': int(100), 'pirateHunt.petrolReserve': int(), 'pirateHunt.fuelBudget': int(), 'pirateHunt.checkEverySeconds': int(60, 5),
+  'pirateHunt.minDurabilityPercent': int(100), 'pirateHunt.checkEverySeconds': int(60, 5),
   'treasure.fleetIds': strings(10), 'treasure.followNames': strings(30), 'treasure.followPlayerIds': strings(30),
   'treasure.rewardItems': strings(100), 'treasure.avoidNames': strings(30),
-  'treasure.minDurabilityPercent': int(100), 'treasure.petrolReserve': int(), 'treasure.maxProgress': int(100, 1),
+  'treasure.minDurabilityPercent': int(100), 'treasure.maxProgress': int(100, 1),
   'treasure.personalProgressLimit': int(100),
   'treasure.dailyDispatchLimit': int(1000), 'treasure.checkEverySeconds': int(300, 5),
   'treasure.avoidPlayerIds': strings(100), 'treasure.participationMode': { kind: 'choice', values: ['untilFull', 'always'] },
-  'treasure.maxRepairCost': int(10000000), 'treasure.dailyRepairPetrolLimit': int(100000000),
+  'treasure.followMode': { kind: 'choice', values: ['trigger', 'eachTime'] },
   'treasure.marchTargetSeconds': int(3600), 'treasure.dailyDiamondLimit': int(100000000),
   'treasure.fallbackAfter': { kind: 'time' }, 'treasure.fallbackTargetRewards': int(100, 1),
   'treasure.fallbackQualities': { ...strings(2), values: ['PURPLE', 'BLUE'] },
@@ -158,8 +169,7 @@ const constraints = {
   'cityWar.defenceTargetPriority': { kind: 'choice', values: ['fewestAllied', 'original'] },
   'cityWar.defenceCityRefs': strings(100),
   'cityWar.fleetStrategies': { kind: 'cityWarFleetStrategies' },
-  'cityWar.repairBelowPercent': int(100, 1), 'cityWar.petrolReserve': int(),
-  'cityWar.maxRepairCost': int(10000000), 'cityWar.dailyPetrolLimit': int(100000000),
+  'cityWar.repairBelowPercent': int(100, 1),
   'cityWar.dailyDispatchLimit': int(1000, 1), 'cityWar.checkEverySeconds': int(300, 5),
   'forge.buildingIds': strings(10), 'forge.recipeIds': strings(100), 'forge.materialReserve': int(),
   'forge.universalReserve': int(), 'forge.goldReserve': int(), 'forge.dailyLimit': int(1000, 1),
@@ -200,6 +210,7 @@ const nativeFields = {
 };
 export function applyNativeTask(settings, key, enabled) {
   const result = copy(settings);
+  if (migratedAutomationTasks.has(key)) { delete result.schedule[key]; return result; }
   if (retiredAutomationTasks.has(key)) enabled = false;
   if (Object.hasOwn(result.schedule, key)) result.schedule[key] = enabled;
   for (const field of nativeFields[key] ?? []) { const [group, name] = field.split('.'); result[group][name] = enabled; }
@@ -216,27 +227,67 @@ export function settingsFromNative(tasks, { rounds = 0, everySeconds = 60, fishi
   result.loop.rounds = rounds;
   result.loop.everySeconds = Math.max(1, Number.isSafeInteger(everySeconds) ? everySeconds : 60);
   result.gather.fishingGoldReserve = fishingGoldReserve;
+  // Native-only accounts still need their original selections before the
+  // retired task registry discards them. Never reopen an existing module gate.
+  for (const key of migratedAutomationTasks) if (typeof tasks?.[key] === 'boolean') result.schedule[key] = tasks[key];
+  delete result.museum.revenue; delete result.museum.achievements;
+  return migrateVersion9Settings(migrateVersion7Settings(migrateVersion6Settings(migrateVersion5Settings(migrateVersion4Settings(result)))));
+}
+
+// Only native-only accounts have no saved module gates. Infer these gates
+// from their explicit task choices once; current settings and new accounts
+// must keep the ordinary settingsFromNative defaults.
+export function settingsFromLegacyNative(tasks, options) {
+  const result = settingsFromNative(tasks, options);
+  const selected = keys => keys.some(key => tasks?.[key] === true);
+  const gates = {
+    'building.enabled': ['collect', 'finishUpgrade', 'build', 'buildSupply', 'upgrade', 'speedUp', 'adSpeedUpBuilding'],
+    'factory.enabled': ['collect', 'startProduce', 'buildSupply', 'speedUp', 'adSpeedUpProduce'],
+    'gather.enabled': ['autoFish', 'fishEnhance', 'floaters', 'antiqueFloaters', 'autoDive', 'diveEnhance', 'autoSalvage', 'salvageEnhance'],
+    'dailies.enabled': ['dailyRewards', 'chests', 'gift', 'freeGold', 'freeRecruit', 'ticketRecruit', 'arena', 'pirate', 'shop'],
+    'loop.dailies': ['freeGold', 'freeRecruit', 'ticketRecruit', 'arena', 'pirate', 'paidGold', 'shop'],
+    'museum.runEnabled': ['museumCollect', 'museumExplore', 'museumRevenue', 'museumAchievements'],
+    'radar.runEnabled': ['radarAuto', 'radarRepair'],
+    'progression.enabled': ['stageAuto'],
+    'heroes.enabled': ['heroGrowth'],
+  };
+  for (const [field, keys] of Object.entries(gates)) if (selected(keys)) {
+    const [group, name] = field.split('.'); result[group][name] = true;
+  }
+  for (const { key, taskKeys } of activityAutomationFields) if (selected(taskKeys)) {
+    const [group, name] = key.split('.'); result[group][name] = true;
+  }
+  if (tasks?.weekSupplyFree === true) {
+    result.activityAutomation.weekLottery = result.activityAutomation.weekChip = result.activityAutomation.weekUnique = true;
+  }
+  if (selected([...gates['building.enabled'], ...gates['factory.enabled'], ...gates['gather.enabled'],
+    'cargo', 'farm', 'finishOrder', 'denyOrder', 'adSpeedUpMuseum', 'petCollect', 'petBreed', 'museumCollect', 'museumExplore', 'museumRevenue', 'museumAchievements'])) result.loop.world = true;
+  // The native farm task explicitly included both harvesting and planting.
+  if (tasks?.farm === true) result.farm.harvest = result.farm.autoPlant = true;
   return result;
 }
+
 export function nativeTaskValues(settings, current) {
   const result = { ...current, ...settings.schedule };
   delete result.weekFactory;
   for (const [key, fields] of Object.entries(nativeFields)) result[key] = fields.some(field => { const [group, name] = field.split('.'); return settings[group][name]; });
   result.heroGrowth = false; // The old mainline-only job has been retired.
   for (const key of retiredAutomationTasks) result[key] = false;
+  for (const key of migratedAutomationTasks) delete result[key];
   result.startProduce = settings.factory.produce || settings.factory.cooperateNative;
   result.speedUp = settings.building.speedUp || settings.factory.speedUp || settings.farm.speedUp || settings.factory.speedUpSources.length > 0;
   return result;
 }
 
 export function hasExtraWork(settings) {
+  if (settings?.radar?.runEnabled && (settings.radar.enabled || settings.radar.repairIdle)) return true;
   if (settings?.weeklyActivity?.enabled && ['farm', 'pet', 'antique', 'order', 'forge', 'hero'].some(kind => settings.weeklyActivity[kind + 'Enabled'])) return true;
-  if (settings?.cityWar?.enabled && settings?.fleetSpeed?.enabled || settings?.appointments?.enabled || settings?.alliance?.enabled || settings?.guildShip?.enabled || settings?.heroRaid?.enabled || settings?.silicon?.enabled) return true;
-  return !!settings && ((settings.loop.world && (settings.museum.runEnabled !== false && (settings.museum.enabled || settings.museum.upgrade) || settings.events.enabled || settings.pet.enabled || (settings.gather.enabled !== false && settings.gather.diving && settings.gather.keyOpen))) || (settings.loop.heroes && settings.heroes.enabled)
+  if (settings?.cityWar?.enabled && settings?.fleetSpeed?.enabled || settings?.appointments?.enabled || settings?.alliance?.enabled || settings?.guildShip?.enabled || settings?.heroRaid?.enabled || settings?.silicon?.enabled || settings?.resourceFields?.enabled) return true;
+  return !!settings && ((settings.loop.world && (settings.museum.runEnabled !== false && ['enabled', 'upgrade', 'revenue', 'achievements', 'display'].some(key => settings.museum[key]) || settings.events.enabled || settings.pet.enabled || (settings.gather.enabled !== false && settings.gather.diving && settings.gather.keyOpen))) || (settings.loop.heroes && settings.heroes.enabled)
     || (settings.progression?.enabled && (settings.progression.mainline || settings.progression.trials)) || settings.pirateHunt?.enabled);
 }
 export function hasBaseWork(settings) {
-  return !!settings && ((settings.loop.world && (settings.museum.runEnabled !== false && (settings.museum.enabled || settings.museum.upgrade) || settings.events.enabled ||
+  return !!settings && ((settings.loop.world && (settings.museum.runEnabled !== false && ['enabled', 'upgrade', 'revenue', 'achievements', 'display'].some(key => settings.museum[key]) || settings.events.enabled ||
     settings.pet.enabled || (settings.gather.enabled !== false && settings.gather.diving && settings.gather.keyOpen))) ||
     (settings.loop.dailies && settings.gold.enabled));
 }
@@ -252,6 +303,11 @@ export function validateSettings(input, options = {}) {
 }
 
 function validateCurrentSettings(input, { partial = false, catalog = null } = {}) {
+  // An already-open settings page can still submit the retired fields.
+  // Ignore only these known fields; every other setting remains strict.
+  input = migrateVersion10Settings(migrateVersion9Settings(migrateVersion8Settings(migrateVersion7Settings(migrateVersion6Settings(migrateVersion5Settings(migrateVersion4Settings(migrateVersion3Settings(migrateVersion2Settings(input)))))))));
+  // Additive follow preference: keep the existing behavior for older saved files and open pages.
+  input = migrateVersion13Settings(input);
   if (plain(input) && plain(input.weeklyActivity)) input = { ...input, weeklyActivity: migrateWeeklyActivitySettings(input.weeklyActivity) };
   // This additive limit was absent from saved version 2 settings. Only fill
   // the missing field; explicit values still pass through strict validation.
@@ -292,6 +348,9 @@ function validateCurrentSettings(input, { partial = false, catalog = null } = {}
         if (!Array.isArray(value) || value.length > rule.max || value.some(v => typeof v !== 'string' || !v.trim() || v.length > 120) || new Set(value).size !== value.length) errors[name] = '选项必须为不重复的有效列表';
         else if (rule.values && value.some(v => !rule.values.includes(v))) errors[name] = '列表中含有不支持的选项';
         else output[group][key] = [...value];
+      } else if (rule?.kind === 'fleetLineups') {
+        try { output[group][key] = validateFleetLineupBindings(value, output.lineups.presets); }
+        catch (error) { errors[name] = error.message; }
       } else if (rule?.kind === 'siliconFleets') {
         const fleets = validateSiliconFleets(value, errors, catalog);
         if (fleets) output[group][key] = fleets;
@@ -318,13 +377,15 @@ function validateCurrentSettings(input, { partial = false, catalog = null } = {}
   if (output.heroes.heroIds.length) output.heroes.needsSelection = false;
   if (output.progression.trials && !output.progression.raidIds.length) errors['progression.raidIds'] = '请选择自动推关的试炼副本';
   if (output.pirateHunt.enabled && !output.pirateHunt.fleetIds.length) errors['pirateHunt.fleetIds'] = '请选择自动讨伐海盗的舰队';
-  if(output.forge.decompose && !output.forge.decomposeQualities.length)errors['forge.decomposeQualities']='请选择可自动分解的装备品质';
+  if(!output.forge.nativeAuto && output.forge.decompose && !output.forge.decomposeQualities.length)errors['forge.decomposeQualities']='请选择可自动分解的装备品质';
   if(output.pet.release && !output.pet.releaseQualities.length)errors['pet.releaseQualities']='请选择可自动放生的海兽品质';
   if (output.antique.activate && !output.antique.activateQualities.length) errors['antique.activateQualities'] = '请选择自动激活的藏品品质';
   if (output.antique.star && !output.antique.starQualities.length) errors['antique.starQualities'] = '请选择自动升星的藏品品质';
   if (output.antique.suit && !output.antique.suitQualities.length) errors['antique.suitQualities'] = '请选择自动升级的藏品套装品质';
   if (['cityWar','pirateHunt','treasure','radar'].some(k=>!output.fleetDispatch.priority.includes(k))) errors['fleetDispatch.priority']='请保留全部任务，只调整顺序';
-  for(const key of ['worldBoss','follow','silicon'])if(!output.fleetDispatch.priority.includes(key))output.fleetDispatch.priority.push(key);
+  for(const key of ['worldBoss','follow','silicon','resourceFields'])if(!output.fleetDispatch.priority.includes(key))output.fleetDispatch.priority.push(key);
+  if (output.resourceFields.enabled && !output.resourceFields.fleetIds.length) errors['resourceFields.fleetIds'] = '请选择自动占领资源田的舰队';
+  if (output.resourceFields.fleetIds.some(value => !/^[1-9]\d*远征船$/.test(value))) errors['resourceFields.fleetIds'] = '请选择有效的远征舰队';
   if (output.silicon.windows.some(value => !/^([01]\d|2[0-3]):[0-5]\d-([01]\d|2[0-3]):[0-5]\d$/.test(value))) errors['silicon.windows'] = '时段格式为 HH:mm-HH:mm，每行一个；支持跨午夜';
   if (output.pirateHunt.fleetIds.some(value=>! /^[1-9]\d*远征船$/.test(value))) errors['pirateHunt.fleetIds']='请选择有效的海盗首杀舰队';
   if (output.pirateHunt.types.some(value=>! /^[1-9]\d*$/.test(value))) errors['pirateHunt.types']='请选择有效的海盗类型';
@@ -332,7 +393,8 @@ function validateCurrentSettings(input, { partial = false, catalog = null } = {}
   if (output.farm.autoPlant && output.farm.customPlant) errors['farm.customPlant'] = '自动种植和自定义种植只能开启一种';
   if (output.factory.speedUpSources.some(source => !output.factory.demandPriority.includes(source))) errors['factory.speedUpSources'] = '加速来源必须保留在需求优先级列表中';
   if (output.farm.customPlant && !output.farm.crops.length) errors['farm.crops'] = '启用自定义种植前，请至少添加一种作物';
-  if (output.pet.enabled && output.pet.breed && !output.pet.species.length) errors['pet.species'] = '启用自动培育前，请选择培育种类';
+  // An empty species selection pauses breeding, including migrated accounts
+  // which must choose their spending targets in the unified configuration.
   if (output.treasure.enabled && !output.treasure.autoJoin && !output.treasure.follow) errors['treasure.autoJoin'] = '请至少开启自动参加或跟随指定玩家';
   if (output.treasure.enabled && !output.treasure.fleetIds.length) errors['treasure.fleetIds'] = '请明确选择参与巨轮的舰队，空名单不会派遣';
   if (output.treasure.fallbackEnabled && !output.treasure.fallbackQualities.length) errors['treasure.fallbackQualities'] = '开启兜底前，请至少选择一种货轮';
@@ -357,7 +419,7 @@ function validateCurrentSettings(input, { partial = false, catalog = null } = {}
     if (output.cityWar[refs].some(value => !/^[1-9]\d{0,3}:[1-9]\d{0,5}$/.test(value))) errors['cityWar.' + refs] = '城市选项必须包含有效场景和城市编号';
   }
   if (output.forge.enabled && !output.forge.buildingIds.length) errors['forge.buildingIds'] = '请选择装备锻造工厂';
-  if (output.forge.enabled && !output.forge.recipeIds.length) errors['forge.recipeIds'] = '请选择至少一种锻造配方';
+  if (output.forge.enabled && !output.forge.nativeAuto && output.forge.craft && !output.forge.recipeIds.length) errors['forge.recipeIds'] = '请选择至少一种锻造配方';
   if (output.forge.recipeIds.some(value => !/^[1-9]\d{0,8}$/.test(value))) errors['forge.recipeIds'] = '请选择有效的锻造配方';
   if (catalog) {
     for (const [name, collection] of Object.entries({
@@ -367,7 +429,7 @@ function validateCurrentSettings(input, { partial = false, catalog = null } = {}
       'treasure.fleetIds': 'expeditionFleets', 'treasure.rewardItems': 'materials',
       'treasure.fallbackMediumRewardPriority': 'materials', 'treasure.fallbackSmallRewardPriority': 'materials',
       'cityWar.fleetIds': 'expeditionFleets', ...Object.fromEntries([...legacyCityRefs].map(refs => ['cityWar.' + refs, 'cityTargets'])),
-      'radar.fleetIds':'expeditionFleets','worldBoss.fleetIds':'expeditionFleets',
+      'radar.fleetIds':'expeditionFleets','worldBoss.fleetIds':'expeditionFleets','resourceFields.fleetIds':'expeditionFleets',
       'pirateHunt.fleetIds': 'expeditionFleets', 'pirateHunt.types': 'pirateTypes',
       'forge.buildingIds': 'forgeBuildings', 'forge.recipeIds': 'forgeRecipes',
       'alliance.allowedMaterials': 'materials', 'alliance.blockedMaterials': 'materials',
@@ -427,25 +489,122 @@ export function loadAutomationSettings(accountId, { file = settingsFile() } = {}
   const store = readJson(file, { version: SETTINGS_SCHEMA_VERSION, accounts: {} });
   validateSettingsStore(store);
   const entry = Object.hasOwn(store.accounts, key) ? store.accounts[key] : null;
+  return loadedSettingsEntry(entry);
+}
+
+function loadedSettingsEntry(entry) {
   // The container version cannot identify an untouched account in a mixed
   // store. Entries written before version 2 did not carry their own version.
   const version = entry ? entrySettingsVersion(entry) : SETTINGS_SCHEMA_VERSION;
   const settings = entry ? validateCurrentSettings(migrateSettingsVersion(entry.settings, version, { source: 'stored' }),
-    { partial: version < SETTINGS_SCHEMA_VERSION }) : defaultSettings();
-  return { settings, revision: entry?.revision ?? 0, savedAt: entry?.savedAt ?? null };
+    { partial: version === 1 }) : defaultSettings();
+  return { settings, revision: entry?.revision ?? 0, savedAt: entry?.savedAt ?? null,
+    ...(entry?.recovery ? { recovery: copy(entry.recovery) } : {}) };
 }
 
-export function saveAutomationSettings(accountId, input, { revision, file = settingsFile(), catalog = null } = {}) {
+const validRecovery = recovery => plain(recovery) && recovery.required === true
+  && ['missing', 'corrupt'].includes(recovery.reason) && typeof recovery.message === 'string'
+  && (recovery.backupFile === undefined || typeof recovery.backupFile === 'string');
+const validStoredEntry = entry => plain(entry) && supportedSettingsVersion(entrySettingsVersion(entry));
+
+// Read original bytes ourselves: readJson deliberately hides parse vs I/O failures,
+// but only known missing/corrupt settings may be recovered. A higher version is
+// checked by content first; incompatible content must never be reset to defaults.
+function inspectRecoverableSettings(file, key, expected) {
+  let bytes, store;
+  try { bytes = fs.readFileSync(file); }
+  catch (error) {
+    if (error.code === 'ENOENT') return expected ? { reason: 'missing', bytes: null, store: null }
+      : { loaded: loadedSettingsEntry(null) };
+    throw new Error('无法读取挂机配置，已停止操作且未覆盖原文件', { cause: error });
+  }
+  try { store = JSON.parse(bytes.toString('utf8')); }
+  catch (error) {
+    if (error instanceof SyntaxError) return { reason: 'corrupt', bytes, store: null };
+    throw error;
+  }
+  assertCompatibleFutureSettingsStore(store);
+  if (!plain(store) || !supportedSettingsVersion(store.version) || !plain(store.accounts)) return { reason: 'corrupt', bytes, store };
+  const damagedHeaders = Object.values(store.accounts).some(entry => !validStoredEntry(entry));
+  const present = Object.hasOwn(store.accounts, key), entry = present ? store.accounts[key] : null;
+  if (!present && expected && newestSettingsVersion(store) > SETTINGS_SCHEMA_VERSION) {
+    throw incompatibleSettingsError(new SettingsError({ accounts: '已配置账号的设置条目缺失' }), newestSettingsVersion(store));
+  }
+  if (!present) return expected ? { reason: 'missing', bytes, store } : damagedHeaders
+    ? { reason: 'corrupt', bytes, store, keepTarget: true } : { loaded: loadedSettingsEntry(null) };
+  if (!validStoredEntry(entry)) return { reason: 'corrupt', bytes, store };
+  if (!Number.isSafeInteger(entry.revision) || entry.revision < 0
+    || entry.recovery !== undefined && !validRecovery(entry.recovery)) return { reason: 'corrupt', bytes, store };
+  try {
+    const loaded = loadedSettingsEntry(entry);
+    return damagedHeaders ? { reason: 'corrupt', bytes, store, keepTarget: true } : { loaded };
+  }
+  catch (error) {
+    if (error.fields?.version || error.code === 'SETTINGS_INCOMPATIBLE') throw error;
+    return { reason: 'corrupt', bytes, store };
+  }
+}
+
+// Recovery is explicit and persistent. It supplies disabled defaults to the caller;
+// the console must keep automation stopped until the user saves their configuration.
+export function loadRecoverableAutomationSettings(accountId, { file = settingsFile(), expected = false } = {}) {
+  const key = accountKey(accountId), initial = inspectRecoverableSettings(file, key, expected);
+  if (initial.loaded) return initial.loaded;
+  return withFileLock(file, () => {
+    const state = inspectRecoverableSettings(file, key, expected);
+    if (state.loaded) return state.loaded; // Another process already repaired/saved it.
+    const accounts = plain(state.store?.accounts) ? { ...state.store.accounts } : {};
+    const affected = new Set(state.keepTarget ? [] : [key]);
+    // Invalid sibling entry headers would make the rebuilt store unreadable. Only
+    // those damaged entries also receive defaults; valid siblings remain verbatim.
+    for (const [id, entry] of Object.entries(accounts)) if (!validStoredEntry(entry)) affected.add(id);
+    const recovered = new Map();
+    for (const id of affected) {
+      const prior = accounts[id], revision = Number.isSafeInteger(prior?.revision) && prior.revision >= 0 ? prior.revision + 1 : 1;
+      if (!Number.isSafeInteger(revision)) throw new Error('挂机配置版本计数超出范围，已停止恢复且未覆盖原文件');
+      const reason = id === key ? state.reason : 'corrupt';
+      const recovery = { required: true, id: randomUUID(), reason,
+        message: reason === 'missing' ? '挂机配置缺失，已恢复默认设置并关闭自动挂机，请重新配置后保存。'
+          : '挂机配置损坏，已恢复默认设置并关闭自动挂机，请重新配置后保存。' };
+      recovered.set(id, { revision, savedAt: new Date().toISOString(), settingsVersion: SETTINGS_SCHEMA_VERSION,
+        settings: defaultSettings(), recovery });
+    }
+    let backupFile;
+    if (state.bytes !== null) {
+      backupFile = path.resolve(file + '.corrupt-' + Date.now() + '-' + randomUUID() + '.bak');
+      let descriptor;
+      try {
+        descriptor = fs.openSync(backupFile, 'wx', 0o600);
+        fs.writeFileSync(descriptor, state.bytes); fs.fsyncSync(descriptor);
+      } catch (error) {
+        throw new Error('备份挂机配置失败，已停止恢复且未覆盖原文件', { cause: error });
+      } finally { if (descriptor !== undefined) fs.closeSync(descriptor); }
+    }
+    for (const [id, entry] of recovered) {
+      if (backupFile) entry.recovery.backupFile = backupFile;
+      Object.defineProperty(accounts, id, { value: entry, enumerable: true, configurable: true, writable: true });
+    }
+    const next = { ...(plain(state.store) ? state.store : {}), version: newestSettingsVersion(state.store), accounts };
+    atomicJson(file, next);
+    return loadedSettingsEntry(accounts[key]);
+  });
+}
+
+export function saveAutomationSettings(accountId, input, { revision, file = settingsFile(), catalog = null, expectedRecoveryId } = {}) {
   const settings = validateSettings(input, { catalog });
   const key = accountKey(accountId);
   return withFileLock(file, () => {
     const store = readJson(file, { version: SETTINGS_SCHEMA_VERSION, accounts: {} });
     validateSettingsStore(store);
     const current = Object.hasOwn(store.accounts, key) ? store.accounts[key] : null;
+    if (current?.recovery?.id !== expectedRecoveryId)
+      throw new SettingsError({ revision: '配置恢复状态已变化，请重新载入配置后再保存' });
     if (!Number.isSafeInteger(revision) || revision !== (current?.revision ?? 0)) throw new SettingsError({ revision: '设置已在其他页面更新，请重新载入后再保存' });
-    const entry = { revision: revision + 1, savedAt: new Date().toISOString(), settingsVersion: SETTINGS_SCHEMA_VERSION, settings };
+    const entry = { ...current, revision: revision + 1, savedAt: new Date().toISOString(),
+      settingsVersion: Math.max(SETTINGS_SCHEMA_VERSION, current ? entrySettingsVersion(current) : 1), settings };
+    delete entry.recovery;
     Object.defineProperty(store.accounts, key, { value: entry, enumerable: true, configurable: true, writable: true });
-    store.version = SETTINGS_SCHEMA_VERSION;
+    store.version = newestSettingsVersion(store);
     atomicJson(file, store);
     return { revision: entry.revision, savedAt: entry.savedAt, settings: copy(settings) };
   });
@@ -453,14 +612,64 @@ export function saveAutomationSettings(accountId, input, { revision, file = sett
 
 export function exportAutomationSettings(settings) { return { format: SETTINGS_FORMAT, version: SETTINGS_SCHEMA_VERSION, settings: validateSettings(settings) }; }
 export function importAutomationSettings(document, options) {
-  if (!plain(document) || ![SETTINGS_FORMAT, LEGACY_SETTINGS_FORMAT].includes(document.format) || !supportedSettingsVersion(document.version) || Object.keys(document).some(k => !['format', 'version', 'settings'].includes(k))) throw new SettingsError({ import: `请选择本工具导出的配置文件（版本 1–${SETTINGS_SCHEMA_VERSION}），文件不能包含账号或凭据` });
+  if (!plain(document) || ![SETTINGS_FORMAT, LEGACY_SETTINGS_FORMAT].includes(document.format) || !supportedSettingsVersion(document.version) || Object.keys(document).some(k => !['format', 'version', 'settings'].includes(k))) throw new SettingsError({ import: '请选择本工具导出的配置文件，版本须为正整数，文件不能包含账号或凭据' });
   return validateSettings(migrateSettingsVersion(document.settings, document.version), { ...options, partial: false });
 }
 
-const settingsMigrations = new Map([[1, migrateVersion1Settings]]);
-const supportedSettingsVersion = version => Number.isSafeInteger(version) && version >= 1 && version <= SETTINGS_SCHEMA_VERSION;
+const settingsMigrations = new Map([[1, migrateVersion1Settings], [2, migrateVersion2Settings], [3, migrateVersion3Settings], [4, migrateVersion4Settings], [5, migrateVersion5Settings], [6, migrateVersion6Settings], [7, migrateVersion7Settings], [8, migrateVersion8Settings], [9, migrateVersion9Settings], [10, migrateVersion10Settings], [11, migrateVersion11Settings], [12, migrateVersion12Settings], [13, migrateVersion13Settings]]);
+const supportedSettingsVersion = version => Number.isSafeInteger(version) && version >= 1;
 const entrySettingsVersion = entry => Object.hasOwn(entry, 'settingsVersion') ? entry.settingsVersion : 1;
+function newestSettingsVersion(store) {
+  const versions = [store?.version, ...(plain(store?.accounts) ? Object.values(store.accounts).map(entry => entry?.settingsVersion) : [])];
+  return versions.reduce((highest, version) => typeof version === 'number' && version > highest ? version : highest, SETTINGS_SCHEMA_VERSION);
+}
+function incompatibleSettingsError(cause, version) {
+  if (cause.code === 'SETTINGS_INCOMPATIBLE') return cause;
+  const fields = cause.fields ?? { settings: cause.message };
+  const error = new SettingsError(fields);
+  const details = Object.entries(fields).slice(0, 3).map(([field, message]) => `${field}：${message}`).join('；');
+  error.message = `挂机配置自动兼容失败（文件版本 ${version}，当前格式 ${SETTINGS_SCHEMA_VERSION}）：${details}；已停止操作且未覆盖原文件`;
+  return Object.assign(error, { code: 'SETTINGS_INCOMPATIBLE', settingsVersion: version, supportedVersion: SETTINGS_SCHEMA_VERSION, cause });
+}
+// Validation may add defaults, but a newer format must not silently lose any
+// supplied field or change an explicit value through an older normalizer.
+function assertSettingsPreserved(input, output, field = 'settings') {
+  if (plain(input) || Array.isArray(input)) {
+    if (Array.isArray(input) ? !Array.isArray(output) : !plain(output)) {
+      throw new SettingsError({ [field]: '设置结构无法无损兼容' });
+    }
+    for (const key of Object.keys(input)) {
+      const next = field === 'settings' ? key : field + '.' + key;
+      if (!Object.hasOwn(output, key)) throw new SettingsError({ [next]: '当前程序无法保留此设置项' });
+      assertSettingsPreserved(input[key], output[key], next);
+    }
+  } else if (!Object.is(input, output)) {
+    throw new SettingsError({ [field]: '当前程序无法保留此设置值' });
+  }
+}
+function compatibleFutureSettings(settings, version) {
+  try {
+    const normalized = validateCurrentSettings(settings);
+    assertSettingsPreserved(settings, normalized);
+    return normalized;
+  } catch (error) { throw incompatibleSettingsError(error, version); }
+}
+function assertCompatibleFutureSettingsStore(store) {
+  const version = newestSettingsVersion(store);
+  if (version <= SETTINGS_SCHEMA_VERSION) return;
+  try {
+    if (!plain(store) || !supportedSettingsVersion(store.version)) throw new SettingsError({ version: '设置文件版本须为正整数' });
+    if (!plain(store.accounts)) throw new SettingsError({ accounts: '账号设置必须是对象' });
+    for (const entry of Object.values(store.accounts)) {
+      if (!validStoredEntry(entry)) throw new SettingsError({ settingsVersion: '账号设置版本须为正整数' });
+      if (!Number.isSafeInteger(entry.revision) || entry.revision < 0) throw new SettingsError({ revision: '账号设置修订号无效' });
+      if (entry.recovery !== undefined && !validRecovery(entry.recovery)) throw new SettingsError({ recovery: '账号设置恢复标记无效' });
+      loadedSettingsEntry(entry);
+    }
+  } catch (error) { throw incompatibleSettingsError(error, version); }
+}
 function validateSettingsStore(store) {
+  assertCompatibleFutureSettingsStore(store);
   if (!plain(store) || !supportedSettingsVersion(store.version) || !plain(store.accounts)
     || Object.values(store.accounts).some(entry => !plain(entry) || !supportedSettingsVersion(entrySettingsVersion(entry)))) {
     throw new Error('设置文件格式或版本不支持，未覆盖原文件');
@@ -472,6 +681,7 @@ function validateSettingsStore(store) {
 export function migrateSettingsVersion(settings, version, { source = 'import' } = {}) {
   if (!supportedSettingsVersion(version)) throw new SettingsError({ version: '设置文件版本不支持' });
   if (!['import', 'stored'].includes(source)) throw new TypeError('未知设置迁移来源');
+  if (version > SETTINGS_SCHEMA_VERSION) return compatibleFutureSettings(settings, version);
   let result = settings;
   for (let current = version; current < SETTINGS_SCHEMA_VERSION; current++) {
     const migrate = settingsMigrations.get(current);
@@ -522,7 +732,7 @@ function migrateVersion1Settings(settings, { source }) {
   const addedFields = {
     heroes: ['skillAdvance','exclusiveLevel','exclusiveStar','equipment','badge','showSkillReward'],
     treasure: ['onlyTenThousand', 'avoidPlayerIds', 'participationMode', 'repeatAttack', 'autoRepair',
-      'maxRepairCost', 'dailyRepairPetrolLimit', 'marchSpeedUp', 'marchTargetSeconds', 'dailyDiamondLimit',
+      'marchSpeedUp', 'marchTargetSeconds', 'dailyDiamondLimit',
       'personalProgressLimit', 'fallbackEnabled', 'fallbackAfter',
       'fallbackTargetRewards', 'fallbackQualities', 'fallbackMediumRewardPriority', 'fallbackSmallRewardPriority'],
     cityWar: ['targetPriority', 'nativeCommissionLimit', 'defenceFleetIds'],
@@ -544,4 +754,198 @@ function migrateVersion1Settings(settings, { source }) {
   }
   if (plain(input.schedule)) input.schedule = { ...taskSettings(), worldOnlineRewards: false, ...input.schedule };
   return input;
+}
+
+// Version 3 retires petrol reserves and spending limits. Dispatch/repair still
+// checks actual stock and keeps its pending-operation accounting at runtime.
+function migrateVersion2Settings(settings) {
+  if (!plain(settings)) return settings;
+  const input = { ...settings };
+  const retired = {
+    worldBoss: ['petrolReserve'], radar: ['petrolReserve', 'dailyPetrolLimit'],
+    pirateHunt: ['petrolReserve', 'fuelBudget'],
+    treasure: ['petrolReserve', 'maxRepairCost', 'dailyRepairPetrolLimit'],
+    cityWar: ['petrolReserve', 'maxRepairCost', 'dailyPetrolLimit'],
+    silicon: ['petrolReserve', 'dailyPetrolLimit'],
+  };
+  for (const [group, fields] of Object.entries(retired)) {
+    if (!plain(input[group])) continue;
+    input[group] = { ...input[group] };
+    for (const field of fields) delete input[group][field];
+  }
+  if (Array.isArray(input.silicon?.fleets)) {
+    input.silicon.fleets = input.silicon.fleets.map(fleet => {
+      if (!plain(fleet)) return fleet;
+      const row = { ...fleet };
+      delete row.maxRepairCost;
+      return row;
+    });
+  }
+  return input;
+}
+
+// Version 4 keeps per-fleet/per-action speed-up budgets and the global diamond
+// budget, retiring only the additional shared city-war speed-up budget.
+function migrateVersion3Settings(settings) {
+  if (!plain(settings) || !plain(settings.fleetSpeed)) return settings;
+  const input = { ...settings, fleetSpeed: { ...settings.fleetSpeed } };
+  delete input.fleetSpeed.dailyDiamondLimit;
+  return input;
+}
+
+// Version 5 consolidates the duplicate museum, pet and radar task switches.
+// Modern settings already took precedence, so never merge dormant legacy
+// actions into an active module. Native selections without an exact modern
+// spending target wait for an explicit species/fleet selection.
+function migrateVersion4Settings(settings) {
+  if (!plain(settings)) return settings;
+  const input = { ...settings };
+  const schedule = plain(input.schedule) ? input.schedule : {};
+  const museumLegacy = schedule.museumCollect === true || schedule.museumExplore === true;
+  if (plain(input.museum) || !Object.hasOwn(input, 'museum') && museumLegacy) {
+    const museum = { ...(input.museum ?? DEFAULT_SETTINGS.museum) };
+    if (!Object.hasOwn(input, 'museum')) { delete museum.revenue; delete museum.achievements; }
+    if (museum.enabled === false && museumLegacy) {
+      Object.assign(museum, { enabled: true, claim: schedule.museumCollect === true, explore: schedule.museumExplore === true,
+        maxDispatches: 1, factor: 1, materialFactor: false, maps: [], useGuide: false, dailyGuideLimit: 0 });
+    } else {
+      for (const key of ['claim', 'explore']) if (!Object.hasOwn(museum, key)) museum[key] = museum.enabled === true;
+      if (!Object.hasOwn(museum, 'maxDispatches')) museum.maxDispatches = museum.enabled === true ? 0 : 1;
+    }
+    input.museum = museum;
+  }
+  const petLegacy = schedule.petCollect === true || schedule.petBreed === true;
+  if ((plain(input.pet) && input.pet.enabled === false || !Object.hasOwn(input, 'pet')) && petLegacy) {
+    input.pet = { ...(input.pet ?? DEFAULT_SETTINGS.pet), enabled: true, claim: schedule.petCollect === true,
+      breed: schedule.petBreed === true, species: [], quality: 'ORANGE', universal: false, feed: false, advance: false,
+      release: false, releaseQualities: [] };
+  }
+  const radarLegacy = schedule.radarAuto === true || schedule.radarRepair === true;
+  if (plain(input.radar) || !Object.hasOwn(input, 'radar') && radarLegacy) {
+    const radar = { ...(input.radar ?? DEFAULT_SETTINGS.radar) };
+    if (radar.enabled === false && radarLegacy) {
+      Object.assign(radar, { enabled: schedule.radarAuto === true, repairIdle: schedule.radarRepair === true,
+        fleetIds: [], types: [...DEFAULT_SETTINGS.radar.types], allowMaterials: false, minDurabilityPercent: 80 });
+    } else if (!Object.hasOwn(radar, 'repairIdle')) radar.repairIdle = false;
+    input.radar = radar;
+  }
+  if (plain(input.schedule)) {
+    input.schedule = { ...input.schedule };
+    for (const key of ['museumCollect', 'museumExplore', 'petCollect', 'petBreed', 'radarAuto', 'radarRepair']) delete input.schedule[key];
+  }
+  return input;
+}
+
+// Version 6 makes exploration and reward collection one operation again.
+// A previously empty or paused configuration remains off; either selected
+// action under an enabled module becomes the unified exploration workflow.
+function migrateVersion5Settings(settings) {
+  if (!plain(settings) || !plain(settings.museum)) return settings;
+  const museum = { ...settings.museum };
+  if (museum.enabled === true && (Object.hasOwn(museum, 'claim') || Object.hasOwn(museum, 'explore'))) {
+    museum.enabled = museum.claim === true || museum.explore === true;
+  }
+  delete museum.claim;
+  delete museum.explore;
+  return { ...settings, museum };
+}
+
+// Version 7 gives the museum its own reward and display controls. Existing
+// exploration included popularity achievements; preserve that choice once,
+// then let the independent achievement switch own all future collections.
+function migrateVersion6Settings(settings) {
+  if (!plain(settings)) return settings;
+  const input = { ...settings };
+  if (plain(input.museum) || !Object.hasOwn(input, 'museum') && (input.schedule?.museumRevenue === true || input.schedule?.museumAchievements === true)) {
+    const museum = { ...(input.museum ?? DEFAULT_SETTINGS.museum) };
+    if (!Object.hasOwn(input.museum ?? {}, 'revenue')) museum.revenue = input.schedule?.museumRevenue === true;
+    if (!Object.hasOwn(input.museum ?? {}, 'achievements')) museum.achievements = museum.enabled === true || input.schedule?.museumAchievements === true;
+    if (!Object.hasOwn(museum, 'display')) museum.display = false;
+    if (!Object.hasOwn(museum, 'factorMode')) museum.factorMode = 'materials';
+    if (!Object.hasOwn(museum, 'fullRecommendedFactor')) museum.fullRecommendedFactor = 3;
+    if (!Object.hasOwn(museum, 'partialRecommendedFactor')) museum.partialRecommendedFactor = 2;
+    input.museum = museum;
+  }
+  if (plain(input.schedule)) {
+    input.schedule = { ...input.schedule };
+    delete input.schedule.museumRevenue;
+    delete input.schedule.museumAchievements;
+  }
+  return input;
+}
+
+// Version 8 separates zero recommended heroes from partially recommended
+// teams. Preserve the previous fallback only for saved recommendation mode;
+// new accounts keep it off and use a one-times factor when they opt in.
+function migrateVersion7Settings(settings) {
+  if (!plain(settings) || !plain(settings.museum)) return settings;
+  const museum = { ...settings.museum };
+  const legacyRecommended = museum.factorMode === 'recommended' && !Object.hasOwn(museum, 'noRecommendedFallback');
+  if (!Object.hasOwn(museum, 'noRecommendedFallback')) museum.noRecommendedFallback = legacyRecommended;
+  if (!Object.hasOwn(museum, 'noRecommendedFactor')) museum.noRecommendedFactor = legacyRecommended ? museum.partialRecommendedFactor ?? 2 : 1;
+  return { ...settings, museum };
+}
+
+// Version 9 exposes claim/start separately without changing existing forge
+// behavior. Native automation always requires an explicit opt-in.
+function migrateVersion8Settings(settings) {
+  if (!plain(settings) || !plain(settings.forge)) return settings;
+  const forge = { ...settings.forge };
+  for (const key of ['nativeAuto', 'collect', 'craft']) {
+    if (!Object.hasOwn(forge, key)) forge[key] = DEFAULT_SETTINGS.forge[key];
+  }
+  return { ...settings, forge };
+}
+
+// Version 10 unifies the world Boss reward switches. Either old switch could
+// enable claims; preserve that choice once without enabling fleet dispatch.
+function migrateVersion9Settings(settings) {
+  if (!plain(settings) || !plain(settings.schedule) || !Object.hasOwn(settings.schedule, 'worldBossDamage')) return settings;
+  const schedule = { ...settings.schedule };
+  for (const key of ['worldBossDamage', 'worldBossRewards']) {
+    if (Object.hasOwn(schedule, key) && typeof schedule[key] !== 'boolean') {
+      throw new SettingsError({ ['schedule.' + key]: '开关值必须为 true 或 false' });
+    }
+  }
+  schedule.worldBossRewards = schedule.worldBossRewards === true || schedule.worldBossDamage === true;
+  delete schedule.worldBossDamage;
+  return { ...settings, schedule };
+}
+
+// Version 11 adds optional per-fleet boss formations. Existing accounts keep
+// their fleet selection and continue using each fleet's saved formation.
+function migrateVersion10Settings(settings) {
+  if (!plain(settings) || !plain(settings.worldBoss) || Object.hasOwn(settings.worldBoss, 'fleetPresets')) return settings;
+  return { ...settings, worldBoss: { ...settings.worldBoss, fleetPresets: [] } };
+}
+
+// Version 12 introduces opt-in resource field dispatch. Preserve task order and
+// append the new task without enabling it for any existing account.
+function migrateVersion11Settings(settings) {
+  if (!plain(settings)) return settings;
+  const next = { ...settings };
+  if (!Object.hasOwn(next, 'resourceFields')) next.resourceFields = copy(DEFAULT_SETTINGS.resourceFields);
+  if (Array.isArray(next.fleetDispatch?.priority) && !next.fleetDispatch.priority.includes('resourceFields')) {
+    next.fleetDispatch = { ...next.fleetDispatch, priority: [...next.fleetDispatch.priority, 'resourceFields'] };
+  }
+  return next;
+}
+
+// Version 13 retires per-repair / per-journey diamond caps. Daily budgets,
+// explicit switches and existing usage remain unchanged.
+function migrateVersion12Settings(settings) {
+  if (!plain(settings) || !Array.isArray(settings.fleetSpeed?.fleets)) return settings;
+  return { ...settings, fleetSpeed: { ...settings.fleetSpeed, fleets: settings.fleetSpeed.fleets.map(fleet => {
+    if (!plain(fleet)) return fleet;
+    const row = { ...fleet };
+    delete row.repairMaxDiamonds; delete row.marchMaxDiamonds;
+    return row;
+  }) } };
+}
+
+// Version 14 records the follow mode. Keep the historical trigger behavior when
+// absent, and preserve an explicit choice from files already saved as version 14.
+function migrateVersion13Settings(settings) {
+  if (!plain(settings) || !plain(settings.treasure) || Object.hasOwn(settings.treasure, 'followMode')) return settings;
+  return { ...settings, treasure: { ...settings.treasure, followMode: 'trigger' } };
 }

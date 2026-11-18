@@ -16,7 +16,7 @@ export function maintenancePolicies(settings){
   const rank=name=>order.indexOf(name==='treasure'&&settings.treasure.follow?'follow':name);return rank(a)-rank(b);
  });
  for(const source of sources){const p=settings[source];for(const id of p.fleetIds??[]){if(result.has(id)||!/^\d+远征船$/.test(id))continue;
-  result.set(id,{source,buildingId:id,label:source==='cityWar'?'城战维修参数':'巨轮维修参数',reserve:p.petrolReserve,maxCost:p.maxRepairCost,dailyLimit:source==='cityWar'?p.dailyPetrolLimit:p.dailyRepairPetrolLimit,counter:source==='cityWar'?'cityWarPetrol':'treasureRepairPetrol',interval:p.checkEverySeconds??15});
+  result.set(id,{source,buildingId:id,label:source==='cityWar'?'城战维修参数':'巨轮维修参数',interval:p.checkEverySeconds??15});
  }}return [...result.values()];
 }
 export const fleetMaintenanceEnabled=settings=>maintenancePolicies(settings).length>0;
@@ -46,7 +46,7 @@ export async function readFleetMaintenance(client,player,settings,ledger){
  let own,bag;try{[own,bag]=await Promise.all([read('MyFleets'),read('AllItem')]);}catch{snapshot.reason='舰队或汽油未同步，暂不维修';return snapshot;}
  if(!Array.isArray(own?.fleets)||!Array.isArray(bag?.items)){snapshot.reason='舰队或库存数据未完整返回';return snapshot;}
  const fuel=bag.items.filter(i=>i.itemId==='汽油');if(fuel.length>1||fuel.some(i=>!valid(i.num))){snapshot.reason='汽油数量未确认';return snapshot;}snapshot.fuel=fuel[0]?.num??0;
- const pending=ledger.pendingCounters();for(const name of ['treasurePetrol','cityWarPetrol','radarPetrol','piratePetrol','worldBossPetrol','siliconPetrol']){if(!valid(pending[name]??0)){snapshot.reason='待确认汽油记录异常';return snapshot;}snapshot.pendingFuel+=pending[name]??0;}
+ const pending=ledger.pendingCounters();for(const name of ['treasurePetrol','cityWarPetrol','radarPetrol','piratePetrol','worldBossPetrol','siliconPetrol','resourceFieldPetrol']){if(!valid(pending[name]??0)){snapshot.reason='待确认汽油记录异常';return snapshot;}snapshot.pendingFuel+=pending[name]??0;}
  const watch=watchFleetMaintenance(client);watch.seedFleets(own.fleets);watch.seedItems(bag.items);
  for(const policy of policies){
   const matches=own.fleets.filter(f=>f.buildingId===policy.buildingId),fleet=matches[0];
@@ -76,7 +76,7 @@ function effectiveKeys(snapshot){
 export function planFleetMaintenance(snapshot,settings,client){
  const result={enabled:snapshot.enabled,checkedAt:snapshot.checkedAt,fuel:snapshot.fuel,pendingFuel:snapshot.pendingFuel,reason:snapshot.reason,rows:[],actions:[],minimumFuel:Infinity};
  if(snapshot.reason)return result;
- const keys=effectiveKeys(snapshot),spent={...snapshot.usage.counters};let available=snapshot.fuel-snapshot.pendingFuel;
+ const keys=effectiveKeys(snapshot);let available=snapshot.fuel-snapshot.pendingFuel;
  for(const row of snapshot.rows){
   const {policy,fleet}=row,view={id:row.id,name:row.name,source:policy.label,durability:fleet?.durability??null,maxDura:fleet?.maxDura??null,cost:row.cost,state:row.state,condition:row.condition};result.rows.push(view);
   if(view.condition)continue;
@@ -84,14 +84,11 @@ export function planFleetMaintenance(snapshot,settings,client){
   const reservation=dispatchReservationReason(client,settings,policy.source,row.id,{ignoreOwners:['maintenance']});
   if(reservation){view.condition=reservation;view.state='busy';continue;}
   let reason=record&&!record.confirmed?'前次维修/城战结果待确认':fleetRecordReason(keys,row.id,snapshot.worldId);
-  if(!reason&&![policy.reserve,policy.maxCost,policy.dailyLimit,spent[policy.counter]??0].every(valid))reason='维修预算未确认';
-  if(!reason&&policy.maxCost>0&&row.cost>policy.maxCost)reason='补满需 '+row.cost+' 汽油，超过单次上限';
-  if(!reason&&policy.dailyLimit>0&&(spent[policy.counter]??0)+row.cost>policy.dailyLimit)reason='已达当前来源的每日汽油预算';
-  if(!reason)result.minimumFuel=Math.min(result.minimumFuel,row.cost+policy.reserve+snapshot.pendingFuel);
-  if(!reason&&available-row.cost<policy.reserve)reason='等待汽油：补满需 '+row.cost+'，可用 '+Math.max(0,available-policy.reserve);
+  if(!reason)result.minimumFuel=Math.min(result.minimumFuel,row.cost+snapshot.pendingFuel);
+  if(!reason&&available<row.cost)reason='等待汽油：补满需 '+row.cost+'，可用 '+Math.max(0,available);
   if(reason){view.condition=reason;view.state=/待确认|未确认/.test(reason)?'unknown':'waiting';continue;}
   const step={kind:policy.source==='cityWar'?'cityRepair':'treasureRepair',request:'RepairFleetRequest',body:{buildingId:row.id},buildingId:row.id,source:policy.source,worldId:snapshot.worldId,uniqueKey:key,cost:row.cost,costs:[{id:'汽油',num:row.cost}],beforeDurability:fleet.durability,maxDura:fleet.maxDura,policy,label:row.name+'战后普通维修至满耐久'};
-  result.actions.push(step);view.state='ready';view.condition='汽油满足，准备普通维修';available-=row.cost;spent[policy.counter]=(spent[policy.counter]??0)+row.cost;
+  result.actions.push(step);view.state='ready';view.condition='汽油满足，准备普通维修';available-=row.cost;
  }return result;
 }
 function reconcile(snapshot,ledger,onStep){
@@ -121,8 +118,7 @@ export async function runFleetMaintenance(client,player,{getSettings,ledger,enab
    const signature=JSON.stringify([step.cost,fresh.fuel,step.beforeDurability,step.maxDura,step.policy]),failure=failures.get(step.uniqueKey),view=plan.rows.find(r=>r.id===step.buildingId);
    if(failure&&failure.until>Date.now()&&failure.signature===signature){view.condition='服务端此前拒绝，等待状态变化后复查';continue;}
    const counters=step.source==='cityWar'?{cityWarPetrol:step.cost,cityWarRepairs:1}:{treasurePetrol:step.cost,treasureRepairPetrol:step.cost,treasureRepairs:1};
-   const limits={[step.policy.counter]:step.policy.dailyLimit||undefined};
-   const ticket=ledger.reserve(counters,limits,{}, {uniqueKey:step.uniqueKey,details:{kind:step.kind,buildingId:step.buildingId,beforeDurability:step.beforeDurability,maxDura:step.maxDura,sentAt:fresh.checkedAt,postBattle:true}});
+   const ticket=ledger.reserve(counters,{},{}, {uniqueKey:step.uniqueKey,details:{kind:step.kind,buildingId:step.buildingId,beforeDurability:step.beforeDurability,maxDura:step.maxDura,sentAt:fresh.checkedAt,postBattle:true}});
    if(!enabled()||settings!==getSettings()||!client.connected){ledger.cancel(ticket);break;}
    let entry;
    try{

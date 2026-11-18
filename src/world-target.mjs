@@ -9,7 +9,7 @@ import {readWorldBoss} from './world-boss.mjs';
 import {exactAutomationId} from './automation-policy.mjs';
 
 // 目标详情仅使用已保存设置和局部快照；不写预留、设置或用量。
-export async function readWorldTarget(client,protocol,config,player,settings,ledger,{layer,key,pirateSpent=0}){
+export async function readWorldTarget(client,protocol,config,player,settings,ledger,{layer,key}){
  if(!['cities','treasure','radar','pirates','boss','fleets','fields'].includes(layer)||typeof key!=='string'||key.length>100)throw Error('地图目标无效');
  const view={checkedAt:Math.floor(Date.now()/1000),actions:[],notes:[],fleets:[],fuel:null,cost:null};
  const blocked=(task,id)=>fleetRecordReason(ledger.keyRecords(),id,exactAutomationId(player.worldId))||dispatchReservationReason(client,settings,task,id);
@@ -17,7 +17,7 @@ export async function readWorldTarget(client,protocol,config,player,settings,led
  if(settings.cityWar.enabled&&settings.cityWar.reserveDuringWar&&['treasure','radar','pirates','boss'].includes(layer)){
   const war=await readCityWar(client,protocol,config,player,settings.cityWar);reserved=war.reason?[...settings.cityWar.fleetIds]:cityWarReservedFleets(war,settings);
  }
- if(layer==='fields'){view.notes.push('资源田他人归属未同步；本工具当前没有资源田自动派遣入口，不推测可进攻条件。');return view;}
+ if(layer==='fields'){view.notes.push('在总览的「资源田概览」查看本盟城市内可占田地、产量与快捷占领；可在资源田配置中开启自动补满名额。');return view;}
  if(layer==='fleets'){
   const own=await client.request('MyFleetsRequest',{},'MyFleetsResponse');
   view.fleets=fleetDispatchView(client,settings,ledger,own.fleets??[],exactAutomationId(player.worldId)).filter(f=>'fleet-'+f.buildingId===key).map(f=>({name:f.buildingId,reason:[f.reason,...f.reserved.map(r=>'预留给'+r),'允许任务顺序：'+(f.intents.map(i=>i.label+(i.key==='cityWar'?'（'+((settings.cityWar.defenceFleetIds??[]).includes(f.buildingId)?'防守':'进攻')+'）':'')).join(' → ')||'无'),'当前目标格：'+(f.targetGrid??'主城')].filter(Boolean).join('；')}));return view;
@@ -31,7 +31,7 @@ export async function readWorldTarget(client,protocol,config,player,settings,led
   for(const f of state.view.fleets)f.reason||=(!settings.pirateHunt.fleetIds.includes(f.buildingId)?'未选择此舰队':'')||blocked('pirateHunt',f.buildingId)||(reserved.includes(f.buildingId)?'城战时段预留':'');
   view.fleets=state.view.fleets;
   if(!target)view.notes.push('此目标不是当前可首杀的下一等级，或目标已变化');
-  else{const picked=selectPirateAdvance({...state,view:{...state.view,targets:[target]}},settings.pirateHunt,{spent:pirateSpent,pendingFuel:pendingPetrol(ledger)});view.notes.push(picked.reason||'目标符合当前首杀条件；需单独启动首杀');if(!picked.reason)view.actions.push({label:picked.fleet.name+' → '+target.name,costs:[{id:'汽油',num:picked.cost}]});}
+  else{const picked=selectPirateAdvance({...state,view:{...state.view,targets:[target]}},settings.pirateHunt,{pendingFuel:pendingPetrol(ledger)});view.notes.push(picked.reason||'目标符合当前首杀条件；需单独启动首杀');if(!picked.reason)view.actions.push({label:picked.fleet.name+' → '+target.name,costs:[{id:'汽油',num:picked.cost}]});}
   return view;
  }
  if(layer==='radar'){

@@ -203,12 +203,13 @@ await check('不抢占行军战斗维修排队巨轮驻外矿场或其他角色�
     f=>{f.state.fleets[0].owner.playerId='9007199254741999';}, f=>{f.state.buildings[0].fleet.formation.heroPositions=[];}];
   for (const change of changes) { const f=warForgeFixture(),s=warForgeSettings();s.cityWar.fleetIds=['1远征船'];change(f);await warRun(f,s);assert.equal(f.client.writes.length,0); }
 });
-await check('完整维修报价、汽油保留、单次与每日预算均生效', async () => {
+await check('完整维修只检查实际汽油，旧保留/单次/每日限制不再拦截', async () => {
   const f=warForgeFixture(),s=warForgeSettings();s.cityWar.fleetIds=['1远征船'];f.state.fleets[0].durability=1000;
   const plan=await warPlan(f,s);assert.equal(plan.actions[0].request,'RepairFleetRequest');assert.equal(plan.actions[0].cost,2000);
-  s.cityWar.maxRepairCost=1999;assert.equal((await warPlan(f,s)).actions.length,0);
-  s.cityWar.maxRepairCost=3000;s.cityWar.dailyPetrolLimit=1999;assert.equal((await warPlan(f,s)).actions.length,0);
-  s.cityWar.dailyPetrolLimit=5000;s.cityWar.petrolReserve=49000;assert.equal((await warPlan(f,s)).actions.length,0);
+  s.cityWar.maxRepairCost=1999;assert.equal((await warPlan(f,s)).actions.length,1);
+  s.cityWar.maxRepairCost=3000;s.cityWar.dailyPetrolLimit=1999;assert.equal((await warPlan(f,s)).actions.length,1);
+  s.cityWar.dailyPetrolLimit=5000;s.cityWar.petrolReserve=49000;assert.equal((await warPlan(f,s)).actions.length,1);
+  f.state.fuel=1999;assert.equal((await warPlan(f,s)).actions.length,0);f.state.fuel=2000;assert.equal((await warPlan(f,s)).actions.length,1);
   s.cityWar.petrolReserve=0;s.cityWar.autoRepair=false;assert.equal((await warPlan(f,s)).actions.length,0);
 });
 await check('城战派遣确认、防重复与返航后继续接续', async () => {
@@ -840,9 +841,12 @@ try {
     const f=warForgeFixture(),session=app.sessions.get('a');f.alignScenarioOne();session.client=f.client;session.player=f.player;session.paused=false;
     const war=await api('settings/preview','a',{category:'cityWar'}),forge=await api('settings/preview','a',{category:'forge'});
     assert.equal(war.status,200,JSON.stringify(war.data));assert.equal(forge.status,200,JSON.stringify(forge.data));assert.equal(war.data.cityWar.nativeLimit,4);
-    assert.equal(war.data.actions.length,2,'真实场景配置下也应生成两项有效城战计划');assert(forge.data.actions.length);assert(forge.data.forge.factories.length);assert.equal(f.client.writes.length,0);assert.deepEqual(fs.readFileSync(path.join(directory,'accounts.json')),before);
+    assert.equal(war.data.actions.length,2,'真实场景配置下也应生成两项有效城战计划');assert(forge.data.actions.length);assert(forge.data.forge.factories.length);assert.equal(f.client.writes.length,0);
+    const expectedAccounts = JSON.parse(before);
+    expectedAccounts.accounts.find(account => account.id === 'a').automation.settingsConfigured = true;
+    assert.deepEqual(JSON.parse(fs.readFileSync(path.join(directory,'accounts.json'))), expectedAccounts, '保存仅登记本账号已配置，不改变凭据、其他账号或挂机开关');
   });
-  await check('真实场景2配置与地图可通过HTTP预览，且遵守真实行军费用预算',async()=>{
+  await check('真实场景2配置与地图可通过HTTP预览，且按真实汽油库存规划行军',async()=>{
     const f=warForgeFixture(),session=app.sessions.get('a');f.player.scenarioId=2;
     f.state.cities=[{id:277,state:1,guildIdx:7},{id:285,state:2,guildIdx:8}];
     f.state.war.declarations=[{attackGuildIdx:7,defenceGuildIdx:8,cityId:285}];
@@ -851,12 +855,255 @@ try {
     const war=await api('settings/preview','a',{category:'cityWar'});
     assert.equal(war.status,200,JSON.stringify(war.data));
     assert(!war.data.notes.some(note=>note.startsWith('城战状态未确认')),JSON.stringify(war.data));
-    assert.equal(war.data.actions.length,1,JSON.stringify(war.data));
-    assert(war.data.notes.some(note=>note.includes('城战汽油预算')),JSON.stringify(war.data));
+    assert.equal(war.data.actions.length,2,JSON.stringify(war.data));
+    assert(war.data.actions.reduce((sum, action)=>sum+action.costs.reduce((cost, item)=>cost+item.num,0),0)<=f.state.fuel);
     assert(war.data.cityWar.targets.every(target=>target.ref==='2:285'&&target.petrol>0));
     assert.equal(f.client.writes.length,0);
   });
 } finally {app.server.closeAllConnections();await app.close();}
+await check('装备自动领取和续产可分别关闭，只领取时无需配方', async () => {
+  const f = warForgeFixture(), settings = warForgeSettings(), usage = ledger();
+  settings.forge.craft = false;
+  settings.forge.recipeIds = [];
+  assert.doesNotThrow(() => validateSettings(settings));
+  f.state.factory.equipMaking = { makeId: 1001, finishTime: Math.floor(Date.now() / 1000) - 10, equipId: '测试武器', star: 2 };
+  const claimed = await forgeRun(f, settings, usage);
+  assert(claimed.results.some(row => row.step?.kind === 'forgeClaim' && row.status === 'confirmed'));
+  await forgeRun(f, settings, usage);
+  assert.deepEqual(f.client.writes.map(row => row.name), ['PickMadeEquipRequest']);
+  assert.equal(f.state.equipment.length, 2);
+  assert.equal(usage.snapshot().counters.forgeStarts ?? 0, 0);
+  const g = warForgeFixture(), second = warForgeSettings();
+  second.forge.collect = false;
+  g.state.factory.equipMaking = { makeId: 1001, finishTime: Math.floor(Date.now() / 1000) - 10, equipId: '测试武器', star: 2 };
+  await forgeRun(g, second);
+  assert.equal(g.client.writes.length, 0, '关闭领取时保留已完成批次，不能跳过领取继续制作');
+});
+await check('原生自动锻造只切换游戏开关，禁用工具领取制作分解及预算', async () => {
+  const f = warForgeFixture(), settings = warForgeSettings(), usage = ledger();
+  Object.assign(settings.forge, { nativeAuto: true, recipeIds: [], decompose: true, decomposeQualities: ['BLUE'],
+    goldReserve: 999999, materialReserve: 999999, dailyLimit: 1, dailyGoldLimit: 1 });
+  f.state.monthCards = [{ type: f.protocol.MonthCardType.MONTH_CARD_SENIOR, endTime: -1 }];
+  f.state.factory.equipMaking = { makeId: 1001, finishTime: Math.floor(Date.now() / 1000) - 10, equipId: '测试武器', star: 2 };
+  assert.doesNotThrow(() => validateSettings(settings), '原生模式无需配方');
+  const result = await forgeRun(f, settings, usage);
+  assert.deepEqual(f.client.writes, [{ name: 'SetBuildingAutoWorkRequest', body: { buildingId: '1装备厂', isOn: true } }]);
+  assert.equal(result.results.at(-1)?.status, 'confirmed', JSON.stringify(result));
+  assert.equal(f.state.factory.auto, true);
+  assert(f.calls.some(row => row.name === 'MonthCardRequest'));
+  assert(f.calls.filter(row => row.name === 'OnWaterRequest').length >= 2, '开关发送后必须回读工厂');
+  assert.equal(usage.snapshot().counters.forgeStarts ?? 0, 0);
+  assert.equal(usage.snapshot().counters.forgeGold ?? 0, 0);
+  const record = Object.values(usage.keyRecords()).find(row => row.details?.kind === 'forgeNative');
+  assert.equal(record?.confirmed, true, '保留本工具启用原生的归属记录');
+  await forgeRun(f, settings, usage);
+  assert.equal(f.client.writes.length, 1, '已开启时不会重复发送或触发工具分解');
+});
+await check('原生自动锻造遵守月卡有效期和权益，缺少资格不回退工具制作', async () => {
+  for (const variant of ['absent', 'expired', 'normal', 'zero', 'missingConfig', 'readFailed']) {
+    const f = warForgeFixture(), settings = warForgeSettings();
+    settings.forge.nativeAuto = true;
+    f.state.monthCards = variant === 'absent' ? [] : [{ type: variant === 'normal' ? 1 : 2,
+      endTime: variant === 'expired' ? Math.floor(Date.now() / 1000) - 1 : -1 }];
+    if (variant === 'zero') f.config.tables.MonthCardCfg.data[1].effectList[0][1] = 0;
+    if (variant === 'missingConfig') delete f.config.tables.MonthCardCfg;
+    if (variant === 'readFailed') f.beforeRead = name => { if (name === 'MonthCardRequest') throw new Error('模拟月卡读取失败'); };
+    const result = await forgeRun(f, settings);
+    assert.equal(f.client.writes.length, 0, variant + ': ' + JSON.stringify(result));
+    assert(result.notes.length, variant + ' 必须给出等待原因');
+  }
+  for (const endTime of [-1, Math.floor(Date.now() / 1000) + 3600]) {
+    const f = warForgeFixture(), settings = warForgeSettings();
+    settings.forge.nativeAuto = true;
+    f.state.monthCards = [{ type: 2, endTime }];
+    await forgeRun(f, settings);
+    assert.equal(f.client.writes.length, 1, '永久或未到期月卡可开启');
+  }
+});
+await check('月卡读取失败不影响工具自定义锻造', async () => {
+  const f = warForgeFixture(), settings = warForgeSettings();
+  f.beforeRead = name => { if (name === 'MonthCardRequest') throw new Error('模拟月卡读取失败'); };
+  const result = await forgeRun(f, settings);
+  assert.equal(result.results.at(-1)?.status, 'confirmed');
+  assert.deepEqual(f.client.writes.map(row => row.name), ['MakeEquipRequest']);
+});
+await check('原生开启结果未知跨轮及重启保留防重，回读后确认归属', async () => {
+  const f = warForgeFixture(), settings = warForgeSettings(), file = path.join(directory, 'native-pending.json');
+  let usage = ledger({ file });
+  settings.forge.nativeAuto = true;
+  f.state.monthCards = [{ type: 2, endTime: -1 }];
+  f.ignoreForgeNative = true;
+  const first = await forgeRun(f, settings, usage);
+  assert.equal(first.results.at(-1)?.status, 'unknown');
+  assert.equal(f.client.writes.length, 1);
+  assert(Object.values(usage.keyRecords()).some(row => row.details?.kind === 'forgeNative' && !row.confirmed));
+  usage = ledger({ file });
+  await forgeRun(f, settings, usage);
+  assert.equal(f.client.writes.length, 1, '新账本实例仍阻止重复开启');
+  f.state.factory.auto = true;
+  await forgeRun(f, settings, usage);
+  assert.equal(f.client.writes.length, 1);
+  assert(Object.values(usage.keyRecords()).some(row => row.details?.kind === 'forgeNative' && row.confirmed));
+});
+await check('关闭工具开启的原生自动后先回读确认，后续轮次恢复自定义', async () => {
+  const f = warForgeFixture(), settings = warForgeSettings(), usage = ledger();
+  settings.forge.nativeAuto = true;
+  f.state.monthCards = [{ type: 2, endTime: -1 }];
+  await forgeRun(f, settings, usage);
+  settings.forge.nativeAuto = false;
+  const result = await forgeRun(f, settings, usage);
+  assert.deepEqual(f.client.writes.map(row => [row.name, row.body.isOn]), [
+    ['SetBuildingAutoWorkRequest', true], ['SetBuildingAutoWorkRequest', false],
+  ]);
+  assert.equal(result.results.at(-1)?.status, 'confirmed');
+  assert.equal(f.state.factory.auto, false);
+  assert(!Object.values(usage.keyRecords()).some(row => row.details?.kind === 'forgeNative'));
+  await forgeRun(f, settings, usage);
+  assert.equal(f.client.writes.at(-1).name, 'MakeEquipRequest');
+});
+await check('原生关闭未确认时继续等待，单轮最多关闭一次且不接管制作', async () => {
+  const f = warForgeFixture(), settings = warForgeSettings(), usage = ledger();
+  settings.forge.nativeAuto = true;
+  f.state.monthCards = [{ type: 2, endTime: -1 }];
+  await forgeRun(f, settings, usage);
+  settings.forge.nativeAuto = false;
+  f.ignoreForgeNative = true;
+  for (let round = 0; round < 2; round++) {
+    const before = f.client.writes.length;
+    const result = await forgeRun(f, settings, usage);
+    assert.equal(f.client.writes.length, before + 1);
+    assert.deepEqual(f.client.writes.at(-1), { name: 'SetBuildingAutoWorkRequest', body: { buildingId: '1装备厂', isOn: false } });
+    assert.equal(result.results.at(-1)?.status, 'unknown');
+    assert(Object.values(usage.keyRecords()).some(row => row.details?.kind === 'forgeNative'));
+  }
+  f.ignoreForgeNative = false;
+  await forgeRun(f, settings, usage);
+  assert.equal(f.state.factory.auto, false);
+  assert(f.client.writes.every(row => row.name === 'SetBuildingAutoWorkRequest'));
+});
+await check('游戏内已有原生开关不冒领归属，不擅自关闭或重复领取', async () => {
+  const f = warForgeFixture(), settings = warForgeSettings(), usage = ledger();
+  f.state.factory.auto = true;
+  f.state.monthCards = [{ type: 2, endTime: -1 }];
+  settings.forge.nativeAuto = true;
+  await forgeRun(f, settings, usage);
+  assert.equal(f.client.writes.length, 0);
+  assert(!Object.values(usage.keyRecords()).some(row => row.details?.kind === 'forgeNative'));
+  settings.forge.nativeAuto = false;
+  await forgeRun(f, settings, usage);
+  assert.equal(f.client.writes.length, 0);
+  assert.equal(f.state.factory.auto, true);
+});
+await check('原生开启已发送后回读失败保留归属，显式关闭可解除未知状态', async () => {
+  const f = warForgeFixture(), settings = warForgeSettings(), usage = ledger();
+  settings.forge.nativeAuto = true;
+  f.state.monthCards = [{ type: 2, endTime: -1 }];
+  f.beforeRead = name => {
+    if (name === 'OnWaterRequest' && f.client.writes.length)
+      throw Object.assign(new Error('模拟回读未发送'), { notSent: true });
+  };
+  const result = await forgeRun(f, settings, usage);
+  assert.equal(result.results.at(-1)?.status, 'unknown');
+  assert.equal(f.client.writes.length, 1);
+  assert(Object.values(usage.keyRecords()).some(row => row.details?.kind === 'forgeNative' && !row.confirmed));
+  f.beforeRead = null;
+  settings.forge.nativeAuto = false;
+  await forgeRun(f, settings, usage);
+  assert.equal(f.client.writes.length, 2);
+  assert.equal(f.client.writes.at(-1).body.isOn, false);
+  assert.equal(f.state.factory.auto, false);
+  assert(!Object.values(usage.keyRecords()).some(row => row.details?.kind === 'forgeNative'));
+});
+await check('工具下单结果未知时不启用原生自动覆盖原批次证据', async () => {
+  const f = warForgeFixture(), settings = warForgeSettings(), usage = ledger();
+  f.unknown = true;
+  await forgeRun(f, settings, usage);
+  assert.equal(f.client.writes.length, 1);
+  f.unknown = false;
+  settings.forge.nativeAuto = true;
+  f.state.monthCards = [{ type: 2, endTime: -1 }];
+  const result = await forgeRun(f, settings, usage);
+  assert.equal(f.client.writes.length, 1);
+  assert.match(result.notes.join(' '), /结果待确认/);
+});
+await check('取消工厂选择仍关闭本工具原生开关，其他角色记录不影响当前角色', async () => {
+  const f = warForgeFixture(), settings = warForgeSettings(), usage = ledger();
+  settings.forge.nativeAuto = true;
+  f.state.monthCards = [{ type: 2, endTime: -1 }];
+  await forgeRun(f, settings, usage);
+  const [nativeKey] = Object.keys(usage.keyRecords()).filter(key => key.startsWith('forgeNative:'));
+  settings.forge.buildingIds = [];
+  await forgeRun(f, settings, usage);
+  assert.equal(f.client.writes.length, 2);
+  assert.equal(f.client.writes.at(-1).body.isOn, false);
+  assert.equal(usage.hasKey(nativeKey), false);
+  settings.forge.buildingIds = ['1装备厂'];
+  await forgeRun(f, settings, usage);
+  const prior = usage.keyRecords();
+  f.player.playerId = '9007199254900999';
+  settings.forge.nativeAuto = false;
+  await forgeRun(f, settings, usage);
+  assert.equal(f.client.writes.length, 3, '同世界另一角色不能关闭原角色的原生开关');
+  assert.deepEqual(usage.keyRecords(), prior);
+});
+await check('周活动等待时原生模式可开启关闭再开启，普通工具制造按自身开关恢复', async () => {
+  const originalNow = Date.now;
+  let clock = Date.UTC(2026, 10, 18, 4);
+  Date.now = () => clock;
+  try {
+    for (const subjectId of [1, 2]) {
+      const f = warForgeFixture(), usage = ledger(), rounds = [];
+      let settings = warForgeSettings(), weeklyReads = 0;
+      settings.cityWar.enabled = false;
+      settings.forge.nativeAuto = true;
+      Object.assign(settings.weeklyActivity, { enabled: true, forgeEnabled: true, forgeStop: 'score', forgeScore: 60 });
+      f.state.monthCards = [{ type: 2, endTime: -1 }];
+      f.player.worldId = f.protocol.PlayerInfo.decode(f.protocol.PlayerInfo.encode({ worldId: '2000001' }).finish()).worldId;
+      f.config.tables.ModuleOpenCfg.data.push({ moduleId: '每日跨服比拼', playerLevel: 20 });
+      const request = f.client.request;
+      f.client.request = async (name, ...args) => {
+        if (name !== 'CrossRankInfoRequest') return request(name, ...args);
+        weeklyReads++;
+        return f.protocol.CrossRankInfoResponse.decode(f.protocol.CrossRankInfoResponse.encode({
+          subjectId, roomLevel: 1, grouping: false, settleTime: Math.floor(clock / 1000) + 3600,
+          rankList: [{ playerId: f.player.playerId, score: 60, rank: 1, nickname: '测试角色', level: 40, avatar: {} }],
+        }).finish());
+      };
+      await runLoop(f.client, f.protocol, {
+        config: f.config, player: f.player, rounds: 4, everyMs: 15000, allowMutate: true,
+        getSettings: () => settings, usageLedger: usage, isEnabled: () => false,
+        sleep: async ms => { clock += ms; },
+        onRound: () => {
+          rounds.push(f.client.writes.map(row => [row.name, row.body.isOn]));
+          if (rounds.length === 1 || rounds.length === 3)
+            settings = { ...settings, forge: { ...settings.forge, nativeAuto: rounds.length === 3 } };
+        },
+      });
+      const on = ['SetBuildingAutoWorkRequest', true], off = ['SetBuildingAutoWorkRequest', false], craft = ['MakeEquipRequest', undefined];
+      assert.deepEqual(rounds, [[on], [on, off], [on, off, craft], [on, off, craft, on]], '周活动主题 ' + subjectId);
+      assert.equal(f.state.factory.auto, true);
+      assert(weeklyReads > 0, '真实主循环已进入周活动检查');
+      assert.equal(usage.snapshot().counters.forgeStarts, 1, '普通制造独立执行且只扣一次预算');
+    }
+  } finally { Date.now = originalNow; }
+});
+await check('原生开关发送前暂停、改配置或关闭总开关即取消', async () => {
+  for (const change of ['pause', 'settings', 'master']) {
+    const f = warForgeFixture(), initial = warForgeSettings(), usage = ledger();
+    initial.forge.nativeAuto = true;
+    f.state.monthCards = [{ type: 2, endTime: -1 }];
+    let current = initial, active = true, reads = 0;
+    f.beforeRead = name => {
+      if (name !== 'OnWaterRequest' || ++reads !== 2) return;
+      if (change === 'pause') active = false;
+      else if (change === 'master') current.forge.enabled = false;
+      else current = { ...initial, forge: { ...initial.forge, nativeAuto: false } };
+    };
+    await forgeRun(f, initial, usage, { enabled: () => active, getSettings: () => current });
+    assert.equal(f.client.writes.length, 0, change);
+    assert(!Object.values(usage.keyRecords()).some(row => row.details?.kind === 'forgeNative'), change);
+  }
+});
 const report=path.join(parent,'result-'+Date.now()+'.json');fs.writeFileSync(report,JSON.stringify({time:new Date().toISOString(),results},null,2));
 console.log(results.filter(r=>r.passed).length+'/'+results.length+' 通过；'+report);
 if(results.some(r=>!r.passed))process.exitCode=1;

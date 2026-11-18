@@ -34,7 +34,7 @@ const tables = {
   EquipCfg: [{ id: '刀', type: '武器' }], EquipAttrCfg: [{ id: '刀', star: '0', maxLv: 3 }],
   EquipUpDecomposeCfg: [{ level: 2, upgradeCost: 10 }],
   HeroBadgeAttrCfg: [{ id: '徽', star: 0, maxLevel: 5 }], HeroBadgeLevelCfg: [{ level: 2, exp: 5, goldExpRadio: 2 }],
-  HeroAbilityShowCfg: ['甲', '乙'].map(id => ({ id, reward: ['RUBY', 1] })),
+  HeroAbilityShowCfg: ['甲', '乙', '未拥有'].map(id => ({ id, reward: ['RUBY', 1] })),
 };
 const config = { tables: Object.fromEntries(Object.entries(tables).map(([key, data]) => [key, { data }])) };
 
@@ -57,14 +57,16 @@ function fixture() {
           assert.equal(body.heroId, hero.heroId); assert.equal(body.universal, false);
           writes.push(name); bag.甲碎片 -= 10; return { nextStar: ++hero.star };
         case 'GotHeroShowSkillRequest':
-          assert.equal(body.heroId, hero.heroId); writes.push(name); claimed.push(body.heroId); return {};
+          assert(['甲', '乙'].includes(body.heroId), '只领取已拥有且配置有奖励的英雄');
+          assert(!claimed.includes(body.heroId), '已领展示奖励不能重复领取');
+          writes.push(name); claimed.push(body.heroId); return {};
         case 'EnhanceBadgeRequest':
           assert.equal(uidText(body.uid), '72'); assert.deepEqual(body.decomposeUid, []);
           assert.equal(body.expItemNum, 5); writes.push(name); badge.level++; gold -= 10; bag.徽章经验 -= 5; return {};
       }
       reads.push(name);
       switch (name) {
-        case 'AllHeroRequest': return structuredClone({ heroes: [hero, bench], showSkillHeroes: claimed });
+        case 'AllHeroRequest': return structuredClone({ heroes: [hero, bench, { heroId: '无奖励' }], showSkillHeroes: claimed });
         case 'AllItemRequest': return { items: Object.entries(bag).map(([itemId, num]) => ({ itemId, num })) };
         case 'AllResourceRequest': return { list: [{ res: 3, amount: gold }] };
         case 'EquipsRequest': return structuredClone({ equip: [equip] });
@@ -91,7 +93,7 @@ function fixture() {
   };
   const plan = async () => (await readHeroGrowthPlan(client, config, player, settings)).plan;
   const run = (plan, options = {}) => runHeroPlan(client, protocol, plan, { allowMutate: true, config, player, getSettings: () => settings, ...options });
-  return { settings, plan, run, bag, writes, reads, client };
+  return { settings, plan, run, bag, writes, reads, client, claimed };
 }
 
 async function testExclusiveMaterialRecovery() {
@@ -151,17 +153,19 @@ async function testExclusiveMaterialRecovery() {
 }
 
 try {
-  const f = fixture();
   assert(newActions.every(key => defaultSettings().heroes[key] === false));
-  f.settings.heroes.heroIds = [];
-  const empty = await f.plan();
-  assert.deepEqual(empty.steps, []);
+  const unselected = fixture();
+  unselected.settings.heroes.heroIds = [];
+  const empty = await unselected.plan();
+  assert.deepEqual(empty.steps.map(step => [step.kind, step.heroId]), [['showSkillReward', '甲'], ['showSkillReward', '乙']]);
   assert.match(empty.notes.join(''), /选择/);
-  await f.run(empty);
-  assert.deepEqual(f.writes, []);
-  assert(!f.reads.includes('EquipsRequest') && !f.reads.includes('BadgesRequest'));
+  await unselected.run(empty);
+  assert.deepEqual(unselected.writes, ['GotHeroShowSkillRequest', 'GotHeroShowSkillRequest'], '空名单仅领取全部英雄奖励，不执行消费养成');
+  assert.deepEqual(unselected.claimed, ['甲', '乙']);
+  assert(!unselected.reads.some(name => ['AllItemRequest', 'EquipsRequest', 'BadgesRequest'].includes(name)));
+  assert.deepEqual((await unselected.plan()).steps, [], '空名单领奖也以已领记录去重');
 
-  f.settings.heroes.heroIds = ['甲'];
+  const f = fixture();
   f.bag.甲碎片 = 69;
   const tight = await f.plan();
   assert(tight.steps.some(step => step.kind === 'star'));
@@ -169,16 +173,18 @@ try {
   f.bag.甲碎片 = 70;
   const all = await f.plan();
   assert.deepEqual(new Set(all.steps.map(step => step.kind)), new Set(['level', 'star', 'skill', ...newActions]));
-  assert(all.steps.every(step => step.heroId === '甲'));
+  assert(all.steps.filter(step => step.kind !== 'showSkillReward').every(step => step.heroId === '甲'));
+  assert.deepEqual(all.steps.filter(step => step.kind === 'showSkillReward').map(step => step.heroId), ['甲', '乙']);
   const reserved = [], committed = [];
   const result = await f.run(all, {
     beforeAction: step => { const ticket = { step }; reserved.push(ticket); return ticket; },
     afterAction: (step, ticket) => { assert.equal(ticket.step, step); committed.push(ticket); },
   });
   assert(result.every(entry => entry.ok), JSON.stringify(result));
-  assert.equal(f.writes.length, 9);
+  assert.equal(f.writes.length, 10);
   assert.deepEqual(committed, reserved);
-  assert.equal(reserved.length, 9);
+  assert.equal(reserved.length, 10);
+  assert.deepEqual(f.claimed, ['甲', '乙']);
   assert.equal(f.bag.甲碎片, 0);
   assert(!((await f.plan()).steps.some(step => step.kind === 'showSkillReward')), '已领展示奖励不会重复列入');
 
@@ -188,12 +194,31 @@ try {
       beforeAction: step => { interrupted.settings.heroes.heroIds = heroIds; return step; },
       cancelAction: (step, ticket, why) => { assert.equal(step, ticket); canceled.push(why); },
     });
-    assert.deepEqual(interrupted.writes, []);
+    assert.deepEqual(interrupted.writes, ['GotHeroShowSkillRequest', 'GotHeroShowSkillRequest'], '更改培养名单不影响所有英雄领奖');
+    assert.deepEqual(interrupted.claimed, ['甲', '乙']);
     assert.deepEqual(canceled, [{ notSent: true }], '已预留但尚未发送时更改目标须释放该次预留');
   }
   const partial = fixture();
   await partial.run(await partial.plan(), { onStep: () => { partial.settings.heroes.heroIds = ['乙']; } });
-  assert.deepEqual(partial.writes, ['HeroLevelUpRequest'], '执行中换目标后不会继续处理旧计划');
+  assert.deepEqual(partial.writes, ['HeroLevelUpRequest', 'GotHeroShowSkillRequest', 'GotHeroShowSkillRequest'], '执行中换目标会停止旧培养计划，但继续领取全部奖励');
+  for (const key of ['enabled', 'showSkillReward']) {
+    const disabled = fixture();
+    disabled.settings.heroes.heroIds = [];
+    const planned = await disabled.plan();
+    disabled.settings.heroes[key] = false;
+    assert.deepEqual((await disabled.plan()).steps, [], key + ' 关闭后不再计划领奖');
+    await disabled.run(planned);
+    assert.deepEqual(disabled.writes, [], key + ' 关闭后旧计划也不再领奖');
+
+    const interrupted = fixture(), canceled = [];
+    interrupted.settings.heroes.heroIds = [];
+    await interrupted.run(await interrupted.plan(), {
+      beforeAction: step => { interrupted.settings.heroes[key] = false; return step; },
+      cancelAction: (step, ticket, why) => { assert.equal(step, ticket); canceled.push(why); },
+    });
+    assert.deepEqual(interrupted.writes, [], key + ' 在发送前关闭时须停止领奖');
+    assert.deepEqual(canceled, [{ notSent: true }]);
+  }
   await testExclusiveMaterialRecovery();
 
   const file = path.join(directory, 'legacy-settings.json');
@@ -225,7 +250,7 @@ try {
   assert.deepEqual(native.heroes.heroIds, []);
   assert.equal(native.heroes.needsSelection, true);
   assert.equal(nativeTaskValues(native, { heroGrowth: true }).heroGrowth, false);
-  console.log('英雄养成集成通过：九项计划与执行、空名单、共享消耗、变更目标、专武材料超时对账、旧存档和导入迁移');
+  console.log('英雄养成集成通过：九项计划与执行、空名单全英雄领奖、领奖开关与去重、共享消耗、变更培养目标、专武材料超时对账、旧存档和导入迁移');
 } finally {
   fs.rmSync(directory, { recursive: true, force: true });
 }

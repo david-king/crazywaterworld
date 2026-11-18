@@ -61,8 +61,10 @@ function enabledFields(value, prefix = '') {
   return Object.entries(value).flatMap(([key, child]) => enabledFields(child, prefix ? prefix + '.' + key : key));
 }
 function assertEnabledSettings(settings, allowed = []) {
-  // 此隐藏兼容字段固定为 true，不是自动执行开关。
-  assert.deepEqual(enabledFields(settings).sort(), ['ads.noPrivilege', ...allowed].sort());
+  // 隐藏兼容字段及装备总控下的默认动作不会单独触发自动执行。
+  assert.deepEqual(enabledFields(settings).sort(), ['ads.noPrivilege', 'forge.collect', 'forge.craft', ...allowed].sort());
+  assert.equal(settings.forge.enabled, false);
+  assert.equal(settings.forge.nativeAuto, false);
 }
 function assertIdle(view, enabled = []) {
   assert.equal(view.running, false);
@@ -77,7 +79,7 @@ async function test(name, work) {
 }
 
 try {
-  await test('新建账号的所有默认开关关闭，读取配置不连接游戏', async () => {
+  await test('新建账号的自动执行默认关闭，读取配置不连接游戏', async () => {
     const result = add(firstId);
     assert.equal(result.created, true);
     assert.deepEqual(result.account.automation, { enabled: false, autoStart: false });

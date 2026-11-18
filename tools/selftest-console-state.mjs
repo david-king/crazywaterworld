@@ -81,6 +81,7 @@ test('移除账号清理快照、操作锁和表单，迟到回复不能重新�
   actions.setGameData('b', 'loop', { running: true });
   actions.setFlag('hosting', 'b', true);
   actions.patchSlice('loginSettings:b', { data: { revision: 2 } });
+  actions.setView({ loginSettingsAccountId: 'b' });
   actions.selectAccount('b');
   actions.replaceAccounts([{ id: 'a', status: {} }], 'a');
   actions.setStatus('b', { connected: true });
@@ -90,15 +91,16 @@ test('移除账号清理快照、操作锁和表单，迟到回复不能重新�
   assert.equal(store.getState().accountsById.b, undefined);
   assert.equal(store.getState().gameByAccount.b, undefined);
   assert.equal(store.getState().slices['loginSettings:b'], undefined);
+  assert.equal(store.getState().view.loginSettingsAccountId, null);
   assert.equal(store.getState().hosting.size, 0);
 });
 test('日志筛选独立于操作账号和页签，重复设置不触发订阅', () => {
   const { store, actions } = fixture();
   actions.setView({ logAccount: 'a', logGroup: '世界与联盟', onlyIssues: true });
   actions.selectAccount('b');
-  actions.setView({ page: 'login-settings' });
+  actions.setView({ page: 'account' });
   const before = store.getState();
-  actions.setView({ page: 'login-settings' });
+  actions.setView({ page: 'account' });
   assert.equal(store.getState(), before);
   assert.equal(store.getState().view.logAccount, 'a');
   assert.equal(store.getState().view.onlyIssues, true);

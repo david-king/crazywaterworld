@@ -339,10 +339,15 @@ try {
   });
 
   await test('删除预设同步移除自动绑定，保留其他阵容与配置', async () => {
+    const configView = ok(await api('settings'));
+    configView.settings.worldBoss.fleetPresets = configView.settings.lineups.presets.map((preset, index) => ({ buildingId: (index + 1) + '远征船', presetId: preset.id }));
+    ok(await api('settings', { confirm: true, revision: configView.revision, settings: configView.settings }));
     saved = ok(await api('lineup-presets'));
     const after = ok(await api('lineup-presets/delete', payload(saved, { id: saved.presets[0].id })));
     assert.equal(after.mainlinePresetId, ''); assert.deepEqual(after.trialPresets, []);
     assert.equal(after.presets.length, 1); assert.equal(after.presets[0].name, '原搭配');
+    assert.deepEqual(ok(await api('settings')).settings.worldBoss.fleetPresets,
+      [{ buildingId: '2远征船', presetId: after.presets[0].id }], '仅清除已删除预设的舰队绑定');
     assert.deepEqual(ok(await api('lineup-presets', undefined, 'b')).presets, []);
   });
   console.log('保存阵容HTTP与执行器专项 ' + passed + '/' + passed + ' 通过');

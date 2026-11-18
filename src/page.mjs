@@ -1,8 +1,9 @@
 import { readFileSync } from 'node:fs';
+import { SETTINGS_FORMAT, SETTINGS_SCHEMA_VERSION } from './automation-settings.mjs';
 import { operationLabels } from './operation-labels.mjs';
 import { LOG_CATEGORIES, LOG_GROUPS, LOG_GROUP_TONES } from './log-categories.mjs';
 import { createLogAccountLabels } from './log-accounts.mjs';
-import { chrome, journal, dialogs, templates, giftCodesPage, overviewPage, manualPage, inventoryPage, heroesPage, lineupsPage, guildPage, activitiesPage, accountPage, loginSettingsPage, stagePanel, settingsPage } from './ui/dist/console.mjs';
+import { chrome, journal, dialogs, templates, giftCodesPage, overviewPage, manualPage, inventoryPage, heroesPage, lineupsPage, guildPage, activitiesPage, accountPage, stagePanel, settingsPage } from './ui/dist/console.mjs';
 const componentCss = readFileSync(new URL('./ui/dist/theme.css', import.meta.url), 'utf8');
 const consoleCss = readFileSync(new URL('./console.css', import.meta.url), 'utf8');
 const progressionScript = readFileSync(new URL('./ui/progression.js', import.meta.url), 'utf8');
@@ -17,9 +18,12 @@ const productionPlanningScript = readFileSync(new URL('./production-planning-ui.
 const worldMapScript=readFileSync(new URL('./world-map-ui.js',import.meta.url),'utf8');
 const siliconOverviewScript = readFileSync(new URL('./silicon-overview-ui.js', import.meta.url), 'utf8');
 const siliconOverviewCss = readFileSync(new URL('./silicon-overview.css', import.meta.url), 'utf8');
+const resourceFieldsScript = readFileSync(new URL('./resource-fields-ui.js', import.meta.url), 'utf8');
+const resourceFieldsCss = readFileSync(new URL('./resource-fields.css', import.meta.url), 'utf8');
 import {mapMotionPosition} from './world-map-geometry.mjs';
 const phoneLoginScript = readFileSync(new URL('./phone-login-ui.js', import.meta.url), 'utf8');
 const alipayLoginScript = readFileSync(new URL('./alipay-login-ui.js', import.meta.url), 'utf8');
+const douyinLoginScript = readFileSync(new URL('./douyin-login-ui.js', import.meta.url), 'utf8');
 const accountAddScript = readFileSync(new URL('./account-add-ui.js', import.meta.url), 'utf8');
 const accountBackupScript = readFileSync(new URL('./account-backup-ui.js', import.meta.url), 'utf8');
 const accountPickerScript = readFileSync(new URL('./account-picker-ui.js', import.meta.url), 'utf8');
@@ -39,13 +43,13 @@ export const PAGE = `<!doctype html>
 <meta name="theme-color" content="#ffffff">
 <meta name="format-detection" content="telephone=no">
 <script id="theme-init">${themeScript}</script>
-<style>@layer properties, theme, base, components, page, utilities; @layer page { ${consoleCss} ${settingsCss} ${appointmentsCss} ${lineupCss} ${siliconOverviewCss} } ${componentCss}</style>
+<style>@layer properties, theme, base, components, page, utilities; @layer page { ${consoleCss} ${settingsCss} ${appointmentsCss} ${lineupCss} ${siliconOverviewCss} ${resourceFieldsCss} } ${componentCss}</style>
 </head>
 <body>
 ${chrome()}
 <div class="deck"><main>
-  <nav id="resource-tabs" class="resource-tabs" aria-label="资源与玩法分类" hidden>
-    <button type="button" data-resource-tab="guild">联盟</button><button type="button" data-resource-tab="inventory">仓库</button><button type="button" data-resource-tab="heroes">英雄与装备</button><button type="button" data-resource-tab="activities">活动</button><button type="button" data-resource-tab="giftcodes">礼包兑换</button>
+  <nav id="resource-tabs" class="resource-tabs" aria-label="杂项分类" hidden>
+    <button type="button" data-resource-tab="guild">联盟</button><button type="button" data-resource-tab="inventory">仓库</button><button type="button" data-resource-tab="heroes">英雄与装备</button><button type="button" data-resource-tab="giftcodes">礼包兑换</button>
   </nav>
   <section id="tab-overview">
     ${overviewPage()}
@@ -87,9 +91,6 @@ ${chrome()}
   <section id="tab-account" class="hidden">
     ${accountPage()}
   </section>
-  <section id="tab-login-settings" class="hidden">
-    ${loginSettingsPage()}
-  </section>
 </main></div>
 ${journal()}
 ${dialogs()}
@@ -107,6 +108,48 @@ const operationNames = ${JSON.stringify(operationLabels)};
 let current = null;
 let accounts = [];
 let stream = null;
+const consoleDraftFormat = ${JSON.stringify({ format: SETTINGS_FORMAT, version: SETTINGS_SCHEMA_VERSION })};
+
+function createConsoleVersionGuard() {
+  const version = document.querySelector('meta[name="cw-console-version"]')?.content || '';
+  const message = '控制台已更新或重启，当前页面已过期。未保存的草稿已保留；请先下载或复制未保存的修改，再刷新页面。';
+  const stops = new Set(['/api/loop/stop','/api/disconnect','/api/stages/stop','/api/pirates/advance/stop',
+    '/api/guild/mutual/stop','/api/trials/stop','/api/capture/stop','/api/accounts/alipay-login/cancel','/api/accounts/douyin-login/cancel','/api/accounts/phone-login/cancel']);
+  let stale = false;
+  const failure = () => Object.assign(new Error(message), { code: 'CLIENT_VERSION_MISMATCH', fields: { revision: message } });
+  const allowed = (path, method = 'POST') => ['GET','HEAD','OPTIONS'].includes(String(method).toUpperCase())
+    || String(method).toUpperCase() === 'POST' && stops.has(new URL(path || '/', location.href).pathname);
+  const reject = () => {
+    if (stale) return;
+    stale = true;
+    const banner = document.createElement('section'); banner.id = 'console-version-warning'; banner.className = 'config-message';
+    banner.dataset.kind = 'error'; banner.setAttribute('role', 'alert');
+    const text = document.createElement('p'); text.textContent = message; banner.append(text);
+    const actions = document.createElement('div'); Object.assign(actions.style, { display: 'flex', flexWrap: 'wrap', gap: '8px', marginTop: '8px' });
+    const action = (label, run) => { const button = document.createElement('button'); button.type = 'button'; button.className = 'config-small-button'; button.textContent = label; button.onclick = run; actions.append(button); return button; };
+    const download = action('下载游戏配置草稿', () => configDownloadDraft()); download.disabled = !configHasDraft();
+    action('刷新页面', () => {
+      if (!window.confirm('刷新会丢弃本页未保存的修改。请先下载游戏配置草稿或复制需要保留的内容，确认已保留后再刷新。')) return;
+      location.reload();
+    });
+    for (const [label, route] of [['停止当前账号挂机', '/api/loop/stop'], ['断开当前账号', '/api/disconnect']]) {
+      const button = action(label, async () => {
+        if (!current) return; button.disabled = true;
+        try { await call(route, { method: 'POST', body: JSON.stringify({ confirm: true }) }); await refreshLoop(); }
+        catch (error) { reportError(error); }
+        finally { button.disabled = !current; }
+      }); button.disabled = !current;
+    }
+    banner.append(actions); (document.querySelector('header') || document.body).prepend(banner);
+    window.dispatchEvent(new Event('cw-console-version-stale'));
+  };
+  const observe = value => { if (value && value !== version) reject(); };
+  return Object.freeze({ version, message, isStale: () => stale, observe, reject,
+    check(response, data) { observe(response?.headers?.get('X-CW-Console-Version')); if (data?.code === 'CLIENT_VERSION_MISMATCH') reject(); return !stale; },
+    assertWritable(path, method = 'POST') { if (stale && !allowed(path, method)) throw failure(); },
+  });
+}
+window.cwConsoleVersion = createConsoleVersionGuard();
 
 function num(v) {
   if (v == null || typeof v !== 'object') return v;
@@ -138,7 +181,10 @@ function trackCall(delta) {
 }
 
 async function call(path, options) {
-  const opts = options || {};
+  const opts = { ...options }, method = String(opts.method || 'GET').toUpperCase();
+  const versionGuard = window.cwConsoleVersion;
+  versionGuard.assertWritable(path, method);
+  const headers = new Headers(opts.headers); headers.set('X-CW-Console-Version', versionGuard.version); opts.headers = headers;
   let url = path;
   if (current && url.indexOf('/api/') === 0 && url.indexOf('account=') < 0) {
     url += (url.indexOf('?') < 0 ? '?' : '&') + 'account=' + encodeURIComponent(current);
@@ -147,9 +193,14 @@ async function call(path, options) {
   trackCall(1);
   try {
     const res = await fetch(url, opts);
+    versionGuard.check(res);
+    versionGuard.assertWritable(path, method);
     const data = await res.json();
+    versionGuard.check(res, data);
+    versionGuard.assertWritable(path, method);
     if (!res.ok) {
       const error = new Error(data.error || res.statusText);
+      if (data.code) error.code = data.code;
       if (data.fields) error.fields = data.fields;
       if (data.log) appendLog(data.log);
       error.logged = true;
@@ -728,6 +779,7 @@ function renderAccountSelect() {
   }
   if(worldMapOwner!==null&&worldMapOwner!==current)resetWorldMap();
   siliconAccountChanged();
+  resourceFieldsAccountChanged();
   if (productionPlanOwner !== null && (productionPlanOwner !== current || !snapshot.connected || snapshot.paused || disconnected.has(current))) resetProductionPlan();
   $('production-plan-refresh').disabled = productionPlanBusy || !snapshot.connected || snapshot.paused || disconnected.has(current);
   renderHostingControl();
@@ -758,7 +810,7 @@ async function loadAccounts(reload) {
   if (previous !== current || reload) refreshProgression();
   if (previous !== current || reload) void refreshSavedLineups();
   if (previous !== current) refreshManualWorld();
-  if (previous !== current) {configAccountChanged();giftAccountChanged();loginSettingsAccountChanged();}
+  if (previous !== current) {configAccountChanged();giftAccountChanged();}
   if (reload) {
     subscribe();
     refreshOverview();
@@ -770,7 +822,6 @@ function selectLoadedAccount(next) {
   if (!stateActions.selectAccount(next)) return;
   giftAccountChanged();
   configAccountChanged();
-  loginSettingsAccountChanged();
   renderAccountSelect();
   refreshProgression();
   void refreshSavedLineups();
@@ -1129,7 +1180,8 @@ function renderLoop(data) {
   $('loop-every').disabled = !current || loopIntervalSaves.has(current);
   $('loop-hint').textContent = (data.recovery ? '网络恢复中（第 ' + data.recovery.attempt + ' 次），已完成 ' : data.running ? '后台挂机中，已完成 ' : '未在挂机，累计 ') + data.completed + ' 轮' + (data.error ? '，已中止' : '');
   if (data.stopping) $('loop-hint').textContent = '正在暂停，等待在途请求结束';
-
+  if (data.settingsRecovery?.required) $('loop-hint').textContent = configRecoveryMessage(data.settingsRecovery, true);
+  configSyncRecovery(data);
 }
 
 let loopReads = 0;
@@ -1634,7 +1686,7 @@ function table(headers, rows) {
 // ---- 账号页 ----------------------------------------------------------------
 ${accountBackupScript}
 function accountChannel(source) {
-  return { alipay: '支付宝', phone: '益世界 APP', 'douyin-mitm': '抖音小游戏', mitm: '微信小游戏', wechat: '微信小游戏' }[source] || '已导入账号';
+  return { alipay: '支付宝', phone: '益世界 APP', douyin: '抖音小游戏', 'douyin-mitm': '抖音小游戏', mitm: '微信小游戏', wechat: '微信小游戏' }[source] || '已导入账号';
 }
 
 async function useAccountCard(id) {
@@ -1690,6 +1742,9 @@ function createAccountCard(id) {
   const action = name => card.querySelector('[data-account-action="' + name + '"]');
   action('select').onclick = () => useAccountCard(id);
   action('loop').onclick = () => toggleAccountCardLoop(id);
+  action('login-settings').onclick = () => {
+    if (accounts.some(account => account.id === id)) stateActions.setView({ loginSettingsAccountId: id });
+  };
   action('details').onclick = async () => {
     if (!await useAccountCard(id)) return;
     const account = accounts.find(row => row.id === id);
@@ -1882,7 +1937,9 @@ function renderCapture(state) {
   }
   const notice = $('account-add-notice');
   notice.hidden = !state.running && !cleanupPending;
-  notice.textContent = notice.hidden ? '' : (state.platform === 'douyin' ? '抖音' : '微信') + '账号添加尚未完成，请点击「添加账号」并选择对应渠道继续处理。';
+  notice.textContent = notice.hidden ? '' : state.platform === 'douyin'
+    ? '电脑抖音账号添加尚未完成，请点击「添加账号」，展开「备用登录方式」并选择「电脑抖音采集」继续处理。'
+    : '微信账号添加尚未完成，请点击「添加账号」并选择对应渠道继续处理。';
 
   if (!state.running && !cleanupPending && phase !== 'saved') {
     const clientName = accountAddChannel() === 'douyin' ? '抖音' : '微信';
@@ -2069,6 +2126,9 @@ ${phoneLoginScript}
 // ---- 支付宝扫码登录 --------------------------------------------------------
 ${alipayLoginScript}
 
+// ---- 抖音扫码登录 ----------------------------------------------------------
+${douyinLoginScript}
+
 // ---- 添加账号引导 ----------------------------------------------------------
 ${accountAddScript}
 
@@ -2082,15 +2142,11 @@ ${helpTipsScript}
 ${mapMotionPosition.toString()}
 ${worldMapScript}
 ${siliconOverviewScript}
+${resourceFieldsScript}
 ${inventoryScript}
 ${productionPlanningScript}
 ${settingsScript}
 ${appointmentsScript}
-// ---- 登录设置 --------------------------------------------------------------
-// Kept for DOM diagnostics; React subscribes directly to the shared store.
-function loginSettingsAccountChanged() {
-  $('login-settings-root').dataset.account = current || '';
-}
 ${giftCodeScript}
 let selectedResource = 'guild';
 consoleStore.subscribe((state, previous) => {
@@ -2157,7 +2213,9 @@ async function boot() {
   // 显式链接优先，否则恢复当前历史记录的页面；配置分组由 configApplyHash 恢复。
   const savedView = history.state?.consoleView;
   const initialTab = location.hash.startsWith('#config-group-') ? 'settings'
-    : location.hash === '#pirate-first-kill' ? 'stages' : location.hash === '#journal' ? 'overview' : savedView?.tab;
+    : location.hash === '#pirate-first-kill' ? 'stages' : location.hash === '#journal' ? 'overview'
+    : savedView?.tab === 'login-settings' ? 'account'
+    : savedView?.tab === 'resources' && savedView.resource === 'activities' ? 'activities' : savedView?.tab;
   const button = [...document.querySelectorAll('#tabs button')].find(tab => tab.dataset.tab === initialTab)
     || document.querySelector('#tabs [data-tab="overview"]');
   const resource = [...document.querySelectorAll('[data-resource-tab]')].some(tab => tab.dataset.resourceTab === savedView?.resource)

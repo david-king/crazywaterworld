@@ -86,7 +86,8 @@ export async function readFleetSpeed(client, player) {
 
 export function planFleetSpeed(snapshot, config, settings, ledger) {
   const plan = { actions:[], notes:[], rows:[], waits:[] };
-  if (!fleetSpeedEnabled(settings)) { plan.notes.push('联盟城战或城战逐队加速未开启'); return plan; }
+  if (!settings?.cityWar?.enabled) { plan.notes.push('联盟城战未开启，维修及派遣钻石加速暂停'); return plan; }
+  if (!settings?.fleetSpeed?.enabled) { plan.notes.push('维修及派遣钻石加速总开关已关闭；逐队开关开启也不会加速'); return plan; }
   if (!snapshot.worldId || !snapshot.playerId) { plan.notes.push('角色或区服未确认'); return plan; }
   const keys = recordsInWorld(ledger.keyRecords(),snapshot.worldId), usage = {...ledger.snapshot().counters};
   if(Object.values(keys).some(r=>r.confirmed && r.details?.kind==='fleetSpeed' && !r.details.balanceObserved &&
@@ -124,17 +125,14 @@ export function planFleetSpeed(snapshot, config, settings, ledger) {
       block('本次预计节省时间不足 '+policy.marchMinSavedSeconds+' 秒，不花钻'); continue;
     }
     if (Object.values(keys).some(r=>!r.expired && !r.confirmed && r.details?.buildingId===policy.id)) { block('该队有结果待确认的操作'); continue; }
-    const previous = Object.values(keys).filter(r=>r.details?.kind==='fleetSpeed' && r.details.buildingId===policy.id && r.details.operation===operation);
-    const spent = previous.reduce((sum,r)=>sum+r.details.cost,0);
     const cost = mode==='repair' ? repairDiamondCost(config,Math.ceil(remaining/60),usedMinutes)
       : config?.tables?.WorldParamCfg?.data.find(r=>r.paramName==='行军加速消耗')?.paramValue;
     row.cost = cost;
-    if (!valid(cost,1) || !valid(spent)) { block('加速费用未确认'); continue; }
+    if (!valid(cost,1)) { block('加速费用未确认'); continue; }
     if (!settings.resources?.allowDiamonds) { block('全局钻石消费已关闭'); continue; }
-    if (!valid(policy[mode+'MaxDiamonds'],1) || spent+cost>policy[mode+'MaxDiamonds']) { block('超过该队本次'+(mode==='repair'?'维修':'整段航程')+'钻石上限'); continue; }
     const counter = 'fleetSpeed'+(mode==='repair'?'Repair':'March')+policy.id.replace('远征船','');
-    const limits = { diamonds:settings.resources.diamondDailyLimit, fleetSpeedDiamonds:settings.fleetSpeed.dailyDiamondLimit, [counter]:policy[mode+'DailyDiamonds'] };
-    if (Object.entries(limits).some(([key,limit])=>!valid(limit,1)||!valid(usage[key]??0)||(usage[key]??0)+cost>limit)) { block('达到该项、舰队加速或全局每日钻石上限'); continue; }
+    const limits = { diamonds:settings.resources.diamondDailyLimit, [counter]:policy[mode+'DailyDiamonds'] };
+    if (Object.entries(limits).some(([key,limit])=>!valid(limit,1)||!valid(usage[key]??0)||(usage[key]??0)+cost>limit)) { block('达到该项或全局每日钻石上限'); continue; }
     if (!valid(settings.resources.diamondThreshold) || !valid(available) || available-cost<settings.resources.diamondThreshold) { block('钻石不足或低于保留量'); continue; }
     const uniqueKey = `fleet-speed:${snapshot.worldId}:${policy.id.replace('远征船','')}:${operation}:${beforeEnd}`;
     if (keys[uniqueKey]) { block('同一结束时间已有加速记录，等待新状态'); continue; }

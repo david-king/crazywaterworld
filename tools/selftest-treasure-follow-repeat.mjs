@@ -1,4 +1,4 @@
-// Issue #34：虚构业务数据经过真实协议编解码；不连接或消费真实游戏账号。
+// Issue #34 / #49：虚构业务数据经过真实协议编解码；不连接或消费真实游戏账号。
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
@@ -199,7 +199,7 @@ try {
       totalProgress: (f, s) => { f.state.targets[0].progress = s.treasure.maxProgress; },
       avoid: (f, s) => { Object.assign(f.state.targets[0], { ownerGuildIdx: 7, ownerFleetNum: 1 }); f.state.defenders[72] = [{ name: '需要避战', guildIdx: 7, isNpc: false }]; s.treasure.avoidNames = ['需要避战']; },
       hostile: f => { Object.assign(f.state.targets[0], { ownerGuildIdx: 8, ownerFleetNum: 1 }); f.state.defenders[72] = [{ name: '敌方守军', guildIdx: 8, isNpc: false }]; },
-      fuel: (f, s) => { s.treasure.petrolReserve = f.state.fuel; },
+      fuel: f => { f.state.fuel = 499; },
       dailyDispatch: (f, s) => { s.treasure.dailyDispatchLimit = 1; },
       rewardQuota: f => { f.state.stats.todayRewardTimes = 3; },
       durability: (f, s) => { f.state.fleets[0].durability = 1000; s.treasure.autoRepair = false; },
@@ -256,8 +256,139 @@ try {
     s.treasure.follow = true; s.treasure.autoJoin = false;
     await run(f, s, usage); assert.equal(dispatches(f).length, 1);
   });
+
+  await check('每次重新跟随：返航后没有当前跟随对象就等待，不自行出征或维修', async () => {
+    for (const color of [3, 4, 5]) {
+      for (const durability of [1500, 2000]) {
+        const { f, s } = fixture(), usage = ledger();
+        Object.assign(s.treasure, { followMode: 'eachTime', onlyTenThousand: false, participationMode: 'always', autoJoin: true });
+        f.state.targets[0].color = color;
+        await first(f, s, usage); leave(f); f.returnFromTreasure('1远征船', durability);
+        f.state.stats.todayRewardTimes = 3;
+        const plan = await preview(f, s, usage);
+        assert.equal(plan.actions.length, 0);
+        assert(plan.notes.some(note => note.includes('未匹配指定跟随玩家')));
+        await run(f, s, usage);
+        assert.equal(f.client.writes.length, 1, `品质 ${color}、耐久 ${durability} 不得借历史记录自动接续`);
+      }
+    }
+  });
+
+  await check('每次重新跟随：重新读到指定玩家当前守军后允许再次参加', async () => {
+    const { f, s } = fixture(), usage = ledger(); s.treasure.followMode = 'eachTime';
+    await first(f, s, usage); leave(f); f.returnFromTreasure('1远征船');
+    await run(f, s, usage); assert.equal(dispatches(f).length, 1);
+    Object.assign(f.state.targets[0], { ownerGuildIdx: 7, ownerFleetNum: 1 });
+    f.state.defenders[72] = [{ name: '海上的风', guildIdx: 7, isNpc: false }];
+    const result = await run(f, s, usage);
+    assert.equal(dispatches(f).length, 2);
+    assert.equal(result.results[0]?.status, 'confirmed');
+    assert.equal(result.results[0].step.followPhase, 'defending');
+    assert.equal(result.results[0].step.repeatFollow, false);
+    assert.match(result.results[0].step.label, /跟随 海上的风（当前守军）/);
+  });
+
+  await check('每次重新跟随：旧行军结束后等待新的有效出发行军', async () => {
+    const { f, s } = fixture(), usage = ledger(), request = f.client.request;
+    s.treasure.followMode = 'eachTime'; leave(f);
+    const now = Math.floor(Date.now() / 1000);
+    let traveler = { buildingId: '9远征船', state: 2, treasureLootUid: 72, targetGridIdx: 500,
+      moveStartTs: now - 10, moveEndTs: now + 60,
+      owner: { playerId: '9007199254740999', nickname: '海上的风', guildId: f.player.guildId } };
+    const oldTravel = structuredClone(traveler);
+    f.client.request = async (...args) => {
+      const reply = await request(...args);
+      return args[0] === 'WorldInfoRequest' ? f.protocol.WorldInfoResponse.decode(f.protocol.WorldInfoResponse.encode({
+        ...reply, fleets: [...reply.fleets, traveler],
+      }).finish()) : reply;
+    };
+    await first(f, s, usage); f.returnFromTreasure('1远征船');
+    traveler = { ...traveler, state: 1, treasureLootUid: 0, targetGridIdx: 0 };
+    await run(f, s, usage); assert.equal(dispatches(f).length, 1);
+    traveler = oldTravel;
+    await run(f, s, usage); assert.equal(dispatches(f).length, 1, '已结束行军的迟到快照不能触发');
+    traveler = { ...oldTravel, moveStartTs: now, moveEndTs: now + 90 };
+    const result = await run(f, s, usage);
+    assert.equal(dispatches(f).length, 2);
+    assert.equal(result.results[0]?.step.followPhase, 'departing');
+    assert.equal(result.results[0].step.repeatFollow, false);
+  });
+
+  await check('每次重新跟随：维修完成仍需当前跟随对象，关闭反复攻占仍阻止复派', async () => {
+    const { f, s } = fixture(), usage = ledger(); s.treasure.followMode = 'eachTime';
+    await first(f, s, usage); f.returnFromTreasure('1远征船', 1500);
+    const repair = await run(f, s, usage);
+    assert.equal(repair.results[0]?.step.kind, 'treasureRepair');
+    assert.equal(repair.results[0].status, 'confirmed');
+    leave(f); f.finishRepair('1远征船');
+    await run(f, s, usage); assert.equal(f.client.writes.length, 2);
+    Object.assign(f.state.targets[0], { ownerGuildIdx: 7, ownerFleetNum: 1 });
+    f.state.defenders[72] = [{ name: '海上的风', guildIdx: 7, isNpc: false }];
+    s.treasure.repeatAttack = false;
+    await run(f, s, usage); assert.equal(f.client.writes.length, 2);
+    s.treasure.repeatAttack = true;
+    await run(f, s, usage); assert.equal(dispatches(f).length, 2);
+  });
+
+  await check('每次重新跟随：发送前跟随者离开时取消复派和维修', async () => {
+    for (const durability of [1500, 2000]) {
+      const { f, s } = fixture(), usage = ledger(); s.treasure.followMode = 'eachTime';
+      await first(f, s, usage); f.returnFromTreasure('1远征船', durability);
+      let worldReads = 0;
+      f.beforeRead = name => { if (name === 'WorldInfoRequest' && ++worldReads === 2) leave(f); };
+      const result = await run(f, s, usage);
+      assert.equal(result.results[0]?.skipped, true);
+      assert.equal(f.client.writes.length, 1);
+      assert.equal(usage.snapshot().uncertain, 0);
+    }
+  });
+
+  await check('每次重新跟随：旧确认记录在重启换日后仍不能自动复派，切回原模式可继续', async () => {
+    const { f, s } = fixture(), file = path.join(directory, 'each-time-restart.json');
+    let now = Date.parse('2026-11-03T15:59:00Z'), usage = ledger({ file, now: () => now });
+    delete s.treasure.followMode; // 旧设置缺少此字段时仍使用首次触发模式。
+    await first(f, s, usage); leave(f); f.returnFromTreasure('1远征船');
+    await run(f, s, usage); assert.equal(dispatches(f).length, 2);
+    f.returnFromTreasure('1远征船'); s.treasure.followMode = 'eachTime';
+    now += 120000; usage = ledger({ file, now: () => now });
+    await run(f, s, usage); assert.equal(dispatches(f).length, 2);
+    assert.equal(usage.keyRecords()[treasureFollowKey(f.player.worldId, 72, '1远征船')]?.confirmed, true);
+    s.treasure.followMode = 'trigger';
+    await run(f, s, usage); assert.equal(dispatches(f).length, 3);
+  });
+
+  await check('出征前切换为每次重新跟随，旧计划不能沿用首次跟随确认', async () => {
+    const { f, s } = fixture(), usage = ledger();
+    await first(f, s, usage); leave(f); f.returnFromTreasure('1远征船');
+    let worldReads = 0;
+    f.beforeRead = name => { if (name === 'WorldInfoRequest' && ++worldReads === 2) s.treasure.followMode = 'eachTime'; };
+    const result = await run(f, s, usage);
+    assert.equal(result.results[0]?.skipped, true);
+    assert.equal(dispatches(f).length, 1);
+  });
+
+  await check('每次重新跟随：复派结果未知时，新的跟随匹配也不能重复发送', async () => {
+    const { f, s } = fixture(), usage = ledger(); s.treasure.followMode = 'eachTime';
+    await first(f, s, usage); f.returnFromTreasure('1远征船'); f.unknown = true;
+    const result = await run(f, s, usage);
+    assert.equal(result.results[0]?.status, 'unknown');
+    await run(f, s, usage);
+    assert.equal(dispatches(f).length, 2);
+    assert.equal(usage.snapshot().uncertain, 1);
+  });
+
+  await check('每次重新跟随：显式中小货轮兜底仍按独立规则参加', async () => {
+    const { f, s } = fixture(), usage = ledger();
+    Object.assign(s.treasure, { followMode: 'eachTime', fallbackEnabled: true, fallbackAfter: '00:00' });
+    leave(f); f.state.targets[0].color = 4;
+    const result = await run(f, s, usage);
+    assert.equal(dispatches(f).length, 1);
+    assert.equal(result.results[0]?.status, 'confirmed');
+    assert.equal(result.results[0].step.mode, 'fallback');
+    assert.match(result.results[0].step.label, /兜底参加中型货轮/);
+  });
 } finally {
-  const report = { kind: 'Issue #34 跟随首次触发离线回归，未连接真实游戏', total: results.length,
+  const report = { kind: 'Issue #34 / #49 跟随模式离线回归，未连接真实游戏', total: results.length,
     passed: results.filter(row => row.passed).length, results };
   console.log(`跟随反复攻占专项：${report.passed}/${report.total} 组通过`);
   const resolved = fs.realpathSync(directory);

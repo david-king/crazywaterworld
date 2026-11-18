@@ -81,19 +81,30 @@ try {
       .locator("#login-settings-state")
       .filter({ hasText: /设置已保存|使用默认设置/ })
       .waitFor();
-  async function choose(id) {
-    await page.locator("#account-picker-trigger").click();
+  async function closeSettings() {
+    if (await page.locator("#account-login-dialog").isVisible()) {
+      await page.locator("#account-login-close").click();
+      await page.locator("#account-login-dialog").waitFor({ state: "hidden" });
+    }
+  }
+  async function openSettings(id) {
+    await closeSettings();
+    await page.locator('#tabs [data-tab="account"]').click();
     await page
-      .locator("#account-picker-list [role=option]")
+      .locator("#accounts .account-card")
       .filter({ hasText: `重构验收账号 ${id}` })
+      .locator('[data-account-action="login-settings"]')
       .click();
     await page
-      .locator("#account-picker-title")
+      .locator("#account-login-title")
       .filter({ hasText: `重构验收账号 ${id}` })
+      .waitFor();
+    await page
+      .locator(`[data-react-page="login-settings"][data-account="${id}"]`)
       .waitFor();
   }
 
-  await test("总览只加载轻量入口，打开登录设置才加载 React 和页面样式", async () => {
+  await test("总览和账号列表保持轻量，点击账号的登录设置才加载表单", async () => {
     await page.goto(base);
     await page
       .locator("#account-picker-title")
@@ -107,7 +118,27 @@ try {
       requests.filter((row) => row.url.includes("/api/login-settings")).length,
       0,
     );
-    await page.locator('#tabs [data-tab="login-settings"]').click();
+    assert.equal(
+      await page.locator('#tabs [data-tab="login-settings"]').count(),
+      0,
+    );
+    await page.locator('#tabs [data-tab="account"]').click();
+    await page.locator("#accounts .account-card").first().waitFor();
+    assert.equal(
+      await page
+        .locator('#accounts [data-account-action="login-settings"]')
+        .count(),
+      2,
+    );
+    assert.equal(
+      requests.filter((row) => row.url.includes("/ui/chunks/")).length,
+      0,
+    );
+    assert.equal(
+      requests.filter((row) => row.url.includes("/api/login-settings")).length,
+      0,
+    );
+    await openSettings("a");
     await saved();
     assert.equal(
       await page.locator('[data-react-page="login-settings"]').count(),
@@ -141,11 +172,28 @@ try {
       animations: "disabled",
     });
     assert.equal(
-      await page.evaluate(
-        () => document.documentElement.scrollWidth <= innerWidth,
-      ),
+      await page.evaluate(() => {
+        const dialog = document.getElementById("account-login-dialog");
+        return (
+          document.documentElement.scrollWidth <= innerWidth &&
+          dialog.scrollWidth <= dialog.clientWidth
+        );
+      }),
       true,
     );
+    await page.locator("#login-settings-save").scrollIntoViewIfNeeded();
+    const saveBounds = await page.locator("#login-settings-save").boundingBox();
+    assert(
+      saveBounds &&
+        saveBounds.y >= 0 &&
+        saveBounds.y + saveBounds.height <= 844,
+      "手机弹窗可以滚动到保存按钮",
+    );
+    await page.screenshot({
+      path: path.join(output, "login-mobile-actions.png"),
+      animations: "disabled",
+    });
+    await page.locator("#account-login-close").scrollIntoViewIfNeeded();
     await page.evaluate(() =>
       document.documentElement.setAttribute("data-theme", "dark"),
     );
@@ -252,7 +300,7 @@ try {
     );
     await page.locator("#login-settings-reload").click();
     await started.promise;
-    await choose("b");
+    await openSettings("b");
     await saved();
     assert.equal(
       await page.locator("#login-reconnect-delay").inputValue(),
@@ -266,8 +314,8 @@ try {
     );
   });
 
-  await test("保存中的重复提交只发送一次，切号后的保存响应仍归原账号", async () => {
-    await choose("a");
+  await test("保存中的重复提交只发送一次，打开其他账号后的保存响应仍归原账号", async () => {
+    await openSettings("a");
     await saved();
     const started = deferred(),
       release = deferred(),
@@ -292,7 +340,7 @@ try {
     await started.promise;
     assert.equal(posts(), count + 1);
     assert.equal(await page.locator("#login-settings-save").isDisabled(), true);
-    await choose("b");
+    await openSettings("b");
     await saved();
     release.resolve();
     await finished.promise;
@@ -307,7 +355,8 @@ try {
     await page.waitForFunction(() => {
       const state = window.cwConsoleStore.getState();
       return (
-        state.currentAccountId === "b" &&
+        state.currentAccountId === "a" &&
+        state.view.loginSettingsAccountId === "b" &&
         !state.slices["loginSettings:a"]?.saving &&
         state.slices["loginSettings:a"]?.data?.settings.baseDelaySeconds === 777
       );
@@ -318,7 +367,7 @@ try {
     );
   });
 
-  await test("读取失败可手动重试，离页和切号均保留各账号的未保存草稿", async () => {
+  await test("读取失败可手动重试，关闭弹窗和切换编辑账号均保留各自草稿", async () => {
     await page.route(
       "**/api/login-settings?account=b",
       (route) =>
@@ -333,20 +382,22 @@ try {
     await page.locator("#login-settings-reload").click();
     await saved();
     await page.locator("#login-reconnect-delay").fill("555");
+    const count = posts();
+    await page.keyboard.press("Escape");
+    await page.locator("#account-login-dialog").waitFor({ state: "hidden" });
     await page.locator('#tabs [data-tab="overview"]').click();
-    await page.locator('#tabs [data-tab="login-settings"]').click();
+    await openSettings("b");
     assert.equal(
       await page.locator("#login-reconnect-delay").inputValue(),
       "555",
     );
-    const count = posts();
-    await choose("a");
+    await openSettings("a");
     await saved();
     assert.equal(
       await page.locator("#login-reconnect-delay").inputValue(),
       "777",
     );
-    await choose("b");
+    await openSettings("b");
     await page
       .locator("#login-settings-state")
       .filter({ hasText: "有未保存修改" })
@@ -355,24 +406,84 @@ try {
       await page.locator("#login-reconnect-delay").inputValue(),
       "555",
     );
-    assert.equal(posts(), count, "切号恢复草稿不自动提交");
+    assert.equal(posts(), count, "关闭和切换编辑账号恢复草稿不自动提交");
     assert.equal(
       requests.filter((row) => row.url.includes("/ui/chunks/")).length,
       1,
     );
   });
 
-  await test("没有账号时提供空状态且不请求登录设置", async () => {
+  await test("编辑非当前账号独立保存，刷新后两个账号分别恢复自己的设置", async () => {
+    assert.match(
+      await page.locator("#account-picker-title").textContent(),
+      /重构验收账号 a/,
+    );
+    await page.locator("#login-deep-delay").fill("18");
+    await page.locator("#login-reconnect-max-retries").fill("7");
+    await page.locator("#login-settings-save").click();
+    await saved();
+    assert.equal(
+      loadAutomationSettings("b").settings.login.intervalSeconds,
+      555,
+    );
+    assert.equal(
+      loadAutomationSettings("a").settings.login.intervalSeconds,
+      777,
+    );
+    assert.equal(
+      requests.filter((row) => row.url.includes("/api/accounts/active")).length,
+      0,
+      "打开或保存非当前账号的登录设置不会切换账号",
+    );
+    await page.reload();
+    await page.locator("#accounts .account-card").first().waitFor();
+    assert.equal(
+      await page.locator("#account-login-dialog").isVisible(),
+      false,
+    );
+    await openSettings("b");
+    await saved();
+    assert.equal(
+      await page.locator("#login-reconnect-delay").inputValue(),
+      "555",
+    );
+    assert.equal(await page.locator("#login-deep-delay").inputValue(), "18");
+    assert.equal(
+      await page.locator("#login-reconnect-max-retries").inputValue(),
+      "7",
+    );
+    await openSettings("a");
+    await saved();
+    assert.equal(
+      await page.locator("#login-reconnect-delay").inputValue(),
+      "777",
+    );
+    assert.equal(await page.locator("#login-deep-start").inputValue(), "23:00");
+    assert.equal(await page.locator("#login-deep-end").inputValue(), "06:00");
+  });
+
+  await test("没有账号时显示添加账号入口，且不加载登录设置表单", async () => {
     saveStore({ version: 1, activeId: null, accounts: [] });
     requests.length = 0;
     await page.reload();
-    await page.locator('#tabs [data-tab="login-settings"]').click();
-    await page
-      .locator("#login-settings-state")
-      .filter({ hasText: "请先选择账号" })
-      .waitFor();
+    await page.locator('#tabs [data-tab="account"]').click();
+    await page.locator("#accounts .account-empty").waitFor();
+    assert.equal(
+      await page
+        .locator('#accounts [data-account-action="login-settings"]')
+        .count(),
+      0,
+    );
+    assert.equal(
+      await page.locator("#account-login-dialog").isVisible(),
+      false,
+    );
     assert.equal(
       requests.filter((row) => row.url.includes("/api/login-settings")).length,
+      0,
+    );
+    assert.equal(
+      requests.filter((row) => row.url.includes("/ui/chunks/")).length,
       0,
     );
     assert.equal(await page.locator("#login-settings-save").count(), 0);

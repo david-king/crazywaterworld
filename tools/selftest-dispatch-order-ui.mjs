@@ -66,10 +66,11 @@ function fixture(order = initial) {
 let passed = 0;
 function test(name, run) { run(); console.log('通过：' + name); passed++; }
 
-test('七项调度名称完整，硅矿显示名称且未知历史值仍可辨识', () => {
+test('八项调度名称完整，资源田显示名称且未知历史值仍可辨识', () => {
   const f = fixture();
   assert.deepEqual(f.order(), initial);
-  assert.equal(f.rows().at(-1).children[2].textContent, '硅矿采集');
+  assert.equal(f.rows().at(-1).children[2].textContent, '资源田占领');
+  assert.equal(f.rows().find(row => row.dataset.dispatch === 'silicon').children[2].textContent, '硅矿采集');
   assert(f.rows().every(row => row.children[2].textContent.trim()));
   assert.equal(fixture(['future-task']).rows()[0].children[2].textContent, 'future-task');
 });
@@ -88,7 +89,7 @@ test('上下按钮保留边界保护，键盘排序后保留焦点', () => {
 
 test('拖动时只预览，放手一次保存完整顺序，再次放手不重复保存', () => {
   const f = fixture(), node = f.down();
-  node.onpointermove({ pointerId: 7, clientY: 480 });
+  node.onpointermove({ pointerId: 7, clientY: 540 });
   assert.equal(f.rows().at(-1).dataset.drop, 'after');
   assert.equal(f.state.saves.length, 0); assert.deepEqual(f.state.values, initial);
   node.onpointerup({ pointerId: 7 }); node.onpointerup({ pointerId: 7 });
@@ -98,9 +99,9 @@ test('拖动时只预览，放手一次保存完整顺序，再次放手不重�
 });
 
 test('从末尾拖到中间保持其余项目相对顺序', () => {
-  const f = fixture(), node = f.down(6);
+  const f = fixture(), last = initial.length - 1, node = f.down(last);
   node.onpointermove({ pointerId: 7, clientY: 210 }); node.onpointerup({ pointerId: 7 });
-  assert.deepEqual(f.order(), [...initial.slice(0, 2), initial[6], ...initial.slice(2, 6)]);
+  assert.deepEqual(f.order(), [...initial.slice(0, 2), initial[last], ...initial.slice(2, last)]);
 });
 
 test('轻触手柄或拖回原位不保存，其他指针不提交', () => {

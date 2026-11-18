@@ -7,6 +7,9 @@ import { spawnSync } from 'node:child_process';
 const root = path.resolve(import.meta.dirname, '..');
 const temporary = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), 'cw-offline-'));
 const cases = [
+  ['selftest-campaign-report-rewards.mjs'],
+  ['selftest-world-boss-fleets.mjs'],
+  ['selftest-world-boss-lineups.mjs'],
   ['selftest-react-client.mjs'],
   ['selftest-account-backup-http.mjs'],
   ['selftest-account-backup-ui.mjs'],
@@ -14,6 +17,11 @@ const cases = [
   ['selftest-fleet-speed-http.mjs'],
   ['selftest-storage-transactions.mjs'],
   ['selftest-settings-version.mjs'],
+  ['selftest-settings-recovery.mjs'],
+  ['selftest-settings-recovery-http.mjs'],
+  ['selftest-console-version.mjs'],
+  ['selftest-console-version-http.mjs'],
+  ['selftest-console-version-ui.mjs'],
   ['selftest-protocol-updates.mjs'],
   ['selftest-protocol-refresh-http.mjs'],
   ['selftest-resource-version.mjs'],
@@ -91,6 +99,10 @@ const cases = [
   ['selftest-alipay-login.mjs'],
   ['selftest-alipay-login-http.mjs'],
   ['selftest-alipay-login-ui.mjs'],
+  ['selftest-douyin-login.mjs'],
+  ['selftest-douyin-game-auth.mjs'],
+  ['selftest-douyin-login-http.mjs'],
+  ['selftest-douyin-login-ui.mjs'],
 ];
 
 try {

@@ -68,6 +68,9 @@ try {
 
     await page.goto(base);
     await tab('overview');
+    assert.equal(await page.locator('#tabs [data-tab="activities"]').getAttribute('aria-label'), '活动');
+    assert.equal(await page.locator('#tabs [data-tab="resources"]').getAttribute('aria-label'), '杂项');
+    assert.deepEqual(await page.locator('[data-resource-tab]').allTextContents(), ['联盟', '仓库', '英雄与装备', '礼包兑换']);
     await main('settings');
     await config('base', 'building');
     await page.reload();
@@ -112,6 +115,33 @@ try {
     await page.reload();
     await tab('resources', 'heroes');
 
+    // 活动独立为顶级页面，返回杂项继续显示原子页。
+    await main('activities');
+    await tab('activities');
+    assert.equal(await page.locator('#resource-tabs').isVisible(), false);
+    await main('resources');
+    await tab('resources', 'heroes');
+    await main('activities');
+    await page.reload();
+    await tab('activities');
+    assert.equal(await page.locator('#resource-tabs').isVisible(), false);
+
+    // 旧版保存在资源与玩法中的活动位置迁移到顶级活动；杂项仍默认打开联盟。
+    await reloadFrom({ consoleView: { tab: 'resources', resource: 'activities' } });
+    await tab('activities');
+    assert.equal(await page.locator('#resource-tabs').isVisible(), false);
+    await page.waitForFunction(() => history.state?.consoleView?.tab === 'activities');
+    await main('resources');
+    await tab('resources', 'guild');
+
+    // 独立登录设置入口已并入账号，旧页面记录恢复到账号列表。
+    await reloadFrom({ consoleView: { tab: 'login-settings', resource: 'guild' } });
+    await tab('account');
+    assert.equal(await page.locator('#tabs [data-tab="login-settings"]').count(), 0);
+    await page.locator('#accounts [data-account-action="login-settings"]').waitFor();
+    assert.equal(await page.locator('#account-login-dialog').isVisible(), false);
+    await page.waitForFunction(() => history.state?.consoleView?.tab === 'account');
+
     // 显式配置深链优先于原来的主页面；旧版分组链接沿用现有迁移。
     await reloadFrom({ consoleView: { tab: 'overview', resource: 'guild' } }, '#config-group-cityWar');
     await config('world', 'cityWar');
@@ -137,7 +167,7 @@ try {
     await tab('overview');
     assert.equal(new URL(page.url()).hash, '');
     await context.close();
-    console.log('通过：' + name + ' 首次配置、分类和生产分组刷新恢复，缓存返回、切离配置、资源子页、深链与无效状态回退');
+    console.log('通过：' + name + ' 首次配置、分类和生产分组刷新恢复，缓存返回、切离配置、顶级活动、杂项子页、旧活动迁移、深链与无效状态回退');
   }
   assert.deepEqual(errors, []);
   assert.equal(settingsWrites, 0, '导航不保存配置');

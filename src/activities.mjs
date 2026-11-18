@@ -12,7 +12,7 @@ import { activityTimestamp, catalogEntry, pushedActivityEntries } from './activi
 import { festivalTaskWindow } from './activity-availability.mjs';
 import { watchHeroRaidPushes } from './hero-raid-automation.mjs';
 import { claimFestivalRewards, claimWeeklyRewards, claimVipDaily, festivalRewardKeys, weeklyRewardKeys, festivalRewardState, snowballState,
-  compassState, weekChargeState, weekHeroStarState, weekFreePackState, weekOrderState, vipDailyState, syncFestivalDay } from './free-rewards.mjs';
+  compassState, weekChargeState, weekHeroStarState, weekFreePackState, vipDailyState, syncFestivalDay } from './free-rewards.mjs';
 
 const weekNames = { 1: '勇士战令', 2: '累计充值', 3: '英雄升星', 4: '幸运转盘', 5: '不差钱商人', 6: '芯片活动', 7: '周翻牌' };
 const serverNow = client => (Date.now() + (client.serverClockOffsetMs || 0)) / 1000;
@@ -290,8 +290,13 @@ export async function runActivity(client, config, { activityId, taskKey, enabled
 const text = (config, rows = []) => rows.map(([id, num]) => displayMaterial(config, id) + ' ×' + num).join('、');
 
 // One line per reward so each tab says what can be collected before anything is clicked.
-async function rewardStatus(client, config, activities, week, player) {
+async function rewardStatus(client, config, activities, week, player, { readOrder, readInventory }) {
   const status = {};
+  const rankStates = new Map();
+  const readRank = rank => {
+    if (!rankStates.has(rank.type)) rankStates.set(rank.type, openRankState(client, config, player, rank));
+    return rankStates.get(rank.type);
+  };
   const put = (id, lines, ready, badge = '可领') => { status[id] = { lines, ready, badge }; };
   const safely = async (id, work) => {
     try { await work(); } catch (error) { put(id, ['状态读取失败：' + error.message], false); }
@@ -335,13 +340,12 @@ async function rewardStatus(client, config, activities, week, player) {
         + (view.next ? ' · 下一档需 ' + view.next.hero1Star + ' / ' + view.next.hero2Star + ' 星' + (view.ready ? '（可领取）' : '') : ' · 全部领完') : '缺少本期配置'], view.ready);
     });
     if (row.type === 4) await safely(id, async () => {
-      const bag = normalize(await client.request('AllItemRequest', {}, 'AllItemResponse'));
-      const coins = (bag.items ?? []).filter(item => item.itemId === '周转盘币').reduce((sum, item) => sum + item.num, 0);
+      const coins = (await readInventory()).get('周转盘币') ?? 0;
       put(id, ['周转盘币 ' + coins + ' 个，开启「使用周转盘币」后才会抽奖'], coins > 0, '可抽');
     });
     if (row.type === 5) await safely(id, async () => {
-      const view = await weekOrderState(client, config, row, readWeekOrder);
-      put(id, [view.finalDone ? '最终奖励已领取' : view.finalReady ? '最终奖励可领取' : '完成全部档位后可领最终奖励'], view.finalReady);
+      const view = await readOrder();
+      put(id, [view.finalReady ? '最终奖励可领取' : view.finished ? '最终奖励已领取' : '完成全部档位后可领最终奖励'], Boolean(view.finalReady));
     });
     if (row.type === 6 || row.type === 7) await safely(id, async () => {
       const view = await weekFreePackState(client, config, row.type);
@@ -351,7 +355,7 @@ async function rewardStatus(client, config, activities, week, player) {
   const vip = vipDailyState(player, config, Math.floor((serverNow(client) + 8 * 3600) / 86400));
   await safely('pirates', async () => {
     const reports = await campaignReportState(client, config, player);
-    const rank = await openRankState(client, config, player, openRanks[2]);
+    const rank = await readRank(openRanks[2]);
     put('pirates', [
       reports.pending ? '战报奖励 ' + reports.pending + ' 份待领：' + reports.rewards : '战报奖励已领完',
       rank.open ? '剿匪冲榜 ' + rank.progress + ' 分' + (rank.me?.rank ? ' · 排名第 ' + rank.me.rank + ' 名' : ' · 未上榜') + ' · 已领 ' + rank.got + '/' + rank.total + ' 档' + (rank.next ? ' · 下一档 ' + rank.next.score + ' 分' : '') + (rank.ready.length ? '（可领 ' + rank.ready.length + ' 档）' : '') : '剿匪冲榜已结束',
@@ -360,7 +364,7 @@ async function rewardStatus(client, config, activities, week, player) {
   });
   await safely('openrank', async () => {
     const ranks = [];
-    for (const rank of openRanks) ranks.push(await openRankState(client, config, player, rank));
+    for (const rank of openRanks) ranks.push(await readRank(rank));
     const open = ranks.filter(rank => rank.open);
     if (!open.length) return;
     const windows = (client.openRankActivity?.activityTime ?? []).filter(row => row.startTime <= serverNow(client) && serverNow(client) < row.endTime);
@@ -377,7 +381,14 @@ export async function activityView(client, festivals = [], config = null, player
   const week = schedule.filter(row => open(row, time));
   const activities = activityEntries(client, schedule, festivals, { includeInactive: true });
   const active = activities.filter(row => row.lifecycle === 'active');
-  const status = await rewardStatus(client, config, active, week, player);
+  // Reuse reads only within this view. Every refresh and every action still
+  // reads fresh state; requests stay sequential because prompts have no ID.
+  let orderRead, inventoryRead;
+  const reads = {
+    readOrder: () => orderRead ??= readWeekOrder(client, week, config),
+    readInventory: () => inventoryRead ??= readWeekOrderInventory(client),
+  };
+  const status = await rewardStatus(client, config, active, week, player, reads);
   const heroActivities = active.filter(row => row.id.startsWith('hero-raid:'));
   if (heroActivities.length) {
     const state = watchHeroRaidPushes(client);
@@ -393,10 +404,13 @@ export async function activityView(client, festivals = [], config = null, player
     }
   }
   for (const row of active) if (!activities.some(item => item.id === row.id)) activities.push(catalogEntry(row, time));
-  return { status, ...(await activityDetails(client, config, week, activities)) };
+  return { status, ...(await activityDetails(client, config, week, activities, reads)) };
 }
 
-async function activityDetails(client, config, week, activities) {
+async function activityDetails(client, config, week, activities, {
+  readOrder = () => readWeekOrder(client, week, config),
+  readInventory = () => readWeekOrderInventory(client),
+} = {}) {
   const lotteryRow = week.find(r => r.type === 4);
   let lottery, lotteryError;
   if (lotteryRow) {
@@ -407,9 +421,9 @@ async function activityDetails(client, config, week, activities) {
   }
   if (!week.some(row => row.type === 5)) return { activities, lottery, lotteryError, order: null };
   try {
-    const { needed, finished, finalReady, orderKey, evidence } = await readWeekOrder(client, week, config);
+    const { needed, finished, finalReady, orderKey, evidence } = await readOrder();
     if (finished) return { activities, lottery, lotteryError, order: { materials: [], finished, finalReady } };
-    const stock = await readWeekOrderInventory(client);
+    const stock = await readInventory();
 
     const materials = Array.from(needed, ([id, required]) => {
       const owned = stock.get(id) ?? 0;

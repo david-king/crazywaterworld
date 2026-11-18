@@ -135,6 +135,11 @@ try {
     let seen;
     const aborted = createAccountApi("a", async (_url, options) => {
       seen = options.signal;
+      assert.equal(
+        new Headers(options.headers).has("X-CW-Console-Version"),
+        false,
+        "Node 调用没有页面时不伪造版本",
+      );
       options.signal.throwIfAborted();
     });
     await assert.rejects(
@@ -143,6 +148,185 @@ try {
     );
     assert.equal(seen, controller.signal);
     assert.throws(() => createAccountApi(""), /选择账号/);
+  });
+
+  let browserModuleSequence = 0;
+  async function withBrowserApi(version, bridge, run) {
+    const documentDescriptor = Object.getOwnPropertyDescriptor(
+      globalThis,
+      "document",
+    );
+    const windowDescriptor = Object.getOwnPropertyDescriptor(
+      globalThis,
+      "window",
+    );
+    let metaVersion = version;
+    Object.defineProperty(globalThis, "document", {
+      configurable: true,
+      value: {
+        querySelector(selector) {
+          assert.equal(selector, 'meta[name="cw-console-version"]');
+          return { getAttribute: () => metaVersion };
+        },
+      },
+    });
+    Object.defineProperty(globalThis, "window", {
+      configurable: true,
+      value: { cwConsoleVersion: bridge },
+    });
+    try {
+      const browserApi = await import(
+        `${pathToFileURL(outfile).href}?version-test=${++browserModuleSequence}`
+      );
+      await run(browserApi, (value) => {
+        metaVersion = value;
+      });
+    } finally {
+      if (documentDescriptor)
+        Object.defineProperty(globalThis, "document", documentDescriptor);
+      else delete globalThis.document;
+      if (windowDescriptor)
+        Object.defineProperty(globalThis, "window", windowDescriptor);
+      else delete globalThis.window;
+    }
+  }
+
+  await test("React API冻结初始页面版本，读取和保存均携带；新版响应不能套用旧界面", async () => {
+    await withBrowserApi(
+      "page-a",
+      undefined,
+      async (browserApi, changeMeta) => {
+        let replyVersion = "page-a";
+        const requests = [];
+        const transport = async (_url, options) => {
+          requests.push(options);
+          return new Response(
+            replyVersion === "page-b" ? "not-json" : JSON.stringify(initial),
+            {
+              headers: { "X-CW-Console-Version": replyVersion },
+            },
+          );
+        };
+        const client = browserApi.createAccountApi("a", transport);
+        await read(client);
+        changeMeta("page-b");
+        await browserApi
+          .createAccountApi("a", transport)
+          .save(initial.settings, 0);
+        assert.deepEqual(
+          requests.map((request) =>
+            request.headers.get("X-CW-Console-Version"),
+          ),
+          ["page-a", "page-a"],
+        );
+        replyVersion = "page-b";
+        await assert.rejects(
+          read(client),
+          (error) =>
+            error instanceof browserApi.ApiError &&
+            error.status === 409 &&
+            !!error.fields.revision,
+        );
+        assert.equal(requests[2].headers.get("X-CW-Console-Version"), "page-a");
+        await assert.rejects(
+          browserApi.createAccountApi("a", transport).save(initial.settings, 0),
+          /页面已过期/,
+        );
+        assert.equal(
+          requests.length,
+          3,
+          "已知过期后新建客户端也不能再发保存请求",
+        );
+      },
+    );
+  });
+
+  await test("缺少版本响应头的409仍通知全局过期保护，且不重试保存", async () => {
+    let stale = false,
+      rejections = 0,
+      calls = 0;
+    const bridge = {
+      version: "page-a",
+      isStale: () => stale,
+      observe() {},
+      reject() {
+        stale = true;
+        rejections++;
+      },
+    };
+    await withBrowserApi("page-a", bridge, async (browserApi) => {
+      const client = browserApi.createAccountApi("a", async (_url, options) => {
+        calls++;
+        assert.equal(options.headers.get("X-CW-Console-Version"), "page-a");
+        return new Response(
+          JSON.stringify({
+            code: "CLIENT_VERSION_MISMATCH",
+            error: "请刷新页面",
+            fields: { revision: "请刷新页面" },
+          }),
+          { status: 409 },
+        );
+      });
+      const settings = structuredClone(initial.settings),
+        before = structuredClone(settings);
+      await assert.rejects(
+        client.save(settings, 0),
+        (error) =>
+          error instanceof browserApi.ApiError && !!error.fields.revision,
+      );
+      assert.deepEqual(settings, before);
+      assert.equal(rejections, 1);
+      assert.equal(calls, 1);
+      await assert.rejects(client.save(settings, 0), /页面已过期/);
+      assert.equal(calls, 1, "版本拒绝不能自动重发或沿用新版本继续保存");
+    });
+  });
+
+  await test("全局已发现版本更新时阻止保存，已在途的成功响应也不清除草稿", async () => {
+    let stale = false,
+      calls = 0,
+      complete;
+    const bridge = {
+      version: "page-a",
+      isStale: () => stale,
+      observe() {},
+      reject() {
+        stale = true;
+      },
+    };
+    await withBrowserApi("page-a", bridge, async (browserApi) => {
+      const client = browserApi.createAccountApi("a", async () => {
+        calls++;
+        return new Promise((resolve) => {
+          complete = resolve;
+        });
+      });
+      let applied = false;
+      const pending = client.save(initial.settings, 0).then((value) => {
+        applied = true;
+        return value;
+      });
+      stale = true;
+      complete(
+        new Response(JSON.stringify(initial), {
+          headers: { "X-CW-Console-Version": "page-a" },
+        }),
+      );
+      await assert.rejects(
+        pending,
+        (error) => error instanceof browserApi.ApiError && error.status === 409,
+      );
+      assert.equal(applied, false, "旧页面不能接纳晚到保存结果并覆盖其草稿");
+      await assert.rejects(
+        browserApi
+          .createAccountApi("b", async () => {
+            calls++;
+          })
+          .save(initial.settings, 0),
+        /页面已过期/,
+      );
+      assert.equal(calls, 1);
+    });
   });
 
   await test("Day.js 展示使用北京时间，跨日与无效日期结果明确", () => {

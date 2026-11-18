@@ -18,10 +18,10 @@ import {runSinglePirateHunt} from '../src/pirate-advance.mjs';
 import {PAGE} from '../src/page.mjs';
 const dir=fs.mkdtempSync(path.join(os.tmpdir(),'cw-optimization-test-'));
 let passed=0;const test=async(name,fn)=>{await fn();console.log('通过：'+name);passed++;};
-await test('汽油0不限额，试炼默认450，导入已有200不覆盖',()=>{
- const s=defaultSettings();assert.equal(s.trials.dailyDiamondBudget,450);
- s.radar.dailyPetrolLimit=s.cityWar.dailyPetrolLimit=s.cityWar.maxRepairCost=s.treasure.maxRepairCost=s.treasure.dailyRepairPetrolLimit=s.pirateHunt.fuelBudget=0;
- for(const group of ['radar','cityWar','treasure','pirateHunt'])assert.deepEqual(validateSettings(s)[group],s[group]);assert.equal(validateSettings({trials:{dailyDiamondBudget:200}},{partial:true}).trials.dailyDiamondBudget,200);
+await test('汽油旧限额清除，试炼默认450，导入已有200不覆盖',()=>{
+ const s=defaultSettings(),expected=defaultSettings();assert.equal(s.trials.dailyDiamondBudget,450);
+ s.radar.dailyPetrolLimit=s.cityWar.dailyPetrolLimit=s.cityWar.maxRepairCost=s.treasure.maxRepairCost=s.treasure.dailyRepairPetrolLimit=s.pirateHunt.fuelBudget=1;
+ for(const group of ['radar','cityWar','treasure','pirateHunt'])assert.deepEqual(validateSettings(s)[group],expected[group]);assert.equal(validateSettings({trials:{dailyDiamondBudget:200}},{partial:true}).trials.dailyDiamondBudget,200);
  assert.throws(()=>validateSettings({...s,fleetDispatch:{priority:['radar']}}),/保留全部任务/);
 });
 const cfg={materialName:id=>id,tables:{BuildingCfg:{data:[{buildingType:'种子厂',name:'种子厂'}]},BuildingProduceCfg:{data:[{itemId:'番茄种子',buildType:'种子厂',unlockLevel:1,costItem:[['种子',1]],produceTime:60},{itemId:'小麦种子',buildType:'种子厂',unlockLevel:1,costItem:[['种子',1]],produceTime:50}]},FarmlandPlantCfg:{data:[{id:'番茄',material:['番茄种子',1],produceNum:5,time:60}]}}};
@@ -117,7 +117,7 @@ await test('城战时段与高优先级手动首杀预留，过期或释放后�
  settings.cityWar.enabled=true;settings.cityWar.reserveDuringWar=true;settings.cityWar.fleetIds=['1远征船'];reserveDispatch(client,'cityWar',['1远征船']);assert.match(dispatchReservationReason(client,settings,'radar','1远征船'),/城战/);
  reserveDispatch(client,'cityWar',[]);reserveDispatch(client,'pirateHunt',['1远征船'],0);assert.equal(dispatchReservationReason(client,settings,'radar','1远征船'),'');
 });
-await test('情报0预算仍受实际库存、保留量和统一舰队预留限制，预览不写入',async()=>{
+await test('情报仍受实际库存和统一舰队预留限制，预览不写入',async()=>{
  const f=pirateAdvanceFixture();f.player.guildId='1001007';f.config.tables.ModuleOpenCfg.data.push({moduleId:'联盟情报',playerLevel:18});f.config.tables.WorldParamCfg.data.push({paramName:'情报事件消耗汽油',paramValue:500});
  const settings=f.settings;settings.radar={...settings.radar,runEnabled:true,enabled:true,fleetIds:['1远征船','2远征船'],dailyPetrolLimit:0,petrolReserve:0,types:['pirate']};
  const fleets=[f.fleet,{...f.fleet,buildingId:'2远征船'}],events=[1,2].map(i=>({uid:String(9000+i),eventId:10001,gridIdx:100+i,state:1,createTime:10,pirate:{type:1,level:1}}));const original=f.client.request;

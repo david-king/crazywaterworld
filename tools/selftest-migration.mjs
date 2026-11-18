@@ -110,9 +110,9 @@ for (const getSettings of [() => null, legacyServiceSettings]) {
   const f = loopFixture();
   await runLoop(f.client, {}, { ...f.options, getSettings, isEnabled: key => legacyKeys.includes(key) });
   for (const key of legacyKeys) {
-    assert(f.reports.some(entry => entry.key === key && entry.skipped), '原主分支开关仍有实际服务入口：' + key);
+    assert(!f.reports.some(entry => entry.key === key), '已退役或迁移动作不能从残留回调恢复旧入口：' + key);
   }
-  assert.deepEqual(f.reads, [], '未解锁的原服务在读取游戏前给出等待原因');
+  assert.deepEqual(f.reads, [], '残留旧回调不能再触发退役服务读取');
 }
 
 for (const settings of [null, defaultSettings()]) {
@@ -126,7 +126,8 @@ for (const settings of [null, defaultSettings()]) {
 
 for (const getSettings of [() => null, legacyServiceSettings]) {
   const f = loopFixture();
-  const keys = ['seasonTasks', 'crossRankDaily', 'passStageRewards', 'guildAidCollect', 'museumRevenue'];
+  const keys = ['seasonTasks', 'crossRankDaily', 'passStageRewards'];
+  const retiredKeys = ['guildAidCollect', 'guildAidHelp', 'museumRevenue', 'museumAchievements'];
   const reward = { reward: { asset: [{ type: 0, id: '木材', num: 1 }] } };
   const responses = {
     MyGuildAidRequest: { aids: [{ helper: { playerId: 2 } }] },
@@ -155,11 +156,14 @@ for (const getSettings of [() => null, legacyServiceSettings]) {
   f.options.config.tables.SeasonTaskCfg = { data: [{ season: 1, stage: 1, personTarget: 10, teamTarget: 100 }] };
   rewardSchedule(f.client);
   f.client.emit('message', { name: 'SCRedPoint', body: { redPoint: [{ type: 33, num: 1 }] } });
-  const options = { ...f.options, getSettings, isEnabled: key => keys.includes(key) };
+  const options = { ...f.options, getSettings, isEnabled: key => keys.includes(key) || retiredKeys.includes(key) };
   await runLoop(f.client, protocol, options);
-  for (const name of ['GotMyGuildAidRequest', 'GotSeasonTaskRequest', 'GetDailyRewardRequest', 'PassStageGotRewardRequest', 'MuseumCollectRevenueRequest']) {
+  for (const name of ['GotSeasonTaskRequest', 'GetDailyRewardRequest', 'PassStageGotRewardRequest']) {
     assert(requests.some(([request]) => request === name), '旧领奖开关必须真正进入写协议：' + name);
   }
+  assert(!requests.some(([name]) => name.startsWith('Museum')), '已退役的博物馆奖励入口不能绕过独立开关');
+  assert(!requests.some(([name]) => name.includes('GuildAid')), '已退役的联盟互助旧开关不能触发读取、领取或赠送');
+  assert(!f.reports.some(entry => retiredKeys.includes(entry.taskKey)), '退役互助入口不应继续执行或报告领取成功');
   assert.deepEqual(requests.filter(([name]) => name === 'PassStageGotRewardRequest').map(([, body]) => body.stage), [1, 2],
     '领取函数提前 defer 后，仍应完成本轮已核对的全部奖励');
   for (const key of keys) assert(f.reports.some(entry => entry.taskKey === key && entry.ok), '成功领取必须带回原开关 key：' + key);
@@ -181,6 +185,10 @@ for (const getSettings of [() => null, legacyServiceSettings]) {
   await runLoop(f.client, {}, { ...f.options, getSettings: () => settings, isEnabled: key => controlled.includes(key) });
   for (const key of controlled) {
     const entries = f.reports.filter(entry => entry.key === key);
+    if (['radarAuto', 'radarRepair', 'museumCollect', 'museumExplore', 'museumRevenue', 'museumAchievements', 'petCollect', 'petBreed', 'treasureLoot'].includes(key)) {
+      assert.equal(entries.length, 0, '已迁移动作不再报告旧入口或接管状态：' + key);
+      continue;
+    }
     assert.equal(entries.length, 1, '每个被详细配置接管的旧入口只报告一次：' + key);
     assert(entries.every(entry => entry.skipped && /接管/.test(entry.reason)), '详细配置接管后不运行旧消费路径：' + key);
   }

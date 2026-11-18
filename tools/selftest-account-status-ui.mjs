@@ -111,6 +111,7 @@ function fixture(rows = [
     const loginSettingsAccountChanged = () => env.effects.push('login-settings');
     const appointmentsAccountChanged = () => {};
     const siliconAccountChanged = () => {}, maybeRefreshSilicon = () => {};
+    const resourceFieldsAccountChanged = () => {};
     const renderAccounts = () => env.effects.push('account-cards');
     const resetWorldMap = () => env.effects.push('clear-map');
     const resetProductionPlan = () => env.effects.push('clear-production');

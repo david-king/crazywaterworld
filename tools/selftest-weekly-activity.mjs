@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { defaultSettings, hasExtraWork } from '../src/automation-settings.mjs';
-import { createWeeklyActivityContext, weeklyManagedSettings, weeklyLegacyTaskAllowed, nextWeeklyActivityBoundary } from '../src/weekly-activity.mjs';
+import { createWeeklyActivityContext, weeklyExecutionSettings, nextWeeklyActivityBoundary } from '../src/weekly-activity.mjs';
 
 const config = { tables: { ModuleOpenCfg: { data: [{ moduleId: '每日跨服比拼', playerLevel: 20 }] } } };
 const player = { playerId: '9007199254740993', worldId: '2000001', level: 30 };
@@ -87,22 +87,56 @@ await test('读取失败停止，已达目标和关闭开关不执行；全天�
   const allDay = fixture(); allDay.settings.weeklyActivity.petStop = 'allDay'; allDay.state.rankList = [];
   assert(await allDay.context());
 });
-await test('周配置接管原有重复入口并保留原配置及稳定对象身份', () => {
+await test('六类活动独立授权计分动作，不依赖普通总开关或收种升星细项', async () => {
+  const paths = {
+    farm: ['farm.enabled', 'farm.harvest', 'farm.autoPlant'],
+    pet: ['pet.enabled', 'pet.claim', 'pet.breed'],
+    antique: ['antique.enabled', 'antique.star', 'antique.suit'],
+    order: ['resident.enabled'], forge: ['forge.enabled', 'forge.collect', 'forge.craft'],
+    hero: ['loop.heroes', 'heroes.enabled', 'heroes.star'],
+  };
+  const ids = { farm: 6, pet: 3, antique: 4, order: 1, forge: 2, hero: 5 };
+  for (const [kind, fields] of Object.entries(paths)) {
+    const f = fixture(kind, ids[kind]);
+    f.settings.forge.collect = f.settings.forge.craft = false;
+    const before = structuredClone(f.settings), context = await f.context();
+    assert(context, kind);
+    for (const field of fields) {
+      const [group, key] = field.split('.');
+      assert.equal(before[group][key], false, field + ' 普通开关关闭');
+      assert.equal(context.settings[group][key], true, field + ' 活动独立授权');
+    }
+    assert.deepEqual(f.settings, before, '活动不能改写普通开关');
+    assert.deepEqual(context.settings.resources, before.resources, '钻石与加速资源权限保持原值');
+    for (const group of ['forge', 'pet', 'heroes', 'antique']) {
+      for (const key of Object.keys(before[group]).filter(key => /Ids$|Qualities$|species|Reserve|Limit|target|universal/.test(key))) {
+        assert.deepEqual(context.settings[group][key], before[group][key], group + '.' + key + ' 对象与预算不扩大');
+      }
+    }
+  }
+});
+await test('活动种田保留自定义作物范围和目标，智能种植只在非自定义模式启用', () => {
   const s = defaultSettings();
-  s.weeklyActivity.enabled = true;
-  for (const kind of ['farm', 'pet', 'antique', 'order', 'forge', 'hero']) s.weeklyActivity[kind + 'Enabled'] = true;
-  s.farm.enabled = s.pet.enabled = s.antique.enabled = s.forge.enabled = s.loop.heroes = s.alliance.recruit = true;
-  const before = structuredClone(s), managed = weeklyManagedSettings(s);
-  assert.equal(weeklyManagedSettings(s), managed);
-  assert.deepEqual(s, before);
-  for (const group of ['farm', 'pet', 'antique', 'forge', 'resident']) assert.equal(managed[group].enabled, false);
-  assert.equal(managed.alliance.recruit, false); assert.equal(managed.loop.heroes, false);
-  assert.equal(managed.cargo.enabled, false); assert.equal(managed.factory.speedUp, false);
-  assert.deepEqual(managed.factory.speedUpSources, []); assert.equal(managed.schedule.ticketRecruit, false);
-  for (const key of ['ticketRecruit', 'guildOrders', 'petBreed', 'petCollect', 'cargo', 'adSpeedUpProduce']) assert.equal(weeklyLegacyTaskAllowed(s, key), false);
-  assert(weeklyLegacyTaskAllowed(s, 'freeRecruit'));
-  const off = structuredClone(s); off.weeklyActivity.enabled = false;
-  assert.equal(weeklyManagedSettings(off), off);
+  Object.assign(s.farm, { customPlant: true, crops: [{ id: '小麦', target: 10 }] });
+  const custom = weeklyExecutionSettings(s, 'farm');
+  assert.equal(custom.farm.customPlant, true); assert.equal(custom.farm.autoPlant, false);
+  assert.deepEqual(custom.farm.crops, [{ id: '小麦', target: 10 }]);
+  s.farm.customPlant = false;
+  const intelligent = weeklyExecutionSettings(s, 'farm');
+  assert.equal(intelligent.farm.autoPlant, true);
+  assert.deepEqual(intelligent.farm.crops, s.farm.crops);
+  assert.equal(s.farm.autoPlant, false);
+});
+await test('未到本分项主题或积分达标只暂停活动，不改普通自动化配置', async () => {
+  for (const scenario of ['other', 'completed']) {
+    const f = fixture('forge', scenario === 'other' ? 4 : 2);
+    Object.assign(f.settings.forge, { enabled: true, collect: true, craft: true });
+    f.settings.schedule.ticketRecruit = true;
+    if (scenario === 'completed') f.state.rankList[0].score = 100;
+    const before = structuredClone(f.settings);
+    assert.equal(await f.context(), null);
+    assert.deepEqual(f.settings, before);
+  }
 });
 await test('只开启周活动也能启动挂机，空选择不视作自动任务', () => {
   const s = defaultSettings();

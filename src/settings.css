@@ -89,7 +89,6 @@
 .config-war-fleet { min-width:0 }
 .config-war-strategy { margin-top:0 }
 [data-config-branch="cityWar.fleetIds"]>.config-children { border-left:1px solid var(--border) }
-.config-war-inherited { margin:0; padding:10px 0 }
 .config-war-strategy .config-row[data-kind=choice] { grid-template-columns:minmax(0,1fr) minmax(0,320px) }
 .config-dispatch-row .config-order-tools { grid-column:auto; flex-wrap:nowrap }
 .config-dispatch-row .config-order-name { overflow-wrap:normal; word-break:normal }

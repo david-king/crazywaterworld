@@ -3,6 +3,7 @@ import { EventEmitter } from 'node:events';
 import { defaultSettings } from '../src/automation-settings.mjs';
 import { buildProductionSnapshot, readProductionSnapshot } from '../src/production-snapshot.mjs';
 import { watchHeroRaidPushes } from '../src/hero-raid-automation.mjs';
+import { watchGuildShipPushes } from '../src/guild-ships.mjs';
 
 const table = data => ({ data });
 const config = { tables: {
@@ -179,6 +180,7 @@ await test('海兽消费备料遵守世界循环、模块、动作和来源开�
 await test('博物馆消费备料遵守世界循环、运行、探宝、升级和来源开关', () => {
   const museumConfig = { tables: { ...config.tables,
     MuseumExpeditionStageCfg: table([{ stageId: 1, areaLevelReq: [] }]),
+    MuseumExploreTimeFactorCfg: table([{ playerLevel: 1, factor: 1 }]),
     MuseumAreaCfg: table([{ areaId: 1, level: 2, playerLevelReq: 1, costArr: [['小麦', 3]] }]),
   } };
   for (const [name, change, expected] of [
@@ -412,7 +414,7 @@ await test('当前订单读取独立于生产优先级和自动提交开关', as
   assert.equal(snapshot.complete, true, JSON.stringify(snapshot.missingReads));
   assert.deepEqual([...new Set(snapshot.orders.map(row => row.source))].sort(), ['cargo', 'guildRecruit', 'heroRaid', 'merchant', 'refugee', 'resident']);
   assert(snapshot.orders.every(row => row.kind === 'order'));
-  assert.equal(snapshot.orders.find(row => row.source === 'guildRecruit').metadata.enabled, true);
+  assert.equal(snapshot.orders.find(row => row.source === 'guildRecruit').metadata.enabled, false, '残留联盟订单开关不能授权新版募兵');
   assert.equal(snapshot.orders.find(row => row.source === 'heroRaid').metadata.enabled, false);
   assert.equal(snapshot.orders.find(row => row.source === 'refugee').id, 'refugee:9007199254740993');
   assert.deepEqual(snapshot.orders.find(row => row.source === 'refugee').requirements, [{ id: '面包', num: 1 }]);
@@ -448,6 +450,50 @@ await test('未解锁、未开放的活动不发送无效读取也不阻断其�
     assert.equal(client.calls.includes('RadarInfoRequest'), level >= 18);
     assert(!client.calls.includes('GuildInfoRequest'));
     assert(snapshot.reads.some(row => row.request === 'GuildShipRequest' && row.status === 'notApplicable'));
+  }
+});
+
+await test('商船读取后的其他采集跨过结算截止，最终快照丢弃过期红船备料', () => {
+  const { raw, settings } = fixture();
+  Object.assign(settings.guildShip, { enabled: true, produceMissing: true });
+  raw.guildShipView = { period: 1, activityEndTime: 1601, candidates: [{ kind: 'crew', type: 3,
+    shipId: 1, crewId: 1, preparedEndTime: 1800, costs: [{ id: '面包', need: 2 }] }] };
+  let snapshot = buildProductionSnapshot(raw, config, settings);
+  assert.equal(snapshot.orders.find(row => row.source === 'guildShip').deadline, 1001,
+    '提前结算比船舱准备结束更早时，排产必须使用提前结算截止');
+  raw.serverNow = 1001;
+  snapshot = buildProductionSnapshot(raw, config, settings);
+  assert(!snapshot.orders.some(row => row.source === 'guildShip'), '商船快照仍有候选也不能在截止后备料');
+  assert(snapshot.orders.some(row => row.source === 'resident'), '其他当前订单仍正常排产');
+});
+
+await test('生产只读代理沿用原连接的商船结算截止，停止红船备料', async () => {
+  for (const remaining of [1200, 600]) {
+    const { raw, settings } = fixture(), now = Math.floor(Date.now() / 1000);
+    raw.player.guildId = '999';
+    settings.weekOrder.enabled = false;
+    Object.assign(settings.guildShip, { enabled: true, crew: true, produceMissing: true });
+    raw.guildShips = { period: 1, ownRun: [], ship: [{ shipId: 1, type: 3, state: 1,
+      leader: { playerId: '888' }, leaderCond: [], preparedEndTime: now + 1800, mvEndTime: 0,
+      reward: { asset: [{ type: 0, id: '水姆币', num: 80 }] },
+      cabin: Array.from({ length: 6 }, (_, i) => ({ crewId: i + 1, player: null,
+        order: [{ type: 0, id: '面包', num: 2 }] })) }] };
+    const shipConfig = { tables: { ...config.tables,
+      GuildShipCfg: table([{ shipId: 3, num: 6, time: 540 }]),
+      GuildShipParamCfg: table([{ season: 1, shipNum: 2, duration: 30, time: [8, 11, 14, 17, 20, 23] }]),
+    } };
+    const { client, protocol, responses } = fakeClient(raw);
+    responses.GuildInfoRequest = { guild: { guildId: raw.player.guildId } };
+    protocol.GuildInfoRequest = protocol.GuildInfoResponse = {};
+    watchGuildShipPushes(client);
+    client.emit('message', { name: 'SCGuildShipActivity', body: { period: {
+      period: 1, startTime: now - 86400, endTime: now + remaining,
+    } } });
+    const snapshot = await readProductionSnapshot(client, protocol, shipConfig, raw.player, settings);
+    assert.equal(snapshot.complete, true, JSON.stringify(snapshot.missingReads));
+    assert.equal(snapshot.orders.some(row => row.source === 'guildShip'), remaining > 600);
+    if (remaining === 600) assert(snapshot.reads.some(row => row.request === 'guildShipView'
+      && row.status === 'notApplicable' && /结算期/.test(row.reason)));
   }
 });
 

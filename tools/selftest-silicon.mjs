@@ -120,13 +120,39 @@ try {
     f.state.reportDetails['123'] = { battles: [{ win: true, leftCamp: { player: { nickname: f.player.nickname } }, rightCamp: { player: { nickname: '战报敌人0' } } }] };
     await run(f, s, ledger); assert.equal(Object.keys(ledger.keyRecords()['silicon-state:3001001'].details.defeated).length, 1);
   });
-  await test('汽油日预算/保留量与全局待确认占用共同生效', async () => {
-    const f = siliconFixture(), s = siliconSettings(), ledger = usage(f); s.silicon.petrolReserve = 49900;
-    assert.equal((await plan(f, s, ledger)).actions.length, 0); s.silicon.petrolReserve = 0; s.silicon.dailyPetrolLimit = 499; assert.equal((await plan(f, s, ledger)).actions.length, 0);
-    s.silicon.dailyPetrolLimit = 0; ledger.reserve({ treasurePetrol: 49900 }, {}, {}, { uniqueKey: 'test-shared:1', details: {} }); assert.equal((await plan(f, s, ledger)).actions.length, 0);
+  await test('旧汽油日预算/保留量不拦截派遣，全局待确认占用仍扣除', async () => {
+    const f = siliconFixture(), s = siliconSettings(), ledger = usage(f); s.silicon.petrolReserve = 49900; s.silicon.dailyPetrolLimit = 1;
+    assert.equal((await plan(f, s, ledger)).actions.length, 1);
+    const ticket = ledger.reserve({ treasurePetrol: 49900 }, {}, {}, { uniqueKey: 'test-shared:1', details: {} }); assert.equal((await plan(f, s, ledger)).actions.length, 0);
+    ledger.cancel(ticket); await run(f, s, ledger); assert.equal(f.client.writes[0].name, 'ChipMineSendFleetRequest');
+  });
+  await test('派遣确认早于库存扣减时，本轮维修不会再次花费已用汽油', async () => {
+    for (const fuel of [500, 900]) {
+      const f = siliconFixture(), s = siliconSettings(), ledger = usage(f); f.state.fuel = fuel;
+      Object.assign(s.silicon.fleets[1], { enabled: true, autoRepair: true }); f.state.fleets[1].durability = 1800;
+      f.beforeRead = name => name === 'AllItemRequest' ? { items: [{ itemId: '汽油', num: fuel }] } : undefined;
+      await run(f, s, ledger);
+      assert.deepEqual(f.client.writes.map(row => row.name), fuel === 500 ? ['ChipMineSendFleetRequest'] : ['ChipMineSendFleetRequest', 'RepairFleetRequest']);
+      assert.equal(f.state.fuel, 0); assert.equal(ledger.confirmedCounters().siliconPetrol, fuel);
+    }
+  });
+  await test('同轮未知派遣费用只扣一次，明确拒绝后余额可用于维修', async () => {
+    for (const status of ['unknown', 'rejected']) {
+      const f = siliconFixture(), s = siliconSettings(), ledger = usage(f), fuel = status === 'unknown' ? 900 : 500;
+      f.state.fuel = fuel; Object.assign(s.silicon.fleets[1], { enabled: true, autoRepair: true }); f.state.fleets[1].durability = 1800;
+      f.beforeRead = name => name === 'AllItemRequest' ? { items: [{ itemId: '汽油', num: fuel }] } : undefined;
+      const send = f.client.sendWatch; f.client.sendWatch = async (name, ...args) => {
+        f.unknown = name === 'ChipMineSendFleetRequest' && status === 'unknown'; f.reject = name === 'ChipMineSendFleetRequest' && status === 'rejected';
+        return send(name, ...args);
+      };
+      await run(f, s, ledger);
+      assert.deepEqual(f.client.writes.map(row => row.name), ['ChipMineSendFleetRequest', 'RepairFleetRequest']);
+      assert.equal(ledger.confirmedCounters().siliconPetrol, 400); assert.equal(ledger.pendingCounters().siliconPetrol ?? 0, status === 'unknown' ? 500 : 0);
+      assert.equal(f.state.fuel, fuel - 400);
+    }
   });
   await test('普通维修与钻石维修加速均有真实业务确认和预算', async () => {
-    const f = siliconFixture(), s = siliconSettings(), ledger = usage(f); s.silicon.fleets[0].autoRepair = true; s.silicon.fleets[0].repairSpeedUp = true; f.state.fleets[0].durability = 0;
+    const f = siliconFixture(), s = siliconSettings(), ledger = usage(f); s.silicon.fleets[0].autoRepair = true; s.silicon.fleets[0].maxRepairCost = 1; s.silicon.petrolReserve = 50000; s.silicon.dailyPetrolLimit = 1; s.silicon.fleets[0].repairSpeedUp = true; f.state.fleets[0].durability = 0;
     await run(f, s, ledger); assert.deepEqual(f.client.writes.map(row => row.name), ['RepairFleetRequest']);
     await run(f, s, ledger); assert.equal(f.client.writes.length, 1);
     s.resources.allowDiamonds = true; s.silicon.dailyDiamondLimit = 1000; await run(f, s, ledger);
@@ -165,7 +191,7 @@ try {
     f.client.emit('message', { name: 'SCSpeedUp', body: { data: [{ type: 4, minutes: 60 }] } }); assert.equal(watcher.repairMinutes(), 60);
   });
   await test('未知维修加速到期自然修复不假记加速成功', async () => {
-    const f = siliconFixture(), s = siliconSettings(), ledger = usage(f); s.silicon.fleets[0].autoRepair = true; s.silicon.fleets[0].repairSpeedUp = true; f.state.fleets[0].durability = 1000;
+    const f = siliconFixture(), s = siliconSettings(), ledger = usage(f); s.silicon.fleets[0].autoRepair = true; s.silicon.fleets[0].maxRepairCost = 1; s.silicon.petrolReserve = 50000; s.silicon.dailyPetrolLimit = 1; s.silicon.fleets[0].repairSpeedUp = true; f.state.fleets[0].durability = 1000;
     s.silicon.fleets[0].minDurabilityPercent = 100; s.resources.allowDiamonds = true; s.silicon.dailyDiamondLimit = 1000;
     await run(f, s, ledger); f.unknown = true; await run(f, s, ledger); assert(ledger.hasKey('silicon-speed:3001001:1'));
     f.client.serverClockOffsetMs += 1200000; f.returnFleet('1远征船'); f.state.fleets[0].durability = 2000;
@@ -277,8 +303,7 @@ try {
       ['同盟', f => { f.state.positions[5000][1].player.guildIdx = 7; }],
       ['敌方过强', f => { f.state.positions[5000][1].player.power = 2000; }],
       ['只占空位', (f, s, p) => { p.emptyOnly = true; }],
-      ['汽油保留', (f, s) => { s.silicon.petrolReserve = 49900; }],
-      ['每日汽油预算', (f, s) => { s.silicon.dailyPetrolLimit = 499; }],
+      ['实际汽油不足', f => { f.state.fuel = 499; }],
       ['共享待确认汽油', (f, s, p, ledger) => { ledger.reserve({ treasurePetrol: 49900 }, {}, {}, { uniqueKey: 'shared-hunt', details: {} }); }],
       ['抢占次数耗尽', f => { f.state.fightTimes = 30; }],
       ['低耐久', f => { f.state.fleets[0].durability = 0; }],
@@ -349,7 +374,6 @@ try {
   await test('多舰追杀撤回共用后续汽油和抢占额度，返航跨轮跨重启继续保留意向', async () => {
     const limits = [
       ['余额只够一次', (f, s) => { f.state.fuel = 500; }],
-      ['汽油预算只够一次', (f, s) => { s.silicon.dailyPetrolLimit = 500; }],
       ['抢占额度只剩一次', (f, s) => { f.state.fightTimes = 29; }],
     ];
     for (const [label, limit] of limits) {

@@ -64,14 +64,30 @@ async function downloadAccounts(includeSettings) {
   updateAccountExportSelection();
   $('account-export-error').hidden = true;
   try {
+    const path = '/api/accounts/export', body = { ids, includeSettings };
+    const versionGuard = typeof window === 'undefined' ? null : window.cwConsoleVersion;
+    const pageVersion = versionGuard?.version;
+    const assertCurrent = response => {
+      if (response && versionGuard?.check(response) === false) throw new Error('控制台已更新，请刷新页面后重新导出账号。');
+      versionGuard?.assertWritable(path, 'POST', body);
+    };
+    assertCurrent();
     if (includeSettings && !await configFlush()) throw new Error('配置尚未保存，请先处理配置页的提示后再导出');
-    const response = await fetch('/api/accounts/export', { method: 'POST', headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ ids, includeSettings }) });
+    assertCurrent();
+    const headers = { 'content-type': 'application/json', ...(pageVersion ? { 'X-CW-Console-Version': pageVersion } : {}) };
+    const response = await fetch(path, { method: 'POST', headers, body: JSON.stringify(body) });
+    assertCurrent(response);
     if (!response.ok) {
       const data = await response.json();
+      if (versionGuard?.check(response, data) === false) throw new Error('控制台已更新，请刷新页面后重新导出账号。');
+      assertCurrent();
       throw new Error(data.error || '账号导出失败');
     }
-    const url = URL.createObjectURL(await response.blob());
+    const blob = await response.blob();
+    // The version may change while the body is being read. Never initiate an
+    // account download after the global page guard has rejected this page.
+    assertCurrent(response);
+    const url = URL.createObjectURL(blob);
     const link = document.createElement('a');
     link.href = url;
     link.download = (ids.length === 1 ? 'account-' : 'accounts-') + (includeSettings ? 'with-settings-' : '')
@@ -115,7 +131,6 @@ async function importAccounts(file) {
     renderAccounts();
     if (result.settingsCount) {
       await configLoad();
-      loginSettingsAccountChanged();
       await refreshSavedLineups();
     }
     accountTransferNotice('导入完成：新增 ' + result.created + ' 个账号，更新 ' + result.updated + ' 个账号，恢复 ' + result.settingsCount + ' 份配置。');

@@ -11,6 +11,7 @@ function section(start, end) {
   return script.slice(from, to);
 }
 const source = [
+  section('function configRecoveryMessage(', 'function configMessage('),
   section('function setTaskSwitch(', 'const pirateAdvanceErrors'),
   section('function renderHostingControl(', 'function renderAccountSelect('),
   section('function renderLoop(', 'async function toggleAutoTask('),
@@ -43,7 +44,7 @@ function fixture() {
     return nodes.get(id);
   };
   const view = seconds => ({ running: false, rounds: 0, everyMs: seconds * 1000, completed: 0, controls: [], settingsRevision: 1 });
-  const env = { node, calls: [], errors: [], states: { a: view(60), b: view(90) }, flushes: 0, statusRenders: [] };
+  const env = { node, calls: [], errors: [], states: { a: view(60), b: view(90) }, flushes: 0, statusRenders: [], recoveryChecks: [] };
   env.flush = async () => { env.flushes++; return env.onFlush ? env.onFlush() : true; };
   env.call = async (account, route, options) => {
     const payload = options?.body ? JSON.parse(options.body) : null;
@@ -71,6 +72,7 @@ function fixture() {
     const renderAutomationOverview = data => { overviewLoopOwner = current; overviewLoopData = data; };
     const renderPirateAdvance = () => {}, filterIdleControls = () => {}, clear = () => {};
     const configIntervalSaved = () => {};
+    const configSyncRecovery = data => env.recoveryChecks.push(data.settingsRecovery);
     const paintConnection = () => env.statusRenders.push(['picker', structuredClone(snapshot)]);
     const renderAccounts = () => env.statusRenders.push(['cards', structuredClone(snapshot)]);
     ${source}
@@ -86,6 +88,18 @@ function fixture() {
 
 let passed = 0;
 async function test(name, run) { await run(); passed++; console.log('通过：' + name); }
+
+await test('运行轮询显示配置恢复或不可用提示，并触发配置状态同步', async () => {
+  const f = fixture();
+  f.env.states.a.settingsRecovery = { required: true, reason: 'missing' };
+  await f.load(); assert.match(f.node('loop-hint').textContent, /配置丢失.*自动挂机已停止.*重新配置/);
+  assert.equal(f.env.recoveryChecks.length, 1);
+  const message = '配置版本过高，原文件未覆盖，请更新程序后重试。';
+  f.env.states.a.settingsRecovery = { required: true, reason: 'unavailable', message };
+  await f.load(); assert.match(f.node('loop-hint').textContent, /配置暂不可用.*原文件未覆盖.*查看原因并修复/);
+  assert.doesNotMatch(f.node('loop-hint').textContent, /已恢复.*默认/);
+  assert.equal(f.env.recoveryChecks.length, 2);
+});
 
 await test('页头间隔输入与挂机、托管两个独立按钮依次排列', () => {
   const header = PAGE.match(/<header>[\s\S]*?<\/header>/)?.[0];

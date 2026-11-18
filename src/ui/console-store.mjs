@@ -17,7 +17,7 @@ export function createConsoleStore() {
     hosting: new Set(),
     gameByAccount: {},
     slices: {},
-    view: { page: 'overview', resource: 'guild', logAccount: 'all', logGroup: 'all', onlyIssues: false },
+    view: { page: 'overview', resource: 'guild', logAccount: 'all', logGroup: 'all', onlyIssues: false, loginSettingsAccountId: null },
     actions: {
       replaceAccounts(rows, activeId, { preserveStatus = false, select = false } = {}) {
         set(state => {
@@ -32,6 +32,8 @@ export function createConsoleStore() {
             : Object.hasOwn(accountsById, activeId) ? activeId : accountIds[0] ?? null;
           const keep = values => new Set([...values].filter(id => Object.hasOwn(accountsById, id)));
           return { accountsById, accountIds, currentAccountId,
+            view: state.view.loginSettingsAccountId && !Object.hasOwn(accountsById, state.view.loginSettingsAccountId)
+              ? { ...state.view, loginSettingsAccountId: null } : state.view,
             disconnected: keep(state.disconnected), connecting: keep(state.connecting), hosting: keep(state.hosting),
             gameByAccount: Object.fromEntries(Object.entries(state.gameByAccount).filter(([id]) => Object.hasOwn(accountsById, id))),
             slices: Object.fromEntries(Object.entries(state.slices).filter(([key]) =>

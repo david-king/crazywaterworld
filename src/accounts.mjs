@@ -2,7 +2,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { worldName } from './world-name.mjs';
 
-// 账号身份就是微信 openId：同一个号反复抓包，抓到的还是同一条记录，只是凭证被刷新。
+// 账号身份按渠道与 openId 区分；抖音扫码和电脑采集共用同一身份空间。
 // 一条记录 = 一份能登录的凭证 + 一点人类可读的标记（昵称、等级、区服）。
 // 自检要在一个临时目录里验证「读 / 写 / 迁移」这条链，所以留一个环境变量出口。
 // 正常运行时根本不会设它，路径与原来一致。
@@ -21,7 +21,7 @@ export function accountId(credential) {
   const id = credential?.login?.eworldParams?.openId;
   if (typeof id !== 'string' || !id) return null;
   if (credential.source === 'alipay') return 'alipay:' + id;
-  return credential.source === 'douyin-mitm' ? 'douyin:' + id : id;
+  return ['douyin', 'douyin-mitm'].includes(credential.source) ? 'douyin:' + id : id;
 }
 
 // 网页和 CLI 要的都是这一小块，凭证本体不往外散。
@@ -168,9 +168,11 @@ export function describeAccount(account, { active = false } = {}) {
   const lastSeen = account.lastSeen
     ? { ...account.lastSeen, worldName: worldName(account.lastSeen.worldId) }
     : null;
-  let title = account.label || lastSeen?.nickname || (account.source === 'alipay'
-    ? `支付宝账号 ${String(params.openId ?? '').slice(-6)}` : `账号 ${account.id.slice(0, 6)}`);
-  if (account.source === 'alipay' && lastSeen?.nickname) {
+  const scanChannel = ['alipay', 'douyin', 'douyin-mitm'].includes(account.source);
+  const channelName = account.source === 'alipay' ? '支付宝' : '抖音';
+  let title = account.label || lastSeen?.nickname || (scanChannel
+    ? `${channelName}账号 ${String(params.openId ?? '').slice(-6)}` : `账号 ${account.id.slice(0, 6)}`);
+  if (scanChannel && lastSeen?.nickname) {
     const remark = account.label && account.label !== lastSeen.nickname ? account.label : null;
     title = [remark, lastSeen.nickname, lastSeen.worldName].filter(Boolean).join(' · ');
   }

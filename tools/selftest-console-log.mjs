@@ -130,14 +130,29 @@ test('空正文和无效时间不会使日志输出抛错', () => {
 const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'cw-console-log-cli-'));
 const configFile = path.join(dir, 'config.json');
 fs.writeFileSync(configFile, '[]');
-// 空账号启动只需空协议命名空间，使用明确的测试包走真实加载入口。
-const protocolFile = path.join(dir, 'empty-protocol.js');
+// 空账号不会发起游戏请求，但真实加载入口仍校验基础消息编解码。
+// 明确提供六个空消息夹具，不依赖已安装客户端或放宽生产协议校验。
+const protocolFile = path.join(dir, 'fixture-protocol.js');
 fs.writeFileSync(protocolFile, `
 define('src/chunks/bundle.test.js', function () {
   System.register([], function () {
     return { execute() {
       System.register('chunks:///_virtual/proto-bundle.js', ['helpers', 'protobuf'], function (publish) {
-        return { setters: [() => {}, () => {}], execute() { publish('protocol', {}); } };
+        let minimal;
+        return { setters: [() => {}, module => { minimal = module.default; }], execute() {
+          const protocol = {};
+          for (const name of ['LoginRequest', 'LoginResponse', 'PingRequest', 'PingResponse', 'Ack', 'Nack']) {
+            function Message() {}
+            Message.encode = () => minimal.Writer.create();
+            Message.decode = bytes => {
+              const reader = minimal.Reader.create(bytes);
+              while (reader.pos < reader.len) reader.skipType(reader.uint32() & 7);
+              return {};
+            };
+            protocol[name] = Message;
+          }
+          publish('protocol', protocol);
+        } };
       });
     } };
   });

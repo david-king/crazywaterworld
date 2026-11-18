@@ -144,8 +144,8 @@ try {
   await check('新优先策略不绕过原生委任次数、汽油和时段限制', async () => {
     const f = warFixture(), s = warForgeSettings(); f.state.fleets.forEach(fleet => { fleet.autoFight.todayTimes = 0; });
     assert.equal((await warPlan(f, s)).actions.length, 0);
-    f.state.fleets.forEach(fleet => { fleet.autoFight.todayTimes = 4; }); s.cityWar.petrolReserve = 50000; assert.equal((await warPlan(f, s)).actions.length, 0);
-    s.cityWar.petrolReserve = 0; f.state.war.startTime += 7200; f.state.war.endTime += 7200; assert.equal((await warPlan(f, s)).actions.length, 0);
+    f.state.fleets.forEach(fleet => { fleet.autoFight.todayTimes = 4; }); f.state.fuel = 0; assert.equal((await warPlan(f, s)).actions.length, 0);
+    f.state.fuel = 50000; f.state.war.startTime += 7200; f.state.war.endTime += 7200; assert.equal((await warPlan(f, s)).actions.length, 0);
   });
 } finally {
   const report = { at: new Date().toISOString(), kind: '虚构受控数据，真实协议编解码；未连接游戏', passed: results.filter(x => x.passed).length, total: results.length, results };

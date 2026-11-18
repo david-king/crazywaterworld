@@ -317,7 +317,7 @@ export async function inspectHunt(client, config, player, enterMap = false) {
     const key = huntKey(session, ['fleet', world, fleet.buildingId, positions.map(p => [p.heroId, normalize(p.pos)]), formation?.presetId, normalize(formation?.petUid)]);
     const held = [...session.pending.values()].some(f => f.buildingId === fleet.buildingId);
     const reason = held ? '已派出或尚待确认' : !/^\d+远征船$/.test(fleet.buildingId) ? '无法确认远征舰队建筑' : !(building?.level > 0) ? '舰队建筑尚未建成' :
-      !ids.length ? '请先在「资源与玩法 → 活动 → 海盗首杀」查看并保存这支舰队的首次编队' : fleet.state !== 1 ? '舰队未闲置' :
+      !ids.length ? '请先在「活动 → 海盗首杀」查看并保存这支舰队的首次编队' : fleet.state !== 1 ? '舰队未闲置' :
       fleet.treasureLootUid || fleet.chipWar?.rewardTs || fleet.curGridIdx > 0 ? '舰队正在驻守地块或执行其他任务' :
       !(fleet.durability > 0) ? '舰队没有耐久，请先修理' : '';
     const number = /^([1-9]\d*)远征船$/.exec(fleet.buildingId)?.[1];
@@ -328,7 +328,7 @@ export async function inspectHunt(client, config, player, enterMap = false) {
   }
   if (!view.targets.length) view.reason ||= '地图上暂无可首杀的下一等级海盗';
   if (!view.fleets.length) view.reason ||= buildings.some(b => b.level > 0 && /^\d+远征船$/.test(b.buildingId))
-    ? '远征舰队已建成，世界地图尚未列出出征队伍，请在「资源与玩法 → 活动 → 海盗首杀」查看首次编队' : '尚无出征舰队，请先建成远征舰队并编入英雄';
+    ? '远征舰队已建成，世界地图尚未列出出征队伍，请在「活动 → 海盗首杀」查看首次编队' : '尚无出征舰队，请先建成远征舰队并编入英雄';
   return snapshot;
 }
 

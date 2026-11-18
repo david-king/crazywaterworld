@@ -228,6 +228,9 @@ label[for=gift-code-input] { display:block; margin-bottom:8px }
 .account-grid>.account-empty { grid-column:1 / -1 }
 .account-empty { display:grid; justify-items:center; gap:12px; padding:56px 24px; text-align:center }
 #account-add-dialog,#account-info-dialog { width:min(680px,calc(100vw - 32px)); max-width:none; padding:24px }
+#account-login-dialog { width:min(880px,calc(100vw - 32px)); max-width:none; padding:24px }
+#account-login-dialog[open] { grid-template-rows:auto minmax(0,1fr); overflow:hidden }
+#login-settings-root { min-width:0; min-height:0; overflow:auto; overscroll-behavior:contain }
 #account-export-dialog { width:min(480px,calc(100vw - 32px)); max-width:none; padding:24px }
 #account-export-dialog p { line-height:1.6; overflow-wrap:anywhere }
 .account-export-selection { display:flex; align-items:center; justify-content:space-between; flex-wrap:wrap; gap:8px }
@@ -262,7 +265,7 @@ label[for=gift-code-input] { display:block; margin-bottom:8px }
   .account-page-actions { gap:4px }
   .account-channel-grid { grid-template-columns:minmax(0,1fr) }
   .account-channel { min-height:88px }
-  #account-add-dialog,#account-info-dialog { padding:20px }
+  #account-add-dialog,#account-info-dialog,#account-login-dialog { padding:20px }
   #account-add-dialog[open] { gap:16px }
   .account-dialog-heading { gap:12px }
 }

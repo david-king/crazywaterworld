@@ -11,11 +11,13 @@ process.env.CW_CONFIG_PACK = path.join(directory, 'config.json');
 process.env.CW_RESOURCE_AUTO_UPDATE = '0';
 fs.writeFileSync(process.env.CW_CONFIG_PACK, JSON.stringify([[1, 'HeroCfg', { data: [
   { id: '瑞文', name: '骑士瑞文', quality: 'PURPLE', type: '英雄' },
+  { id: '波奇', name: '波奇', quality: 'PURPLE', type: '英雄' },
   { id: '训练目标', name: '训练木人', quality: 'PURPLE', type: 'NPC' },
-] }]]));
+] }], [2, 'BuildingUnlockCfg', { data: [1, 2, 3].map(id => ({ buildingType: '远征船', buildingId: id + '远征船' })) }]]));
 const { saveStore } = await import('../src/accounts.mjs');
 const { defaultSettings, saveAutomationSettings, loadAutomationSettings, settingsUiRules } = await import('../src/automation-settings.mjs');
 const { GameClient } = await import('../src/client.mjs');
+const { observeOwnedFleets } = await import('../src/fleet-catalog.mjs');
 const { createConsole } = await import('../src/server.mjs');
 let connections = 0;
 GameClient.prototype.connect = async () => { connections++; throw new Error('配置验收禁止连接游戏'); };
@@ -29,18 +31,26 @@ settings.heroes.enabled = true; settings.loop.heroes = false; settings.heroes.le
 settings.heroes.needsSelection = true;
 settings.antique.maxActions = 7; settings.antique.checkEverySeconds = 90;
 settings.museum.runEnabled = true; settings.museum.enabled = settings.museum.upgrade = false;
-settings.schedule.museumCollect = settings.schedule.museumExplore = false;
+settings.lineups.presets = [
+  { id: 'boss-first', name: '世界Boss一队', formation: { presetId: 1, heroPositions: [{ heroId: '瑞文', pos: { x: 4, y: 4 } }], petUid: '0' } },
+  { id: 'boss-second', name: '世界Boss二队', formation: { presetId: 1, heroPositions: [{ heroId: '波奇', pos: { x: 4, y: 4 } }], petUid: '0' } },
+];
 saveAutomationSettings('config-a', settings, { revision: 0 });
 const otherSettings = defaultSettings();
 otherSettings.heroes.heroIds = ['训练目标'];
 saveAutomationSettings('config-b', otherSettings, { revision: 0 });
 const otherBefore = loadAutomationSettings('config-b');
 const output = path.resolve('output/unified-config'); fs.mkdirSync(output, { recursive: true });
+const museumOutput = path.resolve('output/playwright/unified-config'); fs.mkdirSync(museumOutput, { recursive: true });
 const app = createConsole({ port: 0, protocol: {} });
 let browser;
 const errors = [];
 try {
   const base = await app.listen();
+  await fetch(base + '/api/settings?account=config-a');
+  const bossSession = app.sessions.get('config-a');
+  bossSession.player = { playerId: 123, worldId: 1001001 };
+  observeOwnedFleets(bossSession, [1, 2, 3].map(id => ({ buildingId: id + '远征船' })), { complete: true });
   const executablePath = process.env.CW_BROWSER_TEST_EXECUTABLE || [
     'C:/Program Files/Google/Chrome/Application/chrome.exe',
     'C:/Program Files (x86)/Microsoft/Edge/Application/msedge.exe',
@@ -72,15 +82,92 @@ try {
     assert.equal(await page.locator('#config-group-' + control.configTarget + ' ' + selector).count(), 1, control.key + ' 配置归属');
   }
   assert.equal(await page.locator('[data-config-key="loop.heroes"]').count(), 0);
-  for (const key of ['guildAidCollect', 'guildAidHelp']) {
-    assert.equal(await page.locator('[data-config-key="schedule.' + key + '"]').count(), 0, '退役互助开关不再显示');
+  for (const key of ['guildAidCollect', 'guildAidHelp', 'petCollect', 'petBreed', 'museumCollect', 'museumExplore', 'museumRevenue', 'museumAchievements', 'radarAuto', 'radarRepair', 'worldBossDamage']) {
+    assert.equal(await page.locator('[data-config-key="schedule.' + key + '"]').count(), 0, '退役开关不再显示：' + key);
   }
+  assert.equal(await page.locator('#config-root').getByText(/沿用原规则|旧规则/).count(), 0, '实际配置页面没有兼容规则文案');
   for (const key of ['alliance.mutual', 'alliance.autoHelp', 'alliance.autoAsk']) {
     assert.equal(await page.locator('#config-group-alliance [data-config-key="' + key + '"]').count(), 1, '互助只保留统一入口');
   }
   assert.equal(await page.locator('#config-root').getByRole('button', { name: /重新载入/ }).count(), 0);
   assert.equal(await page.locator('#config-root').getByText(/上次保存/).count(), 0);
   console.log('通过：30个模块开关各自归位，旧导航与跨页跳转移除');
+
+  await group('worldBoss');
+  const bossReward = page.locator('#config-field-schedule-worldBossRewards');
+  assert.equal(await page.locator('[data-config-key="schedule.worldBossRewards"]').count(), 1);
+  assert.equal(await page.locator('#config-group-worldBoss [data-config-key="schedule.worldBossRewards"]').count(), 1);
+  assert.equal(await page.locator('#config-group-worldBoss').getByText('每日首战自动派遣', { exact: true }).count(), 1);
+  assert.equal(await page.locator('#config-field-worldBoss-enabled').getAttribute('aria-checked'), 'false');
+  await bossReward.click(); await saved();
+  assert.equal(loadAutomationSettings('config-a').settings.schedule.worldBossRewards, true);
+  assert.equal(loadAutomationSettings('config-a').settings.worldBoss.enabled, false);
+  await page.reload(); await openConfig(); await group('worldBoss');
+  assert.equal(await bossReward.getAttribute('aria-checked'), 'true');
+  await page.screenshot({ path: path.join(museumOutput, 'world-boss-rewards.png'), animations: 'disabled' });
+  await bossReward.click(); await saved();
+  assert.equal(loadAutomationSettings('config-a').settings.schedule.worldBossRewards, false);
+  assert(!Object.hasOwn(loadAutomationSettings('config-a').settings.schedule, 'worldBossDamage'));
+  await group('daily-challenges');
+  assert.deepEqual(await page.locator('#config-group-daily-challenges [data-config-key]').evaluateAll(nodes => nodes.map(node => node.dataset.configKey)),
+    ['schedule.leagueCollect', 'schedule.leaguePassRewards']);
+  console.log('通过：世界Boss只有一个领奖入口，自动保存及刷新保留选择，首战派遣保持独立');
+
+  await group('worldBoss');
+  const bossFleets = page.locator('#config-field-worldBoss-fleetIds');
+  const bossLineups = page.locator('#config-field-worldBoss-fleetPresets');
+  const bossDisclosure = page.getByRole('button', { name: /^首战参与舰队，(?:展开|收起)下级设置$/ });
+  const fleetLineup = id => bossLineups.locator('[data-lineup-binding="fleet:' + id + '远征船"]');
+  assert.equal(await bossDisclosure.getAttribute('aria-expanded'), 'false');
+  assert.equal(await bossLineups.isVisible(), false, '逐队阵容设置默认收起');
+  await bossDisclosure.click();
+  assert.equal(await bossDisclosure.getAttribute('aria-expanded'), 'true');
+  assert.equal(await bossLineups.getByText('请先勾选参与舰队以逐队指定阵容。', { exact: true }).isVisible(), true);
+  await bossFleets.locator('summary').click();
+  await bossFleets.getByRole('button', { name: '全选首战参与舰队', exact: true }).click();
+  await bossFleets.locator('summary').click(); await saved();
+  assert.deepEqual(loadAutomationSettings('config-a').settings.worldBoss.fleetIds, ['1远征船', '2远征船', '3远征船']);
+  assert.equal(await bossLineups.locator('select:visible').count(), 3);
+  await fleetLineup(1).selectOption('boss-first');
+  await fleetLineup(2).selectOption('boss-second'); await saved();
+  assert.equal(await fleetLineup(3).inputValue(), '', '未指定的舰队沿用当前阵容');
+  const expectedFleetPresets = [{ buildingId: '1远征船', presetId: 'boss-first' }, { buildingId: '2远征船', presetId: 'boss-second' }];
+  assert.deepEqual(loadAutomationSettings('config-a').settings.worldBoss.fleetPresets, expectedFleetPresets);
+  const beforeCollapse = loadAutomationSettings('config-a');
+  await bossDisclosure.click();
+  assert.equal(await bossDisclosure.getAttribute('aria-expanded'), 'false');
+  assert.equal(await bossLineups.isVisible(), false);
+  assert.deepEqual(loadAutomationSettings('config-a'), beforeCollapse, '收起仅改变显示，不保存或清空舰队与阵容');
+  await bossDisclosure.click();
+  assert.equal(await fleetLineup(1).inputValue(), 'boss-first');
+  assert.equal(await fleetLineup(2).inputValue(), 'boss-second');
+  await bossFleets.locator('summary').click();
+  await bossFleets.getByRole('checkbox', { name: '远征舰队 1 队', exact: true }).uncheck(); await saved();
+  assert.equal(await fleetLineup(1).isVisible(), false);
+  assert.equal(await fleetLineup(2).inputValue(), 'boss-second');
+  await bossFleets.getByRole('checkbox', { name: '远征舰队 1 队', exact: true }).check(); await saved();
+  assert.equal(await fleetLineup(1).inputValue(), 'boss-first', '重新勾选恢复此前阵容选择');
+  await bossFleets.getByRole('button', { name: '清空选择', exact: true }).click(); await saved();
+  assert.deepEqual(loadAutomationSettings('config-a').settings.worldBoss.fleetIds, []);
+  assert.deepEqual(loadAutomationSettings('config-a').settings.worldBoss.fleetPresets, expectedFleetPresets);
+  assert.match(await bossFleets.locator('summary').textContent(), /自动选一支空闲舰队/);
+  assert.equal(await bossLineups.getByText('请先勾选参与舰队以逐队指定阵容。', { exact: true }).isVisible(), true);
+  assert.equal(await bossLineups.locator('select:visible').count(), 0);
+  await bossFleets.getByRole('button', { name: '全选首战参与舰队', exact: true }).click();
+  await bossFleets.locator('summary').click(); await saved();
+  await page.reload(); await openConfig(); await group('worldBoss');
+  assert.equal(await bossDisclosure.getAttribute('aria-expanded'), 'false', '重新打开页面默认收起');
+  assert.equal(await bossLineups.isVisible(), false);
+  await page.screenshot({ path: path.join(museumOutput, 'world-boss-collapsed.png'), animations: 'disabled' });
+  await bossDisclosure.click();
+  assert.equal(await fleetLineup(1).inputValue(), 'boss-first');
+  assert.equal(await fleetLineup(2).inputValue(), 'boss-second');
+  assert.equal(await fleetLineup(3).inputValue(), '');
+  assert.equal(await page.locator('#config-field-worldBoss-enabled').getAttribute('aria-checked'), 'false');
+  await page.screenshot({ path: path.join(museumOutput, 'world-boss-fleets.png'), animations: 'disabled' });
+  await page.screenshot({ path: path.join(museumOutput, 'world-boss-expanded.png'), animations: 'disabled' });
+  console.log('通过：世界Boss阵容默认收起且可展开，收起保留选择，舰队全选、逐队选阵容及刷新保存正确');
+  await group('building');
 
   await page.locator('[data-config-family=production]').click();
   const factory = page.locator('#config-field-factory-enabled');
@@ -146,7 +233,7 @@ try {
   assert(newActions.every(action => growth[action])); assert.equal(growth.targetLevel, 35);
   await picker.locator('summary').click(); await picker.getByRole('button', { name: '清空选择' }).click();
   await picker.locator('summary').click(); await saved();
-  assert.equal(await picker.locator('summary').textContent(), '留空则不处理任何英雄');
+  assert.equal(await picker.locator('summary').textContent(), '留空则暂停培养，不影响技能展示领奖');
   assert.deepEqual(loadAutomationSettings('config-a').settings.heroes.heroIds, []);
   console.log('通过：资源页移除手动养成和远征舰队编队并保留其余功能，挂机配置仍可按名称选英雄、保存独立动作及目标、清空名单');
   const hero = page.locator('#config-field-heroes-enabled');
@@ -159,9 +246,89 @@ try {
   assert.equal(stored.heroes.level, false); assert.equal(stored.heroes.star, true);
   await group('museum');
   assert.match(await page.locator('#config-field-museum-runEnabled-note').textContent(), /尚未选择执行动作/);
-  await page.locator('#config-field-museum-enabled').click(); await saved();
+  const museum = page.locator('#config-group-museum');
+  const autoExplore = museum.locator('#config-field-museum-enabled');
+  for (const key of ['upgrade', 'revenue', 'achievements', 'display']) {
+    const action = museum.locator('#config-field-museum-' + key);
+    assert(await action.isVisible(), key + ' 在同组直接展示');
+    assert.equal(await action.getAttribute('aria-checked'), 'false');
+    await action.click(); await saved();
+    assert.equal(loadAutomationSettings('config-a').settings.museum[key], true);
+    assert.equal(loadAutomationSettings('config-a').settings.museum.enabled, false, key + ' 不依赖自动探宝');
+    assert.equal(await page.locator('#config-field-museum-runEnabled-note').isVisible(), false);
+    await action.click(); await saved();
+  }
+  assert.equal(await museum.locator('#config-field-museum-claim, #config-field-museum-explore').count(), 0, '领奖和派遣使用同一个开关');
+  assert.equal(await museum.getByRole('switch', { name: '自动探宝', exact: true }).count(), 1);
+  assert.equal(await museum.locator('#config-field-museum-factor').isVisible(), false, '探宝关闭时参数隐藏');
+  await autoExplore.click(); await saved();
   assert.equal(await page.locator('#config-field-museum-runEnabled-note').isVisible(), false);
-  console.log('通过：英雄组合主控同时保存两层状态，博物馆未配置提示及时更新');
+  assert.equal(loadAutomationSettings('config-a').settings.museum.enabled, true);
+  assert.equal(await museum.locator('#config-field-museum-factor').isVisible(), false, '开启探宝后参数默认折叠');
+  await museum.getByRole('button', { name: '自动探宝，展开下级设置', exact: true }).click();
+  for (const key of ['factorMode', 'factor', 'maxDispatches', 'maps', 'useGuide']) {
+    assert.equal(await museum.locator('#config-field-museum-' + key).isVisible(), true, key + ' 参数直接随自动探宝展开');
+  }
+  await museum.locator('#config-field-museum-factor').selectOption('2');
+  await museum.locator('#config-field-museum-maxDispatches').fill('1'); await saved();
+  assert.equal(loadAutomationSettings('config-a').settings.museum.factor, 2, '常规倍率保存数字');
+  await museum.locator('#config-field-museum-materialFactor').click();
+  await museum.getByRole('button', { name: '根据材料调整倍数，展开下级设置', exact: true }).click();
+  await museum.locator('#config-field-museum-matchedFactor').selectOption('3'); await saved();
+  assert.equal(loadAutomationSettings('config-a').settings.museum.matchedFactor, 3, '命中倍率保存数字');
+  await museum.locator('#config-field-museum-materialFactor').click(); await saved();
+  await museum.locator('#config-field-museum-factorMode').selectOption('recommended'); await saved();
+  assert.equal(loadAutomationSettings('config-a').settings.museum.factorMode, 'recommended');
+  assert.equal(await museum.locator('#config-field-museum-factor').isVisible(), false);
+  assert.equal(await museum.locator('#config-field-museum-materialFactor').isVisible(), false);
+  assert.equal(await museum.locator('#config-field-museum-fullRecommendedFactor').inputValue(), '3');
+  assert.equal(await museum.locator('#config-field-museum-partialRecommendedFactor').inputValue(), '2');
+  const fallback = museum.locator('#config-field-museum-noRecommendedFallback');
+  const fallbackFactor = museum.locator('#config-field-museum-noRecommendedFactor');
+  assert.equal(await fallback.getAttribute('aria-checked'), 'false');
+  assert.equal(await fallbackFactor.isVisible(), false);
+  await fallback.click(); await saved();
+  await museum.getByRole('button', { name: '无推荐英雄时兜底，展开下级设置', exact: true }).click();
+  assert.equal(await fallbackFactor.inputValue(), '1');
+  await museum.screenshot({ path: path.join(museumOutput, 'museum-recommended-desktop.png'), animations: 'disabled' });
+  await museum.locator('#config-field-museum-fullRecommendedFactor').selectOption('2');
+  await museum.locator('#config-field-museum-partialRecommendedFactor').selectOption('1');
+  await fallbackFactor.selectOption('3'); await saved();
+  let factors = loadAutomationSettings('config-a').settings.museum;
+  assert.equal(factors.fullRecommendedFactor, 2); assert.equal(factors.partialRecommendedFactor, 1); assert.equal(factors.noRecommendedFactor, 3);
+  await fallback.click(); await saved();
+  assert.equal(await fallbackFactor.isVisible(), false);
+  assert.equal(loadAutomationSettings('config-a').settings.museum.noRecommendedFactor, 3, '关闭兜底保留倍率');
+  assert.equal(await museum.locator('#config-field-museum-maps').isVisible(), true);
+  await museum.locator('#config-field-museum-factorMode').selectOption('materials'); await saved();
+  assert.equal(await museum.locator('#config-field-museum-factor').inputValue(), '2');
+  assert.equal(await museum.locator('#config-field-museum-fullRecommendedFactor').isVisible(), false);
+  assert.equal(await fallback.isVisible(), false); assert.equal(await fallbackFactor.isVisible(), false);
+  assert.equal(loadAutomationSettings('config-a').settings.museum.fullRecommendedFactor, 2);
+  assert.equal(loadAutomationSettings('config-a').settings.museum.partialRecommendedFactor, 1);
+  await museum.screenshot({ path: path.join(museumOutput, 'museum-actions-desktop.png'), animations: 'disabled' });
+  await autoExplore.click(); await saved();
+  assert.equal(await museum.locator('#config-field-museum-factor').isVisible(), false);
+  assert.equal(loadAutomationSettings('config-a').settings.museum.factor, 2, '暂停自动探宝保留倍数');
+  assert.equal(loadAutomationSettings('config-a').settings.museum.enabled, false);
+  await page.reload(); await openConfig(); await group('museum');
+  assert.equal(await autoExplore.getAttribute('aria-checked'), 'false');
+  assert.equal(await museum.locator('#config-field-museum-factor').isVisible(), false);
+  await autoExplore.click(); await saved();
+  await museum.getByRole('button', { name: '自动探宝，展开下级设置', exact: true }).click();
+  assert.equal(await museum.locator('#config-field-museum-factor').inputValue(), '2');
+  const savedMuseum = loadAutomationSettings('config-a').settings.museum;
+  assert.equal(savedMuseum.enabled, true);
+  assert(!Object.hasOwn(savedMuseum, 'claim') && !Object.hasOwn(savedMuseum, 'explore'), '保存后没有拆分动作字段');
+  await museum.locator('#config-field-museum-factorMode').selectOption('recommended'); await saved();
+  assert.equal(await museum.locator('#config-field-museum-fullRecommendedFactor').inputValue(), '2');
+  assert.equal(await museum.locator('#config-field-museum-partialRecommendedFactor').inputValue(), '1');
+  assert.equal(await fallback.getAttribute('aria-checked'), 'false');
+  await fallback.click(); await saved();
+  await museum.getByRole('button', { name: '无推荐英雄时兜底，展开下级设置', exact: true }).click();
+  assert.equal(await fallbackFactor.inputValue(), '3');
+  console.log('通过：兼容开关和拆分动作开关移除，自动探宝一个开关控制领奖及派遣，参数直接展开且暂停刷新保留');
+  console.log('博物馆截图：' + path.join(museumOutput, 'museum-actions-desktop.png'));
 
   await page.locator('[data-config-tab=antique]').click();
   const antiques = page.locator('#config-group-antique');

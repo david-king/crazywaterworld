@@ -257,7 +257,7 @@ try {
       }
       if (condition === 'personal') f.state.ranks[81] = [{ playerId: f.player.playerId, nickname: f.player.nickname, guildIdx: 7, progress: 20 }];
       if (condition === 'progress') target.progress = 90;
-      if (condition === 'fuel') p.petrolReserve = f.state.fuel;
+      if (condition === 'fuel') f.state.fuel = 499;
       if (condition === 'limit') { p.dailyDispatchLimit = 1; options.usage = { counters: { treasureDispatches: 1 } }; }
       if (condition === 'quota') f.state.stats.todayRewardTimes = null;
       if (condition === 'unknown') f.client.onRequest = name => name === 'TreasureLootRankRequest' ? {} : undefined;
@@ -434,9 +434,10 @@ try {
     assert(plan.fleets.every(fleet => fleet.state === '空闲' && !fleet.reason));
   });
 
-  await check('汽油共同预算、每日次数和游戏领奖上限同时限制计划', async () => {
+  await check('实际汽油库存、每日次数和游戏领奖上限限制计划', async () => {
     const f = treasureFixture(), s = treasureSettings(); f.state.fuel = 1100; s.treasure.petrolReserve = 600;
-    assert.equal((await preview(f, s)).actions.length, 1);
+    assert.equal((await preview(f, s)).actions.length, 2);
+    f.state.fuel = 999; assert.equal((await preview(f, s)).actions.length, 1);
     s.treasure.petrolReserve = 0; s.treasure.dailyDispatchLimit = 2;
     assert.equal((await preview(f, s, { usage: { counters: { treasureDispatches: 1 } } })).actions.length, 1);
     f.state.stats.todayRewardTimes = 3; assert.equal((await preview(f, s)).actions.length, 0);
@@ -529,7 +530,7 @@ try {
     const file = path.join(directory, 'unknown-midnight.json');
     let usage = createUsageLedger('测试账号', { file, now: () => now });
     const ticket = usage.reserve({ treasureDispatches: 1, treasurePetrol: 500 }, {}, {}, { uniqueKey: 'treasure:1001001:71:1' });
-    const f = treasureFixture(), s = treasureSettings(); f.state.fuel = 1000; s.treasure.petrolReserve = 500;
+    const f = treasureFixture(), s = treasureSettings(); f.state.fuel = 500; s.treasure.petrolReserve = 500;
     const checkPlan = () => preview(f, s, { usage: usage.snapshot(), keys: usage.keyRecords(), pendingFuel: usage.pendingCounters().treasurePetrol ?? 0 });
     assert.equal((await checkPlan()).actions.length, 0);
     now += 2000; usage = createUsageLedger('测试账号', { file, now: () => now });
@@ -563,13 +564,14 @@ try {
   });
 
   await check('真实库存暂未回写时，同轮预算仍保留已派出舰队的费用', async () => {
-    const f = treasureFixture(); let s = treasureSettings(); f.state.fuel = 1000;
+    const f = treasureFixture(), usage = ledger(); let s = treasureSettings(); f.state.fuel = 1000;
     f.client.onSend = (_, body) => {
       f.state.fleets.find(row => row.buildingId === body.fleetBuildingIds[0]).treasureLootUid = body.uid;
-      s = structuredClone(s); s.treasure.petrolReserve = 400;
+      s = structuredClone(s); usage.reserve({ radarPetrol: 1 });
       return {};
     };
-    await run(f, s, ledger(), { getSettings: () => s }); assert.equal(f.client.writes.length, 1);
+    await run(f, s, usage, { getSettings: () => s }); assert.equal(f.client.writes.length, 1);
+    assert.equal(usage.confirmedCounters().treasurePetrol, 500); assert.equal(usage.pendingCounters().radarPetrol, 1);
   });
 
   await check('世界配置预览与保存不出征，按账号隔离并兼容原接口', async () => {
@@ -582,14 +584,19 @@ try {
     try {
       const original = fs.readFileSync(path.join(directory, 'accounts.json'));
       const initial = (await api('巨轮甲', '/api/settings')).body;
-      const s = initial.settings; Object.assign(s.treasure, { enabled: true, follow: true, followNames: ['同行者甲'], fleetIds: ['1远征船'], minDurabilityPercent: 80 });
+      const s = initial.settings; Object.assign(s.treasure, { enabled: true, follow: true, followMode: 'eachTime', repeatAttack: true, followNames: ['同行者甲'], fleetIds: ['1远征船'], minDurabilityPercent: 80 });
       const saved = await api('巨轮甲', '/api/settings', { settings: s, revision: initial.revision, baseRevision: initial.baseRevision }); assert.equal(saved.status, 200);
+      assert.equal((await api('巨轮甲', '/api/settings')).body.settings.treasure.followMode, 'eachTime');
       assert.equal((await api('巨轮乙', '/api/settings')).body.settings.treasure.enabled, false);
+      assert.equal((await api('巨轮乙', '/api/settings')).body.settings.treasure.followMode, 'trigger');
       const f = treasureFixture(), session = app.sessions.get('巨轮甲'); session.client = f.client; session.player = f.player; session.paused = false;
       const response = await api('巨轮甲', '/api/settings/preview', { settings: s, category: 'world' });
       assert.equal(response.status, 200); assert.equal(response.body.scopeLabel, '万吨巨轮'); assert.equal(response.body.actions[0].kind, 'treasureDispatch');
       assert.deepEqual(f.client.writes, []); assert.equal(session.loop.running, false);
-      assert.deepEqual(fs.readFileSync(path.join(directory, 'accounts.json')), original);
+      const expectedAccounts = JSON.parse(original);
+      expectedAccounts.accounts.find(account => account.id === '巨轮甲').automation.settingsConfigured = true;
+      assert.deepEqual(JSON.parse(fs.readFileSync(path.join(directory, 'accounts.json'))), expectedAccounts,
+        '保存仅登记本账号已配置，不修改凭据、其他账号或挂机开关');
       assert.deepEqual(Object.keys(exportAutomationSettings(s)), ['format', 'version', 'settings']);
       Object.assign(s.treasure, { fallbackEnabled: true, fallbackAfter: '00:00', fallbackTargetRewards: 1, fleetIds: ['1远征船', '2远征船'] });
       f.state.targets = [{ ...f.state.targets[1], color: 4 }];

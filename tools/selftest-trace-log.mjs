@@ -11,6 +11,12 @@ import { classifyLog } from '../src/log-categories.mjs';
 import { prepareAd } from '../src/ad-shop.mjs';
 
 const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'cw-trace-log-'));
+const douyinTrace = JSON.parse(traceJson({ sessionid: 'fixture-web-session', hostSessionId: 'fixture-host-session',
+  anonymousCode: 'fixture-anonymous-code', cloudCode: 'fixture-cloud-code', code: 'fixture-login-code',
+  qrImage: 'data:image/png;base64,fixture-image', error: { code: 21101 },
+  message: 'sessionid=fixture-session-text anonymousCode=fixture-anonymous-text' }));
+assert.equal(douyinTrace.error.code, 21101, '数值错误码保留以便诊断');
+assert.doesNotMatch(JSON.stringify(douyinTrace), /fixture-|data:image/);
 const file = path.join(dir, 'protocol.log');
 function diagnosticFrame(name, size = 4) {
   const frame = Buffer.alloc(11 + name.length + size, 0);

@@ -1,6 +1,6 @@
 import { toNumber } from './client.mjs';
 import { hasOtherFleetReservations, isFleetReserved, registerFleetReservations } from './fleet-reservations.mjs';
-import { freeFleet, normalizeFleet, radarFuelReserve } from './radar.mjs';
+import { freeFleet, normalizeFleet } from './radar.mjs';
 import { gameplayOpenDay, worldOpenDays } from './extra-rewards.mjs';
 import {fleetRecordReason,legacyFleetReservationReason} from './fleet-availability.mjs';
 import { recordsInWorld, settleFleetSnapshot, treasureSpeedConfirmed as speedConfirmed } from './fleet-settlement.mjs';
@@ -45,7 +45,8 @@ const canRepeat = (record, fleet, preferences) => record?.confirmed === true && 
 const confirmedFollow = record => record?.confirmed === true && !record.expired &&
   ['treasureDispatch', 'treasureFollow'].includes(record.details?.kind) && ['departing', 'defending'].includes(record.details.followPhase);
 function repeatFollowRecord(keys, snapshot, target, fleet, preferences) {
-  if (!preferences.follow || !preferences.repeatAttack || !homeIdle(fleet)) return null;
+  // 每次重新跟随时，只接受 following() 本轮匹配到的行军或守军，不沿用历史确认。
+  if (!preferences.follow || !preferences.repeatAttack || preferences.followMode === 'eachTime' || !homeIdle(fleet)) return null;
   return [keys[treasureFollowKey(snapshot.worldId, target.uid, fleet.buildingId)],
     keys[treasureDispatchKey(snapshot.worldId, target.uid, fleet.buildingId)]].find(confirmedFollow) ?? null;
 }
@@ -359,9 +360,9 @@ export function planTreasureLoot(snapshot, config, settings, { usage = { counter
   }
   let fuel = snapshot.fuel - pendingFuel, plannedDiamonds = 0;
   if (!integer(pendingFuel)) { plan.notes.push('未确认派遣的汽油记录异常，停止派遣'); return plan; }
-  if (pendingFuel > 0) plan.notes.push(`有 ${pendingFuel} 汽油的出征或维修结果待确认，暂保留同额预算`);
-  let count = usage.counters?.treasureDispatches ?? 0, repairPetrol = usage.counters?.treasureRepairPetrol ?? 0;
-  if (!integer(count) || !integer(repairPetrol)) { plan.notes.push('今日出征或维修用量记录异常，停止派遣'); return plan; }
+  if (pendingFuel > 0) plan.notes.push(`有 ${pendingFuel} 汽油的出征或维修结果待确认，暂扣除同额可用库存`);
+  let count = usage.counters?.treasureDispatches ?? 0;
+  if (!integer(count)) { plan.notes.push('今日出征用量记录异常，停止派遣'); return plan; }
   for (const buildingId of p.fleetIds) {
     const fleet = snapshot.fleets.find(row => row.buildingId === buildingId);
     if (!fleet) continue;
@@ -387,7 +388,7 @@ export function planTreasureLoot(snapshot, config, settings, { usage = { counter
     if (!reason && repairRecord && (!repairRecord.confirmed || !homeIdle(fleet))) reason = '前次巨轮维修仍在进行或结果待确认';
     if (!reason) reason = fleetRecordReason(keys,buildingId);
     if (!reason && p.dailyDispatchLimit > 0 && count >= p.dailyDispatchLimit) reason = '已达到每日出征上限';
-    if (!reason && fuel - snapshot.fuelPerFleet < p.petrolReserve) reason = '出征后汽油会低于保留量';
+    if (!reason && fuel < snapshot.fuelPerFleet) reason = '出征汽油不足';
     if (reason) { const view = plan.fleets.find(row => row.name === fleetName(buildingId)); if (view) view.reason = reason; plan.notes.push(fleetName(buildingId) + '：' + reason); continue; }
     const chosen = candidates.find(row => {
       const record = keys[treasureDispatchKey(snapshot.worldId, row.target.uid, buildingId)];
@@ -406,9 +407,8 @@ export function planTreasureLoot(snapshot, config, settings, { usage = { counter
       let repairReason = '';
       if (!(Number.isFinite(quote?.unitRepairCost) && quote.unitRepairCost > 0 && Number.isFinite(quote?.unitRepairTime) && quote.unitRepairTime > 0)) repairReason = '未取得有效普通维修报价';
       const cost = Math.ceil((fleet.maxDura - fleet.durability) * quote?.unitRepairCost);
-      if (!repairReason && (!integer(cost, 1) || p.maxRepairCost > 0 && cost > p.maxRepairCost)) repairReason = '完整维修费用超过单次上限';
-      if (!repairReason && p.dailyRepairPetrolLimit > 0 && repairPetrol + cost > p.dailyRepairPetrolLimit) repairReason = '会超过今日巨轮维修汽油上限';
-      if (!repairReason && fuel - cost - snapshot.fuelPerFleet < p.petrolReserve) repairReason = '维修后不足以保留汽油并完成下一次出征';
+      if (!repairReason && !integer(cost, 1)) repairReason = '完整维修费用未确认';
+      if (!repairReason && fuel < cost + snapshot.fuelPerFleet) repairReason = '汽油不足以完成维修和下一次出征';
       const view = plan.fleets.find(row => row.name === fleetName(buildingId));
       if (repairReason) { if (view) view.reason = repairReason; plan.notes.push(fleetName(buildingId) + '：' + repairReason); continue; }
       if (view) view.reason = '先普通维修，结束后重新检查货轮再派遣';
@@ -417,7 +417,7 @@ export function planTreasureLoot(snapshot, config, settings, { usage = { counter
         followName: follow?.name ?? null, followPlayerId: follow?.playerId ?? null,followPhase:follow?.phase??null,followDepartedAt:follow?.departedAt??null,followSeenAt:follow?.seenAt??null,
         uniqueKey: treasureRepairKey(snapshot.worldId, buildingId), costs: [{ id: '汽油', num: cost }],
         label: `${fleetName(buildingId)}普通维修至满耐久，完成后重新检查货轮` });
-      fuel -= cost + snapshot.fuelPerFleet; repairPetrol += cost; count++;
+      fuel -= cost + snapshot.fuelPerFleet; count++;
       rewardTargets.add(target.uid);
       continue;
     }
@@ -470,7 +470,7 @@ export async function runTreasureLoot(client, protocol, config, player, { getSet
     const snapshot = await readTreasureLoot(client, protocol, config, player, { preferences: getSettings().treasure });
     if (integer(petrolCeiling)) snapshot.fuel = Math.min(snapshot.fuel, petrolCeiling);
     reconcileKeys(snapshot, ledger, baseline);
-    const pendingFuel = () => { const counters = ledger.pendingCounters?.() ?? {}; return (counters.treasurePetrol ?? 0) + (counters.cityWarPetrol ?? 0) + (counters.piratePetrol ?? 0) + (counters.radarPetrol ?? 0) + (counters.worldBossPetrol ?? 0) + (counters.siliconPetrol ?? 0); };
+    const pendingFuel = () => { const counters = ledger.pendingCounters?.() ?? {}; return (counters.treasurePetrol ?? 0) + (counters.cityWarPetrol ?? 0) + (counters.piratePetrol ?? 0) + (counters.radarPetrol ?? 0) + (counters.worldBossPetrol ?? 0) + (counters.siliconPetrol ?? 0) + (counters.resourceFieldPetrol ?? 0); };
     const unavailableFleets = () => Object.fromEntries(getSettings().treasure.fleetIds.map(id => [id,
       legacyFleetReservationReason(client, id) || (!canUseFleet(id) ? '此舰队已预留给其他任务' : '')]));
     const acceleratedFleetIds = [];
@@ -532,7 +532,7 @@ export async function runTreasureLoot(client, protocol, config, player, { getSet
       }
       const repair = step.kind === 'treasureRepair', speed = step.kind === 'treasureSpeed';
       const limits = speed ? { diamonds: current.resources.diamondDailyLimit, treasureDiamonds: current.treasure.dailyDiamondLimit }
-        : repair ? { treasureRepairPetrol: current.treasure.dailyRepairPetrolLimit || undefined } : current.treasure.dailyDispatchLimit > 0 ? { treasureDispatches: current.treasure.dailyDispatchLimit } : {};
+        : !repair && current.treasure.dailyDispatchLimit > 0 ? { treasureDispatches: current.treasure.dailyDispatchLimit } : {};
       const counters = speed ? { diamonds: step.costs[0].num, treasureDiamonds: step.costs[0].num }
         : repair ? { treasureRepairs: 1, treasureRepairPetrol: step.costs[0].num, treasurePetrol: step.costs[0].num } : { treasureDispatches: 1, treasurePetrol: step.costs[0].num };
       // 直到实际准备再次派遣才换锁，维修或跳过检查不能抹掉已参与记录。
@@ -674,7 +674,7 @@ export async function serviceTreasureLoot(client, config, { player, protocol, ge
     if (out + stats.todayRewardTimes >= limit) { later(600); return skip('已派出的舰队足够领完今日奖励次数'); }
     const cost = legacyParam(config, 'WorldParamCfg', '进攻宝藏消耗汽油');
     if (!(cost > 0)) throw new Error('缺少宝藏汽油消耗配置');
-    if (fuel - cost < radarFuelReserve) { later(600); return skip('派遣后需保留 ' + radarFuelReserve + ' 汽油，当前 ' + fuel); }
+    if (fuel < cost) { later(600); return skip('派遣需要 ' + cost + ' 汽油，当前 ' + fuel); }
     const treasures = (await client.request('TreasureLootListRequest', {}, 'TreasureLootListResponse'))?.treasure;
     if (!Array.isArray(treasures)) throw new Error('未能读取宝藏列表');
     const types = treasureTypes(protocol, config);

@@ -6,7 +6,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
 import { EventEmitter } from 'node:events';
-import { defaultSettings, validateSettings, saveAutomationSettings, loadAutomationSettings, exportAutomationSettings, importAutomationSettings, createUsageLedger, beijingDay, nativeTaskValues, applyNativeTask, settingsFromNative, settingsUiRules } from '../src/automation-settings.mjs';
+import { SETTINGS_SCHEMA_VERSION, defaultSettings, validateSettings, saveAutomationSettings, loadAutomationSettings, exportAutomationSettings, importAutomationSettings, createUsageLedger, beijingDay, nativeTaskValues, applyNativeTask, settingsFromNative, settingsUiRules } from '../src/automation-settings.mjs';
 import { createActionGuard, budgetPreview, exactAutomationId, automationWireId } from '../src/automation-policy.mjs';
 import { planWorld, runWorld } from '../src/world.mjs';
 import { planBaseAutomation, runBaseAutomation, watchBasePushes, gameSeason, previewNativeAutomation } from '../src/base-automation.mjs';
@@ -14,7 +14,7 @@ import { planHeroes } from '../src/heroes.mjs';
 import { DAILY_DRIVERS, runDailies } from '../src/dailies.mjs';
 import { serviceCargo } from '../src/cargo.mjs';
 import { runLoop } from '../src/loop.mjs';
-import { retiredAutomationTasks, taskSettings } from '../src/automation.mjs';
+import { retiredAutomationTasks, migratedAutomationTasks, taskSettings } from '../src/automation.mjs';
 
 const parent = path.join(os.tmpdir(),'cw-parameter-test-runs');
 fs.mkdirSync(parent, { recursive: true });
@@ -81,6 +81,73 @@ try {
     assert.throws(() => importAutomationSettings({ ...document, accounts: [] }), /不能包含账号或凭据/);
     const changed = applyNativeTask(initial, 'collect', false); assert.equal(changed.building.collect, false); assert.equal(changed.factory.gain, false);
     assert.equal(nativeTaskValues(changed, {}).collect, false);
+  });
+
+  await check('装备领取与续产独立保存，原生模式不要求工具配方或分解品质', () => {
+    const settings = defaultSettings();
+    assert.equal(settings.forge.nativeAuto, false);
+    assert.equal(settings.forge.collect, true);
+    assert.equal(settings.forge.craft, true);
+    Object.assign(settings.forge, { enabled: true, buildingIds: ['1装备厂'], craft: false });
+    const claimOnly = validateSettings(settings);
+    assert.deepEqual(claimOnly.forge.recipeIds, []);
+    const file = path.join(directory, 'forge-modes.json');
+    saveAutomationSettings('forge', claimOnly, { file, revision: 0 });
+    assert.deepEqual(loadAutomationSettings('forge', { file }).settings.forge, claimOnly.forge);
+    settings.forge.craft = true;
+    assert.throws(() => validateSettings(settings), error => !!error.fields?.['forge.recipeIds']);
+    settings.forge.nativeAuto = true;
+    settings.forge.collect = false;
+    settings.forge.decompose = true;
+    const native = validateSettings(settings);
+    assert.deepEqual(native.forge, settings.forge, '原生模式保留工具设置，不强行改写');
+    assert.deepEqual(importAutomationSettings(exportAutomationSettings(native)).forge, native.forge);
+    saveAutomationSettings('forge', native, { file, revision: 1 });
+    assert.deepEqual(loadAutomationSettings('forge', { file }).settings.forge, native.forge);
+    settings.forge.nativeAuto = false;
+    assert.throws(() => validateSettings(settings), error => !!error.fields?.['forge.recipeIds'] && !!error.fields?.['forge.decomposeQualities']);
+    for (const key of ['nativeAuto', 'collect', 'craft']) {
+      const invalid = structuredClone(native); invalid.forge[key] = 'true';
+      assert.throws(() => validateSettings(invalid), error => !!error.fields?.['forge.' + key]);
+    }
+  });
+
+  await check('版本8装备配置升级保留原领取续产与明确开关值，加载不改写文件', () => {
+    const old = exportAutomationSettings(defaultSettings()); old.version = 8;
+    Object.assign(old.settings.forge, { enabled: true, buildingIds: ['1装备厂'], recipeIds: ['1001'] });
+    for (const key of ['nativeAuto', 'collect', 'craft']) delete old.settings.forge[key];
+    const before = structuredClone(old), file = path.join(directory, 'forge-version8.json');
+    fs.writeFileSync(file, JSON.stringify({ version: 8, accounts: { old: { revision: 6, settingsVersion: 8, settings: old.settings } } }));
+    const bytes = fs.readFileSync(file);
+    for (const result of [importAutomationSettings(old), loadAutomationSettings('old', { file }).settings, validateSettings(old.settings)]) {
+      assert.deepEqual(result.forge, { ...old.settings.forge, nativeAuto: false, collect: true, craft: true });
+    }
+    assert.deepEqual(old, before);
+    assert.deepEqual(fs.readFileSync(file), bytes);
+    Object.assign(old.settings.forge, { nativeAuto: true, collect: false, craft: false });
+    assert.deepEqual(importAutomationSettings(old).forge, old.settings.forge);
+  });
+
+  await check('原生锻造隐藏工具配置，关闭模式恢复领取续产与原有参数', () => {
+    const source = fs.readFileSync(new URL('../src/settings-ui.js', import.meta.url), 'utf8');
+    const groups = newStateFunction(source.slice(0, source.indexOf('function configGet(')) + '\nreturn configGroups;')();
+    const fields = groups.find(group => group.id === 'forge').fields;
+    const draft = defaultSettings(); Object.assign(draft.forge, { nativeAuto: true, universal: true, decompose: true, recipeIds: ['1001'] });
+    const saved = structuredClone(draft.forge);
+    for (const field of fields.filter(field => !['forge.enabled', 'forge.buildingIds', 'forge.nativeAuto'].includes(field.key))) {
+      assert.equal(field.when?.(draft), false, field.key + '在原生模式不可见');
+    }
+    draft.forge.nativeAuto = false;
+    for (const key of ['collect', 'craft', 'decompose', 'recipeIds', 'materialReserve', 'dailyLimit', 'dailyGoldLimit']) {
+      assert.equal(fields.find(field => field.key === 'forge.' + key).when(draft), true);
+    }
+    assert.deepEqual(draft.forge, { ...saved, nativeAuto: false });
+    draft.forge.craft = false;
+    assert.equal(fields.find(field => field.key === 'forge.recipeIds').when(draft), false);
+    assert.equal(fields.find(field => field.key === 'forge.collect').when(draft), true);
+    assert.match(fields.find(field => field.key === 'forge.nativeAuto').help, /月卡权益/);
+    assert.match(source, /游戏原生开关/);
+    assert.match(source, /此预览只读/);
   });
 
   await check('商人自动完成与钻石补料独立保存，旧账号补料默认关闭', () => {
@@ -238,6 +305,64 @@ try {
     assert.throws(() => loadAutomationSettings('a', { file: broken }), /停止/); assert.equal(fs.readFileSync(broken, 'utf8'), '{bad');
   });
 
+  await check('巨轮后续跟随方式兼容旧配置、按账号保存且严格校验', () => {
+    const initial = defaultSettings();
+    assert.equal(initial.treasure.followMode, 'trigger');
+    const legacy = structuredClone(initial);
+    Object.assign(legacy.treasure, { enabled: true, follow: true, repeatAttack: true, followNames: ['海上的风'], fleetIds: ['1远征船'] });
+    delete legacy.treasure.followMode;
+    assert.equal(validateSettings(legacy).treasure.followMode, 'trigger', '已打开的旧页面保存保持原行为');
+    assert.equal(Object.hasOwn(legacy.treasure, 'followMode'), false, '兼容处理不修改输入');
+    const version13 = structuredClone(legacy);
+    version13.resources.diamondDailyLimit = 3210; version13.loop.everySeconds = 87;
+    const expected13 = structuredClone(version13); expected13.treasure.followMode = 'trigger';
+    assert.deepEqual(importAutomationSettings({ ...exportAutomationSettings(initial), version: 13, settings: version13 }), expected13,
+      '版本13导入仅补齐跟随方式，不改变其他设置');
+    const version14 = structuredClone(expected13); version14.treasure.followMode = 'eachTime';
+    assert.deepEqual(importAutomationSettings({ ...exportAutomationSettings(initial), version: 14, settings: version14 }), version14,
+      '已导出的版本14必须继续支持，且保留显式跟随方式');
+    const file = path.join(directory, 'treasure-follow-mode.json');
+    for (let version = 1; version <= SETTINGS_SCHEMA_VERSION; version++) {
+      const document = { ...exportAutomationSettings(initial), version, settings: legacy };
+      const expected = { ...legacy.treasure, followMode: 'trigger' };
+      assert.deepEqual(importAutomationSettings(document).treasure, expected, '旧版导入 ' + version);
+      fs.writeFileSync(file, JSON.stringify({ version, accounts: { legacy: { settingsVersion: version, revision: 7, settings: legacy } } }));
+      const bytes = fs.readFileSync(file);
+      assert.deepEqual(loadAutomationSettings('legacy', { file }).settings.treasure, expected, '旧版读取 ' + version);
+      assert.deepEqual(fs.readFileSync(file), bytes, '只读升级不能覆盖原文件');
+    }
+    for (const mode of ['trigger', 'eachTime']) {
+      const custom = structuredClone(initial); custom.treasure.followMode = mode;
+      assert.deepEqual(importAutomationSettings(exportAutomationSettings(custom)).treasure, custom.treasure);
+      saveAutomationSettings(mode, custom, { file, revision: 0 });
+      assert.deepEqual(loadAutomationSettings(mode, { file }).settings.treasure, custom.treasure);
+      const oldDocument = { ...exportAutomationSettings(custom), version: SETTINGS_SCHEMA_VERSION - 1 };
+      assert.equal(importAutomationSettings(oldDocument).treasure.followMode, mode, '迁移保留显式选择');
+    }
+    const bytes = fs.readFileSync(file);
+    for (const value of ['unknown', '', true, 1, null]) {
+      const invalid = structuredClone(initial); invalid.treasure.followMode = value;
+      const invalidField = error => !!error.fields?.['treasure.followMode'];
+      assert.throws(() => validateSettings(invalid), invalidField);
+      assert.throws(() => importAutomationSettings({ ...exportAutomationSettings(initial), settings: invalid }), invalidField);
+      assert.throws(() => saveAutomationSettings('eachTime', invalid, { file, revision: 1 }), invalidField);
+      assert.deepEqual(fs.readFileSync(file), bytes);
+    }
+  });
+
+  await check('后续跟随方式只在启用跟随及反复攻占时显示', () => {
+    const source = fs.readFileSync(new URL('../src/settings-ui.js', import.meta.url), 'utf8');
+    const groups = newStateFunction(source.slice(0, source.indexOf('function configGet(')) + '\nreturn configGroups;')();
+    const field = groups.find(group => group.id === 'treasure').fields.find(row => row.key === 'treasure.followMode');
+    assert.equal(field.kind, 'radio');
+    assert.equal(field.parent, 'treasure.follow');
+    assert.deepEqual(field.options.map(([value]) => value), ['trigger', 'eachTime']);
+    for (const follow of [false, true]) for (const repeatAttack of [false, true]) {
+      const draft = defaultSettings(); Object.assign(draft.treasure, { follow, repeatAttack });
+      assert.equal(field.when(draft), follow && repeatAttack);
+    }
+  });
+
   await check('巨轮行军加速默认关闭、严格校验、旧版迁移和持久化', () => {
     const initial = defaultSettings();
     const added = ['marchSpeedUp', 'marchTargetSeconds', 'dailyDiamondLimit'];
@@ -372,7 +497,7 @@ try {
       const settings = settingsFromNative(tasks);
       const restored = importAutomationSettings(exportAutomationSettings(settings));
       for (const key of keys) {
-        const expected = retiredAutomationTasks.has(key) ? false : enabled;
+        const expected = migratedAutomationTasks.has(key) ? undefined : retiredAutomationTasks.has(key) ? false : enabled;
         assert.equal(restored.schedule[key], expected, key + ' 仅退役开关归一化为关闭');
         assert.equal(nativeTaskValues(restored, {})[key], expected);
       }
@@ -383,15 +508,16 @@ try {
     const normalized = validateSettings(legacy);
     assert.deepEqual(normalized.forge, legacy.forge, '兼容旧装备开关时不改已授权的锻造设置');
     for (const key of retiredAutomationTasks) {
-      assert.equal(normalized.schedule[key], false);
-      assert.equal(nativeTaskValues(legacy, { [key]: true })[key], false, '未迁移的旧开关也不能参与执行');
-      assert.equal(taskSettings({ [key]: true })[key], false, '仅有旧任务配置的账号也不能恢复退役任务');
-      assert.equal(applyNativeTask(legacy, key, true).schedule[key], false, '旧快捷开关不能重新打开退役任务');
+      const expected = migratedAutomationTasks.has(key) ? undefined : false;
+      assert.equal(normalized.schedule[key], expected);
+      assert.equal(nativeTaskValues(legacy, { [key]: true })[key], expected, '未迁移的旧开关也不能参与执行');
+      assert.equal(taskSettings({ [key]: true })[key], expected, '仅有旧任务配置的账号也不能恢复退役任务');
+      assert.equal(applyNativeTask(legacy, key, true).schedule[key], expected, '旧快捷开关不能重新打开退役任务');
     }
     const oldDocument = { ...exportAutomationSettings(defaultSettings()), version: 1 };
     for (const key of keys) delete oldDocument.settings.schedule[key];
     const restored = importAutomationSettings(oldDocument);
-    for (const key of ['guildOrders', 'radarAuto', 'radarRepair', 'equipmentCollect', 'equipmentCraft', 'museumCollect', 'museumExplore', 'petCollect', 'petBreed', 'weekLotterySpin', 'weekOrderSubmit', 'merchantTrade', 'beautyVotes', 'compassSpin']) assert.equal(restored.schedule[key], false, key);
+    for (const key of ['guildOrders', 'radarAuto', 'radarRepair', 'equipmentCollect', 'equipmentCraft', 'museumCollect', 'museumExplore', 'petCollect', 'petBreed', 'weekLotterySpin', 'weekOrderSubmit', 'merchantTrade', 'beautyVotes', 'compassSpin']) assert.equal(restored.schedule[key], migratedAutomationTasks.has(key) ? undefined : false, key);
     assert.equal(restored.schedule.weekOrderFinal, false);
     assert.equal(restored.schedule.vipDaily, false);
   });
@@ -758,16 +884,20 @@ try {
         assert.equal(app.sessions.get('qa-a').loop.tasks[key], false);
       }
       const rewardIds = a.catalog.treasureRewards.slice(0, 2).map(item => item.value);
-      Object.assign(a.settings.treasure, { marchSpeedUp: true, marchTargetSeconds: 90, dailyDiamondLimit: 180,
+      Object.assign(a.settings.treasure, { followMode: 'eachTime', marchSpeedUp: true, marchTargetSeconds: 90, dailyDiamondLimit: 180,
         fallbackEnabled: true, fallbackAfter: '23:10', fallbackTargetRewards: 2,
         fallbackQualities: ['BLUE'], fallbackMediumRewardPriority: rewardIds, fallbackSmallRewardPriority: [...rewardIds].reverse() });
       const save = await api('qa-a', '/api/settings', { settings: a.settings, revision: a.revision, baseRevision: a.baseRevision }); assert.equal(save.status, 200); assert.equal(save.body.revision, 1);
       assert.deepEqual((await api('qa-a', '/api/settings')).body.settings.treasure, a.settings.treasure);
-      assert.deepEqual(fs.readFileSync(path.join(directory, 'accounts.json')), before);
+      const expectedAccounts = JSON.parse(before);
+      expectedAccounts.accounts.find(account => account.id === 'qa-a').automation.settingsConfigured = true;
+      assert.deepEqual(JSON.parse(fs.readFileSync(path.join(directory, 'accounts.json'))), expectedAccounts,
+        '保存仅登记本账号已配置，不修改凭据、其他账号或挂机开关');
       assert.equal(app.sessions.get('qa-a').client, null); assert.equal(app.sessions.get('qa-a').loop.running, false);
       assert.equal((await api('qa-b', '/api/settings')).body.settings.building.keepBlueprints, 0);
       assert.equal((await api('qa-b', '/api/settings')).body.settings.treasure.fallbackEnabled, false);
       assert.equal((await api('qa-b', '/api/settings')).body.settings.treasure.marchSpeedUp, false);
+      assert.equal((await api('qa-b', '/api/settings')).body.settings.treasure.followMode, 'trigger');
       const exported = (await api('qa-a', '/api/settings/export')).body; assert.deepEqual(Object.keys(exported), ['format', 'version', 'settings']);
       assert.deepEqual(exported.settings.treasure, a.settings.treasure);
       exported.settings.building.keepBlueprints = 200;

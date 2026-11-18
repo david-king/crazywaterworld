@@ -547,7 +547,7 @@ await check('防守仍要求已有英雄编队和空闲舰队，不抢占行军�
   }
 });
 
-await check('防守零行军费用不绕过维修报价、汽油保留和每日维修预算', async () => {
+await check('防守维修检查实际汽油，忽略旧单次/每日/保留量限制', async () => {
   const { f, settings } = defenceFixture(), usage = ledger(); onlyDefence(settings);
   f.state.fleets[1].durability = 1000;
   let preview = await plan(f, settings, usage);
@@ -555,12 +555,14 @@ await check('防守零行军费用不绕过维修报价、汽油保留和每日�
   assert.equal(preview.actions[0].role, 'defence');
   assert.equal(preview.actions[0].cost, 2000);
   settings.cityWar.maxRepairCost = 1999;
-  assert.equal((await plan(f, settings, usage)).actions.length, 0);
+  assert.equal((await plan(f, settings, usage)).actions.length, 1);
   settings.cityWar.maxRepairCost = 3000; settings.cityWar.dailyPetrolLimit = 1999;
-  assert.equal((await plan(f, settings, usage)).actions.length, 0);
+  assert.equal((await plan(f, settings, usage)).actions.length, 1);
   settings.cityWar.dailyPetrolLimit = 2000; settings.cityWar.petrolReserve = 49000;
-  assert.equal((await plan(f, settings, usage)).actions.length, 0);
-  settings.cityWar.petrolReserve = 0;
+  assert.equal((await plan(f, settings, usage)).actions.length, 1);
+  f.state.fuel = 1999; assert.equal((await plan(f, settings, usage)).actions.length, 0);
+  f.state.fuel = 2000;
+  settings.cityWar.maxRepairCost = 1; settings.cityWar.dailyPetrolLimit = 1;
   assert.equal((await run(f, settings, usage)).results[0]?.status, 'confirmed');
   f.finishRepair('2远征船');
   assert.equal((await run(f, settings, usage)).results[0]?.step.kind, 'cityDispatch');

@@ -77,8 +77,9 @@ export function planHeroes({ config, heroes, itemNum, playerLevel, allowUniversa
   const notes = [];
   let expLeft = Math.max(0, itemNum(HERO_EXP_ITEM) - (pref?.keepExp ?? 0));
   if (pref && !pref.enabled) return { steps, notes: ['英雄养成总开关已关闭'], maxLevel, maxStar };
-  if (pref && !heroIds?.length) return { steps, notes: [pref.needsSelection
-    ? '旧配置曾允许培养全部英雄，请先重新选择要培养的英雄。' : '请先在英雄养成设置中选择要培养的英雄。'], maxLevel, maxStar };
+  if (pref && !heroIds?.length) return { steps, notes: [(pref.needsSelection
+    ? '旧配置曾允许培养全部英雄，请先重新选择要培养的英雄。' : '未选择培养英雄，已暂停培养操作。')
+    + (pref.showSkillReward ? '技能展示领奖不受影响。' : '')], maxLevel, maxStar };
 
   const picked = heroes.filter((hero) => !heroIds || heroIds.includes(hero.heroId));
   // 升星优先给战力最高的英雄，万能碎片有限时这个顺序更划算。
@@ -231,7 +232,21 @@ export async function readHeroGrowthPlan(client, config, player, settings) {
   const stock = pref.enabled && selected.length
     ? farmInventory(normalize(await client.request('AllItemRequest', {}, 'AllItemResponse'))) : new Map();
   const plan = planHeroes({ config, heroes, playerLevel, settings, itemNum: id => stock.get(id) ?? 0 });
-  if (!pref.enabled || !selected.length) return { plan, heroes, stock };
+  if (!pref.enabled) return { plan, heroes, stock };
+
+  // 展示领奖覆盖所有已拥有英雄，与消耗材料的培养名单无关。
+  if (pref.showSkillReward) {
+    const rewardIds = new Set((config.tables.HeroAbilityShowCfg?.data ?? []).filter(row => row.reward?.length).map(row => row.id));
+    const claimed = new Set(roster.showSkillHeroes ?? []);
+    for (const heroId of new Set(heroes.map(hero => hero.heroId))) {
+      if (!rewardIds.has(heroId) || claimed.has(heroId)) continue;
+      plan.steps.push({
+        kind: 'showSkillReward', heroId, label: heroId + ' · 领取技能展示奖励',
+        request: 'GotHeroShowSkillRequest', body: { heroId }, costs: [],
+      });
+    }
+  }
+  if (!selected.length) return { plan, heroes, stock };
 
   const remaining = new Map(stock);
   const itemNum = id => remaining.get(id) ?? 0;
@@ -246,16 +261,10 @@ export async function readHeroGrowthPlan(client, config, player, settings) {
       remaining.set('GOLD', ctx.gear.gold);
     }
   }
-  const rewardIds = new Set((config.tables.HeroAbilityShowCfg?.data ?? []).filter(row => row.reward?.length).map(row => row.id));
-  const claimed = new Set(roster.showSkillHeroes ?? []);
   for (const hero of selected) {
     const candidates = [];
     if (pref.skillAdvance || pref.exclusiveLevel || pref.exclusiveStar) candidates.push(...planAdvancedHeroGrowth(ctx, hero));
     if (ctx.gear) candidates.push(...planHeroGearSteps(ctx, hero));
-    if (pref.showSkillReward && rewardIds.has(hero.heroId) && !claimed.has(hero.heroId)) candidates.push({
-      kind: 'showSkillReward', heroId: hero.heroId, label: hero.heroId + ' · 领取技能展示奖励',
-      request: 'GotHeroShowSkillRequest', body: { heroId: hero.heroId }, costs: [],
-    });
     for (const step of candidates) {
       if (step.costs.some(cost => itemNum(cost.id) < cost.num)) continue;
       deduct(step.costs);
@@ -296,7 +305,8 @@ export async function runHeroPlan(client, protocol, plan, { allowMutate = false,
         if (!enabled()) return false;
         if (!getSettings) return true;
         const pref = getSettings()?.heroes;
-        if (!pref?.enabled || !pref[step.kind] || !pref.heroIds.includes(step.heroId)) return false;
+        if (!pref?.enabled || !pref[step.kind]) return false;
+        if (step.kind !== 'showSkillReward' && !pref.heroIds.includes(step.heroId)) return false;
         if (step.kind === 'level' && pref.targetLevel && targetLevel > pref.targetLevel) return false;
         return step.kind !== 'star' || ((!pref.targetStar || step.to <= pref.targetStar) && (!step.universal || pref.universal));
       };

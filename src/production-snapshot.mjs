@@ -5,7 +5,7 @@ import { exactAutomationId, resourceReserve, worldPreferenceEnabled } from './au
 import { makeTypeResolver, upgradeRow, factoryRecipeAvailability } from './world.mjs';
 import { readWeekOrder, weekSchedule } from './activities.mjs';
 import { baseDemands } from './base-automation.mjs';
-import { readGuildShips } from './guild-ships.mjs';
+import { readGuildShips, guildShipApplicationDeadline } from './guild-ships.mjs';
 import { watchHeroRaidPushes } from './hero-raid-automation.mjs';
 import { activityProductionEnabled } from './activity-automation.mjs';
 
@@ -149,14 +149,17 @@ export function buildProductionSnapshot(raw, config, settings = {}) {
   }
   if (raw.guildOrder?.order) addOrder('guildRecruit', digest(raw.guildOrder.order), raw.guildOrder.order.requirements,
     null, { refreshAt: timestamp(raw.guildOrder.order.nextRefreshTime),
-      enabled: settings.alliance?.enabled === true ? settings.alliance.recruit === true : settings.schedule?.guildOrders === true });
+      enabled: settings.alliance?.enabled === true && settings.alliance.recruit === true });
   else if (raw.guildOrder != null) incomplete('GuildOrderRequest', '联盟订单未完整返回');
   // A confirmed cabin.player is the existing guild-ship module's receipt for
   // GuildShipOrderRequest. Its materials have already been submitted.
   const shipCandidate = raw.guildShipView?.candidates?.find(row => row.kind === 'crew' && row.type === 3);
-  if (settings.guildShip?.enabled && settings.guildShip.produceMissing && shipCandidate) {
+  const shipDeadline = guildShipApplicationDeadline(raw.guildShipView?.activityEndTime);
+  if (settings.guildShip?.enabled && settings.guildShip.produceMissing && shipCandidate
+    && (shipDeadline === null || serverNow < shipDeadline)) {
     addOrder('guildShip', [raw.guildShipView.period, shipCandidate.shipId, shipCandidate.crewId].join(':'), shipCandidate.costs,
-      shipCandidate.preparedEndTime, { shipId: shipCandidate.shipId, crewId: shipCandidate.crewId, candidate: true }, 'consumption');
+      Math.min(timestamp(shipCandidate.preparedEndTime) ?? Infinity, shipDeadline ?? Infinity),
+      { shipId: shipCandidate.shipId, crewId: shipCandidate.crewId, candidate: true }, 'consumption');
   }
   if (activityProductionEnabled(settings, 'heroRaid')) {
     if (!raw.heroRaids?.observed || raw.heroRaids.invalid) incomplete('SCAllActivity', '超凡英雄活动推送尚未完整观察');
@@ -369,7 +372,7 @@ export async function readProductionSnapshot(client, protocol, config, player, s
             await get('guildShips', 'GuildShipRequest');
             if (amount(raw.guildShips?.period) === null) throw new Error('商船活动期数未确认');
             if (raw.guildShips.period === 0) reads.push({ request: 'GuildShipRequest', status: 'notApplicable', required: false, reason: '联盟商船活动未开放' });
-            else raw.guildShipView = await readGuildShips(readonly, protocol, config, { player, getSettings: () => settings, enabled: () => { check(); return true; }, inventory: false });
+            else raw.guildShipView = await readGuildShips(readonly, protocol, config, { player, getSettings: () => settings, enabled: () => { check(); return true; }, inventory: false, activityClient: client });
           }
           if (raw.guildShipView && raw.guildShipView.state !== 'ready') reads.push({ request: 'guildShipView', required: false,
             status: /在角色 \d+ 级开放|活动未开放|活动结束/.test(raw.guildShipView.reason) ? 'notApplicable' : 'missing', reason: raw.guildShipView.reason });

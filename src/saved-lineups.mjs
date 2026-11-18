@@ -94,6 +94,20 @@ export function validateLineupSettings(group = {}) {
   return { presets, mainlinePresetId, trialPresets };
 }
 
+export function validateFleetLineupBindings(bindings, presets) {
+  if (!Array.isArray(bindings) || bindings.length > 10) throw new Error('舰队阵容配置必须是最多 10 项的列表');
+  const fleets = new Set(), ids = new Set(presets.map(preset => preset.id));
+  return bindings.map(binding => {
+    fields(binding, ['buildingId', 'presetId'], '舰队阵容绑定');
+    const buildingId = text(binding.buildingId, '舰队编号'), presetId = text(binding.presetId, '舰队阵容编号');
+    if (!/^[1-9]\d*远征船$/.test(buildingId)) throw new Error('舰队编号无效');
+    if (fleets.has(buildingId)) throw new Error('舰队阵容配置重复');
+    if (!ids.has(presetId)) throw new Error('舰队选择的阵容已不存在');
+    fleets.add(buildingId);
+    return { buildingId, presetId };
+  });
+}
+
 function requireList(value, title) {
   if (!Array.isArray(value)) throw new Error('无法读取' + title);
   return value;

@@ -11,61 +11,22 @@ const nowOf = client => (Date.now() + (client.serverClockOffsetMs || 0)) / 1000;
 const dayOf = seconds => Math.floor((seconds + 28800) / 86400);
 const rows = (config, name) => config?.tables?.[name]?.data ?? [];
 const valid = value => Number.isSafeInteger(value) && value >= 0;
-// Managed actions run only through the competition runner. This also closes
-// legacy/fast-loop paths while waiting for another weekday or score reset.
-const managedCache = new WeakMap();
-export function weeklyLegacyTaskAllowed(settings, key) {
-  const p = settings?.weeklyActivity;
-  if (!p?.enabled) return true;
-  if (p.farmEnabled && key === 'guildOrders') return false;
-  if (p.petEnabled && ['petCollect', 'petBreed'].includes(key)) return false;
-  if (p.heroEnabled && ['ticketRecruit', 'heroGrowth'].includes(key)) return false;
-  if (p.orderEnabled && ['cargo', 'adSpeedUpProduce'].includes(key)) return false;
-  return true;
-}
-export function weeklyManagedSettings(settings) {
-  const p = settings?.weeklyActivity;
-  if (!p?.enabled) return settings;
-  if (managedCache.has(settings)) return managedCache.get(settings);
-  const next = structuredClone(settings);
-  if (p.farmEnabled) {
-    next.farm.enabled = false;
-    next.alliance.recruit = false;
-    next.schedule.guildOrders = false;
-  }
-  if (p.petEnabled) {
-    next.pet.enabled = false;
-    next.schedule.petCollect = next.schedule.petBreed = false;
-  }
-  if (p.antiqueEnabled) next.antique.enabled = false;
-  if (p.orderEnabled) {
-    next.resident.enabled = false;
-    next.cargo.enabled = false;
-    next.factory.speedUp = false;
-    next.factory.speedUpSources = [];
-    next.schedule.adSpeedUpProduce = false;
-  }
-  if (p.forgeEnabled) next.forge.enabled = false;
-  if (p.heroEnabled) {
-    next.loop.heroes = false;
-    next.schedule.ticketRecruit = false;
-  }
-  managedCache.set(settings, next);
-  return next;
-}
-
+// The activity selection authorizes its scoring actions independently of the
+// ordinary switches. Keep target selections, budgets and spending permissions;
+// the returned settings are used only by this activity run, never saved.
 export function weeklyExecutionSettings(settings, kind) {
   const next = structuredClone(settings), p = next.weeklyActivity;
   next.loop.world = true;
   if (kind === 'farm') {
-    next.farm.enabled = true;
+    next.farm.enabled = next.farm.harvest = true;
+    next.farm.autoPlant = !next.farm.customPlant;
     next.farm.speedUp = p.farmSpeedUp;
   } else if (kind === 'pet') {
     next.pet.enabled = next.pet.claim = next.pet.breed = true;
-  } else if (kind === 'antique') next.antique.enabled = true;
+  } else if (kind === 'antique') next.antique.enabled = next.antique.star = next.antique.suit = true;
   else if (kind === 'order') next.resident.enabled = true;
-  else if (kind === 'forge') next.forge.enabled = true;
-  else if (kind === 'hero') next.loop.heroes = next.heroes.enabled = true;
+  else if (kind === 'forge') next.forge.enabled = next.forge.collect = next.forge.craft = true;
+  else if (kind === 'hero') next.loop.heroes = next.heroes.enabled = next.heroes.star = true;
   return next;
 }
 

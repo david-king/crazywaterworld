@@ -2,7 +2,6 @@ import { uidText } from './hero-equipment.mjs';
 import { describeLogError } from './log-errors.mjs';
 import { registerFleetReservations, isFleetReserved, hasOtherFleetReservations } from './fleet-reservations.mjs';
 
-export const radarFuelReserve = 10_000;
 const sessions = new WeakMap();
 const rows = (config, table) => config?.tables?.[table]?.data ?? [];
 const safe = value => {
@@ -158,13 +157,13 @@ function eventPlan(event, config, season, stock) {
   const fuel = rows(config, 'WorldParamCfg').find(r => r.paramName === '情报事件消耗汽油')?.paramValue;
   if (safe(fuel) === null || fuel <= 0) return null;
   costs.set('汽油', (costs.get('汽油') ?? 0) + fuel);
-  for (const [id, n] of costs) if (!Number.isSafeInteger(n) || (stock.get(id) ?? 0) < n + (id === '汽油' ? radarFuelReserve : 0)) return null;
+  for (const [id, n] of costs) if (!Number.isSafeInteger(n) || (stock.get(id) ?? 0) < n) return null;
   return { name, power: Math.ceil(power * 1.2), costs };
 }
 
 /** Two opt-in tasks. No purchase, map occupation, declaration or auto-fight takeover. */
 export async function serviceRadar(client, protocol, config, {
-  player, enabled = () => false, report = () => {}, scheduler,
+  player, enabled = () => false, report = () => {}, scheduler, canUseFleet = () => true,
 } = {}) {
   const entries = [];
   const emit = entry => { entries.push(entry); report(entry); };
@@ -292,25 +291,25 @@ export async function serviceRadar(client, protocol, config, {
           defer(180); return entries;
         }
       }
-      if (!entries.some(e => e.key === 'radarAuto')) skip('radarAuto', '当前没有可领取或可安全出征的情报（检查舰队、耐久、战力、材料和汽油保留额）');
+      if (!entries.some(e => e.key === 'radarAuto')) skip('radarAuto', '当前没有可领取或可安全出征的情报（检查舰队、耐久、战力、材料和可用汽油）');
     }
 
     if (allowed('radarRepair')) {
       snapshot = await snapshotNow();
       for (const initial of snapshot.fleets) {
         if (!allowed('radarRepair')) break;
-        if (!freeFleet(initial) || initial.durability >= initial.maxDura * 0.8 || used.has(initial.buildingId) || isFleetReserved(client, initial.buildingId)) continue;
+        if (!freeFleet(initial) || initial.durability >= initial.maxDura * 0.8 || used.has(initial.buildingId) || isFleetReserved(client, initial.buildingId) || !canUseFleet(initial.buildingId)) continue;
         const param = await read(client, 'FleetRepairParam', { buildingId: initial.buildingId });
         snapshot = await snapshotNow();
         reconcileBudget(snapshot);
         const fleet = snapshot.fleets.find(f => f.buildingId === initial.buildingId);
-        if (!freeFleet(fleet) || fleet.durability >= fleet.maxDura * 0.8 || isFleetReserved(client, fleet.buildingId)) continue;
+        if (!freeFleet(fleet) || fleet.durability >= fleet.maxDura * 0.8 || isFleetReserved(client, fleet.buildingId) || !canUseFleet(fleet.buildingId)) continue;
         if (!(Number.isFinite(param?.unitRepairCost) && param.unitRepairCost > 0 && Number.isFinite(param.unitRepairTime) && param.unitRepairTime > 0)) {
           skip('radarRepair', `${initial.buildingId} 缺少可靠的维修费用和时长`); continue;
         }
         const cost = Math.ceil((fleet.maxDura - fleet.durability) * param.unitRepairCost);
-        if (!Number.isSafeInteger(cost) || cost <= 0 || (budget.get('汽油') ?? 0) - cost < radarFuelReserve) {
-          skip('radarRepair', `${fleet.buildingId} 修满需要 ${cost} 汽油，需另保留 ${radarFuelReserve} 汽油`); continue;
+        if (!Number.isSafeInteger(cost) || cost <= 0 || (budget.get('汽油') ?? 0) < cost) {
+          skip('radarRepair', `${fleet.buildingId} 修满需要 ${cost} 汽油，可用汽油不足或费用未确认`); continue;
         }
         if (otherPending()) return entries;
         if (!allowed('radarRepair')) break;
@@ -342,3 +341,37 @@ export async function serviceRadar(client, protocol, config, {
   } finally { session.busy = false; }
   return entries;
 }
+
+// Independent maintenance action in the current radar configuration. The
+// schedule switches are not consulted; the shared service owns confirmation
+// and fuel reservations until each repair has been observed in server state.
+export async function runRadarIdleRepair(client, protocol, config, {
+  player, getSettings, enabled = () => true, report = () => {}, canUseFleet, ledger,
+}) {
+  const allowed = () => enabled() && getSettings()?.radar?.runEnabled !== false
+    && getSettings()?.radar?.repairIdle === true;
+  if (!allowed()) {
+    // Turning off new repairs does not discard a previous unknown debit.
+    // Reconcile it while the radar module is running so ordinary dispatch can
+    // resume once the server proves that repair has completed.
+    const session = sessions.get(client);
+    if (radarRepairPending(client) && enabled() && getSettings()?.radar?.runEnabled !== false) {
+      await fleetStock(client, session, { readEvents: false, check() {
+        if (!enabled() || getSettings()?.radar?.runEnabled === false || identity(player) !== session.account)
+          throw new Error('舰队维修复查已暂停，保留待确认记录');
+      } });
+    }
+    return;
+  }
+  const pending = ledger?.pendingCounters() ?? {};
+  if (['radarPetrol', 'piratePetrol', 'treasurePetrol', 'cityWarPetrol', 'worldBossPetrol', 'siliconPetrol', 'resourceFieldPetrol'].some(key => (pending[key] ?? 0) > 0)) {
+    report({ key: 'radar.repairIdle', label: '空闲舰队维修', skipped: true, reason: '有汽油支出待确认，暂不维修' });
+    return;
+  }
+  await serviceRadar(client, protocol, config, { player, canUseFleet,
+    enabled: key => key === 'radarRepair' && allowed(),
+    report: entry => report({ ...entry, key: 'radar.repairIdle' }),
+  });
+}
+
+export const radarRepairPending = client => sessions.get(client)?.reserves.some(entry => entry.pending.kind === 'repair') ?? false;

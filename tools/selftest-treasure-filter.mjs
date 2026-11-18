@@ -345,15 +345,14 @@ try {
     }
   }));
 
-  await check('完整挂机旧入口接收账号筛选配置：默认等待，显式关闭才派小船', () => morning(async () => {
+  await check('完整挂机旧巨轮入口已停用，世界总开关关闭时不再派舰', () => morning(async () => {
     for (const onlyTenThousand of [true, false]) {
       const f = legacyFixture(), s = treasureCycleSettings(), usage = ledger(); small(f);
       Object.assign(s.treasure, { enabled: false, onlyTenThousand, autoRepair: false }); s.schedule.treasureLoot = true;
-      const flags = nativeTaskValues(s, {});
+      assert.equal(nativeTaskValues(s, {}).treasureLoot, false);
       const result = await runLoop(f.client, f.protocol, { config: f.config, player: f.player, rounds: 1, allowMutate: true,
-        getSettings: () => s, usageLedger: usage, isEnabled: key => flags[key] === true });
-      assert.equal(f.client.writes.length, onlyTenThousand ? 0 : 1, JSON.stringify(result.history));
-      if (!onlyTenThousand) assert.equal(f.client.writes[0].body.uid, 72);
+        getSettings: () => s, usageLedger: usage, isEnabled: key => key === 'treasureLoot' });
+      assert.equal(f.client.writes.length, 0, JSON.stringify(result.history));
     }
   }));
 

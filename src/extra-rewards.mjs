@@ -3,12 +3,12 @@ import { toNumber } from './client.mjs';
 import { normalize } from './worlds.mjs';
 
 export const extraRewardKeys = ['worldOnline', 'tradeTasks', 'guildTitleReward', 'guildAidCollect', 'heroRecruitRewards',
-  'seasonTasks', 'crossRankDaily', 'worldBossDamage', 'passStageRewards', 'museumRevenue', 'museumAchievements'];
+  'seasonTasks', 'crossRankDaily', 'worldBossDamage', 'passStageRewards'];
 
 const labels = {
   worldOnline: '世界在线奖励', tradeTasks: '海商王联盟任务', guildTitleReward: '联盟职级奖励', guildAidCollect: '联盟互助收取',
   heroRecruitRewards: '英雄累计招募奖励', seasonTasks: '赛季任务奖励', crossRankDaily: '跨服排行每日奖励',
-  worldBossDamage: '世界 Boss 伤害奖励', passStageRewards: '闯关基金奖励', museumRevenue: '博物馆营收', museumAchievements: '博物馆人气成就',
+  worldBossDamage: '世界 Boss 伤害奖励', passStageRewards: '闯关基金奖励',
 };
 const CROSS_RANK_RED_POINT = 33;
 const REWARD_REPLIES = ['GotRewardResponse', 'OkResponse'];
@@ -249,42 +249,6 @@ async function claimPassStage({ client, config, scheduler, report, allowed }) {
   }
 }
 
-async function readMuseum({ client, config, scheduler, report, keys }) {
-  const later = seconds => { for (const key of keys) scheduler?.defer(key, scheduler.now() + seconds); };
-  const allowedBuildings = new Set(rows(config, 'BuildingUnlockCfg').filter(row => row.buildingType === '博物馆').map(row => row.buildingId));
-  const water = await client.request('OnWaterRequest', {}, 'OnWaterResponse');
-  const built = (water?.building ?? []).some(row => allowedBuildings.has(row.buildingId) && row.level > 0);
-  later(1800);
-  if (!built) {
-    for (const key of keys) report(skip(key, '博物馆尚未建成'));
-    return null;
-  }
-  return normalize(await client.request('MuseumInfoRequest', {}, 'MuseumInfoResponse'));
-}
-
-async function claimMuseum(ctx) {
-  const { client, config, report, allowed } = ctx;
-  const info = await readMuseum(ctx);
-  if (!info) return;
-  if (ctx.keys.includes('museumRevenue')) {
-    if (info.uncollectedRevenue > 0) {
-      const reply = normalize(await client.request('MuseumCollectRevenueRequest', {}, 'MuseumCollectRevenueResponse'));
-      report({ key: 'museumRevenue', label: '博物馆营收 · 人气 +' + (reply?.collected ?? info.uncollectedRevenue), ok: true });
-    } else report(skip('museumRevenue', '暂无营收'));
-  }
-  if (!ctx.keys.includes('museumAchievements')) return;
-  const claimed = new Set(info.claimedAchievements ?? []);
-  const ready = rows(config, 'MuseumAchievementCfg').filter(row => row.score <= info.topPopularity && !claimed.has(row.score))
-    .sort((a, b) => a.score - b.score);
-  if (!ready.length) return report(skip('museumAchievements', '暂无可领取的成就'));
-  for (const row of ready.slice(0, MAX_PASS_CLAIMS)) {
-    if (!allowed('museumAchievements')) return;
-    const reply = await client.request('MuseumClaimAchievementRequest', { popularityThreshold: row.score }, REWARD_REPLIES);
-    report({ key: 'museumAchievements', label: withReward('博物馆人气成就 · ' + row.score,
-      replyAssets(config, reply?.reward) || configAssets(config, row.rewards)), ok: true });
-  }
-}
-
 const skip = (key, reason) => ({ key, label: labels[key], skipped: true, reason });
 
 // 一项失败不影响其他项，失败后 30 分钟再试，避免反复请求已被拒绝的接口。
@@ -311,6 +275,4 @@ export async function claimExtraRewards(client, config, player, allowed, report,
   for (const [key, claim] of steps) {
     if (allowed(key)) await run(key, () => claim(ctx));
   }
-  const museumKeys = ['museumRevenue', 'museumAchievements'].filter(allowed);
-  if (museumKeys.length) await run(museumKeys[0], () => claimMuseum({ ...ctx, keys: museumKeys }));
 }

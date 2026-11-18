@@ -197,6 +197,7 @@ function fixture(initial = sampleAccounts()) {
     const loginSettingsAccountChanged = () => {};
     const appointmentsAccountChanged = () => {};
     const siliconAccountChanged = () => {};
+    const resourceFieldsAccountChanged = () => {};
     const resetWorldMap = () => {};
     const resetProductionPlan = () => {};
     let accounts=structuredClone(env.serverRows),current=env.selected,dailyAccount=current,dailyVersion=0;
@@ -207,7 +208,7 @@ function fixture(initial = sampleAccounts()) {
     accountDetailsOwner=current;
     renderAccountSelect();
     env.api={renderAccounts,refreshAccountStatuses,selectLoadedAccount,setAccountStatus,
-      current:()=>current,rows:()=>accounts,snapshot:()=>snapshot,
+      current:()=>current,rows:()=>accounts,snapshot:()=>snapshot,view:()=>consoleStore.getState().view,
       connectingAccounts: { has: id => connectingAccounts.has(id), add: id => stateActions.setFlag('connecting', id, true), delete: id => stateActions.setFlag('connecting', id, false) },
       replace(rows) {stateActions.replaceAccounts(structuredClone(rows), current);renderAccounts();}};
   `)(env);
@@ -218,6 +219,20 @@ function fixture(initial = sampleAccounts()) {
   env.effects.length = 0;
   return env;
 }
+
+await test('登录设置绑定所点卡片，可配置非当前账号而不切号或连接游戏', async () => {
+  const env = fixture();
+  const [first, second] = sampleAccounts();
+  await env.action(second.id, 'login-settings');
+  assert.equal(env.api.view().loginSettingsAccountId, second.id);
+  assert.equal(env.api.current(), first.id);
+  assert.deepEqual(env.calls, []);
+  assert.deepEqual(env.effects, []);
+  await env.action(first.id, 'login-settings');
+  assert.equal(env.api.view().loginSettingsAccountId, first.id);
+  assert.doesNotMatch(PAGE, /data-tab="login-settings"|id="tab-login-settings"/);
+  assert.match(PAGE, /id="account-login-dialog"/);
+});
 
 await test('每张卡片展示自己的资料、渠道和状态，默认不显示凭证或内部标识', async () => {
   const env = fixture();

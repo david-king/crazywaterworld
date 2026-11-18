@@ -117,7 +117,7 @@ async function openSiliconAction(intent) {
     }
     root.append(choices);
     if (quote.automatic) root.append(el('p', 'warn', '硅矿自动化仍开启，后续会继续按配置调度，撤回后可能再次派遣。'));
-    root.append(el('p', 'dim', intent.kind === 'dispatch' ? '仅派遣这支舰队采集所选空位，继续遵守汽油保留量、日预算和舰队占用限制。' : '只撤回本次选择的舰队，自动化配置保持当前设置。'));
+    root.append(el('p', 'dim', intent.kind === 'dispatch' ? '仅派遣这支舰队采集所选空位，继续检查实际汽油库存、待确认消费和舰队占用。' : '只撤回本次选择的舰队，自动化配置保持当前设置。'));
     const expiry = el('p', 'warn'); expiry.id = 'silicon-action-expiry'; expiry.hidden = true; root.append(expiry);
     $('silicon-action-confirm').textContent = intent.kind === 'dispatch' ? '确认派遣' : '确认撤回';
     $('silicon-action-confirm').disabled = !quote.token || !action.fleetId;

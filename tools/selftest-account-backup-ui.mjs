@@ -10,11 +10,28 @@ for (const id of ['import-accounts', 'import-accounts-file', 'export-accounts', 
 assert.equal(PAGE.includes('account-backup-menu'), false, '导出入口无需展开备份菜单');
 let passed = 0;
 const test = async (name, work) => { await work(); passed++; console.log('通过：' + name); };
-function fixture() {
+function fixture(versioned = false) {
   const nodes = new Map();
   const env = { nodes, calls: [], downloads: [], flushes: 0, reloads: [], dialogs: [], saveOK: true,
     confirm: '', refreshed: 0, configReads: 0, preview: { created: 1, updated: 1, settingsCount: 2, token: 'fixture-token' } };
   env.accounts = [{id:'first',title:'测试主号'},{id:'second',title:'测试小号'}];
+  if (versioned) {
+    env.versionGuard = {
+      version: 'page-original',
+      stale: false,
+      checks: 0,
+      assertWritable(path, method) {
+        assert.equal(path, '/api/accounts/export'); assert.equal(method, 'POST');
+        if (this.stale) throw Object.assign(new Error('页面已过期，请刷新页面'), { code: 'CLIENT_VERSION_MISMATCH' });
+      },
+      check(response, data) {
+        this.checks++;
+        const version = response.headers.get('X-CW-Console-Version');
+        if (version && version !== this.version || data?.code === 'CLIENT_VERSION_MISMATCH') this.stale = true;
+        return !this.stale;
+      },
+    };
+  }
   env.element = () => ({ textContent: '', hidden: false, disabled: false, open: false, value: '', children: [], checked: false,
       classList: { toggle() {} }, focus() {}, click() { this.clicked = true; },
       append(...children) { this.children.push(...children); }, appendChild(child) { this.children.push(child); },
@@ -28,20 +45,21 @@ function fixture() {
   env.choices = () => env.node('account-export-list').children.map(row => row.children[0]);
   new Function('env', `
     const $ = env.node;
+    ${versioned ? 'const window = { cwConsoleVersion: env.versionGuard };' : ''}
     const accounts = env.accounts;
     const accountChannel = () => '测试渠道';
-    const configFlush = async () => {env.flushes++;return env.saveOK;};
+    const configFlush = async () => {env.flushes++;await env.flushHook?.();return env.saveOK;};
     const call = async (path, options) => {
       const body=JSON.parse(options.body);env.calls.push({path,body});
       if(env.callError)throw new Error(env.callError);
       return path.endsWith('/preview')?env.preview:{...env.preview,ok:true};
     };
     const fetch = async (path, options) => {
-      env.calls.push({path,body:JSON.parse(options.body)});
+      env.calls.push({path,body:JSON.parse(options.body),headers:options.headers});
       if(env.gate)await env.gate;
-      return {ok:!env.fetchError,json:async()=>({error:env.fetchError}),blob:async()=>({})};
+      return {ok:!env.fetchError,headers:{get:()=>env.replyVersion??null},json:async()=>({error:env.fetchError,code:env.errorCode}),blob:async()=>{env.blobReads=(env.blobReads??0)+1;if(env.blobGate)await env.blobGate;return {};}};
     };
-    const URL={createObjectURL:()=>'blob:fixture',revokeObjectURL:()=>{env.revoked=true;}};
+    const URL={createObjectURL:()=>{env.objectUrls=(env.objectUrls??0)+1;return 'blob:fixture';},revokeObjectURL:()=>{env.revoked=true;}};
     const document={body:{appendChild(){}},createElement:()=>({...env.element(),click(){env.downloads.push(this.download);},remove(){}})};
     const setTimeout=work=>work();
     const accountDialog=async (title,message)=>{env.dialogs.push({title,message});return env.confirm;};
@@ -131,6 +149,52 @@ await test('下载在途阻止重复请求、关闭与Escape', async () => {
   assert.equal(env.calls.length, 1);
   finish(); await pending;
   assert.equal(env.node('account-export-dialog').open, false);
+});
+await test('账号导出携带初始页面版本，版本一致后才创建下载', async () => {
+  const env = fixture(true); env.replyVersion = 'page-original';
+  env.api.exportAccounts('first'); await env.api.downloadAccounts(false);
+  assert.equal(env.calls[0].headers['X-CW-Console-Version'], 'page-original');
+  assert.equal(env.calls[0].headers['content-type'], 'application/json');
+  assert.equal(env.downloads.length, 1); assert.equal(env.objectUrls, 1);
+  assert.equal(env.versionGuard.stale, false); assert(env.versionGuard.checks >= 2);
+});
+await test('已过期页面导出在发送前阻止，也不触发配置自动保存', async () => {
+  const env = fixture(true); env.versionGuard.stale = true;
+  env.api.exportAccounts('first'); await env.api.downloadAccounts(true);
+  assert.equal(env.calls.length, 0); assert.equal(env.flushes, 0); assert.equal(env.downloads.length, 0);
+  assert.match(env.node('account-export-error').textContent, /页面已过期/);
+  assert.equal(env.node('account-export-dialog').open, true); assert.equal(env.node('account-export-settings').disabled, false);
+});
+await test('等待配置保存期间版本改变时再次检查，不能继续发送导出', async () => {
+  const env = fixture(true); env.flushHook = () => { env.versionGuard.stale = true; };
+  env.api.exportAccounts('first'); await env.api.downloadAccounts(true);
+  assert.equal(env.flushes, 1); assert.equal(env.calls.length, 0); assert.equal(env.downloads.length, 0);
+  assert.match(env.node('account-export-error').textContent, /页面已过期/);
+});
+await test('导出响应版本不符或无版本头的409均提示刷新且不读取下载内容', async () => {
+  for (const mode of ['header', '409']) {
+    const env = fixture(true);
+    if (mode === 'header') env.replyVersion = 'server-updated';
+    else { env.fetchError = '页面版本已变化'; env.errorCode = 'CLIENT_VERSION_MISMATCH'; }
+    env.api.exportAccounts('first'); await env.api.downloadAccounts(false);
+    assert.equal(env.calls.length, 1); assert.equal(env.calls[0].headers['X-CW-Console-Version'], 'page-original');
+    assert.equal(env.versionGuard.version, 'page-original', '不能用新响应版本给旧页面授权');
+    assert.equal(env.versionGuard.stale, true); assert.equal(env.blobReads ?? 0, 0);
+    assert.equal(env.objectUrls ?? 0, 0); assert.equal(env.downloads.length, 0);
+    assert.match(env.node('account-export-error').textContent, /刷新页面/);
+    assert.equal(env.node('account-export-dialog').open, true);
+  }
+});
+await test('导出内容异步读取期间页面过期，晚到blob不能创建URL或触发下载', async () => {
+  const env = fixture(true); env.replyVersion = 'page-original'; let finish;
+  env.blobGate = new Promise(resolve => { finish = resolve; });
+  env.api.exportAccounts('first'); const pending = env.api.downloadAccounts(false);
+  await Promise.resolve(); await Promise.resolve();
+  assert.equal(env.blobReads, 1, '响应头已经通过检查，正在读取文件内容');
+  env.versionGuard.stale = true; finish(); await pending;
+  assert.equal(env.calls.length, 1); assert.equal(env.objectUrls ?? 0, 0); assert.equal(env.downloads.length, 0);
+  assert.match(env.node('account-export-error').textContent, /刷新页面/);
+  assert.equal(env.node('account-export-dialog').open, true); assert.equal(env.node('account-export-only').disabled, false);
 });
 await test('导入显示覆盖说明、携带确认版本并刷新账号与配置', async () => {
   const env = fixture();

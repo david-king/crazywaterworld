@@ -1,4 +1,5 @@
 import { cleanupAfterClaim } from './claim-cleanup.mjs';
+import { nativeForgeKey, ownedNativeForgeRecords, readNativeForgeAccess, reconcileNativeForge, runNativeForgeStep } from './equipment-forge-native.mjs';
 // 正常装备锻造：读取配方和库存后下单，确认工厂状态，产出入库后才安排下一件。
 import { exactAutomationId } from './automation-policy.mjs';
 import { displayMaterial } from './config.mjs';
@@ -23,6 +24,9 @@ function factoryKey(prefix, snapshot, buildingId, keys) {
 const keyOf = (snapshot, buildingId, keys) => factoryKey('forge', snapshot, buildingId, keys);
 const claimKeyOf = (snapshot, buildingId, keys) => factoryKey('forgeClaim', snapshot, buildingId, keys);
 export const forgeEnabled = settings => settings?.forge?.enabled === true;
+export const hasOwnedNativeForge = (player, ledger) => ownedNativeForgeRecords({
+  worldId: exactAutomationId(player?.worldId), playerId: exactAutomationId(player?.playerId),
+}, ledger?.keyRecords?.() ?? {}).length > 0;
 
 function quantity(value) {
   if (integer(value)) return value;
@@ -46,10 +50,12 @@ export async function readEquipmentForge(client, protocol, config, player, { ena
     if (!enabled() || client.connected === false) throw new Error('锻造读取已暂停');
     await refreshGoldSpend(client, player, { enabled });
     await refreshOrderMaterialSpends(client, player, { enabled });
-    const [water, items, resources, equips] = await Promise.all([
+    const [water, items, resources, equips, nativeReason] = await Promise.all([
       get('OnWaterRequest', 'OnWaterResponse'), get('AllItemRequest', 'AllItemResponse'),
       get('AllResourceRequest', 'AllResourceResponse'), get('EquipsRequest', 'EquipsResponse'),
+      readNativeForgeAccess(client, protocol, config, snapshot.now),
     ]);
+    snapshot.nativeReason = nativeReason;
     if (!enabled() || client.connected === false || client.connectionEpoch !== epoch
       || exactAutomationId(player?.playerId) !== snapshot.playerId || exactAutomationId(player?.worldId) !== snapshot.worldId) throw new Error('账号或连接已变化，不能使用原锻造库存');
     if (![water.building, items.items, resources.list, equips.equip].every(Array.isArray)) throw new Error('工厂、材料、金币或装备数据不完整');
@@ -120,7 +126,7 @@ export function planEquipmentForge(snapshot, config, settings, { usage = { count
   if (!p) return plan;
   const balances = new Map(snapshot.stock);
   for (const [key, record] of Object.entries(keys)) {
-    if (!key.startsWith('forge:' + snapshot.worldId + ':') || !ownsRecord(record, snapshot) || record.confirmed) continue;
+    if (p.nativeAuto || !key.startsWith('forge:' + snapshot.worldId + ':') || !ownsRecord(record, snapshot) || record.confirmed) continue;
     if (!Array.isArray(record.details?.costs)) { plan.notes.push('存在不完整的未决锻造预算，暂不下单'); return plan; }
     for (const cost of record.details.costs) {
       if (!cost?.id || !integer(cost.num)) { plan.notes.push('未决锻造消耗记录异常'); return plan; }
@@ -129,23 +135,42 @@ export function planEquipmentForge(snapshot, config, settings, { usage = { count
   }
   const used = usage.counters ?? {};
   let count = used.forgeStarts ?? 0, goldSpent = used.forgeGold ?? 0;
-  if (!integer(count) || !integer(goldSpent)) { plan.notes.push('锻造当日用量记录异常'); return plan; }
+  if (!p.nativeAuto && (!integer(count) || !integer(goldSpent))) { plan.notes.push('锻造当日用量记录异常'); return plan; }
   if (!p.enabled) plan.notes.push('装备自动锻造未开启');
   if (snapshot.reason) plan.notes.push(snapshot.reason);
-  for (const id of p.buildingIds) {
+  const ownedNative = ownedNativeForgeRecords(snapshot, keys);
+  const ids = [...new Set([...p.buildingIds, ...ownedNative.map(([, record]) => record.details.buildingId)])];
+  for (const id of ids) {
     const building = snapshot.buildings.find(row => row.buildingId === id), making = building?.equipMaking;
     const record = keys[keyOf(snapshot, id, keys)];
     const claim = keys[claimKeyOf(snapshot, id, keys)];
+    const nativeKey = nativeForgeKey(snapshot, id), nativeRecord = keys[nativeKey];
     const view = { buildingId: id, state: !building ? '未建成或未解锁' : making?.finishTime > snapshot.now ? '锻造中' : making ? '待领取' : '空闲',
       makeId: making?.makeId ?? null, finishTime: making?.finishTime ?? null, nativeAuto: building?.auto === true, recoverable: false, reason: '' };
     plan.factories.push(view);
     let reason = snapshot.reason || (!building ? '装备工厂尚未建成或未解锁' : !/^([1-9]\d*)装备厂$/.test(id) ? '工厂标识无法识别'
-      : building.auto ? '游戏原生自动锻造已开启，工具不另操作' : making?.finishTime > snapshot.now ? '等待当前锻造完成'
-      : claim && !observedProduct(claim.details, snapshot) ? '领取结果待确认，暂不重复领取或下单' : '');
+      : !p.enabled ? (building.auto ? '工具总开关未开启；游戏原生自动锻造仍保持开启' : '装备自动锻造总开关未开启，工具不会自动领取或续产') : '');
     if (reason) { view.reason = reason; plan.notes.push(id + '：' + reason); continue; }
-    if (!p.enabled || snapshot.reason) continue;
+    if (p.nativeAuto || nativeRecord) {
+      const isOn = p.nativeAuto === true && p.buildingIds.includes(id);
+      if (isOn && building.auto === true) reason = '游戏原生自动锻造已开启，领取和续产由游戏处理；工具规则不生效';
+      else if (isOn && nativeRecord && !nativeRecord.confirmed) reason = '原生自动锻造开启结果待确认，暂不重复发送';
+      else if (isOn && (claim || record && !record.confirmed)) reason = '工具上次领取或下单结果待确认，确认后再开启原生自动锻造';
+      else if (isOn && snapshot.nativeReason !== '') reason = snapshot.nativeReason || '原生自动锻造月卡权益未确认';
+      else if (!isOn && !nativeRecord) reason = '未选择此工厂';
+      else {
+        plan.actions.push({ kind: 'forgeNative', request: 'SetBuildingAutoWorkRequest', body: { buildingId: id, isOn },
+          buildingId: id, uniqueKey: nativeKey, costs: [], label: id + (isOn ? '开启' : '关闭') + '游戏原生自动锻造' });
+        reason = isOn ? '挂机运行时开启游戏原生自动锻造，工具规则不生效' : '先关闭本工具开启的原生自动锻造，回读确认后再按工具配置处理';
+      }
+      view.reason = reason; plan.notes.push(id + '：' + reason); continue;
+    }
+    reason = building.auto ? '游戏原生自动锻造已开启，工具不另操作' : making?.finishTime > snapshot.now ? '等待当前锻造完成'
+      : claim && !observedProduct(claim.details, snapshot) ? '领取结果待确认，暂不重复领取或下单' : '';
+    if (reason) { view.reason = reason; plan.notes.push(id + '：' + reason); continue; }
     if (making) {
-      if (!integer(making.makeId, 1) || !integer(making.finishTime, 1)) reason = '当前锻造批次信息不完整';
+      if (p.collect === false) reason = '自动领取已关闭，装备等待手动领取';
+      else if (!integer(making.makeId, 1) || !integer(making.finishTime, 1)) reason = '当前锻造批次信息不完整';
       else if (making.finishTime >= snapshot.now) reason = '等待服务器确认制作到期';
       else if (record && !record.confirmed) reason = '上次下单结果待确认，暂不接管当前批次';
       if (reason) { view.reason = reason; plan.notes.push(id + '：' + reason); continue; }
@@ -154,9 +179,10 @@ export function planEquipmentForge(snapshot, config, settings, { usage = { count
         makeId: making.makeId, finishTime: making.finishTime, equipId: making.equipId || '',
         star: Object.hasOwn(making, 'star') && integer(making.star) ? making.star : null,
         costs: [], label: id + '领取已完成装备' });
-      view.reason = '制作已完成，可领取'; continue;
+      view.reason = '制作已完成，挂机运行时自动领取（预览不执行）'; continue;
     }
-    if (record && !record.confirmed) reason = '上次下单结果待确认，暂不重复';
+    if (p.craft === false) reason = '自动续产已关闭';
+    else if (record && !record.confirmed) reason = '上次下单结果待确认，暂不重复';
     if (!reason && count >= p.dailyLimit) reason = '已达今日锻造次数上限';
     if (reason) { view.reason = reason; plan.notes.push(id + '：' + reason); continue; }
     if (!p.enabled || snapshot.reason) continue;
@@ -192,6 +218,7 @@ export function planEquipmentForge(snapshot, config, settings, { usage = { count
 
 function reconcile(snapshot, ledger, onStep, enabled = () => true) {
   if (snapshot.reason || !enabled()) return;
+  reconcileNativeForge(snapshot, ledger);
   // 领取记录先核对。明确看到工厂批次结束且出现新UID，才释放领取与制作的记录。
   for (const [key, record] of Object.entries(ledger.keyRecords())) {
     if (!enabled()) return;
@@ -231,7 +258,7 @@ function reconcile(snapshot, ledger, onStep, enabled = () => true) {
   }
 }
 
-export async function runEquipmentForge(client, protocol, config, player, { getSettings, ledger, enabled = () => true, onStep } = {}) {
+export async function runEquipmentForge(client, protocol, config, player, { getSettings, ledger, enabled = () => true, onStep, nativeOnly = false } = {}) {
   if (!forgeEnabled(getSettings?.()) || !enabled() || active.has(client)) return { actions: [], results: [], notes: [] };
   if (!ledger?.updateKeyDetails || !ledger?.releaseCompletedKey) throw new Error('缺少持久锻造任务记录');
   active.add(client);
@@ -243,6 +270,7 @@ export async function runEquipmentForge(client, protocol, config, player, { getS
     const read = () => readEquipmentForge(client, protocol, config, player, { enabled: current });
     const snapshot = await read(); reconcile(snapshot, ledger, report, current);
     const plan = planEquipmentForge(snapshot, config, getSettings(), { usage: ledger.snapshot(), keys: ledger.keyRecords() });
+    if (nativeOnly) plan.actions = plan.actions.filter(step => step.kind === 'forgeNative');
     const balances = new Map(snapshot.stock);
     for (const proposed of plan.actions) {
       if (!current() || !forgeEnabled(getSettings())) break;
@@ -254,6 +282,17 @@ export async function runEquipmentForge(client, protocol, config, player, { getS
         JSON.stringify(action.body) === JSON.stringify(proposed.body) && JSON.stringify(action.costs) === JSON.stringify(proposed.costs));
       if (!step || settings !== getSettings() || !current()) continue;
       if ((rejected.get(client)?.get(step.uniqueKey) ?? 0) > Date.now()) continue;
+      if (step.kind === 'forgeNative') {
+        const entry = await runNativeForgeStep(client, protocol, fresh, step, ledger, read,
+          () => current() && forgeEnabled(getSettings()) && settings === getSettings());
+        report(entry);
+        if (entry.status === 'rejected') {
+          const failures = rejected.get(client) ?? new Map(); rejected.set(client, failures);
+          failures.set(step.uniqueKey, Date.now() + 300000);
+        }
+        if (entry.status === 'unknown') break;
+        continue;
+      }
       if (step.kind === 'forgeClaim') {
         if (!protocol.PickMadeEquipRequest || !protocol.PickMadeEquipResponse) throw new Error('当前协议缺少装备领取能力');
         const details = { kind: 'forgeClaim', buildingId: step.buildingId, makeId: step.makeId, finishTime: step.finishTime,
@@ -345,10 +384,13 @@ export async function runEquipmentForge(client, protocol, config, player, { getS
     }
     const unsettled = Object.entries(ledger.keyRecords()).some(([key, record]) => ownsRecord(record, snapshot)
       && (key.startsWith('forgeClaim:' + worldId + ':') || key.startsWith('forge:' + worldId + ':') && !record.confirmed));
-    if (!snapshot.reason && !unsettled) {
+    if (!nativeOnly && !snapshot.reason && !unsettled && !getSettings().forge.nativeAuto
+      && !ownedNativeForgeRecords(snapshot, ledger.keyRecords()).length
+      && !plan.actions.some(step => step.kind === 'forgeNative')
+      && !snapshot.buildings.some(building => building.auto)) {
       const settings = getSettings();
       const cleanup = await cleanupAfterClaim(client, config, settings, ledger, 'forge',
-        () => current() && forgeEnabled(getSettings()) && settings === getSettings());
+        () => current() && forgeEnabled(getSettings()) && !getSettings().forge.nativeAuto && settings === getSettings());
       if (cleanup) report({ ...cleanup, step: { kind: 'forgeDecompose', label: cleanup.label } });
     }
     return { ...plan, results };

@@ -13,6 +13,14 @@ const check=async(name,work)=>{await work();passed++;console.log('通过：'+nam
 const fixture=options=>guildShipFixture(protocol,dir,options);
 const read=f=>readGuildShips(f.client,protocol,config,f.options);
 const run=f=>serviceGuildShips(f.client,protocol,config,f.options);
+const publishPeriod=(f,period)=>{
+ watchGuildShipPushes(f.client);
+ f.client.emit('message',{name:'SCGuildShipActivity',body:{period:{period:f.state.period,startTime:f.state.now-3600,...period}}});
+};
+const withServerClock=async(f,work)=>{
+ const originalNow=Date.now;Date.now=()=>f.state.now*1000;f.advance(0);
+ try{await work();}finally{Date.now=originalNow;}
+};
 try{
  await check('协议类型、完整int64身份、船舱和响应字段真实编解码',async()=>{const f=fixture();f.state.ships=[f.roundtripShip(f.state.ships[0])];const view=await read(f);assert.equal(view.ships[0].leaderId,'9007199254742222');assert.equal(view.candidates[0].costs[0].missing,0);for(const name of ['GuildShipRequest','GuildShipResponse','GuildShipOrderRequest','GuildShipSeekRequest','SCGuildShipActivity'])assert.equal(typeof protocol[name].encode,'function');});
  await check('默认关闭不读写，真实18级门槛，未入联盟和关闭活动不派船',async()=>{const f=fixture();f.settings.guildShip.enabled=false;assert((await run(f)).skipped);assert.equal(f.state.calls.length,0);f.settings.guildShip.enabled=true;f.player.level=17;assert.match((await run(f)).reason,/18/);f.player.level=30;f.player.guildId='0';assert.match((await run(f)).reason,/联盟/);f.player.guildId='9007199254742000';f.state.period=0;assert.match((await run(f)).reason,/未开放/);assert.equal(f.state.writes.length,0);});
@@ -44,12 +52,12 @@ try{
  });
  await check('商船按服务端开始和结束时间门控，未开放不读写，到期自动参与',async()=>{
   const f=fixture();f.settings.alliance.enabled=false;
-  const start=f.state.now+30,end=f.state.now+90;
+  const start=f.state.now+30,end=f.state.now+900;
   watchGuildShipPushes(f.client);
   f.client.emit('message',{name:'SCGuildShipActivity',body:{period:{period:3,startTime:start,endTime:end}}});
   assert.match((await run(f)).reason,/未开放/);assert.equal(f.state.calls.length,0);
   f.advance(30);assert.equal((await run(f)).ok,true);
-  f.advance(60);f.state.ships=[f.ship({id:2})];
+  f.advance(end-f.state.now);f.state.ships=[f.ship({id:2})];
   assert.match((await run(f)).reason,/活动结束/);assert.equal(f.state.writes.length,1);
  });
  await check('完整挂机循环独立调度商船，精确到开放边界唤醒，关闭后不参与',async()=>{
@@ -64,7 +72,7 @@ try{
     f.settings.silicon.enabled=false;f.settings.progression.enabled=false;f.settings.dailies.enabled=false;
     const stop={aborted:false},sleeps=[],reports=[];
     watchGuildShipPushes(f.client);
-    f.client.emit('message',{name:'SCGuildShipActivity',body:{period:{period:3,startTime:f.state.now+30,endTime:f.state.now+300}}});
+    f.client.emit('message',{name:'SCGuildShipActivity',body:{period:{period:3,startTime:f.state.now+30,endTime:f.state.now+3600}}});
     await runLoop(f.client,protocol,{config,player:f.player,getSettings:()=>f.settings,usageLedger:f.ledger,
      rounds:2,everyMs:3600000,allowMutate:true,isEnabled:()=>false,stop,
      sleep:async ms=>{
@@ -119,6 +127,130 @@ try{
   assert.equal((await run(f)).reason,'等待下次检查');
   assert.equal(reports.length,2);
   f.client.emit('login');assert.equal(watchGuildShipPushes(f.client).lastResult,null);
+ });
+ await check('提前结算边界：剩余601秒可申请，600秒及以后船员、船长和末日兜底均停止',async()=>{
+  for(const role of ['crew','captain','full'])for(const remaining of [601,600,599]){
+   const f=fixture({hour:23,minute:40});
+   await withServerClock(f,async()=>{
+    Object.assign(f.settings.guildShip,{crew:role==='crew',captain:role==='captain',mode:role==='full'?'full':'redFirst'});
+    f.state.ships=[f.ship({captain:role!=='captain',coins:role==='full'?1:80})];
+    publishPeriod(f,{endTime:f.state.now+remaining});
+    const result=await run(f);
+    assert.equal(f.state.writes.length,remaining>600?1:0,role+'，活动剩余 '+remaining+' 秒');
+    if(remaining>600)assert.equal(result.ok,true,result.error??result.reason);
+    else{
+     assert.equal(result.skipped,true);assert.match(result.reason,/结算|10.*分钟/);
+     assert.equal(f.ledger.snapshot().uncertain,0);
+     assert.equal(pendingOrderMaterialSpends(f.player).length,0);
+    }
+   });
+  }
+ });
+ await check('结算期预览没有可申请候选，也不产生红船备料需求',async()=>{
+  const f=fixture();
+  await withServerClock(f,async()=>{
+   f.settings.guildShip.produceMissing=true;f.state.stock.橡胶圈=0;
+   publishPeriod(f,{endTime:f.state.now+600});
+   const view=await read(f),diagnostics=guildShipDiagnostics(view,f.settings,config);
+   assert.equal(view.candidates.length,0);assert.equal(diagnostics.eligible,0);
+   assert.match(diagnostics.reason,/结算|10.*分钟/);assert.deepEqual(guildShipDemands(view,f.settings),[]);
+   const {previewExtended}=await import('../src/extended-preview.mjs');
+   const preview=await previewExtended('guildShip',f.client,protocol,config,f.player,f.settings,f.ledger);
+   assert.equal(preview.counts.candidates,0);assert.equal(preview.counts.eligible,0);
+   assert(preview.notes.some(note=>/结算|10.*分钟/.test(note)));assert.equal(f.state.writes.length,0);
+  });
+ });
+ await check('没有结束推送、无效结束时间或其他期次不能推算本期提前结算',async()=>{
+  for(const period of [null,{endTime:0},{period:99,endTime:1}]){
+   const f=fixture();
+   await withServerClock(f,async()=>{
+    if(period)publishPeriod(f,period);
+    assert((await read(f)).candidates.length>0);
+    assert.equal((await run(f)).ok,true);assert.equal(f.state.writes.length,1);
+   });
+  }
+ });
+ await check('读取英雄或库存期间进入结算期，不返回过期候选也不再申请',async()=>{
+  for(const request of ['AllHeroRequest','AllItemRequest']){
+   const f=fixture();
+   await withServerClock(f,async()=>{
+    f.settings.guildShip.produceMissing=true;publishPeriod(f,{endTime:f.state.now+601});
+    let crossed=false;
+    f.state.hook=async name=>{if(name===request&&!crossed){crossed=true;f.advance(1);}};
+    const view=await read(f);assert(crossed);assert.equal(view.candidates.length,0);
+    assert.deepEqual(guildShipDemands(view,f.settings),[]);assert.match(view.reason,/结算|10.*分钟/);
+    assert.equal((await run(f)).skipped,true);assert.equal(f.state.writes.length,0);
+    assert.equal(f.ledger.snapshot().uncertain,0);assert.equal(pendingOrderMaterialSpends(f.player).length,0);
+   });
+  }
+ });
+ await check('发送前跨过结算边界或收到提前结束推送，取消船员和船长预占',async()=>{
+  for(const role of ['crew','captain'])for(const change of ['clock','push']){
+   const f=fixture();
+   await withServerClock(f,async()=>{
+    Object.assign(f.settings.guildShip,{crew:role==='crew',captain:role==='captain'});
+    f.state.ships=[f.ship({captain:role==='crew'})];
+    publishPeriod(f,{endTime:f.state.now+(change==='clock'?601:3600)});
+    const reserve=f.ledger.reserve;let reserved=false;
+    f.options.ledger={...f.ledger,reserve(...args){
+     const ticket=reserve(...args);reserved=true;
+     if(change==='clock')f.advance(1);else publishPeriod(f,{endTime:f.state.now+600});
+     return ticket;
+    }};
+    const result=await run(f);assert(reserved,'必须经过发送前持久预占');
+    assert.equal(result.skipped,true);assert.equal(f.state.writes.length,0);
+    assert.equal(f.ledger.snapshot().uncertain,0);assert.deepEqual(f.ledger.keyRecords(),{});
+    assert.equal(pendingOrderMaterialSpends(f.player).length,0);assert.equal(f.state.stock.橡胶圈,50);
+   });
+  }
+ });
+ await check('截止前已发送的申请跨入结算期后仍回读本人船位并核销材料',async()=>{
+  for(const role of ['crew','captain']){
+   const f=fixture();
+   await withServerClock(f,async()=>{
+    Object.assign(f.settings.guildShip,{crew:role==='crew',captain:role==='captain'});
+    f.state.ships=[f.ship({captain:role==='crew'})];publishPeriod(f,{endTime:f.state.now+601});
+    f.state.writeHook=async()=>f.advance(1);
+    const result=await run(f);assert.equal(result.ok,true,result.error??result.reason);
+    assert.equal(f.state.writes.length,1);assert.equal(f.ledger.snapshot().uncertain,0);
+    assert.equal(pendingOrderMaterialSpends(f.player).length,0);
+    assert.equal(f.state.stock.橡胶圈,role==='crew'?45:50);
+    await run(f);assert.equal(f.state.writes.length,1,'结算期不再追加申请');
+   });
+  }
+ });
+ await check('结算期已确认上船的库存核销失败后继续重试，不再申请或遗留材料预占',async()=>{
+  const f=fixture();
+  await withServerClock(f,async()=>{
+   publishPeriod(f,{endTime:f.state.now+601});
+   f.state.writeHook=async()=>f.advance(1);
+   let failed=false;
+   f.state.hook=async name=>{
+    if(name==='AllItemRequest'&&f.state.writes.length&&!failed){failed=true;throw new Error('库存暂未同步');}
+   };
+   const result=await run(f);assert.equal(result.ok,true,result.error??result.reason);assert(failed);
+   assert.equal(f.ledger.snapshot().uncertain,0,'本人船位已确认，只有库存核销待重试');
+   assert.equal(pendingOrderMaterialSpends(f.player).length,1);assert.equal(f.state.stock.橡胶圈,45);
+   const retry=await run(f);assert.equal(retry.skipped,true);assert.match(retry.reason,/结算|10.*分钟/);
+   assert.equal(pendingOrderMaterialSpends(f.player).length,0);assert.equal(f.state.writes.length,1);
+   assert.equal(f.state.stock.橡胶圈,45);
+  });
+ });
+ await check('进入结算期的未知申请只按本人船位补确认，未成功的记录保持防重',async()=>{
+  for(const succeeded of [true,false]){
+   const f=fixture();
+   await withServerClock(f,async()=>{
+    publishPeriod(f,{endTime:f.state.now+601});
+    f.state.writeHook=async(name,body)=>{
+     if(succeeded){f.state.ships[0].cabin[body.crewId-1].player={playerId:f.player.playerId};f.state.stock.橡胶圈-=5;}
+     f.advance(1);throw new Error('响应丢失');
+    };
+    assert.equal((await run(f)).pending,true);assert.equal(f.ledger.snapshot().uncertain,1);
+    f.state.writeHook=async()=>{};await run(f);
+    assert.equal(f.state.writes.length,1);assert.equal(f.ledger.snapshot().uncertain,succeeded?0:1);
+    assert.equal(pendingOrderMaterialSpends(f.player).length,succeeded?0:1);
+   });
+  }
  });
  console.log(`联盟商船 ${passed} 项测试通过。`);
 }finally{fs.rmSync(dir,{recursive:true,force:true});}

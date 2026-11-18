@@ -34,8 +34,8 @@ export function stagePanel() {
       </CardContent>
     </Card>
     <Card><CardHeader><CardTitle>海盗首杀手动推进</CardTitle></CardHeader><CardContent>
-      <p className="dim">手动开始本次连续推进，达到失败停止次数或条件不足时停止；不会开启挂机自动讨伐。舰队、目标和汽油限制沿用海盗配置。</p>
-      <div className="bar"><a href="#config-group-pirate-hunt">设置舰队、目标与预算</a><label htmlFor="pirate-manual-failures">失败停止次数</label><Input id="pirate-manual-failures" aria-label="海盗手动推进失败停止次数" className="w-20" type="number" min="1" max="100" defaultValue="1" /><Button id="pirate-advance-start" disabled>开始首杀推进</Button><Button id="pirate-advance-stop" variant="outline" disabled>停止首杀推进</Button></div>
+      <p className="dim">手动开始本次连续推进，达到失败停止次数或条件不足时停止；不会开启挂机自动讨伐。舰队和目标沿用海盗配置，汽油按实际库存检查。</p>
+      <div className="bar"><a href="#config-group-pirate-hunt">设置舰队与目标</a><label htmlFor="pirate-manual-failures">失败停止次数</label><Input id="pirate-manual-failures" aria-label="海盗手动推进失败停止次数" className="w-20" type="number" min="1" max="100" defaultValue="1" /><Button id="pirate-advance-start" disabled>开始首杀推进</Button><Button id="pirate-advance-stop" variant="outline" disabled>停止首杀推进</Button></div>
       <p id="pirate-advance-state" role="status">尚未开启</p>
     </CardContent></Card>
     </div>

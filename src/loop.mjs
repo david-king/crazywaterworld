@@ -6,11 +6,13 @@ import { runAllianceAutomation } from './alliance-automation.mjs';
 import { serviceGuildShips, watchGuildShipPushes } from './guild-ships.mjs';
 import { serviceGuildForts } from './guild-forts.mjs';
 import { runSiliconMining, watchSiliconMining, siliconInterval } from './silicon-mining.mjs';
+import { runResourceFields } from './resource-field-automation.mjs';
 import { runHeroRaidAutomation } from './hero-raid-automation.mjs';
 import { merchantMonitorSeconds, watchMerchant } from './merchant-monitor.mjs';
 import {runPirateSweeps} from './pirate-sweeps.mjs';
 import {claimGuildTitleReward} from './guild-title-rewards.mjs';
 import {runWorldBoss,claimWorldBossDamage} from './world-boss.mjs';
+import {recoverWorldBossLineups} from './world-boss-lineups.mjs';
 import { claimOpenRank, claimFestivalActive, claimReportRewards, claimLeagueCollect, claimLeaguePass, claimWeekSupply } from './missing-rewards.mjs';
 import { dispatchOrder, reserveDispatch, dispatchReservationReason, bridgeFleetReservations, legacyFleetReservationReason } from './fleet-availability.mjs';
 import { runAllianceRadar } from './alliance-radar.mjs';
@@ -45,6 +47,7 @@ import { createLoopScheduler } from './loop-scheduler.mjs';
 import { createActionGuard, nativePreferenceEnabled, needsCargoDemand, exactAutomationId } from './automation-policy.mjs';
 import { surveyBaseAutomation, planBaseAutomation, observeBaseAutomationPlan, runBaseAutomation, baseDemands } from './base-automation.mjs';
 import { hasBaseWork } from './automation-settings.mjs';
+import { runMuseumDisplay } from './museum-display.mjs';
 import { validateRuntimeSettings, guardRuntimeActions } from './settings-runtime.mjs';
 import { assertResourcesReady } from './resource-store.mjs';
 import { treasureAutomationEnabled, runTreasureLoot } from './treasure-loot.mjs';
@@ -56,14 +59,9 @@ import { forgeEnabled, runEquipmentForge } from './equipment-forge.mjs';
 import { antiqueEnabled, runAntiqueUpgrade } from './antique-upgrade.mjs';
 import { readHeroGrowthPlan, heroStepLabel, runHeroPlan } from './heroes.mjs';
 import { appointments } from './appointments.mjs';
-import { serviceGuildOrders } from './guild-orders.mjs';
-import { serviceRadar } from './radar.mjs';
-import { serviceMuseum } from './museum.mjs';
-import { servicePetBreeding } from './pet-breeding.mjs';
 import { serviceGuildAid } from './guild-aid.mjs';
 import { serviceStageAuto } from './progress-automation.mjs';
 import { createChallengeRun, runChallengeRound } from './challenge-automation.mjs';
-import { serviceTreasureLoot } from './treasure-loot.mjs';
 import { claimFestivalRewards, claimWeeklyRewards, claimVipDaily as claimLegacyVipDaily, festivalRewardKeys, weeklyRewardKeys } from './free-rewards.mjs';
 import { claimOpenRanks } from './pirate-board.mjs';
 import { claimExtraRewards, extraRewardKeys } from './extra-rewards.mjs';
@@ -74,7 +72,7 @@ import { claimWeekly, runLinkage, weekSchedule, readWeekOrder, runAutomaticWeekO
 import { automationTasks, dailyTaskKey, defaultFishingGoldReserve, defaultCompassSpinCount, worldTaskKey } from './automation.mjs';
 import { automationControls } from './automation-controls.mjs';
 import { activityTimeTasks, isActivityTaskAvailable, nextActivityBoundary } from './activity-availability.mjs';
-import { weeklyManagedSettings, weeklyLegacyTaskAllowed, nextWeeklyActivityBoundary } from './weekly-activity.mjs';
+import { nextWeeklyActivityBoundary } from './weekly-activity.mjs';
 import { runWeeklyActivity } from './weekly-activity-runner.mjs';
 
 const automationControlLabels = new Map(automationControls.map(control => [control.key, control.label]));
@@ -115,9 +113,6 @@ export async function runLoop(client, protocol, {
   if (!allowMutate) throw new Error('循环会持续改变账号状态，需要 --yes');
   const getWeeklySettings = getSettings;
   const originalHeroSettings = getHeroSettings;
-  getSettings = () => weeklyManagedSettings(getWeeklySettings());
-  // CLI hero-only runs can supply a separate getter without the main settings.
-  getHeroSettings = originalHeroSettings === getWeeklySettings ? getSettings : originalHeroSettings;
   let runtimeError = null;
   const assertRuntime = () => {
     if (runtimeError) throw runtimeError;
@@ -151,6 +146,9 @@ export async function runLoop(client, protocol, {
   let lastTreasureNotes = '';
   let radarAt=0;
   let siliconAt = 0, siliconPreference = null, extendedAt = 0, extendedPreference = null;
+  let resourceFieldsAt = 0, resourceFieldsPreference = null;
+  const resourceFieldsNext = () => getSettings()?.resourceFields?.enabled ?
+    (resourceFieldsPreference === getSettings().resourceFields ? resourceFieldsAt : 0) : Infinity;
   const siliconNext = () => getSettings()?.silicon?.enabled ?
     (siliconPreference === getSettings().silicon ? siliconAt : 0) : Infinity;
   const extendedEnabled = () => getSettings()?.alliance?.enabled || getSettings()?.guildShip?.enabled || getSettings()?.heroRaid?.enabled;
@@ -209,7 +207,7 @@ export async function runLoop(client, protocol, {
     if (stop.aborted || !getSettings()?.silicon?.enabled) return;
     siliconAt = 0; siliconVersion++; scheduler.wake();
   }));
-  const settingsWake = () => { fleetSpeedAt = 0; siliconAt = 0; extendedAt = 0; siliconVersion++; dispatchSettingsPending = true;
+  const settingsWake = () => { fleetSpeedAt = 0; siliconAt = 0; resourceFieldsAt = 0; extendedAt = 0; siliconVersion++; dispatchSettingsPending = true;
     rewards?.clearTask('guildShip'); rewards?.clearTask('guildFort'); wakeActivities(); scheduler.wake(); };
   const extendedPush = ({ name }) => {
     if (/^SCGuildShip|^SCFort|^SCHeroRaid/.test(name) || ['SCAllActivity','SCGuildOrder','SCNewGuildAidAsk','SCGuildAidHelp','SCGuildAidRemove','SCNewGuildWelfarePack'].includes(name)) {
@@ -245,7 +243,7 @@ export async function runLoop(client, protocol, {
     const empty = () => ({ planned: 0, results: [] });
     const summary = { round, startedAt: Math.floor(Date.now() / 1000), tasks: empty(), dailies: empty(), world: empty() };
     const settings = getSettings();
-    const enabled = key => !stop.aborted && runtimeActive() && weeklyLegacyTaskAllowed(getSettings(), key) && isActivityTaskAvailable(key, client) && nativePreferenceEnabled(getSettings(), key) && (!isEnabled || (isEnabled(key) && rewards.due(key)));
+    const enabled = key => !stop.aborted && runtimeActive() && isActivityTaskAvailable(key, client) && nativePreferenceEnabled(getSettings(), key) && (!isEnabled || (isEnabled(key) && rewards.due(key)));
     const guard = runtimeGuard(createActionGuard(client, getSettings, usageLedger, { player, enabled: () => !stop.aborted && client.connected }));
     const usage = () => usageLedger?.snapshot() ?? { counters: {} };
     let extraDemand = [];
@@ -273,10 +271,10 @@ export async function runLoop(client, protocol, {
     const logReward = (entry, category = '领奖') => stepLog('tasks')({ title: entry.label, ...entry, taskKey:entry.taskKey||entry.key, category });
     const allowDaily = (id, action) => !(getSettings() && action.request === 'ClickGoldRequest' && !action.body.free) && enabled(dailyTaskKey(id, action));
     const allowWorld = kind => enabled(worldTaskKey(kind));
-    const active = key => !stop.aborted && runtimeActive() && weeklyLegacyTaskAllowed(getSettings(), key) && isActivityTaskAvailable(key, client) && nativePreferenceEnabled(getSettings(), key) && Boolean(isEnabled?.(key));
+    const active = key => !stop.aborted && runtimeActive() && isActivityTaskAvailable(key, client) && nativePreferenceEnabled(getSettings(), key) && Boolean(isEnabled?.(key));
     const aliases = { vipDailyGift:['vipDaily'], worldOnlineRewards:['worldOnline'],
       festivalActiveRewards:['festivalActive'], battleReportRewards:['campaignReports'],
-      weekSupplyFree:['weekChipFree','weekUniqueFree'], worldBossRewards:['worldBossDamage'],
+      weekSupplyFree:['weekChipFree','weekUniqueFree'],
       merchantRewards:['tradeTasks'], festivalFreeGift:['festivalGifts'],
       riverScore:['snowballFree'], riverHelp:['snowballFree'],
       pirateRankRewards:['openRankRewards'], warRankRewards:['openRankRewards'] };
@@ -286,11 +284,6 @@ export async function runLoop(client, protocol, {
     const serviceActive = key => isActivityTaskAvailable(key, client) && nativePreferenceEnabled(getSettings(), key)
       && (active(key) || Boolean((getSettings() || key === 'battleReportRewards') && aliases[key]?.some(active)));
     const takeoverReason = key => {
-      const s = getSettings();
-      if (s?.radar?.runEnabled !== false && s?.radar?.enabled && ['radarAuto','radarRepair'].includes(key)) return '联盟情报';
-      if (s?.loop?.world && s.museum?.runEnabled !== false && s.museum?.enabled && ['museumCollect','museumExplore','museumAchievements'].includes(key)) return '博物馆';
-      if (s?.loop?.world && s.pet?.enabled && ['petCollect','petBreed'].includes(key)) return '海兽';
-      if (s?.treasure?.enabled && key === 'treasureLoot') return '巨轮';
       if (key === 'heroGrowth') return '指定英雄养成';
       return null;
     };
@@ -413,6 +406,8 @@ export async function runLoop(client, protocol, {
       if(stop.aborted)return;
       if(usageLedger){const changes=await checkFleetSettlement(client,player,usageLedger);for(const change of changes)if(change.repairRecovery)
         stepLog('world')({category:'战后维修',title:change.buildingId+'维修复查',ok:true,status:'confirmed',note:change.reason,taskKey:'舰队战后维修'});}
+      if(usageLedger)await recoverWorldBossLineups(client,player,usageLedger,{enabled:()=>!stop.aborted&&client.connected!==false,
+        report:entry=>stepLog('world')({...entry,title:entry.label,taskKey:'worldBoss'})});
       await checkMaintenance();
       // 加速补满后立即刷新维修占用，让同轮城战能使用已恢复的舰队。
       if(await checkFleetSpeed())await checkMaintenance();
@@ -428,7 +423,18 @@ export async function runLoop(client, protocol, {
         if (task === (getSettings()?.treasure.follow?'follow':'treasure')) await checkTreasure();
         if (task === 'worldBoss'&&getSettings()?.worldBoss.enabled) await checkBoss();
         if (task === 'silicon') await checkSilicon();
+        if (task === 'resourceFields') await checkResourceFields();
       }
+    }
+    async function checkResourceFields() {
+      if (stop.aborted || resourceFieldsNext() > Date.now()) return;
+      const preference = getSettings()?.resourceFields;
+      resourceFieldsPreference = preference;
+      try { await runResourceFields(client, protocol, config, player, { getSettings, ledger: usageLedger,
+        enabled: () => !stop.aborted && runtimeActive() && client.connected !== false && getSettings()?.resourceFields?.enabled,
+        report: entry => serviceReport('world', '资源田')({ ...entry, taskKey: 'resourceFields.enabled' }) }); }
+      catch (error) { phaseFailure('world', '资源田检查', error); }
+      finally { resourceFieldsAt = preference === getSettings()?.resourceFields ? Date.now() + preference.checkEverySeconds * 1000 : 0; }
     }
     async function checkSilicon() {
       if (stop.aborted || siliconNext() > Date.now()) return;
@@ -570,8 +576,8 @@ export async function runLoop(client, protocol, {
     }
 
     async function checkRadar(){
-      if(stop.aborted || getSettings()?.radar.runEnabled === false || !getSettings()?.radar.enabled || Date.now()<radarAt)return;
-      try{await runAllianceRadar(client,config,player,{getSettings,ledger:usageLedger,canUseFleet:id=>runtimeActive()&&!dispatchReservationReason(client,getSettings(),'radar',id),enabled:()=>!stop.aborted&&runtimeActive()&&client.connected,report(entry){summary.world.results.push(entry);if(!entry.skipped)summary.world.planned++;stepLog('world')({...entry,title:entry.label,category:'联盟情报'});}});}
+      if(stop.aborted || getSettings()?.radar.runEnabled === false || !(getSettings()?.radar.enabled || getSettings()?.radar.repairIdle) || Date.now()<radarAt)return;
+      try{await runAllianceRadar(client,config,player,{protocol,getSettings,ledger:usageLedger,canUseFleet:id=>runtimeActive()&&!dispatchReservationReason(client,getSettings(),'radar',id),enabled:()=>!stop.aborted&&runtimeActive()&&client.connected,report(entry){summary.world.results.push(entry);if(!entry.skipped)summary.world.planned++;stepLog('world')({...entry,title:entry.label,category:'联盟情报'});}});}
       catch(error){phaseFailure('world','联盟情报',error);}
       finally{rewards?.expect('联盟情报',rewards.now()+(getSettings()?.radar.checkEverySeconds??30));radarAt=Date.now()+(getSettings()?.radar.checkEverySeconds??30)*1000;}
     }
@@ -627,6 +633,8 @@ export async function runLoop(client, protocol, {
     await scheduler.run(async () => {
       if (stop.aborted) return;
       beginAdRound(client);
+      // 活动有独立开关；先执行当天活动，普通任务随后重读状态并共用预算，避免沿用消费前的快照。
+      await checkWeeklyActivity();
       await checkAppointments();
       await checkFactoryDue({ checkpoint: true });
       if (!isEnabled && enabled('tasks')) {
@@ -815,37 +823,16 @@ export async function runLoop(client, protocol, {
             ...(error.code==='AUTOMATION_SKIP'?{skipped:true,reason:error.message}:{}),error:error.message}); }
         }
       }
-      for (const key of ['radarAuto','radarRepair','museumCollect','museumExplore','museumAchievements','petCollect','petBreed','treasureLoot','heroGrowth']) {
+      for (const key of ['heroGrowth']) {
         const reason = takeoverReason(key);
         if (enabled(key) && reason) serviceReport('dailies', reason)({key, skipped:true, reason:'由游戏配置中的' + reason + '接管'});
       }
-      // 兼容主分支原有的联盟、博物馆、海兽、成长和巨轮服务。
+      // 兼容原有联盟服务；巨轮只由世界分类中的详细配置控制。
       // 新版调度服务与这些入口共享同一个账号队列；只有显式开启旧开关时才执行，避免重复请求。
       await checkFactoryDue({ checkpoint: true });
-      if (isEnabled && legacyEnabled('guildOrders')) {
-        try { await serviceGuildOrders(client, protocol, config, { player, getSettings, enabled: () => legacyActive('guildOrders'), scheduler: rewards, report: serviceReport('dailies', '联盟订单') }); }
-        catch (error) { phaseFailure('dailies', '联盟订单检查', error); }
-      }
       if (isEnabled && legacyEnabled('guildAidHelp')) {
         try { await serviceGuildAid(client, protocol, config, { player, getSettings, enabled: () => legacyActive('guildAidHelp'), scheduler: rewards, report: serviceReport('dailies', '联盟互助') }); }
         catch (error) { phaseFailure('dailies', '联盟互助检查', error); }
-      }
-      await checkFactoryDue({ checkpoint: true });
-      if (isEnabled && ['radarAuto', 'radarRepair'].some(legacyEnabled)) {
-        try { await serviceRadar(client, protocol, config, { player, enabled: legacyActive, scheduler: rewards, report: serviceReport('dailies', '联盟情报') }); }
-        catch (error) { phaseFailure('dailies', '联盟情报检查', error); }
-      }
-      if (isEnabled && legacyEnabled('treasureLoot')) {
-        try { await serviceTreasureLoot(client, config, { player, protocol, getSettings, enabled: () => legacyActive('treasureLoot'), scheduler: rewards, report: serviceReport('dailies', '世界宝藏') }); }
-        catch (error) { phaseFailure('dailies', '世界宝藏检查', error); }
-      }
-      if (isEnabled && ['museumCollect', 'museumExplore'].some(legacyEnabled)) {
-        try { await serviceMuseum(client, protocol, config, { player, getSettings, enabled: legacyActive, scheduler: rewards, report: serviceReport('dailies', '博物馆') }); }
-        catch (error) { phaseFailure('dailies', '博物馆探险检查', error); }
-      }
-      if (isEnabled && ['petCollect', 'petBreed'].some(legacyEnabled)) {
-        try { await servicePetBreeding(client, protocol, config, { player, enabled: legacyActive, scheduler: rewards, report: serviceReport('world', '海兽培育') }); }
-        catch (error) { phaseFailure('world', '海兽培育检查', error); }
       }
       await checkFactoryDue({ checkpoint: true });
       await runChallengeRound(client, config, { ...challengeOptions, mode: 'progression', report: serviceReport('dailies', '推关与试炼') });
@@ -1083,14 +1070,33 @@ export async function runLoop(client, protocol, {
           summary.world.notes = [...(summary.world.notes ?? []), ...plan.notes];
         } catch (error) { phaseFailure('world', '基地设置执行', error); }
       }
+      if (getSettings()?.loop.world && getSettings()?.museum.runEnabled !== false && getSettings()?.museum.display) {
+        try {
+          const entries = await runMuseumDisplay(client, protocol, config, { player, getSettings, ledger: usageLedger,
+            enabled: () => !stop.aborted && runtimeActive() && client.connected,
+            report(entry) { summary.world.results.push(entry); if (!entry.skipped) summary.world.planned++;
+              stepLog('world')({ ...entry, title: entry.label, taskKey: 'museum.display' }); } });
+          const text = entries.map(entry => entry.reason || entry.error || entry.label).filter(Boolean).join('；');
+          if (text) {
+            const states = entries.map(entry => entry.status === 'pending' ? 'pending' : entry.ok === false && !entry.skipped ? 'error' : entry.skipped ? 'waiting' : 'ok');
+            const state = ['pending', 'error', 'waiting', 'ok'].find(value => states.includes(value)) ?? 'waiting';
+            rewards?.observe('museum.display', text, state);
+            const base = ['enabled', 'upgrade', 'revenue', 'achievements'].some(key => getSettings()?.museum[key]) ? rewards?.status('museum.runEnabled') : null;
+            const combined = ['pending', 'error', 'waiting', 'ok'].find(value => value === state || value === base?.state);
+            rewards?.observe('museum.runEnabled', [base?.text, text].filter(Boolean).join('；'), combined);
+          }
+          rewards?.expect('museum.display', rewards.now() + Math.ceil(getEveryMs() / 1000));
+        } catch (error) { phaseFailure('world', '博物馆自动上架', error); }
+      }
       await checkFactoryDue({ checkpoint: true });
       const heroSettings = getHeroSettings();
-      if (heroSettings?.loop.heroes && heroSettings.heroes.enabled && heroSettings.heroes.heroIds.length && !stop.aborted) {
+      if (heroSettings?.loop.heroes && heroSettings.heroes.enabled
+        && (heroSettings.heroes.heroIds.length || heroSettings.heroes.showSkillReward) && !stop.aborted) {
         try {
           const { plan } = await readHeroGrowthPlan(client, config, player, heroSettings);
           const enabled = () => !stop.aborted && runtimeActive() && client.connected && getHeroSettings()?.loop.heroes;
           const heroGuard = getHeroSettings === getSettings ? guard : runtimeGuard(createActionGuard(client, getHeroSettings, heroUsageLedger, { player, enabled }));
-          rewards?.observe('loop.heroes','已读取指定英雄与库存，检查养成条件');rewards?.expect('loop.heroes',rewards.now()+Math.ceil(getEveryMs()/1000));
+          rewards?.observe('loop.heroes','已读取英雄信息，检查养成与展示领奖条件');rewards?.expect('loop.heroes',rewards.now()+Math.ceil(getEveryMs()/1000));
           const results = await runHeroPlan(client, protocol, plan, { allowMutate, config, player, enabled, getSettings: getHeroSettings,
             beforeAction: heroGuard.before, afterAction: heroGuard.after, cancelAction: heroGuard.cancel,
             onStep: entry => stepLog('tasks')({ ...entry, category: '英雄', title: heroStepLabel(entry.step, entry.targetLevel) }) });
@@ -1101,7 +1107,6 @@ export async function runLoop(client, protocol, {
       await checkForge();
       await checkFactoryDue({ checkpoint: true });
       await checkAntique();
-      await checkWeeklyActivity();
       await checkExtended();
       await checkDispatch();
       await checkFactoryDue({ checkpoint: true });
@@ -1123,10 +1128,10 @@ export async function runLoop(client, protocol, {
           const activityAt = activityVersion !== roundActivityVersion ? 0
             : nextActivityBoundary(client, activityConfigured, roundStartedMs);
           const afkAt = isEnabled && enabled('afk') ? (afkDeadline ?? Date.now() + 60_000) : Infinity;
-          const wakeAt = Math.min(nextRound, activityAt, weeklyAt, factorySchedule.nextAt(), siliconNext(), extendedNext(), merchantNext(), appointmentNext(),
+          const wakeAt = Math.min(nextRound, activityAt, weeklyAt, factorySchedule.nextAt(), siliconNext(), resourceFieldsNext(), extendedNext(), merchantNext(), appointmentNext(),
             fleetMaintenanceEnabled(getSettings()) ? maintenanceAt : Infinity,
             fleetSpeedEnabled(getSettings()) ? fleetSpeedAt : Infinity,
-            getSettings()?.radar.runEnabled !== false && getSettings()?.radar.enabled ? radarAt : Infinity,
+            getSettings()?.radar.runEnabled !== false && (getSettings()?.radar.enabled || getSettings()?.radar.repairIdle) ? radarAt : Infinity,
             isEnabled && enabled('upgrade') ? upgradeAt : Infinity,
             treasureAutomationEnabled(getSettings()) ? treasureAt : Infinity,
             cityWarEnabled(getSettings()) ? cityWarAt : Infinity,
@@ -1147,10 +1152,10 @@ export async function runLoop(client, protocol, {
           await scheduler.runDue('merchant', merchantNext, checkMerchant);
           await scheduler.runDue('extended', extendedNext, checkExtended);
           await scheduler.runDue('appointments', appointmentNext, checkAppointments);
-          const dispatchNext = () => Math.min(siliconNext(),
+          const dispatchNext = () => Math.min(siliconNext(), resourceFieldsNext(),
             fleetMaintenanceEnabled(getSettings()) ? maintenanceAt : Infinity,
             fleetSpeedEnabled(getSettings()) ? fleetSpeedAt : Infinity,
-            getSettings()?.radar.runEnabled !== false && getSettings()?.radar.enabled ? radarAt : Infinity,
+            getSettings()?.radar.runEnabled !== false && (getSettings()?.radar.enabled || getSettings()?.radar.repairIdle) ? radarAt : Infinity,
             cityWarEnabled(getSettings()) ? cityWarAt : Infinity,
             treasureAutomationEnabled(getSettings()) ? treasureAt : Infinity);
           await scheduler.runDue('dispatch', () => dispatchSettingsPending ? 0 : dispatchNext(), async () => {

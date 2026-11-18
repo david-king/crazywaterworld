@@ -6,8 +6,9 @@ export const defaultCompassSpinCount = 10;
 export const maxCompassSpinCount = 999;
 
 // 旧字段仅兼容导入，统一停用，不能在新模块关闭后恢复执行。
-// 装备由 forge.enabled 控制；联盟互助由 alliance.enabled / mutual / autoHelp 控制。
-export const retiredAutomationTasks = new Set(['equipmentCollect', 'equipmentCraft', 'guildAidCollect', 'guildAidHelp']);
+// 装备由 forge.enabled 控制；联盟募兵、互助由 alliance.enabled 及对应细项控制；巨轮由 treasure.enabled 控制。
+export const migratedAutomationTasks = new Set(['museumCollect', 'museumExplore', 'petCollect', 'petBreed', 'radarAuto', 'radarRepair', 'museumRevenue', 'museumAchievements', 'worldBossDamage']);
+export const retiredAutomationTasks = new Set(['equipmentCollect', 'equipmentCraft', 'guildOrders', 'guildAidCollect', 'guildAidHelp', 'treasureLoot', ...migratedAutomationTasks]);
 
 export const automationTasks = [
   ['armsRaceRewards', '自动领奖', '周期活动', false],
@@ -36,23 +37,14 @@ export const automationTasks = [
   ['seasonTasks', '赛季任务奖励', '周期活动', false],
   ['seasonChest', '赛季宝箱用钥匙开启（每轮最多 5 箱）', '周期活动', false],
   ['crossRankDaily', '跨服排行每日奖励', '周期活动', false],
-  ['worldBossDamage', '世界 Boss 伤害奖励', '挑战', false],
   ['passStageRewards', '闯关基金奖励', '领奖', false],
-  ['museumRevenue', '博物馆营收', '博物馆', false],
-  ['museumAchievements', '博物馆人气成就', '博物馆', false],
   ['guildAidHelp', '响应联盟互助', '联盟', false],
   ['treasureLoot', '万吨巨轮派遣', '世界', false],
   ['heroGrowth', '主线英雄自动养成', '英雄', false],
   ['stageAuto', '主线自动推图', '挑战', false],
   ['guildOrders', '联盟订单自动执行', '联盟', false],
-  ['radarAuto', '联盟情报自动派遣', '联盟', false],
-  ['radarRepair', '联盟情报舰队维修', '联盟', false],
   ['equipmentCollect', '装备制造自动领取', '英雄', false],
   ['equipmentCraft', '装备制造自动续产', '英雄', false],
-  ['museumCollect', '博物馆探险自动领取', '藏品', false],
-  ['museumExplore', '博物馆自动派遣', '藏品', false],
-  ['petCollect', '海兽成熟自动领取', '藏品', false],
-  ['petBreed', '海兽自动培育', '藏品', false],
   ['worldOnlineRewards', '领取城战在线奖励', '联盟', false],
   ['weekHeroStar', '升星达标奖励', '周期活动', false],
   ['festivalSign', '酆都诡事每日签到（不补签）', '限时活动', false],
@@ -69,8 +61,8 @@ export const automationTasks = [
   ['vipDaily', 'VIP 每日免费奖励', '领奖', false],
   ['campaignReports', '战报奖励（海盗战斗等）', '领奖', false],
   ['openRankRewards', '开服冲榜积分奖励', '领奖', false],
-  ['pirateRankRewards', '剿匪榜达标奖励', '限时活动', false],
-  ['warRankRewards', '杀敌榜达标奖励', '限时活动', false],
+  ['pirateRankRewards', '剿匪榜达标奖励', '领奖', false],
+  ['warRankRewards', '杀敌榜达标奖励', '领奖', false],
   ['festivalActiveRewards', '酆都诡事签到活跃奖励', '限时活动', false],
   ['worldBossRewards', '世界Boss伤害达标奖励', '挑战', false],
   ['battleReportRewards', '邮件战报一键领取', '领奖', false],
@@ -94,7 +86,7 @@ export const automationTasks = [
   ['fishEnhance', '钓具强化与升级（每轮一次）', '钓鱼', false],
   ['freeAntiqueRecruit', '藏品免费招募', '藏品', false],
   ['antiqueRecruitRewards', '藏品累计招募档位领奖', '藏品', false],
-  ['newbieLogin', '新手七日登录奖励', '限时活动', false],
+  ['newbieLogin', '新手七日登录奖励', '领奖', false],
   ['weekPass', '勇士战令任务与档位奖励', '周期活动', false],
   ['weekGift', '幸运转盘免费好运券礼包', '周期活动', false],
   ['tasks', '任务与成就奖励', '领奖', false],
@@ -131,6 +123,8 @@ export const automationTasks = [
 ].map(([key, label, group, initial]) => ({ key, label, group, initial }));
 
 export function taskSettings(saved = {}) {
+  // 旧、新世界 Boss 领奖开关原先按“任一开启”执行，读取旧任务时保留此选择。
+  if (saved?.worldBossDamage === true) saved = { ...saved, worldBossRewards: true };
   return Object.fromEntries(automationTasks.map(({ key, initial }) =>
     [key, retiredAutomationTasks.has(key) ? false : typeof saved?.[key] === 'boolean' ? saved[key] : initial]));
 }

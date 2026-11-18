@@ -214,12 +214,15 @@ function LoginSettingsPage({
     <div
       className={styles.page}
       data-react-page="login-settings"
+      data-account={accountId ?? ""}
       data-dirty={dirty}
     >
       <div className={styles.heading}>
         <div>
-          <h2 className="text-xl font-semibold">登录设置</h2>
-          <p className="dim mt-1">账号被顶号后自动重新连接</p>
+          <h3 className="font-semibold">登录恢复策略</h3>
+          <p className="dim mt-1">
+            仅对这个账号生效，账号被顶号后按此策略重新连接。
+          </p>
         </div>
         <Badge
           id="login-settings-state"
@@ -241,7 +244,7 @@ function LoginSettingsPage({
         <div aria-busy={loading}>
           <p className="dim">
             {accountId
-              ? "此页仅管理当前账号的登录恢复策略。"
+              ? "正在读取此账号的登录恢复策略。"
               : "选择账号后可编辑登录恢复策略。"}
           </p>
           {accountId && (

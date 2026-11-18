@@ -19,7 +19,7 @@ const { createConsole } = await import('../src/server.mjs');
 const { activityAvailability } = await import('../src/activity-availability.mjs');
 const { catalogEntry, rememberActivityCatalog } = await import('../src/activity-catalog.mjs');
 const { defaultSettings, loadAutomationSettings } = await import('../src/automation-settings.mjs');
-const { activityAutomationFields } = await import('../src/activity-automation.mjs');
+const { activityAutomationFields, activityAutomationSettingFields } = await import('../src/activity-automation.mjs');
 const { rewardSchedule } = await import('../src/reward-schedule.mjs');
 const retiredKeys = activityAvailability().hiddenTasks;
 const keepKeys = ['beautyVotes', 'beautyGift', 'merchantTrade', 'armsRaceRewards', 'newbieLogin', 'pirateRankRewards', 'warRankRewards', 'weekPass'];
@@ -35,6 +35,8 @@ delete legacyActivitySettings.weekOrder.enabled;
 legacyActivitySettings.schedule.merchantTrade = true;
 legacyActivitySettings.schedule.weekOrderSubmit = true;
 legacyActivitySettings.schedule.weekOrderFinal = false;
+legacyActivitySettings.schedule.beautyVotes = true;
+legacyActivitySettings.schedule.beautyGift = false;
 legacyActivitySettings.heroRaid.enabled = true;
 fs.writeFileSync(path.join(directory, 'automation-settings.json'), JSON.stringify({ version: 1, accounts: {
   'activity-legacy': { settings: legacyActivitySettings, revision: 4, savedAt: 'legacy' },
@@ -294,10 +296,10 @@ try {
     assert.deepEqual(view.controls, activityAutomationFields);
     assert.equal(view.revision, 0);
     assert.equal(typeof view.baseRevision, 'string');
-    assert.equal(Object.keys(view.settings).length, activityAutomationFields.length);
+    assert.equal(Object.keys(view.settings).length, activityAutomationSettingFields.length);
     assert.equal(view.settings['heroRaid.enabled'], false);
     assert.equal(view.settings['guildShip.enabled'], false);
-    for (const { key } of activityAutomationFields.filter(control => !['heroRaid.enabled', 'guildShip.enabled'].includes(control.key))) {
+    for (const { key } of activityAutomationSettingFields.filter(control => !['heroRaid.enabled', 'guildShip.enabled'].includes(control.key))) {
       assert.equal(view.settings[key], false, key);
     }
     const legacy = ok(await api('activities/settings', null, 'activity-legacy'));
@@ -305,6 +307,8 @@ try {
     assert.equal(legacy.settings['heroRaid.enabled'], true);
     assert.equal(legacy.settings['merchant.enabled'], false);
     assert.equal(legacy.settings['weekOrder.enabled'], false);
+    assert.equal(legacy.settings['schedule.beautyVotes'], true);
+    assert.equal(legacy.settings['schedule.beautyGift'], false);
     const all = ok(await api('settings', null, 'activity-legacy'));
     assert.equal(all.settings.schedule.merchantTrade, true);
     assert.equal(all.settings.schedule.weekOrderSubmit, true);
@@ -314,13 +318,13 @@ try {
     assert.doesNotMatch(JSON.stringify(view), /invalid\.invalid|"login"|"token"/);
   });
 
-  await test('活动总开关逐项保存与重启回读，关闭保留细项且账号互相隔离', async () => {
+  await test('活动总开关及风采细项逐项保存与磁盘回读，关闭保留其他选择且账号互相隔离', async () => {
     const account = 'activity-legacy';
     const before = ok(await api('settings', null, account));
     const other = ok(await api('settings', null, 'activity-default'));
     const expected = structuredClone(before.settings);
     let current = ok(await api('activities/settings', null, account));
-    for (const { key } of activityAutomationFields) {
+    for (const { key } of activityAutomationSettingFields) {
       for (const value of [false, true]) {
         const saved = ok(await api('activities/settings', {
           key, value, revision: current.revision, baseRevision: current.baseRevision, confirm: true,
@@ -342,12 +346,42 @@ try {
     assert.deepEqual(validated.settings, expected);
   });
 
+  await test('风采总开关关闭时仍可独立预设投票与领奖，旧版本细项保存被拒绝', async () => {
+    const account = 'activity-legacy';
+    let current = ok(await api('activities/settings', null, account));
+    const save = async (key, value) => {
+      current = ok(await api('activities/settings', {
+        key, value, revision: current.revision, baseRevision: current.baseRevision, confirm: true,
+      }, account));
+    };
+    await save('activityAutomation.beauty', false);
+    const before = current;
+    await save('schedule.beautyVotes', false);
+    assert.equal(current.settings['activityAutomation.beauty'], false);
+    assert.equal(current.settings['schedule.beautyGift'], true);
+    const conflict = await api('activities/settings', {
+      key: 'schedule.beautyGift', value: false, revision: before.revision, baseRevision: before.baseRevision, confirm: true,
+    }, account);
+    assert.equal(conflict.status, 400);
+    assert(conflict.data.fields.revision);
+    assert.deepEqual(ok(await api('activities/settings', null, account)), current);
+    await save('schedule.beautyGift', false);
+    await save('schedule.beautyVotes', true);
+    const saved = loadAutomationSettings(account).settings;
+    assert.equal(saved.activityAutomation.beauty, false);
+    assert.equal(saved.schedule.beautyVotes, true);
+    assert.equal(saved.schedule.beautyGift, false);
+    assert.equal(app.sessions.get(account).loop.running, false);
+    assert.equal(app.sessions.get(account).client, null);
+  });
+
   await test('活动总开关严格限定布尔白名单，拒绝旧版本及首存快照冲突', async () => {
     const account = 'activity-default';
     const before = ok(await api('activities/settings', null, account));
     const payload = { key: 'merchant.enabled', value: false, revision: before.revision, baseRevision: before.baseRevision, confirm: true };
     for (const invalid of [[], { ...payload, key: '__proto__' }, { ...payload, key: 'activityAutomation.__proto__' },
       { ...payload, key: 'resources.allowDiamonds' }, { ...payload, key: 'schedule.merchantTrade' },
+      { ...payload, key: 'schedule.beautyUnknown' }, { ...payload, key: 'schedule.beautyVotes', value: 'true' },
       { ...payload, key: 'activityAutomation.unknown' }, { ...payload, value: 'false' }, { ...payload, value: 0 },
       { ...payload, value: null }, { ...payload, value: undefined }, { ...payload, confirm: false },
       { ...payload, enabled: true }, { ...payload, revision: String(before.revision) }]) {
@@ -391,6 +425,15 @@ try {
       assert.equal(saved.settings[control.key], false);
       assert.equal(changed, 1);
       for (const key of [...control.taskKeys, 'weekSupplyFree']) assert(schedule.due(key), key);
+      for (const key of ['beautyVotes', 'beautyGift']) schedule.defer(key, schedule.now() + 3600);
+      const beauty = ok(await api('activities/settings', {
+        key: 'schedule.beautyVotes', value: false, revision: saved.revision, baseRevision: saved.baseRevision, confirm: true,
+      }, account));
+      assert.equal(beauty.settings['schedule.beautyVotes'], false);
+      assert.equal(beauty.settings['schedule.beautyGift'], saved.settings['schedule.beautyGift']);
+      assert.equal(beauty.settings['activityAutomation.beauty'], saved.settings['activityAutomation.beauty']);
+      assert(schedule.due('beautyVotes'));
+      assert(!schedule.due('beautyGift'), '保存投票细项不应清除领奖的检查时间');
       const now = Math.floor(Date.now() / 1000);
       rememberActivityCatalog(account, [catalogEntry({ id: 'weekly:4:12:' + (now - 60), name: '幸运转盘',
         weekType: 4, kind: 'weekly', taskKeys: ['weekGift', 'weekTimes', 'weekLotterySpin'],

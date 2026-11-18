@@ -64,14 +64,14 @@ try {
       const f = fixture(), quote = await preview(f); change(f); await assert.rejects(() => run(f, quote)); assert.deepEqual(f.client.writes, []);
     }
   });
-  await test('汽油保留量、日预算、共享周期额度和自定日奖励上限仍生效', async () => {
-    for (const change of [f => { f.state.fuel = 10499; }, f => { f.settings.silicon.dailyPetrolLimit = 499; },
+  await test('实际汽油、共享周期额度和自定日奖励上限仍生效', async () => {
+    for (const change of [f => { f.state.fuel = 499; },
       f => { f.state.reward.myRewardTimes = 100; }, f => { f.settings.silicon.dailyRewardLimit = 3; f.state.reward.myRewardTimes = 3; }]) {
       const f = fixture(); change(f); const quote = await preview(f); assert(quote.fleets.every(row => !row.step)); assert.deepEqual(f.client.writes, []);
     }
   });
   await test('待确认汽油、其他任务锁和舰队耐久阻止误派', async () => {
-    const f = fixture(); f.ledger.reserve({ radarPetrol: 40000 }); assert((await preview(f)).fleets.every(row => !row.step));
+    const f = fixture(); f.ledger.reserve({ radarPetrol: 49900 }); assert((await preview(f)).fleets.every(row => !row.step));
     const g = fixture(); reserveDispatch(g.client, 'maintenance', ['1远征船']); g.state.fleets[1].durability = 0;
     g.state.fleets[2].owner.playerId = '999'; assert((await preview(g)).fleets.every(row => !row.step));
   });
@@ -141,7 +141,7 @@ try {
     const changed = await getQuote(); session.generation++; assert.equal((await post('action', payload(changed))).ok, false); assert.equal(f.client.writes.length, 1);
   });
   await test('修改配置后原确认失效，清空会话后旧确认不能恢复执行', async () => {
-    const q = await getQuote(), settings = defaultSettings(); settings.silicon.petrolReserve = 20000; saveAutomationSettings('one', settings, { revision: 0 });
+    const q = await getQuote(), settings = defaultSettings(); settings.silicon.dailyRewardLimit = 20; saveAutomationSettings('one', settings, { revision: 0 });
     assert.equal((await post('action', payload(q))).ok, false);
     session.siliconShortcutQuotes.clear(); assert.equal((await post('action', payload(completedQuote))).ok, false); assert.equal(f.client.writes.length, 1);
   });

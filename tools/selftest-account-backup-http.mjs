@@ -112,11 +112,12 @@ try {
     assert.deepEqual(files(), before);
   });
   await test('仅账号导入按渠道去重，保留已有配置与暂停状态', async () => {
+    const automationBeforeImport = structuredClone(loadStore().accounts.find(row => row.id === existing.id).automation);
     const result = await restore(only);
     assert.equal(result.created, 2); assert.equal(result.updated, 1); assert.equal(result.settingsCount, 0);
     assert.equal(loadStore().activeId, unrelated.id);
     assert.equal(loadStore().accounts.length, 4);
-    assert.deepEqual(loadStore().accounts.find(row => row.id === existing.id).automation, existing.automation);
+    assert.deepEqual(loadStore().accounts.find(row => row.id === existing.id).automation, automationBeforeImport);
     assert.deepEqual(loadAutomationSettings(existing.id).settings, local);
     assert.equal(loadAutomationSettings(source[1].id).revision, 0);
     assert.equal(loadStore().accounts.find(row => row.id === source[1].id).automation.autoStart, false);

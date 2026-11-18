@@ -13,6 +13,7 @@ import { petSpendSnapshot, confirmPetSpend } from './spend-evidence.mjs';
 import { readAllianceRecruitDemand } from './alliance-automation.mjs';
 import { readGuildShips, guildShipDemands } from './guild-ships.mjs';
 import { watchHeroRaidPushes, heroRaidDemands } from './hero-raid-automation.mjs';
+import { museumExploreFactor, selectMuseumHeroes } from './museum-exploration.mjs';
 
 const rows = (config, name) => config?.tables?.[name]?.data ?? [];
 const quantities = list => (list ?? []).map(item => Array.isArray(item) ? { id: item[0], num: Number(item[1]) } : { id: item.id, num: Number(item.num) });
@@ -81,7 +82,7 @@ export async function surveyBaseAutomation(client, protocol, config, player, set
   };
   const member = !!exactAutomationId(player?.guildId);
   const [museum, heroes, pets, gold, guildOrder, guildShip, radar] = await Promise.all([
-    settings.museum.runEnabled !== false && (settings.museum.enabled || settings.museum.upgrade || needs.has('museum')) ? get('MuseumInfoRequest', 'museum') : null,
+    settings.museum.runEnabled !== false && (['enabled', 'upgrade', 'revenue', 'achievements', 'display'].some(key => settings.museum[key]) || needs.has('museum')) ? get('MuseumInfoRequest', 'museum') : null,
     settings.museum.runEnabled !== false && settings.museum.enabled ? get('AllHeroRequest', 'museum.enabled') : null,
     settings.pet.enabled && settings.pet.advance ? get('AllPetRequest', 'pet.advance') : null,
     settings.gold.enabled ? get('ClickGoldInfoRequest', 'gold.enabled') : null,
@@ -106,12 +107,13 @@ export async function surveyBaseAutomation(client, protocol, config, player, set
 }
 
 function museumFactor(stage, snapshot, config, settings) {
-  const p = settings.museum;
-  const costs = quantities(stage.expedition?.cost?.asset);
-  const matched = p.materialFactor && costs.some(item => p.factorMaterials.includes(item.id) || (p.stockThreshold > 0 && snapshot.world.have(item.id) <= p.stockThreshold));
-  const selected = matched ? p.matchedFactor : p.factor;
-  const available = rows(config, 'MuseumExploreTimeFactorCfg').filter(row => row.playerLevel <= (snapshot.player?.level ?? 0)).map(row => row.factor);
-  return { factor: Math.min(selected, Math.max(1, ...available)), matched, costs };
+  return museumExploreFactor(stage, snapshot, config, settings);
+}
+
+function museumDispatchPreference(settings) {
+  return JSON.stringify(['factorMode', 'fullRecommendedFactor', 'partialRecommendedFactor', 'noRecommendedFallback',
+    'noRecommendedFactor', 'factor', 'materialFactor', 'factorMaterials', 'stockThreshold', 'matchedFactor', 'maps', 'maxDispatches']
+    .map(key => settings.museum[key]));
 }
 
 function stageAvailable(stage, snapshot, config, settings) {
@@ -245,18 +247,25 @@ export function planBaseAutomation(snapshot, config, settings, usage = {}, { div
 
   function planMuseum() {
     const pref = settings.museum, data = snapshot.museum;
-    if (pref.runEnabled === false || !pref.enabled && !pref.upgrade) return;
+    if (pref.runEnabled === false || !['enabled', 'upgrade', 'revenue', 'achievements', 'display'].some(key => pref[key])) return;
     if (!data) { note('museum', '博物馆：本轮未取得状态，待开放或连接恢复后再检查'); return; }
     if (!data.exhibitions?.length && !data.exploreStages?.length) {
       const unlockLevels = rows(config, 'BuildingUnlockCfg').filter(row => row.buildingType === '博物馆').map(row => row.playerLevel);
       const unlockLevel = Math.min(...unlockLevels);
       if (Number.isSafeInteger(unlockLevel) && player?.level < unlockLevel) note('museum', `博物馆：角色达到 ${unlockLevel} 级后解锁`);
     }
-    if (pref.enabled) {
+    if (pref.revenue) {
+      if (Number.isSafeInteger(data.uncollectedRevenue) && data.uncollectedRevenue > 0) {
+        add({ kind: 'museumRevenue', setting: 'museum.revenue', request: 'MuseumCollectRevenueRequest', response: 'MuseumCollectRevenueResponse', body: {}, label: '领取博物馆人气币' });
+      } else if (data.uncollectedRevenue !== 0) note('museum.revenue', '博物馆：未能确认待领取的人气币数量');
+    }
+    if (pref.achievements) {
       const claimed = new Set((data.claimedAchievements ?? []).map(Number));
       for (const row of rows(config, 'MuseumAchievementCfg')) if (!claimed.has(row.score) && Number(data.topPopularity ?? data.popularity ?? 0) >= row.score) {
-        add({ kind: 'museumAchievement', setting: 'museum.enabled', request: 'MuseumClaimAchievementRequest', response: null, body: { popularityThreshold: row.score }, label: `领取博物馆人气 ${row.score} 成就` });
+        add({ kind: 'museumAchievement', setting: 'museum.achievements', request: 'MuseumClaimAchievementRequest', response: null, body: { popularityThreshold: row.score }, label: `领取博物馆人气 ${row.score} 奖励` });
       }
+    }
+    if (pref.enabled) {
       let guides = Math.max(0, Math.min(free('博物馆加速'), pref.dailyGuideLimit - (usage.counters?.museumGuides ?? 0)));
       for (const stage of data.exploreStages ?? []) {
         if (!(stage.expedition?.endTime > 0)) continue;
@@ -271,20 +280,22 @@ export function planBaseAutomation(snapshot, config, settings, usage = {}, { div
       const occupied = (data.exploreStages ?? []).filter(stage => stage.expedition?.endTime > 0);
       const maxTeams = Math.max(0, ...rows(config, 'MuseumExpeditionTeamCfg').filter(row => row.playerLevel <= (player?.level ?? 0)).map(row => row.teamCount));
       let freeTeams = Math.max(0, maxTeams - occupied.length);
+      if (pref.maxDispatches > 0) freeTeams = Math.min(freeTeams, pref.maxDispatches);
       const busy = new Set(occupied.flatMap(stage => stage.expedition.heroIds ?? []));
       const candidates = (data.exploreStages ?? []).filter(stage => !(stage.expedition?.endTime > 0) && stageAvailable(stage, snapshot, config, settings))
         .map(stage => ({ stage, ...museumFactor(stage, snapshot, config, settings) })).sort((a, b) => Number(a.matched) - Number(b.matched) || a.stage.stageId - b.stage.stageId);
-      for (const { stage, factor, costs } of candidates) {
+      for (const { stage } of candidates) {
         if (!freeTeams) break;
+        const team = selectMuseumHeroes(stage, snapshot.heroes, config, busy);
+        if (!team.ready) { note('museum.enabled', `地图 ${stage.stageId}：${team.reason}`); continue; }
+        const { factor, costs, reason } = museumExploreFactor(stage, snapshot, config, settings, team);
+        if (!(factor > 0)) { note('museum.enabled', `地图 ${stage.stageId}：${reason || '探宝倍数未解锁'}`); continue; }
         if (!validCosts(costs)) { note('museum.enabled', `地图 ${stage.stageId}：服务器尚未下发派遣材料，本轮不派遣`); continue; }
         const requirements = costs.map(item => ({ ...item, num: item.num * factor }));
-        const condition = rows(config, 'MuseumExpeditionConditionCfg').find(r => r.conditionId === stage.expedition?.conditionId);
-        const count = condition?.heroCount ?? 3;
-        const heroes = snapshot.heroes.filter(hero => !busy.has(hero.heroId)).sort((a, b) => Number(b.power ?? 0) - Number(a.power ?? 0)).slice(0, count);
-        if (!(count > 0) || heroes.length !== count) { note('museum.enabled', `地图 ${stage.stageId}：没有足够的空闲英雄`); continue; }
         if (add({ kind: 'museumStart', setting: 'museum.enabled', request: 'MuseumStartExploreRequest', response: 'MuseumStartExploreResponse',
-          body: { stageId: stage.stageId, heroIds: heroes.map(hero => hero.heroId), factor }, costs: requirements, label: `派遣地图 ${stage.stageId}，${factor} 倍探宝` })) {
-          freeTeams--; for (const hero of heroes) busy.add(hero.heroId);
+          body: { stageId: stage.stageId, heroIds: team.heroIds, factor }, costs: requirements,
+          verify: { dispatchPreference: museumDispatchPreference(settings) }, label: `派遣地图 ${stage.stageId}，${factor} 倍探宝` })) {
+          freeTeams--; for (const heroId of team.heroIds) busy.add(heroId);
         }
       }
     }
@@ -318,6 +329,7 @@ export function planBaseAutomation(snapshot, config, settings, usage = {}, { div
     const matureBefore = rooms.reduce((sum, room) => sum + (room.petBreed.maturePets?.length ?? 0), 0);
     let claimPlanned = false, breedPlanned = false;
     if (!rooms.length) note('pet', '海兽培育：未找到已建成的真实培育室');
+    if (pref.breed && !pref.species.length) note('pet.breed', '海兽培育：请先选择培育品种，未选择时不会开始培育');
     if (matureBefore > 0 && pref.breed) note('pet.breed', pref.claim ? '海兽培育：先领取已完成海兽，确认领取后下次检查再培育' : '海兽培育：有已完成海兽待领取，自动领取已关闭，暂不继续培育');
     for (const room of rooms) {
       const data = room.petBreed;
@@ -374,7 +386,7 @@ export function planBaseAutomation(snapshot, config, settings, usage = {}, { div
 export function observeBaseAutomationPlan(rewards, plan, settings, everyMs) {
   if (!rewards) return;
   const groups = {
-    museum: ['runEnabled', 'enabled', 'upgrade', 'useGuide'],
+    museum: ['runEnabled', 'enabled', 'upgrade', 'revenue', 'achievements', 'display', 'useGuide'],
     pet: ['enabled', 'claim', 'breed', 'feed', 'advance'],
     events: ['enabled'],
     gold: ['enabled'],
@@ -382,7 +394,7 @@ export function observeBaseAutomationPlan(rewards, plan, settings, everyMs) {
   for (const [group, fields] of Object.entries(groups)) {
     const preferences = settings[group];
     const active = group === 'museum'
-      ? preferences.runEnabled !== false && (preferences.enabled || preferences.upgrade)
+      ? preferences.runEnabled !== false && ['enabled', 'upgrade', 'revenue', 'achievements', 'display'].some(key => preferences[key])
       : preferences.enabled;
     if (!active || !(group === 'gold' ? settings.loop.dailies : settings.loop.world)) continue;
     const activeFields = fields.filter(field => (field === 'runEnabled' ? preferences[field] !== false : preferences[field] === true)
@@ -414,8 +426,12 @@ export async function runBaseAutomation(client, protocol, config, plan, { player
     try {
       const current = getSettings();
       const [group, key] = step.setting.split('.');
-      if (!current[group]?.[key] || (group === 'pet' && !current.pet.enabled) || (group === 'museum' && (current.museum.runEnabled === false || !current.museum.enabled && key !== 'upgrade'))) continue;
+      if (!current[group]?.[key] || (group === 'pet' && !current.pet.enabled) || (group === 'museum' && (current.museum.runEnabled === false || key === 'useGuide' && !current.museum.enabled))) continue;
+      const dispatchChanged = () => step.kind === 'museumStart' && step.verify?.dispatchPreference
+        && step.verify.dispatchPreference !== museumDispatchPreference(getSettings());
+      if (dispatchChanged()) throw new AutomationSkip('探宝派遣设置已变化，等待重新规划');
       if (!protocol[step.request]) throw new Error('当前协议不支持此动作');
+      if (step.kind === 'museumRevenue' && !protocol.MuseumCollectRevenueResponse) throw new AutomationSkip('当前协议不能确认人气币领取');
       if (step.kind === 'museumComplete' && (!protocol.MuseumCompleteExploreResponse || !protocol.MuseumRewardRequest || !protocol.MuseumRewardResponse)) throw new Error('当前协议不能完整确认探宝结算与领奖');
       if(step.kind==='choiceEvent') {
         if(!protocol.GotRewardResponse||!ledger)throw new AutomationSkip('随机事件回执或记录不可用');
@@ -459,12 +475,14 @@ export async function runBaseAutomation(client, protocol, config, plan, { player
       }
       ticket = await guard.before(step, { waterSnapshot }); prepared = true;
       if (!enabled() || current !== getSettings()) { await guard.cancel(step, ticket, { notSent: true }); if(choiceTicket)ledger.cancel(choiceTicket); break; }
+      if (dispatchChanged()) throw new AutomationSkip('探宝派遣设置已变化，等待重新规划');
       const wireBody = step.kind === 'choiceEvent' ? { ...step.body, uid: automationWireId(step.body.uid) } : step.body;
       sent = writePending = true;
       if (step.response && protocol[step.response]) {
         const reply = await client.request(step.request, wireBody, step.response, 15000);
         writePending = false;
         let body = normalize(reply);
+        if (step.kind === 'museumRevenue' && (!Number.isSafeInteger(body.collected) || body.collected < 0)) throw new Error('服务器尚未确认人气币领取结果');
         if(step.kind==='choiceEvent' && !body.reward?.asset?.length)throw new Error('随机事件奖励回执尚未确认');
         if (step.kind === 'museumStart' && !(body.expedition?.endTime > 0)) throw new Error('服务器尚未确认探宝队伍出发');
         if (step.kind === 'museumComplete') {

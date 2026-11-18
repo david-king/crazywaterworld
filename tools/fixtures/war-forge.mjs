@@ -13,7 +13,7 @@ export function warForgeSettings() {
   s.resident.rewards = s.dailies.enabled = false;
   Object.assign(s.cityWar, { enabled: true, autoRepair: true, reserveDuringWar: true,
     fleetIds: ['1远征船', '2远征船'], dailyPetrolLimit: 20000, dailyDispatchLimit: 10 });
-  Object.assign(s.forge, { enabled: true, buildingIds: ['1装备厂'], recipeIds: ['1001'] });
+  Object.assign(s.forge, { enabled: true, nativeAuto: false, collect: true, craft: true, buildingIds: ['1装备厂'], recipeIds: ['1001'] });
   return s;
 }
 
@@ -27,6 +27,10 @@ export function warForgeFixture() {
   f.config.tables.GameplayOpenCfg.data.push({ gameplay: '国战', openDays: [2, 1] });
   f.config.tables.WorldParamCfg.data.push({ paramName: '攻城战消耗耐久', paramValue: 100 });
   f.config.tables.VipLevelCfg = table([{ level: 1, effects: [] }, { level: 3, effects: [['每日城战委任次数', 4]] }, { level: 4, effects: [['每日城战委任次数', 6]] }]);
+  f.config.tables.MonthCardCfg = table([
+    { id: '普通月卡', effectList: [] },
+    { id: '高级月卡', effectList: [['装备工厂自动锻造', 1]] },
+  ]);
   f.config.tables['1_CityCfg'] = table([{ id: 1, name: '主城', guildIndex: 7 }, { id: 2, name: '目标甲', guildIndex: 0 }, { id: 3, name: '目标乙', guildIndex: 0 }]);
   f.config.tables['1_AttackCityConsumeCfg'] = table([{ dist: 1, cost: 0.4 }, { dist: 6000, cost: 0.5 }]);
   f.config.tables.BuildingUnlockCfg.data.push({ buildingId: '1装备厂', buildingType: '装备厂', playerLevel: 17 });
@@ -41,6 +45,7 @@ export function warForgeFixture() {
   f.state.materials = { 蓝武器材料: 400, 紫武器材料: 400, 蓝装材料自选包: 100 };
   f.state.equipment = [{ uid: '9007199254742993', equipId: '旧装备', star: 1, level: 0 }];
   f.state.factory = { buildingId: '1装备厂', level: 1, auto: false };
+  f.state.monthCards = [];
   f.state.buildings.push(f.state.factory);
   f.state.repair = { unitRepairCost: 2, unitRepairTime: 0.15 };
   for (const fleet of f.state.fleets) Object.assign(fleet, { cityId: 1, durability: 2000, maxDura: 2000, autoFight: { isOn: true, todayTimes: 4 } });
@@ -71,7 +76,8 @@ export function warForgeFixture() {
       case 'AllResourceRequest': value = { list: [{ res: 3, amount: f.state.gold }, { res: 4, amount: 1000 }] }; break;
       case 'AllItemRequest': value = { items: [{ itemId: '汽油', num: f.state.fuel }, ...Object.entries(f.state.materials).map(([itemId, num]) => ({ itemId, num }))] }; break;
       case 'EquipsRequest': value = { equip: f.state.equipment }; break;
-      case 'WeekInfoRequest': case 'MyResFieldsRequest': case 'DailyTaskInfoRequest': case 'MainTaskInfoRequest': case 'AchievementInfoRequest': case 'EmailBoxRequest': case 'AfkInfoRequest': case 'MonthCardRequest': value = {}; break;
+      case 'MonthCardRequest': value = { cardItem: f.state.monthCards }; break;
+      case 'WeekInfoRequest': case 'MyResFieldsRequest': case 'DailyTaskInfoRequest': case 'MainTaskInfoRequest': case 'AchievementInfoRequest': case 'EmailBoxRequest': case 'AfkInfoRequest': value = {}; break;
       case 'AllHeroRequest': value = { heroes: [] }; break;
       default: value = await read(name, body);
     }
@@ -88,7 +94,11 @@ export function warForgeFixture() {
     await f.beforeSend?.(name, body);
     if (f.reject) throw Object.assign(new Error('模拟服务端明确拒绝'), { prompt: { prompt: 1 }, request: name });
     if (f.unknown) return;
-    if (name === 'SetFleetAutoFightRequest') {
+    if (name === 'SetBuildingAutoWorkRequest') {
+      const building = f.state.buildings.find(row => row.buildingId === body.buildingId);
+      if (!building) throw new Error('夹具未建成的原生锻造工厂');
+      if (!f.ignoreForgeNative) building.auto = body.isOn;
+    } else if (name === 'SetFleetAutoFightRequest') {
       if (!f.ignoreNativeOff) for (const id of body.buildingIds) {
         const fleet = f.state.fleets.find(row => row.buildingId === id);
         if (fleet) fleet.autoFight = { ...(fleet.autoFight ?? { todayTimes: 0 }), isOn: body.isOn };

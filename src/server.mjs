@@ -1,11 +1,14 @@
 import { serveClientAsset } from './ui-assets.mjs';
+import { createConsoleVersion, renderVersionedPage, consoleVersionError } from './console-version.mjs';
 import { createTraceLog, traceJson, redactLog } from './trace-log.mjs';
 import { createProtocolDiagnostics } from './protocol-diagnostics.mjs';
 import { createResourceUpdater } from './resource-updater.mjs';
 import {checkFleetSettlement,invalidateFleetReports} from './fleet-settlement.mjs';
+import {recoverWorldBossLineups} from './world-boss-lineups.mjs';
 import { recoverPirateHunts } from './pirate-recovery.mjs';
 import {readGuildTech,upgradeGuildTech} from './guild-tech.mjs';
 import {resourceFieldRows,resourceFieldTotals} from './resource-fields.mjs';
+import { readResourceFieldsOverview, previewResourceField, runResourceFieldShortcut, previewResourceFieldPlan, previewResourceFieldGiveUp, runResourceFieldGiveUp } from './resource-field-automation.mjs';
 import {activityRankCatalog,readActivityRanking} from './activity-rankings.mjs';
 import {readActivityStatistics} from './activity-statistics.mjs';
 import { merchantActivity, readMerchantStatus, readMerchantJournal, merchantJournalSummary } from './merchant-activity.mjs';
@@ -20,7 +23,7 @@ import { watchSiliconMining, previewSiliconShortcut, runSiliconShortcut } from '
 import { readSiliconOverview } from './silicon-overview.mjs';
 import { previewExtended } from './extended-preview.mjs';
 import {watchFleetMaintenance,fleetMaintenanceEnabled} from './fleet-maintenance.mjs';
-import {watchFleetSpeed,readFleetSpeed,planFleetSpeed} from './fleet-speed.mjs';
+import {watchFleetSpeed,readFleetSpeed,planFleetSpeed,fleetSpeedEnabled} from './fleet-speed.mjs';
 import {observeOwnedFleets,ownedFleetCatalog} from './fleet-catalog.mjs';
 import {readPirateSweeps} from './pirate-sweeps.mjs';
 import {readWorldTarget} from './world-target.mjs';
@@ -36,7 +39,7 @@ import { watchFreeRewardClock } from './extra-free-rewards.mjs';
 import { createPirateAdvanceTask } from './pirate-advance.mjs';
 import { automationControlView, setAutomationControl } from './automation-controls.mjs';
 import { activityAvailability, isActivityTaskAvailable } from './activity-availability.mjs';
-import { activityAutomationFields, activityAutomationControl } from './activity-automation.mjs';
+import { activityAutomationFields, activityAutomationSettingFields, activityAutomationControl } from './activity-automation.mjs';
 import http from 'node:http';
 import { setTimeout as recoveryWait } from 'node:timers/promises';
 import fs from 'node:fs';
@@ -82,17 +85,18 @@ import { describeLogError } from './log-errors.mjs';
 import { classifyLog } from './log-categories.mjs';
 import { createLogAccountLabels } from './log-accounts.mjs';
 import { operationLabels } from './operation-labels.mjs';
-import { automationTasks, retiredAutomationTasks, defaultFishingGoldReserve, defaultCompassSpinCount, maxCompassSpinCount, taskSettings, worldTaskKey, dailyTaskKey } from './automation.mjs';
+import { automationTasks, retiredAutomationTasks, migratedAutomationTasks, defaultFishingGoldReserve, defaultCompassSpinCount, maxCompassSpinCount, taskSettings, worldTaskKey, dailyTaskKey } from './automation.mjs';
 import { rewardSchedule } from './reward-schedule.mjs';
 import { rememberTournament } from './side-rewards.mjs';
-import { beijingDay, loadAutomationSettings, saveAutomationSettings, validateSettings, settingsCatalog, settingsFromNative, nativeTaskValues, applyNativeTask, hasExtraWork, createUsageLedger, exportAutomationSettings, importAutomationSettings, SettingsError, settingsUiRules } from './automation-settings.mjs';
+import { beijingDay, loadAutomationSettings, loadRecoverableAutomationSettings, settingsFile, defaultSettings, saveAutomationSettings, validateSettings, settingsCatalog, settingsFromNative, settingsFromLegacyNative, nativeTaskValues, applyNativeTask, hasExtraWork, createUsageLedger, exportAutomationSettings, importAutomationSettings, SettingsError, settingsUiRules } from './automation-settings.mjs';
 import { budgetPreview, exactAutomationId, createActionGuard, nativePreferenceEnabled, needsCargoDemand, AutomationSkip } from './automation-policy.mjs';
 import { guardRuntimeActions, validateRuntimeSettings } from './settings-runtime.mjs';
 import { assertResourcesReady, resourceReadiness } from './resource-store.mjs';
 import { readTreasureLoot, planTreasureLoot, treasureAutomationEnabled } from './treasure-loot.mjs';
 import { readCityWar, planCityWar, cityWarEnabled, cityWarReservedFleets, refreshCityWarReservations } from './city-war.mjs';
 import { readWorldOnlineReward, worldOnlineRewardKey } from './world-online-rewards.mjs';
-import { readEquipmentForge, planEquipmentForge, releaseStaleEquipmentForge, forgeEnabled } from './equipment-forge.mjs';
+import { readEquipmentForge, releaseStaleEquipmentForge, forgeEnabled } from './equipment-forge.mjs';
+import { previewEquipmentForge } from './equipment-forge-preview.mjs';
 import { reconcileManualForge } from './manual-forge-sync.mjs';
 import { readAntiqueUpgrade, planAntiqueUpgrade, antiqueEnabled } from './antique-upgrade.mjs';
 import { watchBasePushes, surveyBaseAutomation, planBaseAutomation, baseDemands, previewNativeAutomation } from './base-automation.mjs';
@@ -109,6 +113,7 @@ import { ACCOUNT_BACKUP_MAX_BYTES, exportAccountBackup, previewAccountImport, im
 import { startCapture, stopCapture, captureState, inspectCaptureRecovery, recoverCapture, DEFAULT_PROXY_PORT } from './capture.mjs';
 import { createPhoneLogin, loadDeviceProfile, saveDeviceProfile, DEVICE_PROFILE_PATH } from './phone-login.mjs';
 import { createAlipayLogin } from './alipay-login.mjs';
+import { createDouyinLogin } from './douyin-login.mjs';
 import { iconIndex, atlasFile, itemIcon, resourceIcon, materialIcon, heroIcon, heroCard, buildingIcon, workerIcon } from './art.mjs';
 
 const LOG_LIMIT = 400;
@@ -139,16 +144,14 @@ const STATE_TEXT = {
   STOPPED: '已停止',
 };
 
-const pageRaw = Buffer.from(PAGE);
-const pageAsset = {
-  raw: pageRaw,
-  gzip: zlib.gzipSync(pageRaw, { level: 9 }),
-  etag: '"' + createHash('sha1').update(pageRaw).digest('hex').slice(0, 16) + '"',
-};
-
 export function createConsole({ host = '127.0.0.1', port = 17321, onLog, recoveryDelayMs, resourceUpdates = false, resourceUpdater = null, protocol: protocolOverride,
   alipayLoginController = null,
+  douyinLoginController = null,
   captureController = { startCapture, stopCapture, captureState, inspectCaptureRecovery, recoverCapture } } = {}) {
+  const consoleVersion = createConsoleVersion(PAGE);
+  const pageRaw = Buffer.from(renderVersionedPage(PAGE, consoleVersion));
+  const pageAsset = { raw: pageRaw, gzip: zlib.gzipSync(pageRaw, { level: 9 }),
+    etag: '"' + createHash('sha1').update(pageRaw).digest('hex').slice(0, 16) + '"' };
   // 保留测试/嵌入调用方注入延迟的能力；正常运行时由当前账号的登录设置决定。
   const injectedRecoveryDelay = typeof recoveryDelayMs === 'function' ? recoveryDelayMs : null;
   const currentProtocol = () => protocolOverride ?? getProtocol();
@@ -158,12 +161,17 @@ export function createConsole({ host = '127.0.0.1', port = 17321, onLog, recover
   let alipaySaving = false;
   let pendingAlipayLogin = null;
   let cancelledAlipayLoginId = null;
+  const douyinLogin = douyinLoginController ?? createDouyinLogin();
+  let douyinSaving = false;
+  let pendingDouyinLogin = null;
+  let cancelledDouyinLoginId = null;
   const traceLog = createTraceLog(TRACE_PATH, { maxBytes: TRACE_MAX_BYTES });
   const protocolDiagnostics = createProtocolDiagnostics(path.join(DATA_DIR, 'protocol-errors'));
   const globalLog = [];
   const streams = new Set();
   const sessions = new Map();
   let closing = false;
+  let settingsWatchStarted = false;
   const resources = resourceUpdater || (resourceUpdates ? createResourceUpdater({ onEvent: ({ level, message }) => emit(null, level, message) }) : null);
   // 先认证并查询已有区服角色，用户选择具体角色后再保存凭证。
   // 密码只用于当次请求；待保存凭证和待选账号只放在内存，十分钟后清理。
@@ -265,13 +273,106 @@ export function createConsole({ host = '127.0.0.1', port = 17321, onLog, recover
       throw new Error('角色列表已变化，请重新选择角色');
     }
     pending.entry.credential = alipayLogin.takeCredential(pending.id);
-    const result = await saveSelectedRole(pending.entry, choice, { sourceLabel: '支付宝扫码', stopExisting: true });
+    const result = await saveSelectedRole(pending.entry, choice, { sourceLabel: '支付宝扫码', stopExisting: true,
+      validateSelection() {
+        if (requireAlipayRoles(pending.id) !== pending || pending.reading || !pending.entry.choices.includes(choice)) {
+          throw new Error('角色列表已变化或扫码已结束，请重新扫码');
+        }
+      },
+    });
     pending.entry.credential = null;
     pending.entry.choices = [];
     cancelledAlipayLoginId = pending.id;
     clearAlipayRoles();
     return result;
   }
+
+  function clearDouyinRoles() {
+    pendingDouyinLogin?.controller?.abort();
+    clearTimeout(pendingDouyinLogin?.expiryTimer);
+    pendingDouyinLogin = null;
+  }
+
+  function readDouyinRoles(pending) {
+    if (pending.reading) return pending.reading;
+    pending.entry.choices = [];
+    pending.entry.roleError = null;
+    pending.controller = new AbortController();
+    const reading = readPhoneRoles(pending.entry, { signal: pending.controller.signal }).finally(() => {
+      if (pending.reading === reading) pending.reading = null;
+    });
+    pending.reading = reading;
+    return reading;
+  }
+
+  function douyinLoginStatus(id) {
+    const state = douyinLogin.status(id);
+    if (cancelledDouyinLoginId !== state.id) cancelledDouyinLoginId = null;
+    if (state.id && state.id === cancelledDouyinLoginId) {
+      clearDouyinRoles();
+      return { ...state, phase: 'cancelled', qrImage: null };
+    }
+    if (state.phase !== 'captured') {
+      clearDouyinRoles();
+      return state;
+    }
+    if (pendingDouyinLogin?.id !== state.id) {
+      clearDouyinRoles();
+      const credential = douyinLogin.takeCredential(state.id);
+      if (!accountId(credential) || credential.source !== 'douyin') throw new Error('抖音游戏登录凭证无效，请重新扫码');
+      pendingDouyinLogin = {
+        id: state.id, reading: null, controller: null,
+        entry: { credential, userName: '抖音账号', choices: [], roleError: null },
+      };
+      const pending = pendingDouyinLogin;
+      pending.expiryTimer = setTimeout(() => {
+        if (pendingDouyinLogin === pending) clearDouyinRoles();
+      }, Math.max(0, state.expiresAt - Date.now()));
+      pending.expiryTimer.unref?.();
+      void readDouyinRoles(pendingDouyinLogin);
+    }
+    const pending = pendingDouyinLogin;
+    const store = loadStore();
+    const idOfAccount = accountId(pending.entry.credential);
+    const existing = store.accounts.find(account => account.id === idOfAccount);
+    return {
+      ...state,
+      phase: pending.reading ? 'reading-roles' : 'captured',
+      choices: roleChoices(pending.entry, store),
+      roleError: pending.entry.roleError,
+      account: { id: idOfAccount, title: existing ? describeAccount(existing).title : '抖音账号' },
+    };
+  }
+
+  function requireDouyinRoles(id) {
+    if (closing) throw new Error('控制台已关闭');
+    const state = douyinLoginStatus(id);
+    const pending = pendingDouyinLogin;
+    if (!pending || pending.id !== id || !['captured', 'reading-roles'].includes(state.phase)
+      || state.expiresAt <= Date.now()) throw new Error('扫码结果已过期或已保存，请重新扫码');
+    return pending;
+  }
+
+  async function saveDouyinRole(pending, choice) {
+    // 排队期间扫码可能被取消、过期或刷新，落盘前重新检查本次选择。
+    if (requireDouyinRoles(pending.id) !== pending || pending.reading || !pending.entry.choices.includes(choice)) {
+      throw new Error('角色列表已变化，请重新选择角色');
+    }
+    pending.entry.credential = douyinLogin.takeCredential(pending.id);
+    const result = await saveSelectedRole(pending.entry, choice, { sourceLabel: '抖音扫码', stopExisting: true,
+      validateSelection() {
+        if (requireDouyinRoles(pending.id) !== pending || pending.reading || !pending.entry.choices.includes(choice)) {
+          throw new Error('角色列表已变化或扫码已结束，请重新扫码');
+        }
+      },
+    });
+    pending.entry.credential = null;
+    pending.entry.choices = [];
+    cancelledDouyinLoginId = pending.id;
+    clearDouyinRoles();
+    return result;
+  }
+
 
   async function readPhoneWorlds(credential, { signal } = {}) {
     if (closing) throw new Error('控制台已关闭');
@@ -349,11 +450,12 @@ export function createConsole({ host = '127.0.0.1', port = 17321, onLog, recover
       linkedAccountCount: pending.linkedAccountCount, expiresAt: pending.createdAt + PHONE_PENDING_MS };
   }
 
-  async function saveSelectedRole(entry, choice, { sourceLabel = 'APP 登录', stopExisting = false } = {}) {
+  async function saveSelectedRole(entry, choice, { sourceLabel = 'APP 登录', stopExisting = false, validateSelection = () => {} } = {}) {
     const idOfAccount = accountId(entry.credential);
     const session = sessions.get(idOfAccount);
     if (session?.connectionDrain) await session.connectionDrain;
     if (closing) throw new Error('控制台已关闭');
+    validateSelection();
     const roleWorldId = choice.role.worldId || choice.worldId;
     const previous = loadStore().accounts.find(account => account.id === idOfAccount);
     const currentRoleId = uidText(session?.player?.playerId ?? session?.player?.id);
@@ -362,7 +464,7 @@ export function createConsole({ host = '127.0.0.1', port = 17321, onLog, recover
       : toNumber(session?.player?.worldId) === roleWorldId
         && toNumber(session?.player?.bornWorldId || previous?.login?.worldId) === choice.worldId;
     if (session && (stopExisting || !sameRole || session.loginBlocked || session.loginRecoveryJob)) {
-      const reason = stopExisting ? '支付宝账号已重新扫码，正在更新连接'
+      const reason = stopExisting ? `${sourceLabel}已重新登录，正在更新连接`
         : sameRole ? '账号凭证已更新，正在恢复连接' : '已选择其他角色，停止旧角色任务';
       requireProductionSync(session);
       session.generation++;
@@ -374,10 +476,11 @@ export function createConsole({ host = '127.0.0.1', port = 17321, onLog, recover
       await closeSessionConnection(session, { includeWorld: true });
     }
     if (closing) throw new Error('控制台已关闭');
+    validateSelection();
     const store = loadStore();
     const existing = store.accounts.find(account => account.id === idOfAccount);
     const credential = { ...entry.credential, login: { ...entry.credential.login, worldId: choice.worldId } };
-    const fallbackLabel = entry.credential.source === 'alipay' ? '未命名角色' : entry.userName;
+    const fallbackLabel = ['alipay', 'douyin'].includes(entry.credential.source) ? '未命名角色' : entry.userName;
     const label = existing?.label && existing.label !== existing.lastSeen?.nickname ? existing.label : choice.role.nickname || fallbackLabel;
     const { account, created } = upsertAccount(store, credential, { label });
     account.automation = { ...account.automation, autoStart: autoStartEnabled(account), loginBlocked: false, loginRecovery: null };
@@ -487,19 +590,35 @@ export function createConsole({ host = '127.0.0.1', port = 17321, onLog, recover
     const accounts = loadStore().accounts;
     rememberLogAccounts(accounts);
     const saved = accounts.find(account => account.id === id)?.automation;
-    const detailed = loadAutomationSettings(id);
+    let detailed;
+    try { detailed = loadRecoverableAutomationSettings(id, { expected: saved?.settingsConfigured === true ||
+      !saved?.tasks && (saved?.autoStart === true || saved?.enabled === true) }); }
+    catch (error) { detailed = unavailableSettings(error); }
+    if (!detailed.recovery && !detailed.revision && [...migratedAutomationTasks].some(key => saved?.tasks?.[key] === true)) {
+      // Persist the complete conversion before native flags are normalized;
+      // otherwise a pause or restart could discard the only migration input.
+      detailed = saveAutomationSettings(id, settingsFromLegacyNative(saved.tasks, saved), { revision: 0 });
+      saveAutomation(id, { tasks: nativeTaskValues(detailed.settings, saved.tasks) });
+    }
     // 新账号首次保存前也使用完整的关闭配置，避免旧任务接口绕过模块和细项开关。
-    // 只有已保存原生任务的旧账号继续沿用原有兼容执行路径。
-    const preferences = detailed.revision ? detailed.settings
+    // 重复动作在读取旧原生任务时立即迁移，随后只使用统一配置。
+    if (detailed.revision || detailed.recovery) {
+      const change = { settingsConfigured: true };
+      if (detailed.recovery) Object.assign(change, { enabled: false, autoStart: false, loginRecovery: null });
+      if (!saved?.settingsConfigured || detailed.recovery) saveAutomation(id, change);
+    }
+    const preferences = detailed.revision || detailed.recovery ? detailed.settings
       : !saved?.tasks ? settingsFromNative(undefined, saved ?? {}) : null;
     return {
       id,
       preferences,
       preferencesRevision: detailed.revision,
       preferencesSavedAt: detailed.savedAt,
+      settingsRecovery: detailed.recovery ?? null,
+      settingsFileStamp: settingsDiskStamp(),
       paused: saved?.paused === true,
       loginBlocked: saved?.loginBlocked === true,
-      loginRecovery: saved?.loginRecovery ?? null,
+      loginRecovery: detailed.recovery ? null : saved?.loginRecovery ?? null,
       loginRecoveryJob: null,
       loginRecoveryController: null,
       loginRecoveryWait: null,
@@ -532,7 +651,7 @@ export function createConsole({ host = '127.0.0.1', port = 17321, onLog, recover
       dailySingle: dailySingleState(),
       loop: {
         running: false,
-        autoStart: saved?.autoStart ?? saved?.enabled ?? false,
+        autoStart: detailed.recovery ? false : saved?.autoStart ?? saved?.enabled ?? false,
         rounds: preferences?.loop.rounds ?? saved?.rounds ?? 0,
         completed: 0,
         everyMs: (preferences?.loop.everySeconds ?? saved?.everySeconds ?? 60) * 1000,
@@ -542,7 +661,7 @@ export function createConsole({ host = '127.0.0.1', port = 17321, onLog, recover
         controller: null, job: null,
         attemptController: null, connectionFailure: null, recovery: null,
         history: [],
-        error: null,
+        error: detailed.recovery?.message ?? null,
       },
     };
   }
@@ -580,6 +699,7 @@ export function createConsole({ host = '127.0.0.1', port = 17321, onLog, recover
     if (!sessions.has(id)) {
       const session = newSession(id);
       sessions.set(id, session);
+      if (session.settingsRecovery) emit(session, 'error', session.settingsRecovery.message);
       try {
         const audit = JSON.parse(fs.readFileSync(factoryReportFile(id), 'utf8'));
         if (audit.lines?.length) emit(session, 'info', '上次工厂检查 · ' + audit.time, { diagnostic: audit.lines.join('\n') });
@@ -597,6 +717,10 @@ export function createConsole({ host = '127.0.0.1', port = 17321, onLog, recover
     session.preferences = entry.settings;
     session.preferencesRevision = entry.revision;
     session.preferencesSavedAt = entry.savedAt;
+    session.settingsRecovery = entry.recovery ?? null;
+    session.settingsFileStamp = settingsDiskStamp();
+    if (entry.revision && !loadStore().accounts.find(account => account.id === session.id)?.automation?.settingsConfigured)
+      saveAutomation(session.id, { settingsConfigured: true });
     session.loop.tasks = nativeTaskValues(entry.settings, session.loop.tasks);
     session.loop.fishingGoldReserve = entry.settings.gather.fishingGoldReserve;
     session.loop.everyMs = entry.settings.loop.everySeconds * 1000;
@@ -605,10 +729,65 @@ export function createConsole({ host = '127.0.0.1', port = 17321, onLog, recover
     if (previousLogin !== JSON.stringify(entry.settings.login)) refreshLoginRecovery(session);
   }
 
+  function settingsDiskStamp() {
+    try { const stat = fs.statSync(settingsFile(), { bigint: true }); return [stat.ino, stat.size, stat.mtimeNs, stat.ctimeNs].join(':'); }
+    catch (error) { return 'unavailable:' + error.code; }
+  }
+
+  function unavailableSettings(error, revision = 0) {
+    return { settings: defaultSettings(), revision, savedAt: null,
+      recovery: { required: true, reason: 'unavailable', message: error.message + (error.code === 'SETTINGS_INCOMPATIBLE'
+        ? '；自动挂机已停止，请修正上述设置或更新程序后重新载入。'
+        : '；自动挂机已停止，原文件未覆盖，请修复配置或使用兼容版本后重新配置。') } };
+  }
+
+  function refreshSessionSettings(session, force = false) {
+    const current = () => ({ settings: session.preferences, revision: session.preferencesRevision,
+      savedAt: session.preferencesSavedAt, ...(session.settingsRecovery ? { recovery: session.settingsRecovery } : {}) });
+    const observedStamp = settingsDiskStamp();
+    if (session.settingsReading || !force && session.settingsFileStamp === observedStamp) return current();
+    session.settingsReading = true;
+    try {
+      let saved;
+      try { saved = loadRecoverableAutomationSettings(session.id, { expected: session.preferencesRevision > 0 ||
+        loadStore().accounts.find(account => account.id === session.id)?.automation?.settingsConfigured === true }); }
+      catch (error) { saved = unavailableSettings(error, session.preferencesRevision); }
+      const changed = saved.revision !== session.preferencesRevision || JSON.stringify(saved.recovery ?? null) !== JSON.stringify(session.settingsRecovery);
+      session.settingsFileStamp = observedStamp;
+      if (changed && (saved.revision || saved.recovery)) {
+        if (saved.recovery) {
+          // 先持久关闭并取消旧任务，再广播新配置，避免推送回调中断恢复顺序。
+          session.settingsRecovery = saved.recovery;
+          session.generation++;
+          stopLoop(session, saved.recovery.message);
+          session.stages.stop(saved.recovery.message); session.mutualAid.stop(saved.recovery.message);
+          for (const task of session.trials.values()) task.stop(saved.recovery.message);
+          session.loop.error = saved.recovery.message;
+        }
+        adoptPreferences(session, saved);
+        if (saved.recovery) emit(session, 'error', saved.recovery.message);
+      }
+      session.settingsFileStamp = observedStamp;
+      return current();
+    } finally { session.settingsReading = false; }
+  }
+
+  function assertSettingsReady(session) {
+    const entry = refreshSessionSettings(session);
+    if (entry.recovery?.required) throw Object.assign(new Error(entry.recovery.message), { code: 'SETTINGS_RECOVERY_REQUIRED' });
+  }
+
+  function settingsFileChanged() {
+    if (closing) return;
+    for (const session of sessions.values()) {
+      try { refreshSessionSettings(session, true); }
+      catch (error) { session.loop.controller?.abort(); emit(session, 'error', '配置检查失败，挂机已停止：' + error.message); }
+    }
+  }
+
   function settingsView(session) {
-    const saved = loadAutomationSettings(session.id);
-    if (saved.revision && saved.revision !== session.preferencesRevision) adoptPreferences(session, saved);
-    const settings = saved.revision ? saved.settings : settingsFromNative(session.loop.tasks, {
+    const saved = refreshSessionSettings(session, true);
+    const settings = saved.revision ? saved.settings : session.preferences ?? settingsFromNative(session.loop.tasks, {
       rounds: session.loop.rounds, everySeconds: session.loop.everyMs / 1000, fishingGoldReserve: session.loop.fishingGoldReserve,
     });
     const baseRevision = createHash('sha256').update(JSON.stringify([session.loop.tasks, session.loop.rounds, session.loop.everyMs, session.loop.fishingGoldReserve])).digest('hex');
@@ -618,7 +797,8 @@ export function createConsole({ host = '127.0.0.1', port = 17321, onLog, recover
     let compatibility = null;
     try { loadConfigSafe(); validateRuntimeSettings(settings, config); }
     catch (error) { compatibility = { error: error.message, fields: error.fields ?? {} }; }
-    return { settings, revision: saved.revision, savedAt: saved.savedAt, baseRevision, compatibility, catalog: ownedFleetCatalog(session,settingsCatalog(config)),
+    const recoveryToken = session.settingsRecovery ? createHash('sha256').update(JSON.stringify([saved.revision, saved.savedAt, session.settingsRecovery])).digest('hex') : null;
+    return { settings, revision: saved.revision, savedAt: saved.savedAt, baseRevision, compatibility, recovery: session.settingsRecovery, recoveryToken, catalog: ownedFleetCatalog(session,settingsCatalog(config)),
       tasks: automationTasks.filter(task => !retiredAutomationTasks.has(task.key) && !availability.hiddenTasks.includes(task.key)), rules: { ...settingsUiRules(), hiddenFields: availability.hiddenFields },
       usage: usageFor(session).snapshot(), pendingUsage: usageFor(session).pendingCounters(), running: session.loop.running };
   }
@@ -724,7 +904,7 @@ export function createConsole({ host = '127.0.0.1', port = 17321, onLog, recover
       throw new SettingsError({ revision: '阵容或游戏配置已更新，请刷新后再保存' });
     }
     const settings = structuredClone(current.settings);
-    update(settings.lineups);
+    update(settings.lineups, settings);
     settings.lineups = validateLineupSettings(settings.lineups);
     const entry = saveAutomationSettings(session.id, settings, { revision: current.revision });
     adoptPreferences(session, entry);
@@ -829,7 +1009,7 @@ export function createConsole({ host = '127.0.0.1', port = 17321, onLog, recover
   function activitySettingsView(session) {
     const current = settingsView(session);
     return {
-      settings: Object.fromEntries(activityAutomationFields.map(({ key }) => {
+      settings: Object.fromEntries(activityAutomationSettingFields.map(({ key }) => {
         const [group, field] = key.split('.');
         return [key, current.settings[group][field]];
       })),
@@ -893,7 +1073,8 @@ export function createConsole({ host = '127.0.0.1', port = 17321, onLog, recover
         enqueue(session,async()=>{
           settlementDirty=false;
           if(current()){const changes=await checkFleetSettlement(instance,session.player,usageFor(session),{afterPush:true});
-            for(const change of changes)if(change.repairRecovery)emit(session,'info','战后维修 · '+change.buildingId+' · '+change.reason+'（已确认）');}
+            for(const change of changes)if(change.repairRecovery)emit(session,'info','战后维修 · '+change.buildingId+' · '+change.reason+'（已确认）');
+            await recoverWorldBossLineups(instance,session.player,usageFor(session),{enabled:current,report:entry=>emit(session,entry.ok?'info':'warn',entry.label+' · '+(entry.reason||entry.error||''))});}
         }).catch(error=>{if(current())emit(session,'warn','舰队归队状态待核对：'+error.message);}).finally(()=>{
           settlementBusy=false;
           if(settlementDirty&&current())scheduleSettlement();
@@ -915,9 +1096,15 @@ export function createConsole({ host = '127.0.0.1', port = 17321, onLog, recover
             .finally(()=>{session.reportClaim=null;});
         }
       }
-      if(['SCNewCampaignReport','SCMyFleetUpdate','SCRadarEventState','SCPirateCampaignEnd','SCPirateKillRecordUpdate'].includes(name))scheduleSettlement();
+      if(['SCNewCampaignReport','SCMyFleetUpdate','SCWorldBossCampaignEnd','SCRadarEventState','SCPirateCampaignEnd','SCPirateKillRecordUpdate'].includes(name))scheduleSettlement();
     });
-    instance.on('close',()=>{clearTimeout(settlementTimer);settlementTimer=null;settlementDirty=false;});
+    const lineupRecoveryTimer=setInterval(()=>{
+      if(!current())return;
+      try{if(Object.values(usageFor(session).keyRecords()).some(record=>record.details?.kind==='worldBossLineup'&&record.details.active!==false))scheduleSettlement();}
+      catch(error){emit(session,'warn','世界Boss阵容恢复记录待核对：'+error.message);}
+    },15000);
+    lineupRecoveryTimer.unref?.();
+    instance.on('close',()=>{clearInterval(lineupRecoveryTimer);clearTimeout(settlementTimer);settlementTimer=null;settlementDirty=false;});
     instance.on('message', ({ name, body }) => {
       if (session.client === instance && session.player && name === 'SCVipUpdate' && Number.isSafeInteger(body.vipLevel)) {
         session.player.vip = { ...session.player.vip, vipLevel: body.vipLevel, vipExp: body.vipExp };
@@ -1384,6 +1571,10 @@ export function createConsole({ host = '127.0.0.1', port = 17321, onLog, recover
 
     try {await checkFleetSettlement(client,session.player,usageFor(session));}
     catch(error){emit(session,'warn','舰队历史占用待核对：'+error.message);}
+    try {await recoverWorldBossLineups(client,session.player,usageFor(session),{
+      enabled:()=>session.client===client&&session.generation===generation&&!session.paused&&client.connected,
+      report:entry=>emit(session,entry.ok?'info':'warn',entry.label+' · '+(entry.reason||entry.error||''))});}
+    catch(error){emit(session,'warn','世界Boss阵容仍待恢复：'+error.message);}
     if (session.client !== client || session.generation !== generation || session.paused || !client.connected) {
       throw new Error('连接初始化期间已断开或取消');
     }
@@ -1721,6 +1912,7 @@ export function createConsole({ host = '127.0.0.1', port = 17321, onLog, recover
 
   async function handle(req, res, body) {
     const parsed = new URL(req.url, 'http://localhost');
+    res.setHeader('X-CW-Console-Version', consoleVersion);
     if (serveClientAsset(req, res, parsed.pathname)) return;
     const route = `${req.method} ${parsed.pathname}`;
     const acceptsGzip = /\bgzip\b/.test(req.headers['accept-encoding'] ?? '');
@@ -1748,6 +1940,10 @@ export function createConsole({ host = '127.0.0.1', port = 17321, onLog, recover
     const scoped_ = (url) => {
       const found = resolve(url);
       scoped = found.session;
+      if (req.method === 'POST' && !['/api/settings', '/api/settings/validate', '/api/logs/clear',
+        '/api/connect', '/api/disconnect', '/api/accounts/pause', '/api/accounts/active', '/api/accounts/label', '/api/accounts/remove',
+        '/api/loop/stop', '/api/loop/auto-start', '/api/stages/stop', '/api/pirates/advance/stop',
+        '/api/guild/mutual/stop', '/api/trials/stop'].includes(parsed.pathname)) assertSettingsReady(found.session);
       if (req.method === 'POST' && found.session.syncingProduction
         && !['/api/accounts/pause', '/api/disconnect', '/api/loop/stop', '/api/stages/stop', '/api/pirates/advance/stop',
           '/api/guild/mutual/stop', '/api/loop/auto-start', '/api/loop/interval', '/api/settings', '/api/settings/validate', '/api/login-settings', '/api/week-order/settings', '/api/hero-raid/settings', '/api/merchant/settings', '/api/guild-ship/settings', '/api/activities/settings', '/api/appointments/settings', '/api/logs/clear',
@@ -1758,6 +1954,8 @@ export function createConsole({ host = '127.0.0.1', port = 17321, onLog, recover
       return found;
     };
     try {
+      const versionError = consoleVersionError(req, consoleVersion);
+      if (versionError) { json(versionError, versionError.status); return; }
       if (['POST /api/dailies/run', 'POST /api/tasks/run', 'POST /api/world/run', 'POST /api/worlds/enter'].includes(route)) {
         const { session } = resolve(parsed);
         parsed.searchParams.set('account', session.id);
@@ -1815,7 +2013,7 @@ export function createConsole({ host = '127.0.0.1', port = 17321, onLog, recover
           || Object.keys(payload).some(key => !['key', 'value', 'revision', 'baseRevision', 'confirm'].includes(key))) {
           throw new SettingsError({ settings: '请选择有效的活动自动挂机开关' });
         }
-        const control = activityAutomationFields.find(field => field.key === payload.key);
+        const control = activityAutomationSettingFields.find(field => field.key === payload.key);
         if (!control) throw new SettingsError({ settings: '请选择有效的活动自动挂机开关' });
         needConfirm(payload);
         const { session } = scoped_(parsed);
@@ -2051,8 +2249,10 @@ export function createConsole({ host = '127.0.0.1', port = 17321, onLog, recover
         const { session } = scoped_(parsed);
         const payload = jsonBody();
         const current = settingsView(session);
+        if (current.recovery?.required && payload.recoveryToken !== current.recoveryToken)
+          throw new SettingsError({ revision: '配置已丢失或损坏，请重新载入默认配置后再保存；旧页面的更改未生效' });
         if (!current.revision && payload.baseRevision !== current.baseRevision) throw new SettingsError({ revision: '现有挂机开关已变化，请重新载入后再保存' });
-        const entry = saveAutomationSettings(session.id, payload.settings, { revision: payload.revision, catalog: settingsCatalog(loadConfigSafe({ allowStale: true })) });
+        const entry = saveAutomationSettings(session.id, payload.settings, { revision: payload.revision, catalog: settingsCatalog(loadConfigSafe({ allowStale: true })), expectedRecoveryId: current.recovery?.id });
         adoptPreferences(session, entry);
         if (session.client) for (const task of automationTasks) rewardSchedule(session.client).clearTask(task.key);
         emit(session, 'info', '游戏配置已保存。正在运行的任务从下次检查开始使用新配置。');
@@ -2066,7 +2266,7 @@ export function createConsole({ host = '127.0.0.1', port = 17321, onLog, recover
         if (!config) throw new Error('缺少游戏配置表，暂时不能预览');
         const settings = validateSettings(payload.settings ?? settingsView(session).settings, { catalog: settingsCatalog(config) });
         const category = payload.category ?? 'base';
-        if (!['base', 'world', 'heroes', 'daily', 'runtime', 'cityWar', 'forge', 'antique', 'equipmentGrowth', 'activity', 'radar', 'pirateHunt', 'fleetDispatch','fleetSpeed','worldBoss','pirateSweep','alliance','guildShip','guildFort','silicon','heroRaid'].includes(category)) throw new Error('不支持的预览分类');
+        if (!['base', 'world', 'heroes', 'daily', 'runtime', 'cityWar', 'forge', 'antique', 'equipmentGrowth', 'activity', 'radar', 'pirateHunt', 'fleetDispatch','fleetSpeed','worldBoss','pirateSweep','alliance','guildShip','guildFort','silicon','heroRaid','resourceFields'].includes(category)) throw new Error('不支持的预览分类');
 
         if (category === 'runtime') {
           json({ checkedAt: new Date().toISOString(), usage: usageFor(session).snapshot(), actions: [], counts: {}, viewOnly: true, scopeLabel: '运行安排（仅查看，不执行）',
@@ -2083,6 +2283,13 @@ export function createConsole({ host = '127.0.0.1', port = 17321, onLog, recover
             actions: plan.actions.map(step => ({ label: step.label, kind: step.kind, costs: (step.costs ?? []).map(item => ({ name: displayMaterial(config, item.id), num: item.num })) })),
             notes: [...new Set(plan.notes ?? [])],
           });
+          if (category === 'resourceFields') {
+            const player = session.player, generation = session.generation;
+            const plan = await previewResourceFieldPlan(client, protocolFor(client), config, player, {
+              getSettings: () => settings, ledger: usageFor(session), enabled: () => session.client === client && client.connected && !session.paused && session.player === player && session.generation === generation,
+            });
+            return output(plan, plan.counts, '资源田自动占领');
+          }
           // 草稿预览的预留结果仅在本请求使用，绝不写入运行中的调度缓存。
           let previewCityReserved=[];
           if(['radar','pirateHunt','worldBoss'].includes(category)&&settings.cityWar.enabled&&settings.cityWar.reserveDuringWar){
@@ -2110,7 +2317,7 @@ export function createConsole({ host = '127.0.0.1', port = 17321, onLog, recover
             const state=await readWorldBoss(client,config,session.player,settings,usageFor(session),{cityReservedFleetIds:previewCityReserved});
             const plan={actions:[],notes:[state.reason||'当前可执行每日首战派遣']};
             if(!settings.worldBoss.enabled)plan.notes.push('世界Boss自动首战未开启');
-            else if(!state.reason)plan.actions.push({kind:'worldBoss',label:state.fleets.find(f=>!f.reason).buildingId+' → 世界Boss '+state.boss.bossId,costs:[{id:'汽油',num:state.cost}]});
+            else if(!state.reason)plan.actions.push({kind:'worldBoss',label:state.selectedFleetIds.join('、')+' → 世界Boss '+state.boss.bossId,costs:[{id:'汽油',num:state.totalCost}]});
             return {...output(plan,{fleets:state.fleets.length},'世界Boss首战'),dispatch:{fleets:state.fleets,fuel:state.fuel,pending:pendingPetrol(usageFor(session))}};
           }
           if (category === 'radar') {
@@ -2122,7 +2329,7 @@ export function createConsole({ host = '127.0.0.1', port = 17321, onLog, recover
             const snapshot=await inspectHunt(client,config,session.player),ledger=usageFor(session);
             for(const fleet of snapshot.view.fleets??[])fleet.reason ||= (!settings.pirateHunt.fleetIds.includes(fleet.buildingId)?'未选择此舰队':'')|| fleetRecordReason(ledger.keyRecords(),fleet.buildingId,exactAutomationId(session.player.worldId))||(previewCityReserved.includes(fleet.buildingId)?'城战时段预留':dispatchReservationReason(client,settings,'pirateHunt',fleet.buildingId,{ignoreOwners:['cityWar']}));
             const progress=pirateRunState(session);
-            const selection=progress.halted?{reason:progress.reason}:selectPirateAdvance(snapshot,settings.pirateHunt,{spent:progress.spent??0,pendingFuel:pendingPetrol(ledger)});
+            const selection=progress.halted?{reason:progress.reason}:selectPirateAdvance(snapshot,settings.pirateHunt,{pendingFuel:pendingPetrol(ledger)});
             const plan={actions:selection.reason?[]:[{kind:'pirateFirst',label:selection.fleet.name+' → '+selection.target.name+' '+selection.target.level+'级',costs:[{id:'汽油',num:selection.cost}]}],notes:[selection.reason||'开启海盗讨伐后随挂机每轮检查；也可单独手动启动，此处仅预览下一次派遣']};
             return {...output(plan,{fleets:snapshot.view.fleets?.length??0,targets:snapshot.view.targets?.length??0},'海盗首杀'),dispatch:{fleets:snapshot.view.fleets,fuel:snapshot.view.fuel,pending:pendingPetrol(ledger)}};
           }
@@ -2135,7 +2342,7 @@ export function createConsole({ host = '127.0.0.1', port = 17321, onLog, recover
           if (category === 'cityWar') {
             const state = await readCityWar(client, protocolFor(client), config, session.player, settings.cityWar);
             const ledger = usageFor(session), pending = ledger.pendingCounters();
-            const plan = planCityWar(state, settings, { usage, keys: ledger.keyRecords(), pendingPetrol: (pending.cityWarPetrol ?? 0) + (pending.treasurePetrol ?? 0) + (pending.piratePetrol ?? 0) + (pending.radarPetrol ?? 0) + (pending.worldBossPetrol ?? 0) + (pending.siliconPetrol ?? 0) });
+            const plan = planCityWar(state, settings, { usage, keys: ledger.keyRecords(), pendingPetrol: (pending.cityWarPetrol ?? 0) + (pending.treasurePetrol ?? 0) + (pending.piratePetrol ?? 0) + (pending.radarPetrol ?? 0) + (pending.worldBossPetrol ?? 0) + (pending.siliconPetrol ?? 0) + (pending.resourceFieldPetrol ?? 0) });
             const online = await readWorldOnlineReward(client, config, session.player);
             if (!settings.schedule.worldOnlineRewards) plan.notes.push('城战在线奖励自动领取未开启');
             else if (online.ready && worldOnlineRewardKey(session.player, online)) {
@@ -2148,8 +2355,9 @@ export function createConsole({ host = '127.0.0.1', port = 17321, onLog, recover
               if (guild.welfareCount > 0) plan.actions.push({ kind: 'guildWelfare', label: `领取联盟福利礼包（${guild.welfareCount}份）`, costs: [] });
               else plan.notes.push('联盟福利：' + (guild.reason || (guild.welfareCount === 0 ? '当前无待领礼包' : '待领数量未确认')));
             }
-            if (settings.fleetSpeed.enabled) {
-              const speed=planFleetSpeed(await readFleetSpeed(client,session.player),config,settings,ledger);
+            if (settings.fleetSpeed.enabled || settings.fleetSpeed.fleets.some(fleet =>
+              settings.cityWar.fleetIds.includes(fleet.id) && (fleet.repair || fleet.march))) {
+              const speed=planFleetSpeed(fleetSpeedEnabled(settings) ? await readFleetSpeed(client,session.player) : null,config,settings,ledger);
               plan.actions.push(...speed.actions);plan.notes.push(...speed.notes);
             }
             return { ...output(plan, { fleets: state.fleets.length, targets: state.targets.length }, '联盟城战'), onlineReward: online, cityWar: {
@@ -2164,8 +2372,10 @@ export function createConsole({ host = '127.0.0.1', port = 17321, onLog, recover
               ...(state.lotteryError ? ['周抽奖状态未确认：' + state.lotteryError] : []), ...(state.orderError ? ['商人订单状态未确认：' + state.orderError] : [])] }, { activities: state.activities?.length ?? 0 }, '活动状态（只读）'), viewOnly: true };
           }
           if (category === 'forge') {
-            const state = await readEquipmentForge(client, protocolFor(client), config, session.player);
-            const plan = planEquipmentForge(state, config, settings, { usage, keys: usageFor(session).keyRecords() });
+            const player = session.player, generation = session.generation;
+            const { snapshot: state, plan } = await previewEquipmentForge(client, protocolFor(client), config, player, settings,
+              { usage, keys: usageFor(session).keyRecords(), enabled: () => session.client === client && client.connected
+                && !session.paused && session.player === player && session.generation === generation });
             return { ...output(plan, { factories: state.buildings.length }, '装备锻造'), forge: {
               factories: plan.factories, gold: state.gold, season: state.season, forgeLevel: state.forgeLevel } };
           }
@@ -2490,6 +2700,71 @@ export function createConsole({ host = '127.0.0.1', port = 17321, onLog, recover
         }
         return;
       }
+
+      // ---- 抖音扫码登录 ----
+      if (route === 'POST /api/accounts/douyin-login/start') {
+        needConfirm(jsonBody());
+        if (closing) throw new Error('控制台已关闭');
+        if (douyinSaving) throw new Error('正在保存抖音账号，请稍候');
+        const previous = douyinLogin.status();
+        if (previous.id && previous.id === cancelledDouyinLoginId) await douyinLogin.cancel(previous.id);
+        const starting = douyinLogin.start();
+        const currentState = douyinLogin.status();
+        if (pendingDouyinLogin && (pendingDouyinLogin.id !== currentState.id || currentState.phase !== 'captured')) clearDouyinRoles();
+        const state = await starting;
+        json(douyinLoginStatus(state.id));
+        return;
+      }
+      if (route === 'GET /api/accounts/douyin-login/status') {
+        json(douyinLoginStatus(parsed.searchParams.get('id') || undefined));
+        return;
+      }
+      if (route === 'POST /api/accounts/douyin-login/cancel') {
+        const { id } = jsonBody();
+        if (typeof id !== 'string' || !id) throw new Error('请选择要取消的扫码会话');
+        douyinLogin.status(id);
+        cancelledDouyinLoginId = id;
+        clearDouyinRoles();
+        await douyinLogin.cancel(id);
+        json({ ok: true });
+        return;
+      }
+      if (route === 'POST /api/accounts/douyin-login/roles') {
+        const payload = jsonBody();
+        needConfirm(payload);
+        if (typeof payload.id !== 'string' || !payload.id) throw new Error('扫码结果已过期，请重新扫码');
+        if (douyinSaving) throw new Error('正在保存抖音账号，请稍候');
+        const pending = requireDouyinRoles(payload.id);
+        void readDouyinRoles(pending);
+        json(douyinLoginStatus(payload.id));
+        return;
+      }
+      if (route === 'POST /api/accounts/douyin-login/save') {
+        const payload = jsonBody();
+        needConfirm(payload);
+        if (typeof payload.id !== 'string' || !payload.id) throw new Error('扫码结果已过期，请重新扫码');
+        if (douyinSaving) throw new Error('正在保存抖音账号，请稍候');
+        const pending = requireDouyinRoles(payload.id);
+        if (pending.reading) throw new Error('正在读取区服和角色，请稍候');
+        if (pending.entry.roleError) throw new Error('角色列表读取失败，请重试后再保存');
+        const choices = pending.entry.choices;
+        const choice = payload.choiceId ? choices.find(item => item.id === String(payload.choiceId))
+          : choices.length === 1 ? choices[0] : null;
+        if (!choice || payload.worldId !== undefined) throw new Error('请选择列表中的区服和角色后再保存');
+        douyinSaving = true;
+        try {
+          const session = sessions.get(accountId(pending.entry.credential));
+          const save = () => saveDouyinRole(pending, choice);
+          const result = session && !session.paused ? await enqueue(session, save) : await save();
+          // 凭证已落盘，临时浏览器清理失败也应返回已保存的账号。
+          try { await douyinLogin.cancel(payload.id); } catch {}
+          json(result);
+        } finally {
+          douyinSaving = false;
+        }
+        return;
+      }
+
 
       // ---- 手机号登录 ----
       if (route === 'GET /api/accounts/phone-login/status') {
@@ -2984,11 +3259,12 @@ export function createConsole({ host = '127.0.0.1', port = 17321, onLog, recover
       }
       if (route === 'POST /api/lineup-presets/delete') {
         const payload = jsonBody(); needConfirm(payload);
-        json(saveLineupPreferences(scoped_(parsed).session, payload, lineups => {
+        json(saveLineupPreferences(scoped_(parsed).session, payload, (lineups, settings) => {
           if (!lineups.presets.some(preset => preset.id === payload.id)) throw new Error('此阵容已删除，请刷新');
           lineups.presets = lineups.presets.filter(preset => preset.id !== payload.id);
           if (lineups.mainlinePresetId === payload.id) lineups.mainlinePresetId = '';
           lineups.trialPresets = lineups.trialPresets.filter(binding => binding.presetId !== payload.id);
+          settings.worldBoss.fleetPresets = settings.worldBoss.fleetPresets.filter(binding => binding.presetId !== payload.id);
         }));
         return;
       }
@@ -3116,7 +3392,64 @@ export function createConsole({ host = '127.0.0.1', port = 17321, onLog, recover
       if(route==='GET /api/world/target'){
         const {session}=scoped_(parsed);
         if(!session.client?.connected||session.paused)throw Error('请先连接当前账号，再读取目标详情');
-        const result=await readJob(session,()=>readWorldTarget(session.client,protocolFor(session.client),loadConfigSafe(),session.player,settingsView(session).settings,usageFor(session),{layer:parsed.searchParams.get('layer'),key:parsed.searchParams.get('key'),pirateSpent:pirateRunState(session).spent??0}));json(result);return;
+        const result=await readJob(session,()=>readWorldTarget(session.client,protocolFor(session.client),loadConfigSafe(),session.player,settingsView(session).settings,usageFor(session),{layer:parsed.searchParams.get('layer'),key:parsed.searchParams.get('key')}));json(result);return;
+      }
+      if (route === 'GET /api/resource-fields/overview') {
+        const { session } = scoped_(parsed);
+        if (!session.client?.connected || session.paused) throw Error('请先连接当前账号，再读取资源田');
+        if (!session.resourceFieldsRead) {
+          const client = session.client, generation = session.generation, player = session.player, settings = settingsView(session).settings;
+          const settingsKey = JSON.stringify(settings);
+          const enabled = () => session.client === client && client.connected && !session.paused && session.generation === generation
+            && session.player === player && JSON.stringify(settingsView(session).settings) === settingsKey;
+          const job = readJob(session, () => readResourceFieldsOverview(client, protocolFor(client), loadConfigSafe(), player,
+            { getSettings: () => settings, ledger: usageFor(session), enabled }))
+            .finally(() => { if (session.resourceFieldsRead === job) session.resourceFieldsRead = null; });
+          session.resourceFieldsRead = job;
+        }
+        json(await session.resourceFieldsRead); return;
+      }
+      if (route === 'POST /api/resource-fields/preview') {
+        const { session } = scoped_(parsed), intent = jsonBody();
+        if (intent.kind !== undefined && !['occupy', 'giveUp'].includes(intent.kind)) throw Error('不支持的资源田操作');
+        if (!session.client?.connected || session.paused) throw Error('请先连接当前账号，再操作资源田');
+        const client = session.client, generation = session.generation, player = session.player;
+        const settings = settingsView(session).settings, settingsKey = JSON.stringify(settings);
+        const enabled = () => session.client === client && client.connected && !session.paused && session.generation === generation
+          && session.player === player && JSON.stringify(settingsView(session).settings) === settingsKey;
+        const previewer = intent.kind === 'giveUp' ? previewResourceFieldGiveUp : previewResourceField;
+        const preview = await readJob(session, () => previewer(client, protocolFor(client), loadConfigSafe(), player, intent,
+          { getSettings: () => settings, ledger: usageFor(session), enabled }));
+        if (!enabled()) throw Error('账号或配置已变化，请重新选择');
+        const quotes = session.resourceFieldQuotes ??= new Map();
+        for (const [key, quote] of quotes) if (Date.now() >= quote.expiresAt && (!quote.job || quote.completed)) quotes.delete(key);
+        if (quotes.size >= 30) throw Error('待处理的确认过多，请稍后再试');
+        const available = preview.kind === 'giveUp' ? preview.available === true : preview.fleets.some(fleet => fleet.step);
+        const token = available ? randomUUID() : null, expiresAt = Date.now() + 120000;
+        if (token) quotes.set(token, { preview, expiresAt, enabled, settings, client, player, job: null });
+        const { worldId, identityKey, playerId, operationId, ...view } = preview;
+        json({ ...view, token, expiresAt, ...(preview.fleets ? { fleets: preview.fleets.map(({ step, ...fleet }) => fleet) } : {}) }); return;
+      }
+      if (route === 'POST /api/resource-fields/action') {
+        const payload = jsonBody(); needConfirm(payload);
+        const { session } = scoped_(parsed), quote = session.resourceFieldQuotes?.get(payload.token);
+        if (!quote) throw Error('操作确认已失效，请重新选择资源田');
+        const giveUp = quote.preview.kind === 'giveUp';
+        if (!giveUp && quote.job && quote.fleetId !== payload.fleetId) throw Error('本次确认已用于另一支舰队');
+        if (!quote.job) {
+          if (Date.now() >= quote.expiresAt || !quote.enabled()) throw Error('确认已过期或账号配置已变化，请重新选择');
+          if (giveUp ? quote.preview.available !== true : !quote.preview.fleets.some(fleet => fleet.id === payload.fleetId && fleet.step)) throw Error(giveUp ? '此田当前不能放弃，请重新确认' : '请选择本次确认中可用的舰队');
+          quote.fleetId = giveUp ? null : payload.fleetId;
+          quote.job = enqueue(session, async () => {
+            if (Date.now() >= quote.expiresAt || !quote.enabled()) throw Error('排队期间确认已过期或连接已变化，操作未发送');
+            const options = { getSettings: () => quote.settings, ledger: usageFor(session), enabled: quote.enabled,
+              report: entry => emit(session, entry.ok ? 'info' : 'warn', (entry.label || (giveUp ? '资源田放弃' : '资源田占领')) + '：' + (entry.reason || '结果待确认')) };
+            return giveUp
+              ? runResourceFieldGiveUp(quote.client, protocolFor(quote.client), loadConfigSafe(), quote.player, quote.preview, options)
+              : runResourceFieldShortcut(quote.client, protocolFor(quote.client), loadConfigSafe(), quote.player, quote.preview, quote.fleetId, options);
+          }, giveUp ? '手动放弃资源田' : quote.preview.replacement ? '手动替换资源田' : '手动占领资源田').finally(() => { quote.completed = true; });
+        }
+        json(await quote.job); return;
       }
       if (route === 'POST /api/silicon/preview') {
         const { session } = scoped_(parsed), intent = jsonBody();
@@ -3641,6 +3974,7 @@ export function createConsole({ host = '127.0.0.1', port = 17321, onLog, recover
         needConfirm(payload);
         if (typeof payload.autoStart !== 'boolean') throw new Error('自动开始挂机必须是开关值');
         const { account, session } = scoped_(parsed);
+        if (payload.autoStart) assertSettingsReady(session);
         saveAutomation(account.id, { autoStart: payload.autoStart, enabled: payload.autoStart });
         if (payload.autoStart) await startAutomaticLoop(session);
         json(loopView(session));
@@ -3695,7 +4029,11 @@ export function createConsole({ host = '127.0.0.1', port = 17321, onLog, recover
         const { session } = scoped_(parsed);
         const task = automationTasks.find(item => item.key === payload.key);
         if (!task || typeof payload.enabled !== 'boolean') throw new Error('无效的自动任务设置');
-        if (retiredAutomationTasks.has(task.key)) throw new Error(['guildAidCollect', 'guildAidHelp'].includes(task.key)
+        if (retiredAutomationTasks.has(task.key)) throw new Error(task.key === 'treasureLoot'
+          ? '万吨巨轮已统一，请在“挂机配置 → 世界 → 万吨巨轮”中设置'
+          : task.key === 'guildOrders'
+          ? '联盟订单独立入口已移除，请在“联盟 · 募兵与互助”中设置自动募兵'
+          : ['guildAidCollect', 'guildAidHelp'].includes(task.key)
           ? '联盟互助已统一，请在“联盟 · 募兵与互助”中设置互助总开关和自动赠送'
           : '装备领取与续产已统一，请在装备自动锻造中设置自动挂机');
         const tasks = { ...session.loop.tasks, [task.key]: payload.enabled };
@@ -3739,6 +4077,8 @@ export function createConsole({ host = '127.0.0.1', port = 17321, onLog, recover
 
   async function startAutomaticLoop(session) {
     try {
+      refreshSessionSettings(session);
+      if (session.settingsRecovery?.required) return;
       const generation = session.generation;
       if (session.loop.controller?.signal.aborted) await session.loop.job;
       if (closing || sessions.get(session.id) !== session || generation !== session.generation
@@ -3763,6 +4103,7 @@ export function createConsole({ host = '127.0.0.1', port = 17321, onLog, recover
   }
 
   function startLoop(session, account, options = {}) {
+    assertSettingsReady(session);
     if (session.paused) throw new Error('账号已暂停，请先恢复托管');
     if (session.loginBlocked && !options.explicitLogin && !loginRecoveryActive(session)) throw new Error('账号在别处登录，请先恢复托管或重新开始挂机');
     const loop = session.loop;
@@ -3836,7 +4177,8 @@ export function createConsole({ host = '127.0.0.1', port = 17321, onLog, recover
           isPirateBusy: () => session.pirateAdvance.view().running,
           challengeRun: loop.challengeRun,
           executeBattle: sessionLineupExecutor(session, client),
-          getSettings: () => session.preferences,
+          // 推送监听也会读取配置；恢复时先中止循环并返回关闭的默认值，避免在事件回调中抛错。
+          getSettings: () => { refreshSessionSettings(session); return session.preferences; },
           onFishBookComplete: () => {
             const saved=loadAutomationSettings(session.id);
             if(!saved.settings.gather.fishBook || session.client!==client)return;
@@ -4025,6 +4367,7 @@ export function createConsole({ host = '127.0.0.1', port = 17321, onLog, recover
       fishingGoldReserve: loop.fishingGoldReserve,
       compassSpinCount: session.preferences?.eventActions.compassDrawCount ?? loop.compassSpinCount,
       settingsRevision: session.preferencesRevision,
+      settingsRecovery: session.settingsRecovery,
       rounds: loop.rounds,
       completed: loop.completed,
       everyMs: loop.everyMs,
@@ -4059,11 +4402,13 @@ export function createConsole({ host = '127.0.0.1', port = 17321, onLog, recover
         server.listen(port, host, () => {
           const address = `http://${host}:${server.address().port}`;
           emit(null, 'info', `控制台已启动 ${address}`);
+          fs.watchFile(settingsFile(), { interval: 1000, persistent: false }, settingsFileChanged);
+          settingsWatchStarted = true;
           for (const account of loadStore().accounts) {
             if (account.automation?.autoStart === undefined) saveAutomation(account.id, { autoStart: autoStartEnabled(account) });
-            if (account.automation?.paused) continue;
-            if (!autoStartEnabled(account) && !account.automation?.loginBlocked) continue;
             const session = sessionFor(account.id);
+            if (session.settingsRecovery?.required || account.automation?.paused) continue;
+            if (!autoStartEnabled(account) && !account.automation?.loginBlocked) continue;
             if (session.loginBlocked) {
               // 旧版本仅保存 loginBlocked；迁移时按当前配置安排完整等待。
               if (!session.loginRecovery || session.loginRecovery.status === 'connecting') scheduleLoginRecovery(session);
@@ -4078,8 +4423,11 @@ export function createConsole({ host = '127.0.0.1', port = 17321, onLog, recover
     },
     close: async () => {
       closing = true;
+      if (settingsWatchStarted) fs.unwatchFile(settingsFile(), settingsFileChanged);
       clearAlipayRoles();
       await alipayLogin.close();
+      clearDouyinRoles();
+      await douyinLogin.close();
       for (const client of phonePreviewClients) client.stop();
       phonePreviewClients.clear();
       pendingPhoneLogins.clear();

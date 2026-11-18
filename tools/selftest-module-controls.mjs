@@ -19,7 +19,8 @@ const { loadProtocol } = await import('../src/proto.mjs');
 const { planRadarPreview } = await import('../src/dispatch-preview.mjs');
 const { fleetDispatchView, fleetRecordReason } = await import('../src/fleet-availability.mjs');
 const { automationTasks } = await import('../src/automation.mjs');
-const pairs = { museum: ['museumCollect', 'museumExplore'], radar: ['radarAuto', 'radarRepair'] };
+const pairs = { museum: ['enabled', 'upgrade'], radar: ['enabled', 'repairIdle'] };
+const retired = { museum: ['museumCollect', 'museumExplore', 'museumRevenue', 'museumAchievements'], radar: ['radarAuto', 'radarRepair'] };
 let passed = 0;
 const check = async (name, run) => { await run(); passed++; console.log('通过：' + name); };
 try {
@@ -34,49 +35,52 @@ try {
       assert.equal(defaults[group].runEnabled, false);
       defaults[group].runEnabled = true;
       assert.match(automationControlView(defaults).find(c => c.key === group + '.runEnabled').configurationNote, /尚未选择执行动作/);
-      defaults.schedule[keys[0]] = true;
+      defaults[group].enabled = defaults[group][keys[0]] = true;
       assert.equal(automationControlView(defaults).find(c => c.key === group + '.runEnabled').configurationNote, '');
     }
   });
-  await check('开关往返保留混合细项，旧入口修改不偷偷重开，阻断原因可见', () => {
+  await check('开关往返保留细项，退役入口不可重开，阻断原因可见', () => {
     for (const [group, keys] of Object.entries(pairs)) {
-      const s = defaultSettings(); s.loop.world = true; s[group].runEnabled = s[group].enabled = true; s.schedule[keys[0]] = false; s.schedule[keys[1]] = true;
+      const s = defaultSettings(); s.loop.world = true; s[group].runEnabled = s[group].enabled = true; s[group][keys[0]] = false; s[group][keys[1]] = true;
       const original = structuredClone(s), off = setAutomationControl(s, group + '.runEnabled', false);
       assert.deepEqual(off, { ...original, [group]: { ...original[group], runEnabled: false } });
       assert.deepEqual(setAutomationControl(off, group + '.runEnabled', true), original);
       assert.deepEqual(s, original);
-      assert.equal(nativeTaskValues(off, {})[keys[1]], true);
-      assert.equal(applyNativeTask(off, keys[0], true)[group].runEnabled, false);
-      for (const key of keys) assert.equal(nativePreferenceEnabled(off, key), false);
-      for (const key of keys) assert.equal(nativePreferenceEnabled(s, key), true);
+      for (const key of retired[group]) {
+        assert.equal(nativeTaskValues(off, {})[key] ?? false, false);
+        assert.deepEqual(applyNativeTask(off, key, true), off);
+        assert.equal(nativePreferenceEnabled(off, key), false);
+        assert.equal(nativePreferenceEnabled(s, key), false);
+        assert.throws(() => setAutomationControl(off, 'schedule.' + key, true), /无效/);
+      }
       const views = automationControlView(off);
-      for (const key of [group + '.enabled', ...keys.map(k => 'schedule.' + k)])
+      for (const key of [group + '.enabled', ...keys.map(k => group + '.' + k)])
         assert(views.find(c => c.key === key).blockedBy.some(label => label.includes('总开关')));
     }
   });
-  await check('旧账号读取和导入保留任务选择，缺省总开关关闭且显式值持久保存', () => {
-    const old = validateSettings(defaultSettings());
-    old.schedule.museumExplore = true; old.schedule.museumCollect = false;
-    old.schedule.radarAuto = false; old.schedule.radarRepair = true;
-    delete old.museum.runEnabled; delete old.radar.runEnabled;
-    const file = path.join(directory, 'legacy.json');
-    fs.writeFileSync(file, JSON.stringify({ version: 1, accounts: { legacy: { settings: old, revision: 3 } } }));
+  await check('读取和导入保存当前细项且不再导出退役开关', () => {
+    const saved = validateSettings(defaultSettings());
+    saved.museum.enabled = true; saved.museum.upgrade = false;
+    saved.radar.enabled = false; saved.radar.repairIdle = true;
+    const file = path.join(directory, 'current.json');
+    saveAutomationSettings('current', saved, { file, revision: 0 });
     const original = fs.readFileSync(file);
-    const loaded = loadAutomationSettings('legacy', { file });
+    const loaded = loadAutomationSettings('current', { file });
     assert.deepEqual(fs.readFileSync(file), original);
-    const imported = importAutomationSettings({ format: 'crazywaterworld-automation', version: 1, settings: old });
+    const imported = importAutomationSettings(exportAutomationSettings(saved));
     for (const group of Object.keys(pairs)) {
-      assert.deepEqual(loaded.settings[group], { runEnabled: false, ...old[group] });
-      assert.deepEqual(imported[group], { runEnabled: false, ...old[group] });
+      assert.deepEqual(loaded.settings[group], saved[group]);
+      assert.deepEqual(imported[group], saved[group]);
       imported[group].runEnabled = true;
       assert.equal(importAutomationSettings(exportAutomationSettings(imported))[group].runEnabled, true);
       const invalid = defaultSettings(); invalid[group].runEnabled = 'false'; assert.throws(() => validateSettings(invalid));
-      assert.equal(settingsFromNative(old.schedule)[group].runEnabled, false);
+      assert.equal(settingsFromNative({})[group].runEnabled, false);
+      for (const key of retired[group]) assert(!Object.hasOwn(imported.schedule, key));
     }
-    assert.deepEqual(imported.schedule, old.schedule);
+    assert.deepEqual(imported.schedule, saved.schedule);
   });
   await check('暂停博物馆时无详细计划、补料或旧计划写入，结算后暂停也不继续领奖', async () => {
-    const settings = defaultSettings(); settings.loop.world = settings.museum.runEnabled = settings.museum.enabled = true;
+    const settings = defaultSettings(); settings.loop.world = settings.museum.runEnabled = settings.museum.enabled = settings.museum.achievements = true;
     const config = { tables: { MuseumAchievementCfg: { data: [{ score: 100 }] } } };
     const snapshot = { notes: [], choices: [], raids: [], world: { stock: new Map(), buildings: [], factories: [] }, now: 1000,
       player: { level: 35 }, heroes: [], museum: { popularity: 100, exploreStages: [], exhibitions: [] } };
@@ -146,7 +150,7 @@ try {
   await check('HTTP 聚合开关保存、重载与账号隔离，关闭期间编辑细项保持暂停', async () => {
     const { saveStore } = await import('../src/accounts.mjs');
     saveStore({ version: 1, activeId: 'module-a', accounts: ['module-a', 'module-b'].map(id => ({ id, label: '模块测试', url: 'ws://127.0.0.1:1', login: {}, automation: { paused: true } })) });
-    const settings = validateSettings(defaultSettings()); settings.schedule.radarRepair = settings.schedule.museumExplore = true;
+    const settings = validateSettings(defaultSettings()); settings.radar.repairIdle = settings.museum.enabled = true;
     saveAutomationSettings('module-a', settings, { revision: 0 });
     const { createConsole } = await import('../src/server.mjs'); const app = createConsole({ port: 0 }); await app.listen();
     const api = async (route, body, account = 'module-a') => {
@@ -163,6 +167,7 @@ try {
         const saved = await api('settings');
         assert.equal(loadAutomationSettings('module-a').settings[group].runEnabled, false);
         assert.deepEqual(saved.data.settings.schedule, settings.schedule);
+        for (const field of pairs[group]) assert.equal(saved.data.settings[group][field], settings[group][field]);
         const updated = structuredClone(saved.data.settings); updated[group].enabled = true;
         const change = await api('settings', { confirm: true, settings: updated, revision: saved.data.revision });
         assert.equal(change.status, 200); assert.equal(change.data.settings[group].runEnabled, false);

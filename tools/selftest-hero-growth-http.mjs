@@ -8,7 +8,7 @@ const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'cw-hero-growth-http-'))
 process.env.CW_DATA_DIR = directory;
 process.env.CW_CONFIG_PACK = path.join(directory, 'config.json');
 process.env.CW_RESOURCE_DIR = path.join(directory, 'resources');
-const ids = ['甲', '乙', '丙'];
+const ids = ['甲', '乙', '丙', '丁', '戊'];
 const tables = {
   ModuleOpenCfg: [{ moduleId: '英雄装备', playerLevel: 16 }],
   EquipCfg: [{ id: '刀' }], EquipAttrCfg: [{ id: '刀', star: 0, maxLv: 3 }],
@@ -49,7 +49,7 @@ try {
   settings.heroes.enabled = true;
   settings.heroes.showSkillReward = true;
   settings.loop.everySeconds = 1;
-  const claimed = new Set(), writes = [], unexpected = [];
+  const owned = ['甲', '乙'], claimed = new Set(), writes = [], unexpected = [];
   session = app.sessions.get(accountId);
   const client = new EventEmitter();
   client.setMaxListeners(30);
@@ -57,11 +57,12 @@ try {
     connected: true, serverClockOffsetMs: 0,
     stop() { this.connected = false; },
     async request(name, body) {
-      if (name === 'AllHeroRequest') return { heroes: ids.map((heroId, index) => ({ heroId, level: 1, equips: [{ uid: index + 1, equipId: '刀' }] })), showSkillHeroes: [...claimed] };
+      if (name === 'AllHeroRequest') return { heroes: owned.map((heroId, index) => ({ heroId, level: 1, equips: [{ uid: index + 1, equipId: '刀' }] })), showSkillHeroes: [...claimed] };
       if (name === 'AllItemRequest') return { items: [{ itemId: '精铁', num: 100 }] };
       if (name === 'EquipsRequest') return { equip: ids.map((_, i) => ({ uid: i + 1, equipId: '刀', level: 1 })) };
       if (name === 'GotHeroShowSkillRequest') {
         writes.push(body.heroId);
+        assert(owned.includes(body.heroId), '未拥有英雄不能领取展示奖励');
         assert(!claimed.has(body.heroId), '重复领取英雄展示奖励');
         claimed.add(body.heroId);
         return { reward: { asset: [{ id: 'RUBY', num: 20 }] } };
@@ -84,10 +85,11 @@ try {
   });
 
   await save([]);
-  assert.deepEqual((await api('heroes')).steps, []);
-  assert.deepEqual((await preview([])).actions, []);
-  assert.equal((await run()).sent, 0);
-  assert.deepEqual(writes, []);
+  assert.deepEqual((await api('heroes')).steps.map(step => step.heroId), owned, '空名单仍计划全部已拥有英雄奖励');
+  const unselected = await preview([]);
+  assert.deepEqual(unselected.actions.map(step => step.kind), ['showSkillReward', 'showSkillReward']);
+  assert(unselected.actions.every((step, i) => step.label.includes(owned[i])));
+  assert.deepEqual(writes, [], '空名单预览不能执行写入');
 
   await save(['甲']);
   const mixed = { ...settings, heroes: { ...settings.heroes, heroIds: ['乙'], equipment: true } };
@@ -96,32 +98,40 @@ try {
   assert.deepEqual(gear.actions.map(step => step.kind), ['equipment']);
   assert.match(gear.actions[0].label, /乙/);
   const draft = await api('settings/preview', { category: 'heroes', settings: mixed });
-  assert.deepEqual(draft.actions.map(step => step.kind), ['showSkillReward']);
-  assert.match(draft.actions[0].label, /乙/);
+  assert.deepEqual(draft.actions.map(step => step.kind), ['showSkillReward', 'showSkillReward']);
+  assert(draft.actions.every((step, i) => step.label.includes(owned[i])), '英雄预览中的奖励不受草稿培养名单限制');
   assert.deepEqual((await api('settings')).settings.heroes.heroIds, ['甲']);
-  assert.deepEqual((await api('heroes')).steps.map(step => step.heroId), ['甲']);
+  assert.deepEqual((await api('heroes')).steps.map(step => step.heroId), owned);
   assert.deepEqual(writes, [], '读取计划和预览草稿不能执行写入');
   const result = await run();
   assert.equal(result.failed, 0);
-  assert.equal(result.sent, 1);
-  assert(result.steps[0].ok);
-  assert.deepEqual(writes, ['甲']);
+  assert.equal(result.sent, 2);
+  assert(result.steps.every(step => step.ok));
+  assert.deepEqual(writes, ['甲', '乙'], '手动领取包含未选中的已拥有英雄');
   assert.deepEqual((await api('heroes')).steps, [], '已领名单回读后不再计划');
   assert.equal((await run()).sent, 0);
 
+  owned.push('丙');
+  await save([]);
+  const emptyResult = await run();
+  assert.equal(emptyResult.failed, 0);
+  assert.equal(emptyResult.sent, 1);
+  assert.deepEqual(writes, ['甲', '乙', '丙'], '手动空名单仍领取新英雄奖励并跳过已领取英雄');
+
+  owned.push('丁', '戊');
   settings.loop.heroes = true;
-  await save(['丙']);
+  await save([]);
   await api('loop/start', { confirm: true, everySeconds: 1, rounds: 1 });
   await session.loop.job;
   assert.equal(session.loop.error, null);
   assert.equal(session.loop.completed, 1);
-  assert.deepEqual(writes, ['甲', '丙'], '挂机取最新名单并且只执行一次');
+  assert.deepEqual(writes, ids, '挂机空名单仍领取所有新英雄奖励并跳过已领取英雄');
   assert.deepEqual(unexpected, []);
   view = await api('settings');
   await save([]);
   assert.equal((await run()).sent, 0);
-  assert.deepEqual(writes, ['甲', '丙']);
-  console.log('英雄养成 HTTP 通过：持久化名单、草稿只读预览、空名单零写入、手动与挂机按选中英雄执行和回读');
+  assert.deepEqual(writes, ids);
+  console.log('英雄养成 HTTP 通过：持久化培养名单、草稿只读预览、手动与挂机空名单全英雄领奖、回读去重');
 } finally {
   session?.loop.controller?.abort();
   await session?.loop.job;

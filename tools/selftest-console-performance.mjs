@@ -19,6 +19,7 @@ const { decodePng, encodePng, cropIcon, shrink, iconThumb } = await import('../s
 const { saveStore } = await import('../src/accounts.mjs');
 const { createConsole, findAppBrowser } = await import('../src/server.mjs');
 const { PAGE } = await import('../src/page.mjs');
+const { renderVersionedPage } = await import('../src/console-version.mjs');
 
 let count = 0;
 const test = async (name, fn) => { await fn(); count++; console.log('通过：' + name); };
@@ -148,14 +149,14 @@ await test('首页带 gzip 和 ETag，重新验证返回 304；不支持压缩�
   const zipped = await raw('/', { 'accept-encoding': 'gzip' });
   assert.equal(zipped.headers['content-encoding'], 'gzip');
   assert.equal(zipped.headers['cache-control'], 'no-cache');
-  assert.equal(zlib.gunzipSync(zipped.body).toString(), PAGE);
+  assert.equal(zlib.gunzipSync(zipped.body).toString(), renderVersionedPage(PAGE, zipped.headers['x-cw-console-version']));
   assert.ok(zipped.body.length < Buffer.byteLength(PAGE) / 3, '压缩后应明显变小');
   const again = await raw('/', { 'if-none-match': zipped.headers.etag });
   assert.equal(again.status, 304);
   assert.equal(again.body.length, 0);
   const plain = await raw('/');
   assert.equal(plain.headers['content-encoding'], undefined);
-  assert.equal(plain.body.toString(), PAGE);
+  assert.equal(plain.body.toString(), renderVersionedPage(PAGE, plain.headers['x-cw-console-version']));
 });
 
 await test('活动页移除材料来源查询及专用接口', async () => {

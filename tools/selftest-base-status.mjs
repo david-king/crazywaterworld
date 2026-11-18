@@ -22,7 +22,7 @@ function fixture() {
   Object.assign(settings.loop, { world: true, dailies: true, tasks: false, heroes: false });
   Object.assign(settings.factory, { enabled: false, demandFirst: false, keepStock: 0 });
   settings.building.enabled = settings.resident.enabled = false;
-  Object.assign(settings.museum, { runEnabled: true, enabled: true, upgrade: true });
+  Object.assign(settings.museum, { runEnabled: true, enabled: true, achievements: true, upgrade: true });
   Object.assign(settings.pet, { enabled: true, breed: true, claim: true, species: ['1'], feed: false, advance: false });
   settings.events.enabled = settings.gold.enabled = true;
   const config = { tables: Object.fromEntries(Object.entries({
@@ -197,7 +197,7 @@ try {
     assert.match(dailyOnly.text('gold.enabled'), /付费点金/);
   });
 
-  await test('博物馆仅旧规则运行时汇总旧规则状态及最早检查时间', () => {
+  await test('基地暂停时不显示退役任务或历史模块状态', () => {
     const f = fixture();
     f.settings.loop.world = false;
     f.settings.museum.enabled = f.settings.museum.upgrade = false;
@@ -209,32 +209,41 @@ try {
     };
     const deadlines = { museumCollect: 1060, museumExplore: 1030, 'museum.runEnabled': 1002 };
     const result = museumRuntimeStatus(f.settings, { status: key => statuses[key] ?? null, nextCheck: key => deadlines[key] ?? null });
-    assert.match(result.observation.text, /旧领奖已完成/);
-    assert.match(result.observation.text, /旧派遣等待英雄/);
-    assert.doesNotMatch(result.observation.text, /过期的详细模块状态/);
-    assert.equal(result.nextCheck, 1030);
+    assert.deepEqual(result, { observation: null, nextCheck: null });
   });
 
-  await test('博物馆旧规则与详细升级并用时汇总有效状态并突出待确认', () => {
+  await test('博物馆仅升级时也使用统一汇总并忽略退役任务记录', () => {
     const f = fixture();
     f.settings.museum.enabled = false;
+    f.settings.museum.achievements = false;
     f.settings.schedule.museumCollect = true;
     f.settings.schedule.museumExplore = false;
     const statuses = {
       museumCollect: { text: '旧领奖结果待确认', state: 'pending', checkedAt: 1000 },
       museumExplore: { text: '已关闭的旧派遣错误', state: 'error', checkedAt: 1003 },
-      'museum.upgrade': { text: '升级已完成', state: 'ok', checkedAt: 1002 },
+      'museum.runEnabled': { text: '升级结果待确认', state: 'pending', checkedAt: 1002 },
     };
-    const deadlines = { museumCollect: 1060, museumExplore: 1005, 'museum.upgrade': 1040 };
+    const deadlines = { museumCollect: 1060, museumExplore: 1005, 'museum.runEnabled': 1040 };
     const result = museumRuntimeStatus(f.settings, { status: key => statuses[key] ?? null, nextCheck: key => deadlines[key] ?? null });
-    assert.match(result.observation.text, /旧领奖结果待确认/);
-    assert.match(result.observation.text, /升级已完成/);
-    assert.doesNotMatch(result.observation.text, /已关闭的旧派遣错误/);
+    assert.match(result.observation.text, /升级结果待确认/);
+    assert.doesNotMatch(result.observation.text, /旧领奖|旧派遣/);
     assert.equal(result.observation.state, 'pending');
     assert.equal(result.nextCheck, 1040);
   });
 
-  await test('详细探宝接管时总开关使用本轮汇总并排除旧规则记录', () => {
+  await test('独立营收、人气奖励和上架也展示博物馆统一状态', () => {
+    for (const action of ['revenue', 'achievements', 'display']) {
+      const settings = defaultSettings(); settings.loop.world = true;
+      settings.museum.runEnabled = true; settings.museum[action] = true;
+      const summary = { text: action + ' 已核对', state: 'ok', checkedAt: 1000 };
+      const result = museumRuntimeStatus(settings, { status: key => key === 'museum.runEnabled' ? summary : null, nextCheck: () => 1060 });
+      assert.deepEqual(result, { observation: summary, nextCheck: 1060 });
+      settings.museum.runEnabled = false;
+      assert.deepEqual(museumRuntimeStatus(settings, { status: () => summary, nextCheck: () => 1060 }), { observation: null, nextCheck: null });
+    }
+  });
+
+  await test('探宝总开关使用本轮汇总并排除退役任务记录', () => {
     const f = fixture();
     f.settings.schedule.museumCollect = f.settings.schedule.museumExplore = true;
     const summary = { text: '本次计划 3 项', state: 'waiting', checkedAt: 1002 };
@@ -246,7 +255,7 @@ try {
     assert.equal(result.nextCheck, 1060);
   });
 
-  await test('博物馆总开关暂停后忽略旧规则及详细模块的历史状态', () => {
+  await test('博物馆总开关暂停后忽略历史状态', () => {
     const f = fixture();
     f.settings.museum.runEnabled = false;
     f.settings.schedule.museumCollect = f.settings.schedule.museumExplore = true;
@@ -291,7 +300,7 @@ try {
     assert.match(result.history[0].world.notes.join('\n'), /随机事件/);
   });
 
-  await test('HTTP运行状态按当前配置展示详细博物馆与旧规则总状态', async () => {
+  await test('HTTP运行状态展示统一博物馆状态，基地暂停后忽略退役任务记录', async () => {
     const previousConfig = process.env.CW_CONFIG_PACK;
     process.env.CW_CONFIG_PACK = path.join(temporary, 'config.json');
     fs.writeFileSync(process.env.CW_CONFIG_PACK, '[]');
@@ -304,7 +313,6 @@ try {
     const detailed = fixture(), legacy = fixture();
     legacy.settings.loop.world = false;
     legacy.settings.museum.enabled = legacy.settings.museum.upgrade = false;
-    legacy.settings.schedule.museumCollect = legacy.settings.schedule.museumExplore = true;
     saveAutomationSettings('base-detailed', detailed.settings, { revision: 0 });
     saveAutomationSettings('base-legacy', legacy.settings, { revision: 0 });
     const app = createConsole({ port: 0, protocol: createDeclaredProtocol(['MuseumInfoRequest', 'MuseumInfoResponse']) });
@@ -352,11 +360,10 @@ try {
       legacyRewards.expect('museum.runEnabled', current + 5);
       const legacyView = await read('base-legacy');
       const museum = legacyView.controls.find(row => row.key === 'museum.runEnabled');
-      assert.match(museum.condition, /旧领奖结果待确认/);
-      assert.match(museum.condition, /旧派遣等待英雄/);
-      assert.doesNotMatch(museum.condition, /详细模块提示|海兽/);
-      assert.equal(museum.observation.state, 'pending');
-      assert.equal(museum.nextCheck, current + 30);
+      assert.doesNotMatch(museum.condition, /旧领奖|旧派遣|详细模块提示|海兽/);
+      assert.equal(museum.observation.state, 'unseen');
+      assert.equal(museum.observation.checkedAt, null);
+      assert.equal(museum.nextCheck, null);
     } finally {
       app.server.closeAllConnections();
       await app.close();

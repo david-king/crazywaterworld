@@ -29,12 +29,14 @@ export function automationWireId(value) {
 }
 
 const gatherTasks = new Set(['autoFish', 'autoDive', 'autoSalvage', 'floaters', 'antiqueFloaters', 'fishEnhance', 'diveEnhance', 'salvageEnhance', 'diveKey']);
-const museumActions = new Set(['museumCollect', 'museumExplore', 'museumAchievement', 'museumComplete', 'museumStart', 'museumGuide', 'museumExhibition', 'museumKeyword']);
+const museumActions = new Set(['museumCollect', 'museumExplore', 'museumRevenue', 'museumAchievement', 'museumComplete', 'museumStart', 'museumGuide', 'museumExhibition', 'museumKeyword']);
 
 export function worldPreferenceEnabled(settings, kind) {
   if (!settings) return true;
   if (!activityTaskEnabled(settings, kind)) return false;
   if (museumActions.has(kind) && settings.museum?.runEnabled === false) return false;
+  if (['museumComplete', 'museumStart', 'museumGuide'].includes(kind) && !settings.museum?.enabled) return false;
+  if (kind === 'museumRevenue' && !settings.museum?.revenue || kind === 'museumAchievement' && !settings.museum?.achievements) return false;
   if (['radarAuto', 'radarRepair'].includes(kind) && settings.radar?.runEnabled === false) return false;
   if (gatherTasks.has(kind) && (!settings.loop.world || settings.gather.enabled === false)) return false;
   if (['gainFactory', 'collectProduct', 'finishUpgrade', 'build', 'buildSupply', 'upgrade', 'weekFactory', 'finishOrder', 'denyOrder', 'startProduce', 'farm', 'speedUpUpgrade', 'speedUpProduce'].includes(kind) && !settings.loop.world) return false;
@@ -65,7 +67,7 @@ export function nativePreferenceEnabled(settings, key) {
   if (retiredAutomationTasks.has(key)) return false;
   if (!settings) return true;
   if (!activityTaskEnabled(settings, key)) return false;
-  if (settings.alliance?.enabled && ['guildOrders', 'guildWelfare'].includes(key)) return false;
+  if (settings.alliance?.enabled && key === 'guildWelfare') return false;
   if (gatherTasks.has(key) && settings.gather.enabled === false) return false;
   const map = {
     stageAuto: () => settings.progression?.enabled !== false && (settings.progression?.mainline ?? settings.schedule?.stageAuto) === true,

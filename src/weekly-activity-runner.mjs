@@ -68,7 +68,7 @@ export function weeklyForgeRecipes(ids, config, order) {
 
 // Only verified scoring actions are enabled by the weekly runner. Preserve
 // selections and budgets; do not turn a missing selection into "everything".
-function actionSettings(context, config) {
+export function weeklyActivityActionSettings(context, config) {
   const settings = structuredClone(context.settings);
   settings.pet.release = false;
   settings.forge.decompose = false;
@@ -92,7 +92,7 @@ export async function runWeeklyActivity(client, protocol, config, player, {
 } = {}) {
   const context = await createWeeklyActivityContext(client, config, player, { getSettings, enabled, report });
   if (!context) return { kind: null, results: [], notes: [] };
-  const settings = actionSettings(context, config);
+  const settings = weeklyActivityActionSettings(context, config);
   const scope = weeklyActionClient(client, name => context.beforeAction(name));
   const connection = scope.client;
   const active = () => scope.enabled() && context.enabled();
@@ -138,19 +138,20 @@ export async function runWeeklyActivity(client, protocol, config, player, {
       await runBaseAutomation(connection, protocol, config, plan, { player, getSettings: current, ledger, enabled: active, onStep: emit });
       if (!plan.actions.length && settings.pet.species.length) note(plan.notesBySetting?.['pet.breed']?.join('；') || '海兽队列、材料或品质条件暂不满足');
     } else if (context.kind === 'forge') {
-      if (!settings.forge.buildingIds.length || !settings.forge.recipeIds.length) note('请先在装备自动锻造配置选择工厂和配方');
+      if (settings.forge.nativeAuto) note('已选择游戏原生自动锻造，周活动配方、品质和积分停止规则不参与；原生开关由装备挂机总开关同步');
+      else if (!settings.forge.buildingIds.length || !settings.forge.recipeIds.length) note('请先在装备配置选择工厂和配方；无需开启普通自动锻造');
       else {
         const result = await runEquipmentForge(connection, protocol, config, player, { getSettings: current, ledger, enabled: active, onStep: emit });
         if (result.notes?.length) note(result.notes.join('；'));
       }
     } else if (context.kind === 'antique') {
-      if (!(settings.antique.star && settings.antique.starQualities.length) && !(settings.antique.suit && settings.antique.suitQualities.length)) note('请先在藏品配置选择升星或套装升级及品质；周活动只执行消耗藏品碎片或藏品经验的养成');
+      if (!settings.antique.starQualities.length && !settings.antique.suitQualities.length) note('请先在藏品配置选择升星或套装升级的品质；无需开启普通养成开关，周活动只执行消耗藏品碎片或藏品经验的养成');
       else {
         const result = await runAntiqueUpgrade(connection, protocol, config, player, { getSettings: current, ledger, enabled: active, onStep: emit });
         if (result.notes?.length) note(result.notes.join('；'));
       }
     } else if (context.kind === 'hero') {
-      if (!settings.heroes.star || !settings.heroes.heroIds.length) note('请先在英雄配置选择英雄并开启升星；周日活动仅执行已核实计分的升星');
+      if (!settings.heroes.heroIds.length) note('请先在英雄配置选择英雄；无需开启普通养成或升星开关，周日活动仅执行已核实计分的升星');
       else {
         const { plan } = await readHeroGrowthPlan(connection, config, player, settings);
         plan.steps = plan.steps.filter(step => step.kind === 'star');

@@ -103,7 +103,7 @@ async function fixture() {
   settings.factory.keepStock = 0;
   settings.factory.demandPriority = [];
   settings.farm.enabled = true;
-  settings.schedule.guildOrders = true;
+  Object.assign(settings.alliance, { enabled: true, recruit: true });
   settings.heroRaid.enabled = true;
   saveAutomationSettings(id, settings, { revision: 0 });
   const app = createConsole({ port: 0, protocol });

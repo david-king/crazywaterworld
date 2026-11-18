@@ -24,11 +24,25 @@ await test('空联盟名按游戏出生主城取名，不再使用联盟2/4；�
  for(const {player} of view.mines[2].positions){const owner=d.owners.find(o=>o.id===player.guildIdx);assert.equal(player.guildName,owner.name.replace('（我盟）',''));assert.equal(player.guildDefaultName,owner.defaultName);}
 });
 await test('本日已确认耗油不重复加巨轮维修，未决费用单列',async()=>{
- const f=await commentsEighteenFixture(),d=await readWorldOverview(f.client,f.config,f.player,f.settings,ledger,{mapLoader:async()=>f.map});assert.equal(d.fuelUsage.confirmed,12300);assert.equal(d.fuelUsage.pending,2000);assert.equal(d.fuelUsage.activities.length,6);assert.equal(d.fuelUsage.stock,99999);
+ const f=await commentsEighteenFixture(),d=await readWorldOverview(f.client,f.config,f.player,f.settings,ledger,{mapLoader:async()=>f.map});assert.equal(d.fuelUsage.confirmed,12300);assert.equal(d.fuelUsage.pending,2000);assert.equal(d.fuelUsage.activities.length,7);assert.equal(d.fuelUsage.stock,99999);
+});
+await test('旧汽油设置不会在概览中恢复预算，用量统计仍保留',async()=>{
+ const f=await commentsEighteenFixture();
+ Object.assign(f.settings.radar,{dailyPetrolLimit:1});Object.assign(f.settings.cityWar,{dailyPetrolLimit:1});
+ Object.assign(f.settings.treasure,{dailyRepairPetrolLimit:1});Object.assign(f.settings.pirateHunt,{fuelBudget:1});
+ Object.assign(f.settings.silicon,{dailyPetrolLimit:1});
+ const d=await readWorldOverview(f.client,f.config,f.player,f.settings,ledger,{mapLoader:async()=>f.map,pirateSpent:600});
+ assert(d.budgets.every(row=>row.limit===0&&row.remaining===null));
+ assert.equal(d.budgets.find(row=>row.name==='首杀本次').used,600);
+ assert.equal(d.fuelUsage.confirmed,12300);assert.equal(d.fuelUsage.pending,2000);
 });
 await test('硅矿已确认和待确认汽油分别计入世界概览，不漏记或重复累计',async()=>{
  const f=await commentsEighteenFixture(),withSilicon={...ledger,snapshot:()=>({...ledger.snapshot(),counters:{...ledger.snapshot().counters,siliconPetrol:700}}),confirmedCounters:()=>({...ledger.confirmedCounters(),siliconPetrol:500}),pendingCounters:()=>({...ledger.pendingCounters(),siliconPetrol:200})};
  const d=await readWorldOverview(f.client,f.config,f.player,f.settings,withSilicon,{mapLoader:async()=>f.map});assert.equal(d.fuelUsage.confirmed,12800);assert.equal(d.fuelUsage.pending,2200);assert.deepEqual(d.fuelUsage.activities.find(row=>row.name==='硅矿（含维修）'),{name:'硅矿（含维修）',confirmed:500,pending:200});
+});
+await test('资源田占领的已确认和待确认汽油分别计入总用量',async()=>{
+ const f=await commentsEighteenFixture(),withFields={...ledger,confirmedCounters:()=>({...ledger.confirmedCounters(),resourceFieldPetrol:60}),pendingCounters:()=>({...ledger.pendingCounters(),resourceFieldPetrol:20})};
+ const d=await readWorldOverview(f.client,f.config,f.player,f.settings,withFields,{mapLoader:async()=>f.map});assert.equal(d.fuelUsage.confirmed,12360);assert.equal(d.fuelUsage.pending,2020);assert.deepEqual(d.fuelUsage.activities.find(row=>row.name==='资源田'),{name:'资源田',confirmed:60,pending:20});
 });
 await test('己方与其他行军都有起终点时间；静止舰队不生成虚构征程',async()=>{
  const f=await commentsEighteenFixture(),d=await readWorldOverview(f.client,f.config,f.player,f.settings,ledger,{mapLoader:async()=>f.map});assert.equal(d.fleets[0].journey,null);assert(d.fleets[1].journey.from);assert.equal(d.fleets[2].journey.to,'万吨货轮');

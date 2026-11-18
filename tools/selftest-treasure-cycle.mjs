@@ -30,7 +30,7 @@ try {
     assert.equal(loaded.revision, 17); assert.equal(loaded.settings.treasure.minDurabilityPercent, 91); assert.deepEqual(loaded.settings.treasure.followNames, ['原有名单']);
     assert.equal(loaded.settings.treasure.participationMode, 'untilFull'); assert.equal(loaded.settings.treasure.autoRepair, false); assert.equal(loaded.settings.treasure.repeatAttack, false); assert.deepEqual(fs.readFileSync(file), original);
     const imported = importAutomationSettings({ format: 'crazywaterword-automation', version: 1, settings: old }); assert.deepEqual(imported, loaded.settings);
-    for (const [key, value] of [['participationMode', 'bad'], ['maxRepairCost', -1], ['dailyRepairPetrolLimit', -1], ['avoidPlayerIds', ['9e16']], ['avoidPlayerIds', ['9223372036854775808']]]) {
+    for (const [key, value] of [['participationMode', 'bad'], ['avoidPlayerIds', ['9e16']], ['avoidPlayerIds', ['9223372036854775808']]]) {
       const s = defaultSettings(); s.treasure[key] = value; assert.throws(() => validateSettings(s));
     }
   });
@@ -108,24 +108,23 @@ try {
     f.state.fleets[0].durability = 2000; p = await preview(f, s); assert.equal(p.actions[0].kind, 'treasureDispatch');
   });
 
-  await check('两种参与模式都服从预算与避战，打满后仅每次参与可继续', async () => {
+  await check('两种参与模式都服从库存与次数，打满后仅每次参与可继续', async () => {
     const f = treasureCycleFixture(), s = treasureCycleSettings(); f.state.stats.todayRewardTimes = 3;
     assert.equal((await preview(f, s)).actions.length, 0); low(f); assert.equal((await preview(f, s)).actions.length, 0);
     s.treasure.participationMode = 'always'; assert.equal((await preview(f, s)).actions[0].kind, 'treasureRepair');
     f.state.fleets[0].durability = 2000; assert.equal((await preview(f, s)).actions[0].kind, 'treasureDispatch');
-    s.treasure.petrolReserve = f.state.fuel; assert.equal((await preview(f, s)).actions.length, 0);
+    f.state.fuel = 499; assert.equal((await preview(f, s)).actions.length, 0); f.state.fuel = 500;
     s.treasure.petrolReserve = 0; s.treasure.dailyDispatchLimit = 1; assert.equal((await preview(f, s, { usage: { counters: { treasureDispatches: 1 } } })).actions.length, 0);
   });
 
-  await check('单次、每日维修上限及修后出征汽油保留量实际门控', async () => {
+  await check('旧汽油限制不再拦截维修，实际库存仍需覆盖维修和出征', async () => {
     const f = treasureCycleFixture(), s = treasureCycleSettings(); low(f);
-    s.treasure.maxRepairCost = 999; assert.equal((await preview(f, s)).actions.length, 0);
-    s.treasure.maxRepairCost = 1000; s.treasure.dailyRepairPetrolLimit = 999; assert.equal((await preview(f, s)).actions.length, 0);
-    s.treasure.dailyRepairPetrolLimit = 1000; assert.equal((await preview(f, s, { usage: { counters: { treasureRepairPetrol: 1 } } })).actions.length, 0);
-    s.treasure.petrolReserve = f.state.fuel - 1499; assert.equal((await preview(f, s)).actions.length, 0);
-    s.treasure.petrolReserve = f.state.fuel - 1500; assert.equal((await preview(f, s)).actions[0].costs[0].num, 1000);
-    s.treasure.maxRepairCost = s.treasure.dailyRepairPetrolLimit = 0; assert.equal((await preview(f,s,{usage:{counters:{treasureRepairPetrol:1000000}}})).actions[0].kind,'treasureRepair');
-    s.treasure.petrolReserve=f.state.fuel;assert.equal((await preview(f,s)).actions.length,0);
+    Object.assign(s.treasure, { maxRepairCost: 1, dailyRepairPetrolLimit: 1, petrolReserve: f.state.fuel });
+    assert.equal((await preview(f,s,{usage:{counters:{treasureRepairPetrol:1000000}}})).actions[0].kind,'treasureRepair');
+    f.state.fuel = 1499; assert.equal((await preview(f, s)).actions.length, 0);
+    f.state.fuel = 1500; assert.equal((await preview(f, s)).actions[0].costs[0].num, 1000);
+    assert.equal((await preview(f, s, { pendingFuel: 1 })).actions.length, 0);
+    await run(f,s); assert.equal(f.client.writes[0].name, 'RepairFleetRequest');
   });
 
   await check('没有合适货轮、每日派遣满额或关闭反复攻占时不做无用维修', async () => {
@@ -176,7 +175,7 @@ try {
     const war = await readCityWar(f.client, f.protocol, f.config, f.player, s.cityWar, { mapLoader: f.mapLoader });
     const p = planCityWar(war, s, { keys: other.keyRecords(), pendingPetrol: other.pendingCounters().treasurePetrol });
     assert.equal(p.actions.length, 0); assert.match(p.notes.join(' '), /巨轮维修结果待确认/);
-    const g = treasureCycleFixture(); low(g); s.treasure.petrolReserve = g.state.fuel - 1500;
+    const g = treasureCycleFixture(); low(g); g.state.fuel = 1500;
     assert.equal((await preview(g, s, { pendingFuel: 1 })).actions.length, 0);
   });
 

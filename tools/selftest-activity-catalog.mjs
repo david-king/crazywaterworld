@@ -24,6 +24,32 @@ const writeLegacyCatalog = (account, activities) => {
   fs.writeFileSync(file, JSON.stringify({ version: 1, activities }));
 };
 
+function activityReadFixture() {
+  const game = client(), calls = [];
+  const config = { tables: {
+    WeekOrderRwdCfg: { data: [{ periodId: 1, rwdId: 1 }] },
+    WeekLotteryTimesCfg: { data: [{ periodId: 1, rwdId: 1, reqTimes: 10 }] },
+  } };
+  const state = { fail: null, coins: 2, wood: 3, gotRwdId: [], isGotFinal: false, inFlight: 0 };
+  game.request = async (name, body = {}) => {
+    calls.push([name, body]);
+    assert.equal(++state.inFlight, 1, '活动快照内的游戏请求不能并发');
+    try {
+      await Promise.resolve();
+      if (state.fail === name || state.fail === name + ':' + body.type) throw Error('模拟读取失败：' + name);
+      if (name === 'WeekInfoRequest') return { activityTime: [4, 5].map(type => ({ type, period: 1, ...window() })) };
+      if (name === 'AllItemRequest') return { items: [{ itemId: '周转盘币', num: state.coins }, { itemId: '木板', num: state.wood }] };
+      if (name === 'WeekOrderInfoRequest') return { order: [{ id: '木板', num: 3 }], gotRwdId: state.gotRwdId, isGotFinal: state.isGotFinal };
+      if (name === 'CampaignReportsRequest') return { reports: [] };
+      if (name === 'OpenRankInfoRequest') return { endTime: now + 60, progress: body.type * 10 };
+      if (name === 'WeekLotteryInfoRequest') return { gotInfo: { times: 4 } };
+      throw Error('未预期请求：' + name);
+    } finally { state.inFlight--; }
+  };
+  return { game, calls, state, read: () => activityView(game, [], config, {}),
+    count: (name, type) => calls.filter(([called, body]) => called === name && (type === undefined || body.type === type)).length };
+}
+
 try {
   await test('活动模块导入不会提前固定账号文件目录，测试环境可在导入后隔离', async () => {
     const changed = path.join(directory, 'late-account-directory');
@@ -265,6 +291,72 @@ try {
     assert(!calls.includes('WeekOrderInfoRequest'));
     assert(!calls.includes('WeekLotteryInfoRequest'));
     assert.equal(view.order, null);
+  });
+
+  await test('单次活动快照复用订单、库存及剿匪冲榜，下一次刷新重新读取', async () => {
+    const fixture = activityReadFixture();
+    const view = await fixture.read();
+    assert.equal(fixture.calls.length, 9, '转盘及商人快照从 13 次减少到 9 次游戏请求');
+    assert.equal(fixture.count('WeekOrderInfoRequest'), 1);
+    assert.equal(fixture.count('AllItemRequest'), 1);
+    assert.equal(fixture.count('OpenRankInfoRequest', 3), 1);
+    assert.equal(view.order.ready, true);
+    assert.equal(view.order.materials[0].owned, 3);
+    assert.match(view.status.pirates.lines[1], /剿匪冲榜 30 分/);
+    assert(view.status.openrank.lines.some(line => /剿匪冲榜 30 分/.test(line)));
+    fixture.state.coins = 0;
+    fixture.state.wood = 1;
+    const refreshed = await fixture.read();
+    assert.equal(fixture.calls.length, 18);
+    assert.equal(fixture.count('WeekOrderInfoRequest'), 2);
+    assert.equal(fixture.count('AllItemRequest'), 2);
+    assert.equal(fixture.count('OpenRankInfoRequest', 3), 2);
+    assert.equal(refreshed.order.ready, false);
+    assert.equal(refreshed.order.materials[0].missing, 2);
+    assert.equal(refreshed.status['weekly:4:1:' + (now - 60)].ready, false);
+  });
+
+  await test('复用读取失败局限于相关活动，失败也不在同轮重试且下次刷新可恢复', async () => {
+    for (const failure of ['WeekOrderInfoRequest', 'AllItemRequest', 'OpenRankInfoRequest:3']) {
+      const fixture = activityReadFixture();
+      fixture.state.fail = failure;
+      const view = await fixture.read();
+      assert.equal(view.lottery.times, 4, '无关活动仍正常加载');
+      const [name, type] = failure.split(':');
+      assert.equal(fixture.count(name, type === undefined ? undefined : Number(type)), 1);
+      if (name === 'OpenRankInfoRequest') {
+        assert.match(view.status.pirates.lines[0], /模拟读取失败/);
+        assert.match(view.status.openrank.lines[0], /模拟读取失败/);
+        assert.equal(view.order.ready, true);
+      } else {
+        assert.equal(view.order, null);
+        assert.match(view.orderError, /模拟读取失败/);
+        assert(view.status.openrank.lines.length > 0);
+      }
+      fixture.state.fail = null;
+      const refreshed = await fixture.read();
+      assert.equal(fixture.count(name, type === undefined ? undefined : Number(type)), 2);
+      assert.equal(refreshed.order.ready, true);
+      assert.equal(refreshed.orderError, undefined);
+      assert.match(refreshed.status.pirates.lines[1], /剿匪冲榜 30 分/);
+    }
+  });
+
+  await test('订单摘要与详情共用最终奖励状态，保持可领和已领的区分', async () => {
+    const fixture = activityReadFixture();
+    fixture.state.gotRwdId = [1];
+    const key = 'weekly:5:1:' + (now - 60);
+    const ready = await fixture.read();
+    assert.equal(ready.status[key].ready, true);
+    assert.deepEqual(ready.status[key].lines, ['最终奖励可领取']);
+    assert.equal(ready.order.finalReady, true);
+    fixture.state.isGotFinal = true;
+    const claimed = await fixture.read();
+    assert.equal(claimed.status[key].ready, false);
+    assert.deepEqual(claimed.status[key].lines, ['最终奖励已领取']);
+    assert.equal(claimed.order.finished, true);
+    assert.equal(claimed.order.finalReady, undefined);
+    assert.equal(fixture.count('WeekOrderInfoRequest'), 2);
   });
 
   await test('主活动玩法截止后手动入口拒绝执行，即使领奖展示期仍在', async () => {

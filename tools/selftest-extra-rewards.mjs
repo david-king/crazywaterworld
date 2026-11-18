@@ -4,17 +4,18 @@ import { EventEmitter } from 'node:events';
 import { loadProtocol } from '../src/proto.mjs';
 import { claimExtraRewards, extraRewardKeys, gameplayOpenDay, seasonRows, seasonTaskReady, worldBossRewardLevel, worldOnlineState } from '../src/extra-rewards.mjs';
 import { redPointTasks, rewardSchedule } from '../src/reward-schedule.mjs';
+import { automationControls } from '../src/automation-controls.mjs';
 import { automationTasks, taskSettings } from '../src/automation.mjs';
 
 const protocol = loadProtocol();
 for (const [type, task] of Object.entries(redPointTasks)) {
   assert(protocol.RedPointType[type], '红点类型 ' + type + ' 不在协议内');
-  assert(automationTasks.some(row => row.key === task), task);
+  assert(automationTasks.some(row => row.key === task) || automationControls.some(row => row.key === task), task);
 }
 assert.equal(protocol.RedPointType.CROSS_RANK_REWARD, 33);
 assert.equal(protocol.RedPointType.GUILD_AID_NEW, 43);
 assert.equal(protocol.RedPointType.TRADE_TASK, 53);
-for (const key of extraRewardKeys) assert.equal(taskSettings({})[key], false, key + ' 即使是免费领奖，也需用户主动开启');
+for (const key of extraRewardKeys) assert.equal(taskSettings({})[key], key === 'worldBossDamage' ? undefined : false, key + ' 免费领奖默认关闭，退役开关不再注册');
 for (const key of ['guildAidHelp', 'treasureLoot', 'heroGrowth', 'stageAuto']) assert.equal(taskSettings({})[key], false, key + ' 会消耗资源，必须默认关闭');
 
 function fakeClient(handlers, connected = true) {
@@ -261,18 +262,9 @@ if (onlineDue.status === 'ready') {
   assert.equal((await run(over, seasonPlayer, ['passStageRewards']))[0].skipped, true);
 }
 {
-  const client = fakeClient({
-    OnWaterRequest: { building: [{ buildingId: '1博物馆', level: 1 }] },
-    MuseumInfoRequest: { uncollectedRevenue: { low: 30, high: 0 }, topPopularity: { low: 250, high: 0 }, claimedAchievements: [{ low: 100, high: 0 }] },
-    MuseumCollectRevenueRequest: { collected: { low: 30, high: 0 } },
-    MuseumClaimAchievementRequest: reward('RUBY', 5),
-  });
-  const reports = await run(client, seasonPlayer, ['museumRevenue', 'museumAchievements']);
-  assert.match(reports[0].label, /\+30/);
-  assert.deepEqual(client.calls.filter(([name]) => name === 'MuseumClaimAchievementRequest').map(([, body]) => body.popularityThreshold), [200], '只领已达到且未领的档位');
-  const unbuilt = fakeClient({ OnWaterRequest: { building: [] } });
-  assert.equal((await run(unbuilt, seasonPlayer, ['museumRevenue', 'museumAchievements'])).every(entry => entry.skipped), true);
-  assert(!unbuilt.calls.some(([name]) => name === 'MuseumInfoRequest'), '未建成时不读博物馆');
+  const client = fakeClient({});
+  assert.deepEqual(await run(client, seasonPlayer, ['museumRevenue', 'museumAchievements']), []);
+  assert.deepEqual(client.calls, [], '退役入口不能绕过博物馆配置继续领奖');
 }
 {
   // 一项失败不能挡住后面的领奖。

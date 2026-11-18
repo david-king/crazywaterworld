@@ -12,8 +12,10 @@ fs.writeFileSync(process.env.CW_CONFIG_PACK, JSON.stringify([
   [1, 'FarmlandPlantCfg', { data: [{ id: '小麦', material: ['小麦种子', 1], time: 60, produceNum: 5 }] }],
 ]));
 const { idleAutomationControls, automationControlView, setAutomationControl } = await import('../src/automation-controls.mjs');
-const { defaultSettings, validateSettings, saveAutomationSettings, loadAutomationSettings, settingsUiRules } = await import('../src/automation-settings.mjs');
-const { automationTasks } = await import('../src/automation.mjs');
+const { defaultSettings, validateSettings, saveAutomationSettings, loadAutomationSettings, settingsUiRules,
+  exportAutomationSettings, importAutomationSettings, nativeTaskValues, applyNativeTask, settingsFromNative } = await import('../src/automation-settings.mjs');
+const { automationTasks, taskSettings } = await import('../src/automation.mjs');
+const { nativePreferenceEnabled } = await import('../src/automation-policy.mjs');
 const { activityAutomationFields } = await import('../src/activity-automation.mjs');
 const script = fs.readFileSync(new URL('../src/settings-ui.js', import.meta.url), 'utf8');
 const definitions = script.slice(0, script.indexOf('function configGet('));
@@ -35,10 +37,10 @@ let passed = 0;
 const check = async (name, run) => { await run(); passed++; console.log('通过：' + name); };
 
 try {
-  await check('30个模块启停集中在所属配置，全部字段有唯一编辑位置', () => {
+  await check('28个模块启停集中在所属配置，全部字段有唯一编辑位置', () => {
     const rendered = configFields.filter(field => field.moduleControl).map(field => field.key);
     const idleKeys = idleAutomationControls.map(control => control.key), movedFields = idleAutomationControls.flatMap(control => control.fields);
-    assert.equal(idleKeys.length, 30, '装备领取与续产统一使用装备自动锻造，其余模块入口保留');
+    assert.equal(idleKeys.length, 28, '联盟募兵统一由联盟模块管理，不保留旧订单入口');
     assert.equal(rendered.length, new Set(rendered).size, '每个入口只显示一次');
     assert.deepEqual(new Set(rendered), new Set(idleKeys));
     assert.deepEqual(new Set(settingsUiRules().controlFields), new Set(movedFields));
@@ -57,6 +59,9 @@ try {
       assert.equal(locations, 1, key + ' 应有且仅有一个编辑位置');
     }
     assert(!configGroups.some(group => group.id === 'runtime'), '运行安排已从网页配置移除');
+    assert(!configGroups.some(group => group.id === 'guild-orders'), '旧联盟订单页签已移除');
+    assert(!configKeys.has('schedule.guildOrders'), '动态配置不能重新生成旧联盟订单开关');
+    assert(configGroups.find(group => group.id === 'alliance').fields.some(field => field.key === 'alliance.recruit'), '联盟模块保留自动募兵');
     assert(!configKeys.has('loop.rounds'), '网页挂机持续循环，不提供轮数编辑');
     assert(!configKeys.has('loop.everySeconds'));
   });
@@ -78,10 +83,50 @@ try {
     }
   });
 
+  await check('万吨巨轮只保留世界配置，旧派遣开关不能在导入或关闭主控后恢复', () => {
+    assert(!configKeys.has('schedule.treasureLoot'), '真实分组组装不能补回旧派遣入口');
+    assert(!configGroups.some(group => group.id === 'daily-other'), '旧派遣移除后不保留其他项目空组');
+    const treasureGroups = configGroups.filter(group => group.id === 'treasure');
+    assert.equal(treasureGroups.length, 1);
+    assert.equal(treasureGroups[0].category, 'world');
+    assert.equal(configFields.filter(field => field.key === 'treasure.enabled').length, 1);
+    assert.equal(taskSettings({ treasureLoot: true }).treasureLoot, false, '旧任务配置不能重开派遣');
+    assert.equal(nativePreferenceEnabled(null, 'treasureLoot'), false, '无详细配置时旧入口也停用');
+    const nativeOnly = settingsFromNative({ treasureLoot: true });
+    assert.equal(nativeOnly.schedule.treasureLoot, false);
+    assert.equal(nativeOnly.treasure.enabled, false, '旧开关不擅自启用世界主控');
+
+    for (const enabled of [false, true]) {
+      const before = defaultSettings();
+      Object.assign(before.treasure, { enabled, autoJoin: true, onlyTenThousand: true, follow: true,
+        fleetIds: ['2远征船', '1远征船'], followNames: ['跟随玩家'], followPlayerIds: ['9007199254740993'],
+        avoidNames: ['避战玩家'], avoidPlayerIds: ['9007199254740995'], rewardItems: ['测试奖励'],
+        participationMode: 'always', repeatAttack: true, minDurabilityPercent: 73, maxProgress: 85,
+        personalProgressLimit: 15, dailyDispatchLimit: 9, checkEverySeconds: 23, autoRepair: true,
+        marchSpeedUp: true, marchTargetSeconds: 35, dailyDiamondLimit: 123,
+        fallbackEnabled: true, fallbackAfter: '22:15', fallbackTargetRewards: 4,
+        fallbackQualities: ['BLUE', 'PURPLE'], fallbackMediumRewardPriority: ['中型奖励'], fallbackSmallRewardPriority: ['小型奖励'] });
+      before.schedule.treasureLoot = true;
+      const frozen = structuredClone(before);
+      const document = exportAutomationSettings(before);
+      assert.equal(document.settings.schedule.treasureLoot, false, '导出时清除旧派遣授权');
+      document.settings.schedule.treasureLoot = true; // 模拟尚未更新的备份重新导入。
+      for (const result of [validateSettings(before), importAutomationSettings(document), applyNativeTask(before, 'treasureLoot', true)]) {
+        assert.equal(result.schedule.treasureLoot, false, '校验、导入和旧快捷开关均不能激活派遣');
+        assert.deepEqual(result.treasure, frozen.treasure, '世界主控与所有派遣参数完整保留');
+      }
+      assert.equal(nativeTaskValues(before, { treasureLoot: true }).treasureLoot, false);
+      assert.equal(nativePreferenceEnabled(before, 'treasureLoot'), false);
+      assert(!automationControlView(before).some(control => control.key === 'schedule.treasureLoot'));
+      assert.throws(() => setAutomationControl(before, 'schedule.treasureLoot', true), /无效/);
+      assert.deepEqual(before, frozen, '移除旧入口不能修改调用者保存的设置');
+    }
+  });
+
   await check('模块下方保留执行细项、资源权限、策略与预算', () => {
     const details = ['building.collect', 'building.upgrade', 'factory.produce', 'factory.demandFirst',
       'farm.harvest', 'farm.autoPlant', 'farm.customPlant', 'gather.fishing', 'gather.keyOpen',
-      'museum.enabled', 'museum.upgrade', 'schedule.museumCollect', 'radar.enabled', 'schedule.radarRepair',
+      'museum.enabled', 'museum.upgrade', 'museum.revenue', 'museum.achievements', 'museum.display', 'radar.enabled', 'radar.repairIdle',
       'heroes.level', 'heroes.star', 'heroes.skill', 'heroes.universal', 'resources.allowDiamonds',
       'alliance.autoHelp', 'silicon.fleets.0.enabled', 'silicon.fleets.1.huntEnabled'];
     const idleFields = new Set(idleAutomationControls.flatMap(control => control.fields));
@@ -92,6 +137,27 @@ try {
     for (const key of ['building.maxUpgrades', 'factory.keepStock', 'farm.crops', 'gather.targetLevel',
       'treasure.fleetIds', 'resources.diamondDailyLimit', 'heroes.heroIds']) {
       assert(configKeys.has(key), key + ' 参数应保留'); assert(!idleFields.has(key));
+    }
+  });
+
+  await check('博物馆五项功能同组管理，自动探宝不拆分领取派遣开关', () => {
+    const settings = defaultSettings(); settings.museum.runEnabled = true;
+    const note = () => automationControlView(settings).find(control => control.key === 'museum.runEnabled').configurationNote;
+    assert.match(note(), /尚未选择执行动作/);
+    settings.museum.enabled = true;
+    assert.equal(note(), '');
+    settings.museum.enabled = false; settings.museum.useGuide = true;
+    assert.match(note(), /尚未选择执行动作/, '指南不能独立于自动探宝执行');
+    for (const key of ['upgrade', 'revenue', 'achievements', 'display']) {
+      settings.museum[key] = true;
+      assert.equal(note(), '', key + ' 可独立于自动探宝执行');
+      const control = automationControlView(settings).find(row => row.key === 'museum.' + key);
+      assert(control); assert(control.gates.includes('museum.runEnabled')); assert(!control.gates.includes('museum.enabled'));
+      settings.museum[key] = false;
+    }
+    for (const key of ['museum.claim', 'museum.explore', 'schedule.museumRevenue', 'schedule.museumAchievements']) {
+      assert(!configKeys.has(key)); assert(!automationControlView(settings).some(control => control.key === key));
+      assert.throws(() => setAutomationControl(settings, key, true), /无效/);
     }
   });
 
@@ -140,7 +206,6 @@ try {
     original.farm.crops = [{ id: '小麦', target: 73 }];
     original.gather.fishing = true; original.gather.diving = false; original.gather.targetLevel = 5;
     original.museum.enabled = true; original.museum.upgrade = false; original.museum.factor = 3;
-    original.schedule.museumCollect = false; original.schedule.museumExplore = true;
     for (const key of ['building.enabled', 'factory.enabled', 'farm.enabled', 'gather.enabled', 'museum.runEnabled']) {
       const before = structuredClone(original); write(before, key, true);
       const frozen = structuredClone(before), expected = structuredClone(before); write(expected, key, false);

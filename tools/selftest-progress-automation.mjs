@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { EventEmitter } from 'node:events';
-import { automationTasks, taskSettings } from '../src/automation.mjs';
+import { automationTasks, migratedAutomationTasks, retiredAutomationTasks, taskSettings } from '../src/automation.mjs';
 import { runLoop } from '../src/loop.mjs';
 import { rewardSchedule } from '../src/reward-schedule.mjs';
 import { surveyDailies } from '../src/dailies.mjs';
@@ -11,14 +11,20 @@ const keys = ['guildOrders', 'radarAuto', 'radarRepair',
   'museumCollect', 'museumExplore', 'petCollect', 'petBreed'];
 const migrated = taskSettings({ mail: true });
 for (const key of keys) {
+  if (migratedAutomationTasks.has(key)) {
+    assert.equal(automationTasks.find(task => task.key === key), undefined, '已迁移动作不再占用独立任务入口');
+    assert.equal(migrated[key], undefined, '当前配置中移除已迁移动作字段');
+    assert(!PAGE.includes("configField('schedule." + key + "'"), '已迁移动作不再作为兼容开关展示');
+    continue;
+  }
   assert.equal(automationTasks.find(task => task.key === key)?.initial, false);
   assert.equal(migrated[key], false, 'existing accounts must opt in to new spending');
-  const module = ['radarAuto', 'radarRepair'].includes(key) ? 'radar' : ['museumCollect', 'museumExplore'].includes(key) ? 'museum' : null;
-  const controlKey = module ? module + '.runEnabled' : 'schedule.' + key;
+  const controlKey = 'schedule.' + key;
   const control = settingsUiRules().moduleControls.find(control => control.key === controlKey);
-  assert.ok(control?.configTarget, 'the saved schedule control belongs to its configuration module');
-  if (module) assert(PAGE.includes("configField('schedule." + key + "'"), 'the legacy choice remains editable in detailed settings');
-  assert.ok(!PAGE.includes('data-legacy="true"'), 'compatibility controls must be real switches');
+  assert(retiredAutomationTasks.has(key));
+  assert.equal(taskSettings({ [key]: true })[key], false, '旧选择不能恢复退役入口');
+  assert.equal(control, undefined, '退役开关不再出现在配置模块');
+  assert(!PAGE.includes("configField('" + controlKey + "'"), '退役开关不再展示');
 }
 
 function fixture() {
@@ -57,16 +63,14 @@ function fixture() {
   assert.deepEqual(f.reports, []);
 }
 
-// All services reach their own unlock checks; none assumes an unavailable
-// feature is usable. Independent settings stay visible in the loop history.
+// Stale callbacks cannot revive removed guild, museum, radar, or pet entry points.
 {
   const f = fixture();
   const result = await runLoop(f.client, {}, { ...f.options, isEnabled: key => keys.includes(key) });
-  assert.deepEqual(new Set(f.reports.map(entry => entry.key)), new Set(keys));
-  assert.ok(f.reports.every(entry => entry.skipped && entry.reason));
+  assert.deepEqual(f.reports, []);
   assert.equal(result.history.length, 1);
-  assert.equal(result.history[0].world.results.length, 2);
-  assert.equal(result.history[0].dailies.results.length, 5);
+  assert.equal(result.history[0].world.results.length, 0);
+  assert.equal(result.history[0].dailies.results.length, 0);
 }
 
 // Pausing while an account operation is queued prevents all new services.

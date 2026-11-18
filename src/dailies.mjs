@@ -26,7 +26,7 @@ const pirateDailyDriver = {
   probes: pirateSweepProbes,
   evaluate(args) {
     if (!args.player || !args.config?.tables?.ModuleOpenCfg) {
-      return { status: 'waiting', reason: '每日免费扫荡按“游戏配置 → 世界 → 海盗日常扫荡”所选种类及游戏剩余次数独立执行' };
+      return { status: 'waiting', reason: '每日免费扫荡按“挂机配置 → 世界 → 海盗讨伐”所选扫荡种类及游戏剩余次数独立执行' };
     }
     return planPirateSweeps(args);
   },
@@ -382,7 +382,7 @@ export async function surveyDailies(client, protocol, { config = null, player = 
       continue;
     }
     if (task.id === 1010 && independentPirateSweep) {
-      evaluations.push({ task, status: 'waiting', reason: '每日免费扫荡由独立服务按“游戏配置 → 世界 → 海盗日常扫荡”执行', actions: [] });
+      evaluations.push({ task, status: 'waiting', reason: '每日免费扫荡按“挂机配置 → 世界 → 海盗讨伐”中的扫荡设置独立执行', actions: [] });
       continue;
     }
     const driver = DAILY_DRIVERS[task.id];

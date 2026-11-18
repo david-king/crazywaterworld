@@ -43,9 +43,9 @@ await test('只修所选空闲舰队，驻守/出征/未确认任务不会被抢
  await run(f,l);assert.equal(f.client.writes.length,0);
  f.settings.cityWar.autoRepair=false;f.settings.treasure.autoRepair=false;const calls=f.calls.length;await run(f,l);assert.equal(f.calls.length,calls);
 });
-await test('参数按既有优先级选取，单次/每日/保留量拦截，不能改组绕过预算',async()=>{
- const f=fixture();f.state.fuel=50000;f.settings.cityWar.maxRepairCost=2000;assert(maintenancePolicies(f.settings).every(p=>p.source==='cityWar'));await run(f,ledger());assert.equal(f.client.writes.length,0);
- for(const alter of [s=>s.cityWar.dailyPetrolLimit=2000,s=>s.cityWar.petrolReserve=49000]){const g=fixture();g.state.fuel=50000;alter(g.settings);await run(g,ledger());assert.equal(g.client.writes.length,0);}
+await test('维修来源仍按优先级选取，旧单次/每日/保留量不限制实际维修',async()=>{
+ const f=fixture();f.state.fuel=50000;f.settings.cityWar.maxRepairCost=2000;assert(maintenancePolicies(f.settings).every(p=>p.source==='cityWar'));await run(f,ledger());assert.equal(f.client.writes.length,3);
+ for(const alter of [s=>s.cityWar.dailyPetrolLimit=2000,s=>s.cityWar.petrolReserve=49000]){const g=fixture();g.state.fuel=50000;alter(g.settings);await run(g,ledger());assert.equal(g.client.writes.length,3);}
 });
 await test('同轮库存未回写不超花；维修中不重复，完成后释放锁并处理其他队',async()=>{
  const f=fixture(),l=ledger();f.state.fuel=5250;let stale=true;const read=f.client.request;f.client.request=async(...args)=>{const r=await read(...args);if(stale&&args[0]==='AllItemRequest')r.items.find(i=>i.itemId==='汽油').num=5250;return r;};await run(f,l);stale=false;assert.deepEqual(f.client.writes.map(w=>w.body.buildingId),['1远征船','3远征船']);assert.equal(f.state.fuel,0);await run(f,l);assert.equal(f.client.writes.length,2);

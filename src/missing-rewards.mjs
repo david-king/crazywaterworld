@@ -60,25 +60,83 @@ export async function claimFestivalActive(client,config,{enabled,ledger,report})
  }
  if(!found)wait(report,label,'当前未同步到开放的酆都签到活动');
 }
+// 每个正常分页必须增加唯一 UID，总数固定在本次首包；无需限制为 200 页。
+// 空页、重复或总数变化只重扫一次，第二次快照不与第一次的旧状态混合。
+async function readReportSnapshot(client, enabled) {
+  const scan = async () => {
+    const reports = new Map();
+    let total;
+    const partial = (pageNo, reason) => ({ reports, total, complete: false,
+      reason: `战报列表仅读取 ${reports.size}/${total} 条（第 ${pageNo + 1} 页${reason}）` });
+    for (let pageNo = 0; ; pageNo++) {
+      if (!enabled()) throw Error('战报领取已暂停');
+      const page = await read(client, 'CampaignReports', { pageNo });
+      if (!Array.isArray(page?.reports) || !integer(page.total)) throw Error('战报列表或总数未完整返回');
+      total ??= page.total;
+      if (page.total !== total) return partial(pageNo, '总数发生变化');
+      const pageIds = new Set();
+      for (const row of page.reports) {
+        const id = exactAutomationId(row?.uid);
+        if (!id || typeof row.received !== 'boolean') throw Error('战报编号或领取状态未确认');
+        if (reports.has(id) || pageIds.has(id)) return partial(pageNo, '出现重复编号');
+        pageIds.add(id);
+      }
+      for (const row of page.reports) reports.set(exactAutomationId(row.uid), row);
+      if (reports.size > total) throw Error('战报总数与列表不一致');
+      if (reports.size === total) return { reports, total, complete: true };
+      if (!page.reports.length) return partial(pageNo, '返回空列表');
+    }
+  };
+  const first = await scan();
+  return first.complete ? first : scan();
+}
+
+const reportClaimsActive = new WeakSet();
 export async function claimReportRewards(client,config,{enabled,ledger,report}){
- const label='邮件战报一键领取';
- const readAll=async()=>{const all=[];let total=Infinity;
- for(let pageNo=0;pageNo<200&&all.length<total;pageNo++){
-  if(!enabled())throw Error('战报领取已暂停');const page=await read(client,'CampaignReports',{pageNo});
-  if(!Array.isArray(page.reports)||!integer(page.total))throw Error('战报列表未完整返回');
-  total=page.total;if(!page.reports.length)break;all.push(...page.reports);
- }
- if(all.length<total)throw Error('战报列表未读取完整，未发送一键领取');
- return all;};
- const all=await readAll();
- for(const [saved,r]of Object.entries(ledger.keyRecords()))if(!r.confirmed&&r.details?.request==='QuickGotCampaignReportRequest'){
-  if(r.details.claimIds?.length&&r.details.claimIds.every(id=>all.some(x=>exactAutomationId(x.uid)===id&&x.received===true)))ledger.resolveKey(saved,true);
-  else return wait(report,label,'前次战报领取结果未确认，新增战报也暂不重复提交一键领取');
- }
- const pending=all.filter(r=>r.received===false&&(r.rewards?.assetPackage?.asset?.some(a=>Number(a.num)>0)||['heroes','equips','badge','antiques','supplies'].some(k=>r.rewards?.[k]?.length>0)));
- if(!pending.length)return wait(report,label,'当前战报没有待领取奖励');
- const ids=pending.map(r=>exactAutomationId(r.uid));if(ids.some(id=>!id))throw Error('战报编号未确认');
- await claimOnce(client,{ledger,key:'report-all:'+signature(ids.sort()),title:label+' · '+pending.length+' 份',request:'QuickGotCampaignReportRequest',body:{all:true},enabled,report,details:{claimIds:ids},verify:async r=>{if(!reward(r))return false;const latest=await readAll();return ids.every(id=>latest.some(x=>exactAutomationId(x.uid)===id&&x.received===true));}});
+  const label = '邮件战报一键领取', request = 'QuickGotCampaignReportRequest';
+  if (!enabled()) return;
+  if (!ledger?.keyRecords || !ledger?.reserve) return wait(report, label, '领取记录不可用');
+  if (reportClaimsActive.has(client)) return wait(report, label, '战报领取正在核对，未并发提交');
+  reportClaimsActive.add(client);
+  try {
+    let snapshot = await readReportSnapshot(client, enabled);
+    for (const [saved, record] of Object.entries(ledger.keyRecords())) {
+      if (record.confirmed || record.details?.request !== request) continue;
+      const ids = record.details.claimIds;
+      if (Array.isArray(ids) && ids.length && ids.every(id => snapshot.reports.get(id)?.received === true)) ledger.resolveKey(saved, true);
+      else return wait(report, label, '前次战报领取结果未确认，新增战报也暂不重复提交领取');
+    }
+    const pending = [...snapshot.reports].filter(([, row]) => row.received === false && (
+      row.rewards?.assetPackage?.asset?.some(asset => Number(asset.num) > 0)
+      || ['heroes','equips','badge','antiques','supplies'].some(key => row.rewards?.[key]?.length > 0)
+    )).map(([id]) => id);
+    if (!pending.length) return wait(report, label, snapshot.complete ? '当前战报没有待领取奖励'
+      : snapshot.reason + '；已读取范围没有待领奖励，其余战报待同步');
+
+    // 完整快照保留一键领取；缺页时仅提交已知编号，每批最多一页的数量。
+    const all = snapshot.complete;
+    const batchSize = all ? pending.length : 10;
+    for (let offset = 0; offset < pending.length && enabled(); offset += batchSize) {
+      const ids = pending.slice(offset, offset + batchSize).filter(id => snapshot.reports.get(id)?.received === false);
+      if (!ids.length) continue;
+      const before = snapshot;
+      const result = await claimOnce(client, {
+        ledger, key: (all ? 'report-all:' : 'report-ids:') + signature([...ids].sort()),
+        title: label + ' · 本批 ' + ids.length + ' 份', request,
+        body: all ? { all: true } : { all: false, campaignId: ids.map(automationWireId) },
+        enabled, details: { claimIds: ids, all },
+        report: entry => report(!all && entry.ok ? { ...entry, partial: true,
+          reason: `已确认本批 ${ids.length} 份；${before.reason || '本次按已读取编号领取'}，其余战报待同步` } : entry),
+        verify: async reply => {
+          if (!reward(reply)) return false;
+          // 请求已发送后仍完成只读确认；暂停不会导致重新提交。
+          snapshot = await readReportSnapshot(client, () => true);
+          return ids.every(id => snapshot.reports.get(id)?.received === true);
+        },
+      });
+      if (!result) break;
+    }
+  } finally { reportClaimsActive.delete(client); }
 }
 // 累计奖励会重新增长；金额不是一次领取的唯一标识。此锁只保护尚未完成的请求。
 const leagueCollectActive=new WeakSet();

@@ -118,7 +118,7 @@ function activityRows() {
   if (current && !rows.some(isGuildShipActivity)) {
     rows.push({ id: 'guildShip', name: '联盟商船', kind: 'limited', settingsOnly: true, taskKeys: [] });
   }
-  if (activitiesData && !activitiesData.catalogOnly) rows.push({ id: 'fish', name: '钓鱼图鉴', kind: 'permanent', taskKeys: ['fishBook'] });
+  if (activitiesData && (!activitiesData.catalogOnly || activitiesData.fish)) rows.push({ id: 'fish', name: '钓鱼图鉴', kind: 'permanent', taskKeys: ['fishBook'] });
   if (activitiesData?.vipLevel > 0) rows.push({ id: 'vip', name: 'VIP 每日奖励', kind: 'permanent', taskKeys: ['vipDaily'] });
   rows.push({ id: 'pirates', name: '海盗首杀', kind: 'permanent', taskKeys: !activitiesData ? [] : activitiesData.status?.pirates?.rankOpen ? ['campaignReports', 'openRankRewards'] : ['campaignReports'] });
   const order = Object.keys(activityKinds);
@@ -144,12 +144,32 @@ function paintActivityTime(node, endTime) {
   node.classList.toggle('soon', Boolean(endTime) && endTime - activityNow() < 86400);
 }
 
-function renderActivityTabs() {
+function activitySettingsKind(row) {
+  if (!row) return null;
+  if (row.weekType === 5) return 'week-order';
+  if (isHeroRaidActivity(row)) return 'hero-raid';
+  if (isSeaMerchantActivity(row)) return 'merchant';
+  if (isGuildShipActivity(row)) return 'guild-ship';
+  return 'automation:' + row.id;
+}
+
+function editingActivitySettings(section) {
+  return section?.dataset.account === current && section.contains(document.activeElement);
+}
+
+function renderActivityTabs(provisional = false) {
   const rows = activityRows(), tabs = clear($('activity-tabs'));
   activityGroupSignature = rows.map(row => row.id + ':' + activityLifecycle(row)).join('|');
   const visible = rows.filter(row => activityLifecycle(row) === 'active' || activityGroupOpen(activityLifecycle(row)));
+  // A live instance can replace the settings-only placeholder while its form is
+  // being edited. Keep the same configuration selected across that transition.
+  const editing = $('activities-list').querySelector('.activity-settings');
+  if (!visible.some(row => row.id === selectedActivity) && editingActivitySettings(editing)) {
+    const replacement = visible.find(row => activitySettingsKind(row) === editing.dataset.kind);
+    if (replacement) setConsoleValue('activities', 'selectedActivity', replacement.id);
+  }
   if (!visible.some(row => row.id === selectedActivity)) setConsoleValue('activities', 'selectedActivity', visible[0]?.id);
-  activitySelections.set(current, selectedActivity);
+  if (!provisional) activitySelections.set(current, selectedActivity);
   const active = el('div', 'activity-current-tabs');
   tabs.appendChild(active);
   const containers = new Map([['active', active]]);
@@ -245,7 +265,17 @@ function renderActivityDetail() {
   const row = activityRows().find(item => item.id === selectedActivity);
   const panel = $('activity-panel');
   panel.hidden = !row;
-  const box = clear($('activities-list'));
+  const box = $('activities-list');
+  const previousSettings = box.querySelector('.activity-settings');
+  const settingsKind = activitySettingsKind(row);
+  const saving = [savingMerchantSettings, savingHeroRaidSettings, savingSeaMerchantSettings, savingGuildShipSettings, savingActivityAutomation]
+    .some(pending => pending.has(current));
+  const keepSettings = !saving && previousSettings?.dataset.kind === settingsKind && editingActivitySettings(previousSettings);
+  if (keepSettings) {
+    // Leave the focused form attached in its original position. Recreating or
+    // detaching it would lose uncommitted input, native change state and focus.
+    for (const child of [...box.children]) if (child !== previousSettings) child.remove();
+  } else clear(box);
   clear($('activities-order'));
   if (!row) return;
   panel.setAttribute('aria-labelledby', $('activity-tabs').querySelector('[aria-selected=true]').id);
@@ -255,11 +285,24 @@ function renderActivityDetail() {
     : row.kind === 'permanent' ? '长期开放' : '开始 ' + activityDate(row.startTime) + ' · 结束 ' + activityDate(row.endTime) + '（北京时间）';
   if (row.rewardEndTime > row.endTime && row.endTime > 0) $('activity-end').textContent += ' · 奖励展示截至 ' + activityDate(row.rewardEndTime);
   $('activity-pirates').hidden = row.id !== 'pirates';
-  if (row.weekType === 5) renderMerchantSettings(box);
-  if (isHeroRaidActivity(row)) renderHeroRaidSettings(box);
-  if (isSeaMerchantActivity(row)) renderSeaMerchantSettings(box);
-  if (isGuildShipActivity(row)) renderGuildShipSettings(box);
-  if (row.weekType !== 5 && !isHeroRaidActivity(row) && !isSeaMerchantActivity(row) && !isGuildShipActivity(row)) renderActivityAutomation(box, row);
+  if (!keepSettings) {
+    if (row.weekType === 5) renderMerchantSettings(box);
+    if (isHeroRaidActivity(row)) renderHeroRaidSettings(box);
+    if (isSeaMerchantActivity(row)) renderSeaMerchantSettings(box);
+    if (isGuildShipActivity(row)) renderGuildShipSettings(box);
+    if (row.weekType !== 5 && !isHeroRaidActivity(row) && !isSeaMerchantActivity(row) && !isGuildShipActivity(row)) renderActivityAutomation(box, row);
+  }
+  const settings = box.querySelector('.activity-settings');
+  if (settings) {
+    settings.dataset.account = current;
+    settings.dataset.kind = settingsKind;
+    settings.onfocusout = () => {
+      // Let change/save handlers and the next focus target settle first.
+      void Promise.resolve().then(() => {
+        if (settings.parentElement === box && settings.dataset.account === current && !panel.contains(document.activeElement)) renderActivityDetail();
+      });
+    };
+  }
   if (row.settingsOnly) return;
   if (!activitiesData) return;
   const active = activityLifecycle(row) === 'active' && !activitiesData.catalogOnly;
@@ -429,19 +472,22 @@ function renderActivityAutomation(box, row) {
   if (!controls.length) return;
   const section = el('div', 'activity-settings');
   for (const control of controls) {
-    const label = controls.length === 1 ? '开启自动挂机' : control.label + ' · 开启自动挂机';
-    const field = el('label', 'activity-auto');
-    const toggle = component('ui-event-switch');
-    const enabled = activityAutomationData.settings[control.key];
-    toggle.dataset.activityAutomation = control.key;
-    toggle.setAttribute('aria-label', label);
-    setTaskSwitch(toggle, enabled);
-    toggle.disabled = savingActivityAutomation.has(account);
-    toggle.onclick = () => {
-      if (account === current && !toggle.disabled) return saveActivityAutomation(control.key, !enabled);
-    };
-    field.append(toggle, el('span', null, label));
-    section.appendChild(field);
+    const mainLabel = controls.length === 1 ? '开启自动挂机' : control.label + ' · 开启自动挂机';
+    for (const setting of [{ ...control, label: mainLabel }, ...(control.fields ?? [])]) {
+      const field = el('label', 'activity-auto');
+      const toggle = component('ui-event-switch');
+      const enabled = activityAutomationData.settings[setting.key];
+      toggle.dataset.activityAutomation = setting.key;
+      toggle.setAttribute('aria-label', setting.label);
+      setTaskSwitch(toggle, enabled);
+      toggle.disabled = savingActivityAutomation.has(account);
+      toggle.onclick = () => {
+        if (account === current && !toggle.disabled) return saveActivityAutomation(setting.key, !enabled);
+      };
+      field.append(toggle, el('span', null, setting.label));
+      if (setting.help) field.appendChild(makeHelpTip(setting.label, setting.help));
+      section.appendChild(field);
+    }
   }
   const status = el('p', 'dim', savingActivityAutomation.has(account) ? '正在保存…' : activityAutomationStatus);
   status.setAttribute('role', 'status');
@@ -976,31 +1022,67 @@ async function refreshActivities() {
   }
   if ($('tab-activities').classList.contains('hidden')) return;
   const status = $('activities-status');
-  await Promise.all([refreshMerchantSettings(account), refreshHeroRaidSettings(account), refreshSeaMerchantSettings(account), refreshGuildShipSettings(account), refreshActivityAutomation(account)]);
-  if (version !== activitiesVersion || account !== current) return;
-  const unavailable = !account || snapshot.connected !== true || snapshot.paused || disconnected.has(account);
+  const isCurrent = () => version === activitiesVersion && account === current;
+  const selectionVersion = discoveryVersion;
+  const preferredSelection = activitySelections.get(account) || selectedActivity;
+  const render = provisional => {
+    // A partial catalog may not contain the remembered tab yet. Restore it when
+    // it becomes available, unless the user has selected another tab meanwhile.
+    if (selectionVersion === discoveryVersion) setConsoleValue('activities', 'selectedActivity', preferredSelection);
+    renderActivityTabs(provisional);
+  };
+  const isUnavailable = () => !account || snapshot.connected !== true || snapshot.paused || disconnected.has(account);
+  const offlineStatus = () => !account ? '请先选择账号' : snapshot.paused ? '账号已暂停，可修改活动配置' : '账号未连接，可先配置活动';
+  status.textContent = isUnavailable() ? offlineStatus() : '正在同步活动进度…';
+  if (activitiesData) {
+    // Keep the list visible while refreshing, but require live confirmation for
+    // game actions; saved settings remain editable throughout the refresh.
+    setConsoleValue('activities', 'activitiesData', { ...activitiesData, catalogOnly: true, status: {} });
+  }
+  if (account) render(true);
+
+  const refreshSettings = (refresh, matches) => refresh(account).then(() => {
+    if (!isCurrent() || $('tab-activities').classList.contains('hidden')) return;
+    const row = activityRows().find(item => item.id === selectedActivity);
+    if (row && matches(row)) renderActivityDetail();
+  });
+  // Configuration and live game reads are independent. A slow unrelated
+  // settings endpoint must not hold the activity list or selected settings back.
+  const settingsReady = Promise.all([
+    refreshSettings(refreshMerchantSettings, row => row.weekType === 5),
+    refreshSettings(refreshHeroRaidSettings, isHeroRaidActivity),
+    refreshSettings(refreshSeaMerchantSettings, isSeaMerchantActivity),
+    refreshSettings(refreshGuildShipSettings, isGuildShipActivity),
+    refreshSettings(refreshActivityAutomation, row => row.weekType !== 5 && !isHeroRaidActivity(row) && !isSeaMerchantActivity(row) && !isGuildShipActivity(row)),
+  ]);
+  let liveSettled = false;
+  let catalogRead;
+  const readCatalog = () => catalogRead ??= call('/api/activities/catalog?account=' + encodeURIComponent(account)).catch(() => null);
+  const unavailable = isUnavailable();
+  if (account && (changed || !activitiesData || unavailable)) {
+    void readCatalog().then(data => {
+      if (!data || !isCurrent() || liveSettled) return;
+      setConsoleValue('activities', 'activitiesData', data);
+      setConsoleValue('activities', 'activitiesReceivedAt', Date.now());
+      render(true);
+    });
+  }
   if (unavailable) {
-    setConsoleValue('activities', 'activitiesData', null);
-    if (account) {
-      try {
-        const data = await call('/api/activities/catalog?account=' + encodeURIComponent(account));
-        if (version !== activitiesVersion || account !== current) return;
-        setConsoleValue('activities', 'activitiesData', data);
-        setConsoleValue('activities', 'activitiesReceivedAt', Date.now());
-      } catch {
-        if (version !== activitiesVersion || account !== current) return;
-      }
-    }
-    clear($('activity-tabs'));
-    $('activity-panel').hidden = true;
-    status.textContent = !account ? '请先选择账号' : snapshot.paused ? '账号已暂停，可修改活动配置' : '账号未连接，可先配置活动';
-    if (account) renderActivityTabs();
+    status.textContent = offlineStatus();
+    await Promise.all([settingsReady, catalogRead]);
     return;
   }
-  status.textContent = '正在读取活动…';
   try {
-    const data = await call('/api/activities');
-    if (version !== activitiesVersion || account !== current) return;
+    const data = await call('/api/activities?account=' + encodeURIComponent(account));
+    liveSettled = true;
+    if (!isCurrent()) return;
+    if (isUnavailable()) {
+      setConsoleValue('activities', 'activitiesData', { ...data, catalogOnly: true, status: {} });
+      setConsoleValue('activities', 'activitiesReceivedAt', Date.now());
+      status.textContent = offlineStatus();
+      render(true);
+      return;
+    }
     // A settings save can overlap this read. Preserve the newer local value.
     for (const task of data.eventTasks) {
       const local = activityTaskEdits.get(account + ':' + task.key);
@@ -1010,7 +1092,7 @@ async function refreshActivities() {
     setConsoleValue('activities', 'activitiesReceivedAt', Date.now());
     status.textContent = [data.catalogError, ...(data.notes || [])].filter(Boolean).join(' ')
       || (data.activities.length ? '' : '当前没有已下发的限时或周期活动');
-    renderActivityTabs();
+    render(false);
     if (selectedActivity === 'pirates') refreshProgression('pirate-board');
     const boundaries = data.activities.flatMap(row => [row.startTime, row.endTime]).filter(time => time > activityNow());
     if (boundaries.length) activityExpiryTimer = setTimeout(() => {
@@ -1018,19 +1100,19 @@ async function refreshActivities() {
       refreshActivities();
     }, Math.min(2147483647, Math.max(1, Math.ceil((Math.min(...boundaries) - activityNow()) * 1000))));
   } catch {
-    if (version !== activitiesVersion || account !== current) return;
-    setConsoleValue('activities', 'activitiesData', null);
-    try {
-      const data = await call('/api/activities/catalog?account=' + encodeURIComponent(account));
-      if (version !== activitiesVersion || account !== current) return;
+    liveSettled = true;
+    if (!isCurrent()) return;
+    const data = await readCatalog();
+    if (!isCurrent()) return;
+    if (data) {
       setConsoleValue('activities', 'activitiesData', data);
       setConsoleValue('activities', 'activitiesReceivedAt', Date.now());
-    } catch {
-      if (version !== activitiesVersion || account !== current) return;
     }
     status.textContent = activitiesData?.activities.length ? '活动同步失败，当前展示已保存的活动时间。请刷新重试。' : '活动读取失败，请刷新重试。详情见运行日志';
-    renderActivityTabs();
+    render(true);
     if (selectedActivity === 'pirates') refreshProgression('pirate-board');
+  } finally {
+    await settingsReady;
   }
 }
 $('activities-refresh').onclick = refreshActivities;

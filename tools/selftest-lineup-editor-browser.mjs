@@ -337,10 +337,10 @@ try {
   await page.keyboard.press('Escape');
   await modal.waitFor({ state: 'detached' });
   await page.screenshot({ path: path.join(output, 'lineup-settings-desktop.png'), animations: 'disabled' });
-  await page.getByRole('button', { name: '管理自定义阵容', exact: true }).click();
+  await page.locator('#tabs [data-tab="lineups"]').click();
   await page.locator('#tab-lineups').getByRole('button', { name: '编辑阵容 桌面验证阵容', exact: true }).waitFor();
   assert.equal(await page.locator('#tabs [aria-current="page"]').getAttribute('data-tab'), 'lineups');
-  console.log('通过：推关与试炼配置可选择并查看阵容，管理入口直达阵容页');
+  console.log('通过：推关与试炼配置可选择并查看阵容，顶部导航可打开阵容页');
 
   await page.locator('#tabs [data-tab="stages"]').click();
   const choicesBeforeChallenge = challengePayloads.length;

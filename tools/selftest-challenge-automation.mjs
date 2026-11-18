@@ -147,13 +147,13 @@ try {
     await g.once(); assert.equal(g.writes.length, 0);
     f.settings.progression.trials = true; await f.once({ isStageBusy: () => true, isTrialBusy: () => true }); assert.equal(f.writes.length, 0);
   });
-  await test('海盗跨轮确认首杀和三次战败上限，不重置汽油预算', async () => {
+  await test('海盗跨轮确认首杀和三次战败上限，旧汽油预算不阻止推进', async () => {
     for (const mode of ['lose', 'win']) {
       const f = pirateAdvanceFixture({ mode }), state = createChallengeRun(), l = ledger();
       Object.assign(f.settings.pirateHunt, { enabled: true, maxFailures: 3, fuelBudget: mode === 'win' ? 600 : 3000 });
       for (let i = 0; i < 7; i++) await runChallengeRound(f.client, f.config, { player: f.player, getSettings: () => f.settings, state, ledger: l });
-      assert.equal(f.client.writes.length, mode === 'lose' ? 3 : 2);
-      assert.equal(state.pirate.state.spent, mode === 'lose' ? 900 : 600);
+      assert.equal(f.client.writes.length, 3);
+      assert.equal(state.pirate.state.spent, 900);
       if (mode === 'lose') { assert.equal(state.pirate.state.failures, 3); assert(state.pirate.state.halted); }
     }
   });
@@ -165,12 +165,12 @@ try {
       assert.equal(f.client.writes.length, 1); assert.equal(state.pirate.state.failures, 0);
     }
   });
-  await test('调低海盗失败上限后立即停止，不因增加预算继续派遣', async () => {
+  await test('调低海盗失败上限后立即停止，不因旧汽油字段变化继续派遣', async () => {
     const f = pirateAdvanceFixture({ mode: 'lose' }), state = createChallengeRun(), l = ledger();
     Object.assign(f.settings.pirateHunt, { enabled: true, maxFailures: 3, fuelBudget: 300 });
     const round = () => runChallengeRound(f.client, f.config, { player: f.player, getSettings: () => f.settings, state, ledger: l });
-    await round(); await round();
-    assert.equal(state.pirate.state.failures, 1); assert.equal(f.client.writes.length, 1);
+    await round();
+    assert.equal(f.client.writes.length, 1);
     Object.assign(f.settings.pirateHunt, { maxFailures: 1, fuelBudget: 3000 });
     await round(); assert(state.pirate.state.halted); assert.equal(f.client.writes.length, 1);
   });
@@ -264,7 +264,7 @@ try {
       assert.equal(f.settings.pirateHunt.maxFailures, 7);
     }
   });
-  await test('海盗预览沿用自动挂机预算与停止状态，读取不发送派遣', async () => {
+  await test('海盗预览忽略累计汽油用量，沿用自动挂机停止状态且不发送派遣', async () => {
     const f = pirateAdvanceFixture();
     f.client.stop = () => { f.client.connected = false; };
     const { createConsole } = await import('../src/server.mjs'), app = createConsole({ port: 0 });
@@ -281,8 +281,8 @@ try {
         const result = await response.json(); assert.equal(response.status, 200, result.error); return result;
       };
       assert.equal((await preview()).actions.length, 1);
-      progress.spent = f.settings.pirateHunt.fuelBudget;
-      const exhausted = await preview(); assert.equal(exhausted.actions.length, 0); assert.match(exhausted.notes.join(' '), /预算/);
+      progress.spent = 1000000;
+      assert.equal((await preview()).actions.length, 1);
       Object.assign(progress, { spent: 0, halted: true, reason: '达到失败停止次数' });
       const halted = await preview(); assert.equal(halted.actions.length, 0); assert.match(halted.notes.join(' '), /失败停止次数/);
       session.loop.running = false;

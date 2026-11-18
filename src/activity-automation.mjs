@@ -17,12 +17,19 @@ export const activityAutomationFields = [
   { key: 'activityAutomation.festivalGifts', label: '每日免费礼包', taskKeys: ['festivalGifts', 'festivalFreeGift', 'compassDaily', 'compassAdGift'] },
   { key: 'activityAutomation.river', label: '走江踏浪', taskKeys: ['riverScore', 'riverPass', 'riverHelp', 'snowballFree'] },
   { key: 'activityAutomation.newbie', label: '新手七日登录', taskKeys: ['newbieLogin'] },
-  { key: 'activityAutomation.beauty', label: '海上风采大赛', taskKeys: ['beautyVotes', 'beautyGift'] },
+  { key: 'activityAutomation.beauty', label: '海上风采大赛', taskKeys: ['beautyVotes', 'beautyGift'], fields: [
+    { key: 'schedule.beautyVotes', label: '每天投给当前最高票选手', taskKeys: ['beautyVotes'],
+      help: '限时活动，每天投够3票即停；已投票数计入目标，同票按编号升序选择。' },
+    { key: 'schedule.beautyGift', label: '领取每日投票礼包', taskKeys: ['beautyGift'],
+      help: '活动开放期间，当天累计投够3票后领取一次；与自动投票分别控制。' },
+  ] },
   { key: 'activityAutomation.fish', label: '钓鱼图鉴', taskKeys: ['fishBook'] },
   { key: 'activityAutomation.vip', label: 'VIP 每日奖励', taskKeys: ['vipDaily', 'vipDailyGift'] },
   { key: 'activityAutomation.pirates', label: '海盗战报奖励', taskKeys: ['campaignReports', 'battleReportRewards'] },
   { key: 'activityAutomation.openRank', label: '开服冲榜', taskKeys: ['openRankRewards', 'pirateRankRewards', 'warRankRewards'] },
 ];
+
+export const activityAutomationSettingFields = activityAutomationFields.flatMap(control => [control, ...(control.fields ?? [])]);
 
 export const activityAutomationDefaults = Object.fromEntries(activityAutomationFields
   .filter(field => field.key.startsWith('activityAutomation.')).map(field => [field.key.split('.')[1], false]));

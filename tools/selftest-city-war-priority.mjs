@@ -95,7 +95,7 @@ try {
       const f=warForgeFixture(),settings=warForgeSettings(),usage=ledger();f.client.setMaxListeners(32);
       settings.forge.enabled=false;Object.assign(settings.cityWar,{fleetIds:['1远征船'],nativeCommissionLimit:0,checkEverySeconds:15});
       Object.assign(settings.fleetSpeed,{enabled:true,dailyDiamondLimit:100});settings.resources.allowDiamonds=true;
-      Object.assign(settings.fleetSpeed.fleets[0],{repair:true,repairMaxDiamonds:100,repairDailyDiamonds:100});
+      Object.assign(settings.fleetSpeed.fleets[0],{repair:true,repairDailyDiamonds:100});
       f.config.resources={mapFiles:{1:mapFile}};f.config.tables.SpeedUpRubyCfg={data:[{minute:0,fleet:10},{minute:60,fleet:20}]};
       Object.assign(f.state.fleets[0],{state:4,durability:1900,repairing:{startTs:clock/1000-100,endTs:clock/1000+121,endDura:2000}});
       const send=f.client.sendWatch;let repairedAt=null,dispatchedAt=null,sleeps=0;

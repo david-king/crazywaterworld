@@ -218,7 +218,6 @@ export function planSiliconMining(snapshot, settings, ledger, client) {
   const intendedFuel = returningHunts.length * snapshot.petrolCost;
   // 撤回不消耗派遣费；仅在计划内为返航追杀保留意向，不能登记成实际消费。
   let availableFuel = snapshot.fuel - snapshot.pendingFuel - intendedFuel, plannedAttacks = returningHunts.length + [1, 2, 3].reduce((count, n) => count + (ledger.pendingCounters()['siliconAttacks' + n] ?? 0), 0);
-  used.siliconPetrol = (used.siliconPetrol ?? 0) + intendedFuel;
   const targetHeld = (gridId, index) => result.actions.some(action => action.gridId === gridId && action.index === index || action.huntTarget?.gridId === gridId && action.huntTarget?.index === index)
     || Object.values(keys).some(record => record.details?.worldId === snapshot.worldId && record.details.active !== false &&
       (record.details.kind === 'siliconDispatch' && record.details.gridId === gridId && record.details.index === index || record.details.kind === 'siliconRetreat' && record.details.huntTarget?.gridId === gridId && record.details.huntTarget?.index === index));
@@ -237,7 +236,7 @@ export function planSiliconMining(snapshot, settings, ledger, client) {
         label: policy.id + '硅矿撤回（' + reason + '）', costs: [] });
       if (huntTarget) {
         row.target = { gridId: huntTarget.gridId, index: huntTarget.index, nickname: huntTarget.opponent.nickname };
-        availableFuel -= snapshot.petrolCost; used.siliconPetrol += snapshot.petrolCost; plannedAttacks++;
+        availableFuel -= snapshot.petrolCost; plannedAttacks++;
       }
     };
     if (cap || !inWindow) {
@@ -251,7 +250,7 @@ export function planSiliconMining(snapshot, settings, ledger, client) {
       else if (policy.huntEnabled && policy.huntRetreat === 'onTarget') {
         const readiness = fleetReadinessReason(snapshot, policy, fleet) || huntReservationReason(snapshot, policy, own, settings, keys, client);
         if (readiness) { row.reason += '；' + readiness; continue; }
-        if (availableFuel - snapshot.petrolCost < p.petrolReserve || p.dailyPetrolLimit > 0 && (used.siliconPetrol ?? 0) + snapshot.petrolCost > p.dailyPetrolLimit) { row.reason += '；追杀汽油预算不足，继续采集'; continue; }
+        if (availableFuel < snapshot.petrolCost) { row.reason += '；追杀汽油不足，继续采集'; continue; }
         const target = miningCandidates(snapshot, policy, settings, state, fleet, used, plannedAttacks, targetHeld, true)[0];
         if (target) retreat('发现名单目标' + target.opponent.nickname + '，先撤回再核对攻打', target);
         else row.reason += '；未发现符合限制的追杀目标';
@@ -260,8 +259,7 @@ export function planSiliconMining(snapshot, settings, ledger, client) {
     }
     row.reason = fleetReason(snapshot, policy, settings, ledger, client);
     if (row.reason) continue;
-    if (availableFuel - snapshot.petrolCost < p.petrolReserve) { row.reason = '汽油不足或将低于保留量'; continue; }
-    if (p.dailyPetrolLimit > 0 && (used.siliconPetrol ?? 0) + snapshot.petrolCost > p.dailyPetrolLimit) { row.reason = '今日硅矿汽油预算不足'; continue; }
+    if (availableFuel < snapshot.petrolCost) { row.reason = '汽油不足'; continue; }
     const pursuit = siliconPursuitActive(snapshot, policy, settings), candidates = miningCandidates(snapshot, policy, settings, state, fleet, used, plannedAttacks, targetHeld);
     const target = candidates[0];
     if (!target) { row.reason = pursuit ? '追击时段：没有已击败且在游戏黑名单中的合规目标，保持待命' : policy.huntEnabled ? '没有符合限制的追杀名单目标或空位，保持待命' : '当前没有符合矿级、安全名单、战力及次数限制的位置'; continue; }
@@ -269,7 +267,7 @@ export function planSiliconMining(snapshot, settings, ledger, client) {
       buildingId: policy.id, gridId: target.mine.gridId, index: target.index, color: target.mine.color, opponent: target.opponent, pursuit,
       cost: snapshot.petrolCost, costs: [{ id: '汽油', num: snapshot.petrolCost }], label: policy.id + (target.opponent ? policy.huntEnabled ? '追杀' + target.opponent.nickname + '，抢占' : '抢占' : '采集') + target.mine.name };
     result.actions.push(action); row.target = { gridId: action.gridId, index: action.index, nickname: action.opponent?.nickname ?? null }; row.reason = action.label;
-    availableFuel -= action.cost; used.siliconPetrol = (used.siliconPetrol ?? 0) + action.cost; if (target.opponent) plannedAttacks++;
+    availableFuel -= action.cost; if (target.opponent) plannedAttacks++;
   }
   return result;
 }
@@ -415,8 +413,7 @@ function planSiliconShortcut(snapshot, settings, ledger, client, intent, fleetId
   if (records.some(record => record.details.kind === 'siliconDispatch' && record.details.gridId === mine.gridId && record.details.index === intent.index
     || record.details.kind === 'siliconRetreat' && record.details.huntTarget?.gridId === mine.gridId && record.details.huntTarget?.index === intent.index)) throw Error('该矿位已有派遣或返航追击任务');
   const intendedFuel = records.filter(record => record.details.kind === 'siliconRetreat' && record.details.huntTarget).length * snapshot.petrolCost;
-  if (snapshot.fuel - pendingPetrol(ledger) - intendedFuel - snapshot.petrolCost < settings.silicon.petrolReserve) throw Error('汽油不足或将低于保留量');
-  if (settings.silicon.dailyPetrolLimit > 0 && (ledger.snapshot().counters.siliconPetrol ?? 0) + intendedFuel + snapshot.petrolCost > settings.silicon.dailyPetrolLimit) throw Error('今日硅矿汽油预算不足');
+  if (snapshot.fuel - pendingPetrol(ledger) - intendedFuel < snapshot.petrolCost) throw Error('汽油不足');
   return { kind: 'siliconDispatch', request: 'ChipMineSendFleetRequest', body: { gridId: mine.gridId, index: intent.index, fleetId },
     buildingId: fleetId, gridId: mine.gridId, index: intent.index, color: mine.color, opponent: null,
     cost: snapshot.petrolCost, costs: [{ id: '汽油', num: snapshot.petrolCost }], label: fleetId + '手动采集' + mine.name };
@@ -466,7 +463,7 @@ export async function runSiliconShortcut(client, protocol, config, player, previ
     let result;
     await sendAndCheck(client, protocol, player, { ...options, config, manualShortcut: true, report: entry => { result = entry; options.report?.(entry); } }, snapshot, step,
       intent.kind === 'dispatch' ? { siliconPetrol: step.cost, siliconDispatches: 1 } : {},
-      intent.kind === 'dispatch' && settings.silicon.dailyPetrolLimit > 0 ? { siliconPetrol: settings.silicon.dailyPetrolLimit } : {});
+      {});
     return { ...(result || { ok: false, status: 'skipped', reason: '状态已变化，操作未发送，请重新读取' }), cost: step.cost, kind: intent.kind, fleetId };
   } finally { reserveDispatch(client, 'silicon', []); active.delete(client); }
 }
@@ -483,8 +480,8 @@ async function maintenance(client, protocol, config, player, options, snapshot) 
       const quote = snapshot.repairs[policy.id];
       if (!(quote?.unitRepairCost > 0 && quote.unitRepairTime > 0)) continue;
       const cost = Math.ceil((fleet.maxDura - fleet.durability) * quote.unitRepairCost);
-      if (!integer(cost, 1) || policy.maxRepairCost > 0 && cost > policy.maxRepairCost || snapshot.fuel - pendingPetrol(ledger) - cost < p.petrolReserve) continue;
-      await sendAndCheck(client, protocol, player, { ...options, config }, snapshot, { kind: 'siliconRepair', request: 'RepairFleetRequest', body: { buildingId: policy.id }, buildingId: policy.id, beforeDurability: fleet.durability, label: policy.id + '硅矿普通维修' }, { siliconPetrol: cost }, p.dailyPetrolLimit > 0 ? { siliconPetrol: p.dailyPetrolLimit } : {});
+      if (!integer(cost, 1) || snapshot.fuel - pendingPetrol(ledger) < cost) continue;
+      await sendAndCheck(client, protocol, player, { ...options, config }, snapshot, { kind: 'siliconRepair', request: 'RepairFleetRequest', body: { buildingId: policy.id }, buildingId: policy.id, beforeDurability: fleet.durability, label: policy.id + '硅矿普通维修' }, { siliconPetrol: cost }, {});
       return;
     }
     const repair = policy.repairSpeedUp && fleet.state === 4 && fleet.repairing?.endTs > snapshot.checkedAt && ledger.keyRecords()['silicon-repair:' + snapshot.worldId + ':' + fleetNumber(policy.id)]?.confirmed;
@@ -510,6 +507,15 @@ export async function runSiliconMining(client, protocol, config, player, options
     if (who !== identity(player) || !enabled()) return null;
     await reconcile(client, protocol, snapshot, ledger);
     if (snapshot.reason) { report({ label: '硅矿自动采集', skipped: true, reason: snapshot.reason }); return snapshot; }
+    const initialFuel = snapshot.fuel, sentPetrol = new Map();
+    // 业务确认可能早于库存扣减回写；本轮已确认费用继续压低余额上界，未知费用只由 pending 扣一次。
+    const constrainFuel = fresh => {
+      const keys = ledger.keyRecords();
+      const confirmedSpend = [...sentPetrol].reduce((total, [key, cost]) => total + (keys[key]?.confirmed === false ? 0 : cost), 0);
+      fresh.fuel = Math.min(fresh.fuel, initialFuel - confirmedSpend);
+      fresh.pendingFuel = pendingPetrol(ledger);
+    };
+    constrainFuel(snapshot);
     const plan = planSiliconMining(snapshot, settings, ledger, client);
     for (const proposed of plan.actions) {
       if (!enabled() || who !== identity(player) || client.connected === false) break;
@@ -518,16 +524,21 @@ export async function runSiliconMining(client, protocol, config, player, options
         const fresh = await readSiliconMining(client, protocol, config, player, { settings, ledger });
         if (!enabled() || settings !== getSettings() || who !== identity(player) || day(fresh.checkedAt) !== day(now(client))) continue;
         await reconcile(client, protocol, fresh, ledger);
+        constrainFuel(fresh);
         const reviewed = planSiliconMining(fresh, settings, ledger, client).actions.find(action => action.kind === proposed.kind && action.buildingId === proposed.buildingId && action.gridId === proposed.gridId && action.index === proposed.index && hash(action.opponent) === hash(proposed.opponent) && hash(action.huntTarget) === hash(proposed.huntTarget));
         if (!reviewed) continue;
         const counters = reviewed.kind === 'siliconDispatch' ? { siliconPetrol: reviewed.cost, siliconDispatches: 1, ...(reviewed.opponent ? { ['siliconAttacks' + fleetNumber(reviewed.buildingId)]: 1 } : {}) } : {};
-        const policy = settings.silicon.fleets.find(fleet => fleet.id === reviewed.buildingId), limits = { ...(settings.silicon.dailyPetrolLimit > 0 ? { siliconPetrol: settings.silicon.dailyPetrolLimit } : {}), ...(reviewed.opponent && policy.dailyAttackLimit > 0 ? { ['siliconAttacks' + fleetNumber(reviewed.buildingId)]: policy.dailyAttackLimit } : {}) };
-        await sendAndCheck(client, protocol, player, { ...options, config, enabled, report }, fresh, reviewed, counters, limits);
+        const policy = settings.silicon.fleets.find(fleet => fleet.id === reviewed.buildingId), limits = { ...(reviewed.opponent && policy.dailyAttackLimit > 0 ? { ['siliconAttacks' + fleetNumber(reviewed.buildingId)]: policy.dailyAttackLimit } : {}) };
+        const confirmed = await sendAndCheck(client, protocol, player, { ...options, config, enabled, report }, fresh, reviewed, counters, limits);
+        if (reviewed.kind === 'siliconDispatch') {
+          const key = slotKey(fresh.worldId, reviewed.buildingId);
+          if (confirmed || ledger.hasKey(key)) sentPetrol.set(key, reviewed.cost);
+        }
       } finally { reserveDispatch(client, 'silicon', []); }
     }
     if (enabled() && who === identity(player)) {
       settings = getSettings(); snapshot = await readSiliconMining(client, protocol, config, player, { settings, ledger });
-      if (enabled() && settings === getSettings() && who === identity(player)) { await reconcile(client, protocol, snapshot, ledger); await maintenance(client, protocol, config, player, { ...options, enabled, report }, snapshot); }
+      if (enabled() && settings === getSettings() && who === identity(player)) { await reconcile(client, protocol, snapshot, ledger); constrainFuel(snapshot); await maintenance(client, protocol, config, player, { ...options, enabled, report }, snapshot); }
     }
     if (!plan.actions.length) report({ label: '硅矿自动采集', skipped: true, reason: plan.reason || plan.notes.join('；') || plan.rows.filter(row => row.enabled).map(row => row.id + '：' + row.reason).join('；') || '未启用舰队' });
     return plan;

@@ -47,6 +47,32 @@ export function overviewPage() {
       <div className="world-map-layout"><div id="world-map-scroll" className="world-map-scroll"><svg id="world-map" role="group" aria-label="只读世界地图" /></div><div id="world-map-legend" className="world-map-legend" /><div id="world-map-state-legend" className="world-map-state-legend" /><p className="world-map-help"><span className="for-mouse">拖动平移 · Ctrl+滚轮缩放 · </span><span className="for-touch">点「移动地图」后单指拖动 · 用缩放滑块放大 · </span>放大查看舰队名和攻守优先+排队数</p><aside id="world-map-detail" className="world-map-detail" hidden /></div>
       <p id="world-map-notes" className="dim" />
     </Panel>
+    <Panel title="资源田概览" help="按资源类型查看已占数量与有效基础产量，展开查看明细。管理弹窗展示所有已占田，可逐块替换或放弃，也可选择新田占领。" titleAfter={<div className="bar"><a className="inline-link" href="#config-group-resourceFields">资源田配置</a><Button id="resource-fields-refresh" variant="outline" size="sm" disabled>刷新资源田</Button></div>}>
+      <section id="resource-fields-overview" aria-label="资源田概览">
+        <div className="resource-fields-toolbar"><span id="resource-fields-capacity">连接账号后读取资源田</span><span id="resource-fields-automatic" className="dim" /></div>
+        <p id="resource-fields-feedback" className="resource-fields-feedback" role="status" hidden />
+        <div id="resource-fields-summary" className="resource-fields-summary" />
+        <details className="resource-fields-help"><summary>同步状态与玩法说明</summary><p id="resource-fields-status" className="dim" role="status">连接账号后读取资源田</p><p className="dim">总览可见时每 60 秒刷新。</p><p id="resource-fields-notes" className="dim" /><div id="resource-fields-pending" className="resource-fields-list" /><p>资源田产出汽油、种子或科技点，城市失守会暂停产出。上方为当前有效田地的基础小时产量，不含加成。</p><p>占领需要目标城市为本盟、本人尚未占领、有名额及足够汽油，并派出可用舰队。推荐战力仅供参考，派遣后仍需行军和战斗。</p><p>替换会先放弃旧田，再派舰队占领新田。新田战败或中途失败不会自动恢复旧田。自动占领默认关闭，只补足空位，不会自动替换已有田。</p></details>
+      </section>
+      <dialog id="resource-fields-action-dialog" aria-labelledby="resource-fields-action-title">
+        <DialogHeader className="flex-row items-center justify-between"><DialogTitle id="resource-fields-action-title">管理资源田</DialogTitle><Button id="resource-fields-dialog-close" variant="outline" size="sm" aria-label="关闭资源田管理">关闭</Button></DialogHeader>
+        <div id="resource-fields-manager">
+          <div className="resource-fields-table-heading"><h3>已占资源田</h3><span className="dim">包含所有资源类型，可逐块替换或放弃</span></div>
+          <div className="resource-fields-table-scroll" role="region" aria-label="已占资源田表格，可横向滚动" tabIndex={0}><table className="resource-fields-table"><thead><tr><th scope="col">资源</th><th scope="col">田地 / 等级</th><th scope="col">城市 / 格子</th><th scope="col">有效时产</th><th scope="col">状态</th><th scope="col">操作</th></tr></thead><tbody id="resource-fields-owned-table" /></table></div>
+          <p className="resource-fields-table-hint dim">左右滑动查看位置、产量与状态，操作按钮保持可见。</p>
+          <div className="resource-fields-pagination"><Button id="resource-fields-owned-prev" variant="outline" size="sm">上一页</Button><span id="resource-fields-owned-page" className="dim" /><Button id="resource-fields-owned-next" variant="outline" size="sm">下一页</Button></div>
+          <div id="resource-fields-replace-bar" className="resource-fields-replace-bar" hidden><div><strong>正在选择替换目标</strong><p id="resource-fields-replace-note" /></div><Button id="resource-fields-replace-cancel" variant="outline" size="sm">取消替换</Button></div>
+          <div className="resource-fields-table-heading"><h3>可占资源田</h3><span className="dim">未选旧田时为新增占领</span></div>
+          <div className="resource-fields-filters"><label htmlFor="resource-fields-resource">候选资源<select id="resource-fields-resource" defaultValue=""><option value="">按策略推荐</option><option value="汽油">汽油</option><option value="种子">种子</option><option value="公会科技点">科技点</option></select></label><label htmlFor="resource-fields-level">最低等级<input id="resource-fields-level" type="number" min="1" max="100" step="1" defaultValue="1" /></label><span className="dim">筛选仅影响下方候选表</span></div>
+          <p id="resource-fields-candidate-count" className="dim" role="status" />
+          <div className="resource-fields-table-scroll" role="region" aria-label="可占资源田表格，可横向滚动" tabIndex={0}><table className="resource-fields-table"><thead><tr><th scope="col">资源</th><th scope="col">田地 / 等级</th><th scope="col">城市 / 格子</th><th scope="col">基础时产</th><th scope="col">推荐战力</th><th scope="col">操作</th></tr></thead><tbody id="resource-fields-candidates" /></table></div>
+          <p className="resource-fields-table-hint dim">左右滑动查看位置、产量与推荐战力。</p>
+          <div className="resource-fields-pagination"><Button id="resource-fields-page-prev" variant="outline" size="sm">上一页</Button><span id="resource-fields-page-state" className="dim" /><Button id="resource-fields-page-next" variant="outline" size="sm">下一页</Button></div>
+        </div>
+        <div id="resource-fields-action-body" hidden />
+        <DialogFooter><Button id="resource-fields-action-back" variant="outline" hidden>返回选田</Button><Button id="resource-fields-action-confirm" disabled hidden>确认派遣</Button><Button id="resource-fields-action-cancel" variant="outline">关闭</Button></DialogFooter>
+      </dialog>
+    </Panel>
     <Panel title="硅矿概览" help="空矿位的详情浮层可选择舰队采集；自己的采矿舰队首奖后可撤回。单次派遣与撤回不会改变自动配置。自动刷新仅影响此概览；鼠标悬停、键盘聚焦或手机轻触矿位查看详情。奖励由服务器自动发放，倒计时结束后需同步确认。" titleAfter={<div className="bar"><a className="inline-link" href="#config-group-silicon">硅矿配置</a><Button id="silicon-refresh" variant="outline" size="sm" disabled>刷新硅矿</Button></div>}>
       <section id="silicon-overview" aria-label="硅矿概览">
         <div className="silicon-toolbar"><span id="silicon-status" className="dim" role="status">连接账号后读取硅矿</span><div className="world-refresh-controls"><Button id="silicon-auto-refresh" size="sm" variant="outline" aria-pressed="true">自动刷新：开</Button><label className="world-refresh-setting">每<input id="silicon-refresh-seconds" aria-label="硅矿自动刷新秒数" type="number" min="5" max="300" step="1" defaultValue="30" />秒</label></div></div>
@@ -150,10 +176,18 @@ export function accountPage() {
         <Button id="account-add" type="button" aria-haspopup="dialog" aria-controls="account-add-dialog"><Plus aria-hidden="true" />添加账号</Button>
       </div>
     </div>
-    <p className="dim">新账号默认不挂机，点击账号卡片上的「开始挂机」后才会持续运行；可随时点击「暂停挂机」。</p>
+    <p className="dim">新账号默认不挂机，点击「开始挂机」后才会持续运行；每个账号可通过「登录设置」单独配置自动重连策略。</p>
     <p id="account-add-notice" className="dim" role="status" hidden />
     <p id="account-transfer-notice" className="dim" role="status" aria-live="polite" hidden />
     <div id="accounts" className="account-grid" />
+
+    <dialog id="account-login-dialog" aria-labelledby="account-login-title">
+      <div className="account-dialog-heading"><DialogHeader><DialogTitle id="account-login-title" className="leading-snug">登录设置</DialogTitle></DialogHeader><Button id="account-login-close" type="button" size="icon-sm" variant="ghost" aria-label="关闭登录设置"><X aria-hidden="true" /></Button></div>
+      <div id="login-settings-root" data-account="">
+        <p role="status" className="dim">正在载入登录设置…</p>
+        <noscript>请启用 JavaScript 后编辑登录设置。</noscript>
+      </div>
+    </dialog>
 
     <dialog id="account-export-dialog" aria-labelledby="account-export-title" aria-describedby="account-export-scope">
       <div className="account-dialog-heading"><DialogHeader><DialogTitle id="account-export-title">导出账号</DialogTitle></DialogHeader><Button id="account-export-close" type="button" size="icon-sm" variant="ghost" aria-label="关闭账号导出"><X aria-hidden="true" /></Button></div>
@@ -190,7 +224,8 @@ export function accountPage() {
           <Button type="button" variant="outline" className="account-channel h-auto pointer-coarse:h-auto items-start justify-start gap-3.5 p-5 has-[>svg]:px-5 whitespace-normal text-left" data-login-channel="alipay"><QrCode className="size-[22px]" aria-hidden="true" /><span><strong>支付宝</strong><span>扫码登录，选择游戏角色</span></span></Button>
           <Button type="button" variant="outline" className="account-channel h-auto pointer-coarse:h-auto items-start justify-start gap-3.5 p-5 has-[>svg]:px-5 whitespace-normal text-left" data-login-channel="phone"><Smartphone className="size-[22px]" aria-hidden="true" /><span><strong>益世界 APP</strong><span>账号密码或短信验证码</span></span></Button>
           <Button type="button" variant="outline" className="account-channel h-auto pointer-coarse:h-auto items-start justify-start gap-3.5 p-5 has-[>svg]:px-5 whitespace-normal text-left" data-login-channel="wechat"><MessageCircle className="size-[22px]" aria-hidden="true" /><span><strong>微信小游戏</strong><span>从电脑微信读取登录信息</span></span></Button>
-          <Button type="button" variant="outline" className="account-channel h-auto pointer-coarse:h-auto items-start justify-start gap-3.5 p-5 has-[>svg]:px-5 whitespace-normal text-left" data-login-channel="douyin"><Music2 className="size-[22px]" aria-hidden="true" /><span><strong>抖音小游戏</strong><span>从电脑抖音读取登录信息</span></span></Button>
+          <Button type="button" variant="outline" className="account-channel h-auto pointer-coarse:h-auto items-start justify-start gap-3.5 p-5 has-[>svg]:px-5 whitespace-normal text-left" data-login-channel="douyin-qr"><Music2 className="size-[22px]" aria-hidden="true" /><span><strong>抖音扫码</strong><span>扫码登录，选择游戏角色</span></span></Button>
+          <details className="col-span-full text-sm"><summary className="cursor-pointer py-2">备用登录方式</summary><Button type="button" variant="outline" className="mt-2 w-full justify-start whitespace-normal" data-login-channel="douyin">电脑抖音采集</Button><p className="dim mt-2">从已登录的电脑抖音读取，或恢复上次未完成的采集。</p></details>
         </div>
         <section id="account-add-alipay" hidden>
           <div id="alipay-flow" className="alipay-flow">
@@ -203,6 +238,18 @@ export function accountPage() {
             <div className="bar"><Button id="alipay-save" type="button" hidden disabled>保存所选角色</Button><Button id="alipay-roles-retry" type="button" variant="outline" hidden>重新读取角色</Button></div>
           </div>
           <p className="dim">本机需安装 Edge 或 Chrome。扫码后会进入游戏，可能让同账号的游戏客户端下线。</p>
+        </section>
+        <section id="account-add-douyin" hidden>
+          <div id="douyin-flow" className="alipay-flow">
+            <div className="bar"><Button id="douyin-start" type="button">生成二维码</Button><Button id="douyin-cancel" type="button" variant="outline" hidden>取消</Button></div>
+            <img id="douyin-qr" className="alipay-qr" alt="抖音扫码登录二维码" width="256" height="256" hidden />
+            <p id="douyin-hint" className="phone-feedback dim" role="status" aria-live="polite" aria-atomic="true">点击「生成二维码」，然后使用抖音扫一扫。</p>
+            <div id="douyin-roles" hidden />
+            <p id="douyin-result" hidden />
+            <p id="douyin-expiry" className="dim" />
+            <div className="bar"><Button id="douyin-save" type="button" hidden disabled>保存所选角色</Button><Button id="douyin-roles-retry" type="button" variant="outline" hidden>重新读取角色</Button></div>
+          </div>
+          <p className="dim">请使用游戏角色所属的抖音账号扫码。读取角色时会登录游戏，可能让同账号的游戏客户端下线。</p>
         </section>
         <section id="account-add-phone" hidden>
           <p id="phone-step" className="sr-only" role="status">登录验证 → 选择区服和角色 → 保存并切换</p>
@@ -266,12 +313,6 @@ export function accountPage() {
 }
 
 // Client-rendered page; its bundle is loaded when the tab is first opened.
-export function loginSettingsPage() {
-  return renderToStaticMarkup(<div id="login-settings-root" data-account="">
-    <p role="status" className="dim">正在载入登录设置…</p>
-    <noscript>请启用 JavaScript 后编辑登录设置。</noscript>
-  </div>)
-}
 
 export function guildPage() {
   return renderToStaticMarkup(<div className="grid gap-3">

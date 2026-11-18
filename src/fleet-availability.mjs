@@ -18,10 +18,13 @@ export function bridgeFleetReservations(client, getSettings, ledger, worldId) {
 export function fleetRecordReason(records,buildingId,worldId){
  for(const [key,r]of Object.entries(recordsInWorld(records??{},worldId))){
   if(r.expired||r.details?.buildingId!==buildingId)continue;
+  if(r.details.kind==='worldBossLineup'&&r.details.active!==false)return '舰队的世界Boss临时阵容尚待恢复';
   if(r.details.kind==='pirateFirst'&&r.details.active===false)continue;
+  if(r.details.kind==='worldBoss'&&r.details.active===false)continue;
   if(!r.confirmed)return '舰队有结果待确认的任务';
   if(r.details.kind==='worldBoss'&&r.details.active!==false)return '舰队的世界Boss首战尚未结束';
   if(r.details.kind==='siliconDispatch'&&r.details.active!==false)return '舰队的硅矿任务尚未结束';
+  if(r.details.kind==='resourceFieldDispatch'&&r.details.active!==false)return '舰队的资源田占领尚未结束';
   if(['siliconRepair','siliconRetreat','siliconSpeed'].includes(r.details.kind)&&r.details.active!==false)return '舰队的硅矿操作尚未结束';
   if(r.details.kind==='radarSend'&&r.details.active!==false)return '舰队的联盟情报尚未结束';
   if(r.details.kind==='pirateFirst'&&!['won','lost'].includes(r.details.outcome))return '舰队的首杀战果尚未确认';
@@ -32,7 +35,7 @@ export function fleetRecordReason(records,buildingId,worldId){
 
 // 同一连接共享城战时段预留和正在启动的手动首杀；不抢占在途任务。
 const dispatchStates = new WeakMap();
-export const dispatchLabels={maintenance:'战后维修',cityWar:'城战接续',pirateHunt:'海盗讨伐 / 首杀',worldBoss:'世界Boss首战',follow:'巨轮跟随',treasure:'巨轮普通参战',radar:'联盟情报',silicon:'硅矿采集'};
+export const dispatchLabels={maintenance:'战后维修',cityWar:'城战接续',pirateHunt:'海盗讨伐 / 首杀',worldBoss:'世界Boss首战',follow:'巨轮跟随',treasure:'巨轮普通参战',radar:'联盟情报',silicon:'硅矿采集',resourceFields:'资源田占领'};
 export function reconcileBossFleets(ledger,fleets,worldId){
  if(!Array.isArray(fleets))return;
  if(!worldId){
@@ -58,7 +61,7 @@ export function fleetDispatchView(client,settings,ledger,fleets,worldId){
   return {buildingId:f.buildingId,intents:intents.map(k=>({key:k,label:dispatchLabels[k]})),reserved:held,reason,targetGrid:f.state===2?f.targetGridIdx:f.curGridIdx||null};
  });
 }
-export const dispatchOrder = settings => [...new Set([...(settings?.fleetDispatch?.priority ?? []),'cityWar','pirateHunt','worldBoss','follow','treasure','radar','silicon'])];
+export const dispatchOrder = settings => [...new Set([...(settings?.fleetDispatch?.priority ?? []),'cityWar','pirateHunt','worldBoss','follow','treasure','radar','silicon','resourceFields'])];
 export function reserveDispatch(client, task, ids, until = Date.now()+60000) {
  const state=dispatchStates.get(client)??new Map();dispatchStates.set(client,state);
  state.set(task,{ids:[...ids],until});
@@ -75,7 +78,7 @@ export function dispatchReservationReason(client,settings,task,id,{ignoreOwners=
   if(owner==='cityWar'&&(!settings?.cityWar?.enabled||!settings.cityWar.reserveDuringWar))continue;
   if(owner==='cityWar'&&!settings.cityWar.fleetIds.includes(id))continue;
   if(owner===task || record.until<=Date.now() || !record.ids.includes(id))continue;
-  if(owner==='maintenance'||owner==='cityWar' || order.indexOf(owner)<(order.includes(task)?order.indexOf(task):order.length))return '舰队预留给'+({maintenance:'战后维修',cityWar:'城战时段',pirateHunt:'正在运行的首杀',treasure:'巨轮普通参战',follow:'巨轮跟随',worldBoss:'世界Boss首战',radar:'联盟情报',silicon:'硅矿采集'}[owner]);
+  if(owner==='maintenance'||owner==='cityWar' || order.indexOf(owner)<(order.includes(task)?order.indexOf(task):order.length))return '舰队预留给'+({maintenance:'战后维修',cityWar:'城战时段',pirateHunt:'正在运行的首杀',treasure:'巨轮普通参战',follow:'巨轮跟随',worldBoss:'世界Boss首战',radar:'联盟情报',silicon:'硅矿采集',resourceFields:'资源田占领'}[owner]);
  }
  return '';
 }

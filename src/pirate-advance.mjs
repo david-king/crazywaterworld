@@ -33,8 +33,7 @@ export async function runSinglePirateHunt(client,config,player,{targetKey,fleetK
    const settings=getSettings(),p=settings.pirateHunt;
    const reason=fleetRecordReason(ledger.keyRecords(),fleet.buildingId,String(normalize(player.worldId)))||dispatchReservationReason(client,settings,'pirateHunt',fleet.buildingId);
    if(reason)throw Error(reason);
-   if(view.fuel-pendingPetrol(ledger)-view.fuelPerFleet<p.petrolReserve)throw Error('出征后汽油不足保留量');
-   if(p.fuelBudget>0&&view.fuelPerFleet>p.fuelBudget)throw Error('本次首杀汽油预算不足');
+   if(view.fuel-pendingPetrol(ledger)<view.fuelPerFleet)throw Error('可用汽油不足以出征');
    if(!Number.isSafeInteger(fleet.maxDura)||fleet.maxDura<=0||fleet.durability<fleet.maxDura*p.minDurabilityPercent/100)throw Error('舰队耐久低于首杀设置');
    const world=String(normalize(player.worldId));key='pirate-first:'+world+':'+target.type+':'+target.level+':'+target.uid;
    const prior=ledger.keyRecords()[key];if(prior?.confirmed&&prior.details?.outcome==='lost')ledger.releaseCompletedKey(key);
@@ -46,7 +45,7 @@ export async function runSinglePirateHunt(client,config,player,{targetKey,fleetK
 }
 
 const sameOptions=(a,b)=>JSON.stringify(a)===JSON.stringify(b);
-export function selectPirateAdvance(snapshot,options,{spent=0,pendingFuel=0}={}) {
+export function selectPirateAdvance(snapshot,options,{pendingFuel=0}={}) {
  const view=snapshot.view;
  if(view.locked || view.reason) return{reason:view.reason||'世界尚未开放'};
  const targets=view.targets.filter(t=>!options.types.length || options.types.includes(String(t.type)));
@@ -58,8 +57,7 @@ export function selectPirateAdvance(snapshot,options,{spent=0,pendingFuel=0}={})
  const fleet=candidates.find(f=>!f.reason && Number.isSafeInteger(f.maxDura) && f.maxDura>0 && f.durability>=Math.ceil(f.maxDura*options.minDurabilityPercent/100));
  if(!fleet)return{reason:candidates.find(f=>f.reason)?.reason||'所选舰队未就绪或耐久低于设置阈值'};
  if(!Number.isSafeInteger(pendingFuel)||pendingFuel<0)return{reason:'未确认出征的汽油占用异常'};
- if(view.fuel-pendingFuel-view.fuelPerFleet<options.petrolReserve)return{reason:'出征后汽油不足设置的保留量'};
- if(options.fuelBudget>0&&spent+view.fuelPerFleet>options.fuelBudget)return{reason:'本次首杀汽油预算已不足'};
+ if(view.fuel-pendingFuel<view.fuelPerFleet)return{reason:'可用汽油不足以出征'};
  return{target,fleet,cost:view.fuelPerFleet};
 }
 export async function runPirateAdvance({client,config,player,options,ledger,getSettings,enabled,schedule=fn=>fn(),signal,onState=()=>{},sleep=ms=>delay(ms,undefined,{signal}),now=Date.now,prepareDispatch=async()=>{},checkpoint={},oneCheck=false,maxFailures=options.maxFailures??1}) {
@@ -133,7 +131,7 @@ export async function runPirateAdvance({client,config,player,options,ledger,getS
    const pending=ledger.pendingCounters();
    if(fuelCeiling!==null && Number.isSafeInteger(snap.view.fuel))snap.view.fuel=Math.min(snap.view.fuel,fuelCeiling);
    for(const f of snap.view.fleets)f.reason ||= fleetRecordReason(ledger.keyRecords(),f.buildingId,world) || dispatchReservationReason(client,getSettings(),'pirateHunt',f.buildingId);
-   const picked=selectPirateAdvance(snap,options,{spent:state.spent,pendingFuel:(pending.piratePetrol??0)+(pending.treasurePetrol??0)+(pending.cityWarPetrol??0)+(pending.radarPetrol??0)+(pending.worldBossPetrol??0)+(pending.siliconPetrol??0)});
+   const picked=selectPirateAdvance(snap,options,{pendingFuel:(pending.piratePetrol??0)+(pending.treasurePetrol??0)+(pending.cityWarPetrol??0)+(pending.radarPetrol??0)+(pending.worldBossPetrol??0)+(pending.siliconPetrol??0)+(pending.resourceFieldPetrol??0)});
    if(picked.reason)return{stop:picked.reason};
    const {target,fleet}=picked;
    const key=prefix+target.type+':'+target.level+':'+target.uid;
@@ -148,7 +146,7 @@ export async function runPirateAdvance({client,config,player,options,ledger,getS
       if(!live())throw Object.assign(Error('执行条件已变化，停止推进'),{notSent:true});
       for(const f of view.fleets)f.reason ||= fleetRecordReason(ledger.keyRecords(),f.buildingId,world) || dispatchReservationReason(client,getSettings(),'pirateHunt',f.buildingId);
       if(fuelCeiling!==null && Number.isSafeInteger(view.fuel))view.fuel=Math.min(view.fuel,fuelCeiling);
-      const check=selectPirateAdvance({view},options,{spent:state.spent,pendingFuel:(ledger.pendingCounters().piratePetrol??0)+(ledger.pendingCounters().treasurePetrol??0)+(ledger.pendingCounters().cityWarPetrol??0)+(ledger.pendingCounters().radarPetrol??0)+(ledger.pendingCounters().worldBossPetrol??0)+(ledger.pendingCounters().siliconPetrol??0)});
+      const check=selectPirateAdvance({view},options,{pendingFuel:(ledger.pendingCounters().piratePetrol??0)+(ledger.pendingCounters().treasurePetrol??0)+(ledger.pendingCounters().cityWarPetrol??0)+(ledger.pendingCounters().radarPetrol??0)+(ledger.pendingCounters().worldBossPetrol??0)+(ledger.pendingCounters().siliconPetrol??0)+(ledger.pendingCounters().resourceFieldPetrol??0)});
       if(check.reason || check.target?.uid!==reviewed.uid || check.fleet?.buildingId!==raw.buildingId || !live())throw Error(check.reason||'首杀目标或舰队已变化');
       if(Object.values(recordsInWorld(ledger.keyRecords(),world)).some(r=>!r.expired && r.details?.buildingId===raw.buildingId && (!r.confirmed||r.details?.kind==='radarSend'&&r.details.active!==false)))throw Error('舰队还有待确认任务');
       quotedFuel=view.fuel;

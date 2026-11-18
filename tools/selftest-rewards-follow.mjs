@@ -78,9 +78,9 @@ await test('过期行军、返航和同名歧义不能触发；重复推送只�
 await test('发送前目标已返航则取消；未知派遣保持锁，预算及避战仍生效',async()=>{
  const f=followFixture();f.travelers=[f.lead];let readCount=0;f.beforeRead=name=>{if(name==='WorldInfoRequest'&&++readCount===2){f.travelers=[];f.emit([{...f.lead,state:1}]);}};
  await runTreasureLoot(f.client,f.protocol,f.config,f.player,{getSettings:()=>f.settings,ledger:ledger()});assert.equal(f.client.writes.length,0);
- const g=followFixture();g.travelers=[g.lead];g.settings.treasure.petrolReserve=g.state.fuel;const snap=await readTreasureLoot(g.client,g.protocol,g.config,g.player,{preferences:g.settings.treasure});assert.equal(planTreasureLoot(snap,g.config,g.settings).actions.length,0);
+ const g=followFixture();g.travelers=[g.lead];g.state.fuel=499;const snap=await readTreasureLoot(g.client,g.protocol,g.config,g.player,{preferences:g.settings.treasure});assert.equal(planTreasureLoot(snap,g.config,g.settings).actions.length,0);
  const h=followFixture();h.travelers=[h.lead];h.settings.treasure.allowHostile=true;h.settings.treasure.avoidNames=['避战玩家'];h.state.targets[0].ownerGuildIdx=7;h.state.targets[0].ownerFleetNum=1;h.state.defenders[72]=[{name:'避战玩家',guildIdx:7,isNpc:false}];const blocked=planTreasureLoot(await readTreasureLoot(h.client,h.protocol,h.config,h.player,{preferences:h.settings.treasure}),h.config,h.settings);assert.equal(blocked.actions.length,0);assert(blocked.notes.some(n=>n.includes('避战')));
- g.settings.treasure.petrolReserve=0;g.unknown=true;const l=ledger();await runTreasureLoot(g.client,g.protocol,g.config,g.player,{getSettings:()=>g.settings,ledger:l});await runTreasureLoot(g.client,g.protocol,g.config,g.player,{getSettings:()=>g.settings,ledger:l});assert.equal(g.client.writes.length,1);assert.equal(l.snapshot().uncertain,1);
+ g.state.fuel=500;g.unknown=true;const l=ledger();await runTreasureLoot(g.client,g.protocol,g.config,g.player,{getSettings:()=>g.settings,ledger:l});await runTreasureLoot(g.client,g.protocol,g.config,g.player,{getSettings:()=>g.settings,ledger:l});assert.equal(g.client.writes.length,1);assert.equal(l.snapshot().uncertain,1);
 });
 await test('受控循环等待阶段由出发推送唤醒，不等待60秒轮间或检查间隔',async()=>{
  const f=followFixture(),stop=new AbortController(),l=ledger();let sentAt=0,signalAt=0,rounds=0;f.beforeSend=()=>{sentAt=Date.now();};

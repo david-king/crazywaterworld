@@ -1505,7 +1505,7 @@ export async function runWorld(client, protocol, plan, {
 // 「哪些 gridIdx 是田、是什么类型」不在协议里也不在 591 张配置表里，只在 CDN bundle world_map 的
 // JsonAsset 里。地图首次读取时自动缓存到 work/cdn/，编码是 resType * 10000 + cityId。
 // 占田（ChallengeResFieldRequest）要求「该田所属城是我方城 + 有闲置且 durability > 0 的舰队」，
-// 账号没有舰队时这一步必然失败，所以本模块只做只读报告 + 显式手动占田/放弃，不做无人值守的自动占田。
+// 本模块保留 CLI 的只读报告与显式占田/放弃；总览快捷占领和可配置自动补位见 resource-field-automation.mjs。
 
 export const MAP_DIR = path.resolve(import.meta.dirname, '../work/cdn');
 

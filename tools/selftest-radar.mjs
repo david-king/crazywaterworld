@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { serviceRadar, radarFuelReserve } from '../src/radar.mjs';
+import { serviceRadar } from '../src/radar.mjs';
 import { loadProtocol } from '../src/proto.mjs';
 import { loadConfig } from '../src/config.mjs';
 import { uidText } from '../src/hero-equipment.mjs';
@@ -87,7 +87,6 @@ const run = (client, options = {}) => serviceRadar(client, protocol, config, { p
 const sends = client => client.writes.filter(w => w.name === 'RadarSendFleetsRequest');
 
 export async function testRadar() {
-  assert.equal(radarFuelReserve, 10000);
   const defaults = mock();
   await serviceRadar(defaults, protocol, config);
   assert.equal(defaults.calls.length, 0, '未传开关时默认不探测也不写入');
@@ -100,10 +99,10 @@ export async function testRadar() {
     const c = mock(); await run(c, options); assert.equal(c.calls.length, 0); assert.equal(c.writes.length, 0);
   }
 
-  const fuel = mock({ fuel: 11000 });
+  const fuel = mock({ fuel: 1000 });
   const result = await run(fuel);
   assert.equal(sends(fuel).length, 2, '多舰队不能重复花同一份汽油');
-  assert.equal(fuel.data.fuel, 10000);
+  assert.equal(fuel.data.fuel, 0);
   assert.equal(result.filter(e => e.ok).length, 2);
   assert.equal(new Set(sends(fuel).map(w => w.body.fleetBuildingIds[0])).size, 2);
   assert.equal(new Set(sends(fuel).map(w => uidText(w.body.uid))).size, 2);
@@ -186,17 +185,17 @@ export async function testRadar() {
     assert.equal(late.writes.length, 0, '其他模块在读取期间新增预占，写入前仍须暂停');
   }
 
-  const replenished = mock({ fuel: 11000, fuelIncome: 500 });
+  const replenished = mock({ fuel: 1000, fuelIncome: 500 });
   await run(replenished);
   assert.equal(sends(replenished).length, 2, '本轮仍使用累计消费上限，不重复使用途中补入的汽油');
   await run(replenished);
   assert.equal(sends(replenished).length, 3, '业务已确认后的下一轮允许使用新库存，不等待补产遮住的降幅');
 
-  const shared = mock({ fuel: 16500, info: { events: [event(1)] }, fleets: [fleet(1), fleet(2, { durability: 1000 }), fleet(3, { durability: 1000 })] });
+  const shared = mock({ fuel: 6500, info: { events: [event(1)] }, fleets: [fleet(1), fleet(2, { durability: 1000 }), fleet(3, { durability: 1000 })] });
   await run(shared, { enabled: () => true });
   assert.equal(sends(shared).length, 1);
   assert.equal(shared.writes.filter(w => w.name === 'RepairFleetRequest').length, 1);
-  assert.equal(shared.data.fuel, 10000, '派舰和维修共用保留额');
+  assert.equal(shared.data.fuel, 0, '派舰和维修共用实际库存，不设固定保留额');
   const repairOnly = mock({ fleets: [fleet(1, { durability: 1000 })] });
   const deferred = [];
   await run(repairOnly, { enabled: () => true, scheduler: {

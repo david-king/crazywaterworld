@@ -17,7 +17,7 @@ const {observeOwnedFleets}=await import('../src/fleet-catalog.mjs');
 const {cityWarFleetStrategy}=await import('../src/city-war-settings.mjs');
 saveStore({activeId:'speed-browser',accounts:[{id:'speed-browser',label:'加速界面测试',url:'ws://invalid.invalid',login:{},automation:{enabled:false,paused:true}}]});
 const settings=defaultSettings();settings.cityWar.enabled=true;settings.cityWar.fleetIds=['1远征船','2远征船'];settings.cityWar.defenceFleetIds=['2远征船'];
-settings.fleetSpeed.enabled=true;for(const fleet of settings.fleetSpeed.fleets)Object.assign(fleet,{repairSmartSave:true,marchSmartSave:true});Object.assign(settings.fleetSpeed.fleets[0],{repair:true,march:true,repairMaxDiamonds:50,marchMaxDiamonds:90});
+settings.fleetSpeed.enabled=true;for(const fleet of settings.fleetSpeed.fleets)Object.assign(fleet,{repairSmartSave:true,marchSmartSave:true});Object.assign(settings.fleetSpeed.fleets[0],{repair:true,march:true});
 saveAutomationSettings('speed-browser',settings,{revision:0});
 const app=createConsole({port:0,protocol:{}}),base=await app.listen();let browser;const errors=[];
 const executablePath=['C:/Program Files/Google/Chrome/Application/chrome.exe','C:/Program Files (x86)/Microsoft/Edge/Application/msedge.exe'].find(fs.existsSync);
@@ -28,6 +28,9 @@ try{
   for(const [name,viewport] of [['desktop',{width:1440,height:1000}],['mobile',{width:390,height:844}]]){
     const before=loadAutomationSettings('speed-browser');
     Object.assign(before.settings.cityWar,{fleetStrategies:{},defenceFleetIds:['2远征船'],targetMode:'alliance',targetPriority:'fewestAllied',cityRefs:[],defenceTargetMode:'alliance',defenceTargetPriority:'fewestAllied',defenceCityRefs:[]});
+    before.settings.fleetSpeed.enabled=false;before.settings.resources.allowDiamonds=false;
+    before.settings.resources.diamondDailyLimit=2000;
+    Object.assign(before.settings.fleetSpeed.fleets[0],{repair:true,march:true,repairDailyDiamonds:0,marchDailyDiamonds:0});
     saveAutomationSettings('speed-browser',before.settings,{revision:before.revision});
     const context=await browser.newContext({viewport,deviceScaleFactor:1}),page=await context.newPage();
     let settingsWrites=0;
@@ -37,16 +40,25 @@ try{
     const city=page.locator('#config-group-cityWar');
     const globals=page.locator('#config-section-cityWar-targetMode');
     const globalSummary=globals.locator(':scope > summary');
+    assert.equal(await page.locator('#config-field-fleetSpeed-dailyDiamondLimit').count(),0,'城战加速合计上限已移除');
+    assert.equal(Object.hasOwn(loadAutomationSettings('speed-browser').settings.fleetSpeed,'dailyDiamondLimit'),false);
+    assert.equal(await city.locator('[data-config-number$="MaxDiamonds"]').count(),0,'维修和派遣不再显示单次或整段航程上限');
+    for(const fleet of loadAutomationSettings('speed-browser').settings.fleetSpeed.fleets){
+      assert.equal(Object.hasOwn(fleet,'repairMaxDiamonds'),false);assert.equal(Object.hasOwn(fleet,'marchMaxDiamonds'),false);
+    }
     assert.equal(await city.locator('details.config-field-section').count(),1);
     assert.equal(await globals.evaluate(section=>section.tagName),'DETAILS');
     assert.equal(await globalSummary.count(),1);
     assert.equal(await page.locator('#config-field-cityWar-targetMode').isVisible(),false,'全局策略默认收起');
     assert.equal(await page.locator('#config-field-cityWar-defenceTargetMode').isVisible(),false);
-    assert.equal(await globals.evaluate(section=>!!(document.getElementById('config-field-fleetSpeed-dailyDiamondLimit').compareDocumentPosition(section)&Node.DOCUMENT_POSITION_FOLLOWING)),true,'全局策略位于加速总预算之后');
+    assert.equal(await globals.evaluate(section=>!!(document.getElementById('config-field-fleetSpeed-enabled').compareDocumentPosition(section)&Node.DOCUMENT_POSITION_FOLLOWING)),true,'全局策略位于逐队加速总开关之后');
     assert.equal(await page.locator('#config-fields .config-disclosure[aria-expanded=true]').count(),0);
     assert.equal(await page.locator('[id^=config-field-fleetSpeed-fleets-2-]').count(),0);
     await city.screenshot({path:path.resolve('output/fleet-speed/default-levels-'+name+'.png')});
     const participants=city.locator('[data-config-branch="cityWar.fleetIds"]');
+    const speedMaster=page.locator('#config-field-fleetSpeed-enabled');
+    assert.equal(await speedMaster.getAttribute('aria-label'),'维修及派遣钻石加速总开关');
+    assert.equal(await participants.evaluate(node=>!!(document.getElementById('config-field-fleetSpeed-enabled').compareDocumentPosition(node)&Node.DOCUMENT_POSITION_FOLLOWING)),true,'加速总开关在逐队配置前展示');
     const participantDisclosure=participants.locator(':scope > .config-row .config-disclosure');
     const fleet=number=>city.locator('.config-war-fleet[data-fleet-id="'+number+'远征船"]');
     const disclosure=number=>fleet(number).locator('.config-war-role .config-disclosure');
@@ -81,6 +93,7 @@ try{
     assert.equal(await participantDisclosure.textContent(),'收起设置');
     assert.equal(await participantDisclosure.getAttribute('aria-expanded'),'true');
     assert.equal(await participants.locator('#config-field-cityWar-defenceFleetIds').isVisible(),true);
+    assert.equal(await page.locator('#config-field-cityWar-defenceFleetIds-label').isVisible(),false);
     assert.equal(await city.locator('[id^="config-section-fleetSpeed-fleets-"]').count(),0);
     for(const number of [1,2])for(const mode of ['repair','march']){
       const selector='#config-field-fleetSpeed-fleets-'+(number-1)+'-'+mode;
@@ -92,6 +105,60 @@ try{
     assert.equal(await strategy(1,'targetMode').isVisible(),false);
     await close(1);assert.equal(await strategy(1,'targetMode').isVisible(),false);
     await page.waitForTimeout(700);assert.equal(settingsWrites,writesBefore,'展开收起不写入配置');
+
+    // 保存的逐队开关不会绕过显式关闭的总开关；每项阻断都可定位到相应配置。
+    await open(1);
+    const speedStatus=mode=>page.locator('#config-field-fleetSpeed-fleets-0-'+mode+'-status');
+    const returnToCity=async()=>{await page.locator('[data-config-tab=world]').click();await page.locator('[data-config-group=cityWar]').click();};
+    for(const mode of ['repair','march'])assert.match(await speedStatus(mode).textContent(),/尚未生效：.*钻石加速总开关已关闭/);
+    await fleet(1).screenshot({path:path.resolve('output/fleet-speed/blocked-'+name+'.png')});
+    await speedStatus('repair').getByRole('button').click();
+    assert.equal(await speedMaster.evaluate(node=>node===document.activeElement),true);
+    assert.equal(await speedMaster.isChecked(),false,'前往设置只定位，不自动授权');
+    await page.waitForTimeout(700);assert.equal(settingsWrites,writesBefore);
+    await speedMaster.check();await saved();
+    assert.match(await speedStatus('repair').textContent(),/全局自动钻石消耗已关闭/);
+    await speedStatus('repair').getByRole('button').click();
+    const globalDiamonds=page.locator('#config-field-resources-allowDiamonds');
+    assert.equal(await globalDiamonds.evaluate(node=>node===document.activeElement),true);
+    assert.equal(await globalDiamonds.isChecked(),false);
+    await globalDiamonds.check();await saved();
+    await returnToCity();
+    // 全局预算与逐队预算各自生效，且修正提示会立即更新。
+    await page.locator('[data-config-tab=base]').click();await page.locator('[data-config-family=foundation]').click();
+    await page.locator('[data-config-group=resources]').click();
+    const globalBudget=page.locator('#config-field-resources-diamondDailyLimit');
+    const resourceDisclosure=page.locator('[data-config-branch="resources.allowDiamonds"] > .config-row .config-disclosure');
+    if(await resourceDisclosure.getAttribute('aria-expanded')!=='true')await resourceDisclosure.click();
+    await globalBudget.fill('0');await globalBudget.blur();await saved();await returnToCity();
+    assert.match(await speedStatus('repair').textContent(),/全局每日钻石预算为 0/);
+    await speedStatus('repair').getByRole('button').click();
+    assert.equal(await globalBudget.evaluate(node=>node===document.activeElement),true);
+    await globalBudget.fill('2000');await globalBudget.blur();await saved();await returnToCity();
+    for(const [mode,dailyLimit] of [['repair',100],['march',300]]){
+      assert.match(await speedStatus(mode).textContent(),/本项每日钻石上限为 0/);
+      await speedStatus(mode).getByRole('button').click();
+      const daily=page.locator('#config-field-fleetSpeed-fleets-0-'+mode+'DailyDiamonds');
+      assert.equal(await daily.evaluate(node=>node===document.activeElement),true);
+      await daily.fill(String(dailyLimit));await daily.blur();await saved();
+      assert.equal(loadAutomationSettings('speed-browser').settings.fleetSpeed.fleets[0][mode+'DailyDiamonds'],dailyLimit);
+      assert.equal(await speedStatus(mode).isVisible(),false,'允许加速时不显示常态说明');
+      assert.equal(await speedStatus(mode).getByRole('button').isVisible(),false);
+      assert.doesNotMatch(await page.locator('#config-field-fleetSpeed-fleets-0-'+mode+'DailyDiamonds-help').textContent(),/城战加速日上限|本项单次上限/);
+    }
+    const cityMaster=page.locator('#config-field-cityWar-enabled');
+    await cityMaster.uncheck();await saved();
+    for(const mode of ['repair','march'])assert.match(await speedStatus(mode).textContent(),/城战接续总开关已关闭/);
+    await cityMaster.check();await speedMaster.uncheck();await saved();
+    await page.reload();await page.locator('#tabs [data-tab=settings]').click();await returnToCity();await open(1);
+    assert.equal(await speedMaster.isChecked(),false,'刷新保留显式关闭');
+    for(const [mode,dailyLimit] of [['repair',100],['march',300]]){
+      assert.equal(await page.locator('#config-field-fleetSpeed-fleets-0-'+mode).isChecked(),true,'暂停保留逐队选项');
+      assert.match(await speedStatus(mode).textContent(),/钻石加速总开关已关闭/);
+      assert.equal(await page.locator('#config-field-fleetSpeed-fleets-0-'+mode+'DailyDiamonds').inputValue(),String(dailyLimit),'刷新保留维修与派遣各自的每日上限');
+      assert.equal(await page.locator('#config-field-fleetSpeed-fleets-0-'+mode+'MaxDiamonds').count(),0);
+    }
+    await speedMaster.check();await saved();await close(1);
 
     // 每队编辑各自的攻守目标，返回已保存值后立即清理旧错误。
     for(const [number,mode,refs] of [[1,'targetMode','cityRefs'],[2,'defenceTargetMode','defenceCityRefs']]){
@@ -169,7 +236,7 @@ try{
     assert.equal(configured.fleetStrategies['2远征船'].targetMode,ownSecond.targetMode);
     assert.equal(configured.fleetStrategies['2远征船'].targetPriority,ownSecond.targetPriority);
     assert.deepEqual(configured.fleetStrategies['2远征船'].cityRefs,ownSecond.cityRefs);
-    assert.match(await fleet(2).textContent(),/城市乙/,'跟随全局的提示即时反映新目标');
+    assert.equal(await fleet(2).locator('.config-war-inherited').count(),0,'跟随全局不再显示重复策略说明');
     assert.equal(await strategy(1,'targetMode').inputValue(),'selected');
     assert.match(await strategy(1,'cityRefs').locator('summary').textContent(),/城市甲/);
     await page.reload();await page.locator('#tabs [data-tab=settings]').click();
@@ -177,7 +244,7 @@ try{
     await open(1);await open(2);
     assert.equal(await strategy(1,'strategyMode').inputValue(),'custom');
     assert.equal(await strategy(2,'strategyMode').inputValue(),'global');
-    assert.equal(await strategy(2,'targetMode').isVisible(),false);assert.match(await fleet(2).textContent(),/城市乙/);
+    assert.equal(await strategy(2,'targetMode').isVisible(),false);
     await strategy(2,'strategyMode').selectOption('custom');await saved();
     assert.equal(await strategy(2,'targetMode').inputValue(),ownSecond.targetMode);
     assert.equal(await strategy(2,'targetPriority').inputValue(),ownSecond.targetPriority);

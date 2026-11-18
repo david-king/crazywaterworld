@@ -79,7 +79,7 @@ async function showWorldMapTarget(point,refresh=false){
   const info=await call('/api/world/target?layer='+encodeURIComponent(point.layer)+'&key='+encodeURIComponent(point.key));if(owner!==current||!detail.isConnected)return;clear(detail);
   if(info.fuel!==null&&info.fuel!==undefined)detail.append(el('p','','汽油库存 '+fmt(info.fuel)+(info.cost!==null&&info.cost!==undefined?' · 单队费用 '+fmt(info.cost):'')));
   for(const note of info.notes??[])if(note)detail.append(el('p','',note));
-  if(info.fleets?.length)detail.append(table(['舰队','当前条件'],info.fleets.map(f=>[f.name||f.buildingId,f.reason||'基础条件符合，仍需核对目标与预算'])));
+  if(info.fleets?.length)detail.append(table(['舰队','当前条件'],info.fleets.map(f=>[f.name||f.buildingId,f.reason||'基础条件符合，仍需核对目标与可用资源'])));
   for(const action of info.actions??[])detail.append(el('p','',action.label+' · '+(action.costs??[]).map(c=>(c.name||c.id)+' '+c.num).join('、')));
  }catch(error){if(detail.isConnected)detail.textContent='目标详情未同步：'+error.message;}
 }

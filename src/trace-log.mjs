@@ -1,12 +1,12 @@
 import fs from 'node:fs';
 import path from 'node:path';
 
-const secretKey = /(?:password|passwd|pwd|token|secret|sign|signature|sessionkey|authorization|cookie|openid|unionid|phone|mobile|credentials|login|loginframehex)$/i;
+const secretKey = /(?:password|passwd|pwd|token|secret|sign|signature|sessionkey|sessionid|authorization|cookie|openid|unionid|phone|mobile|credentials|login|loginframehex|anonymouscode|cloudcode|qrimage)$/i;
 
 export function redactText(value) {
   return value
     .replace(/\b(Bearer\s+)[^\s"'<>]+/gi, '$1[已脱敏]')
-    .replace(/(["']?)\b((?:access[_-]?|refresh[_-]?)?token|password|passwd|pwd|secret|sign|signature|session[_-]?key|authorization|cookie|open[_-]?id|union[_-]?id|phone|mobile|loginFrameHex)\1\s*[:=]\s*(?:"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|[^\s&,;]+)/gi, '$1$2$1=[已脱敏]')
+    .replace(/(["']?)\b((?:access[_-]?|refresh[_-]?)?token|password|passwd|pwd|secret|sign|signature|(?:host[_-]?)?session[_-]?(?:key|id)|anonymous[_-]?code|cloud[_-]?(?:anonymous[_-]?)?code|authorization|cookie|open[_-]?id|union[_-]?id|phone|mobile|loginFrameHex)\1\s*[:=]\s*(?:"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|[^\s&,;]+)/gi, '$1$2$1=[已脱敏]')
     .replace(/(https?:\/\/|wss?:\/\/)[^\s/@]+:[^\s/@]+@/gi, '$1[已脱敏]@');
 }
 
@@ -14,7 +14,8 @@ export function redactText(value) {
 export function traceJson(value) {
   const ancestors = [];
   return JSON.stringify(value, function (key, item) {
-    if (secretKey.test(key.replace(/[_-]/g, ''))) return '[已脱敏]';
+    const normalizedKey = key.replace(/[_-]/g, '');
+    if (secretKey.test(normalizedKey) || (normalizedKey.toLowerCase() === 'code' && typeof item === 'string')) return '[已脱敏]';
     if (typeof item === 'string') return redactText(item);
     if (typeof item === 'bigint') return item.toString();
     if (item instanceof Error) return { name: item.name, message: redactText(item.message), stack: redactText(item.stack ?? '') };

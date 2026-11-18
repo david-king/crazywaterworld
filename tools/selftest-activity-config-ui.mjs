@@ -52,12 +52,22 @@ await test('服务端已过滤任务时静态联动与广告入口仍隐藏', ()
   assert(groups.find(group => group.id === 'ad-rewards').fields.some(field => field.key === 'schedule.adShop'));
 });
 
-await test('周期、风采、新手及其他任务不受联动下线影响', () => {
+await test('周期、新手及其他任务不受联动下线影响', () => {
   const keys = new Set(keysOf(renderGroups(dataFor())));
-  for (const key of ['armsRaceRewards', 'beautyVotes', 'beautyGift', 'newbieLogin', 'pirateRankRewards', 'warRankRewards']) {
+  for (const key of ['armsRaceRewards', 'newbieLogin', 'pirateRankRewards', 'warRankRewards']) {
     assert(keys.has('schedule.' + key), key);
   }
   assert(keys.has('building.enabled'));
+});
+
+await test('风采大赛细项归活动页，复开和动态补齐不恢复固定页签，原设置保留', () => {
+  for (const data of [dataFor(), dataFor([])]) {
+    Object.assign(data.settings.schedule, { beautyVotes: true, beautyGift: false });
+    const before = structuredClone(data), groups = renderGroups(data);
+    assert(!groups.some(group => group.id === 'beauty-contest'));
+    for (const key of ['schedule.beautyVotes', 'schedule.beautyGift']) assert(!keysOf(groups).includes(key));
+    assert.deepEqual(data, before);
+  }
 });
 
 await test('商人三个开关在活动页编辑，静态配置与任务补齐不会生成重复入口', () => {
@@ -108,11 +118,12 @@ const loadSource = script.slice(script.indexOf('async function configLoad('), sc
 const saveSource = script.slice(script.indexOf('function configSave('), script.indexOf('async function configImportFile('));
 const clearErrorsSource = script.slice(script.indexOf('function configClearErrors('), script.indexOf('function configSet('));
 const dirtySource = script.slice(script.indexOf('function configIsDirty('), script.indexOf('function configVisible('));
+const compatibilitySource = script.slice(script.indexOf('function configCompatibilityMessage('), script.indexOf('function configBusy('));
 const page = fs.readFileSync(new URL('../src/page.mjs', import.meta.url), 'utf8');
 const toggleSource = page.slice(page.indexOf('async function toggleAutoTask('), page.indexOf('async function saveLoopInterval('));
 function loadFixture(initial = dataFor([])) {
   const state = { next: structuredClone(initial), renders: [], usageRenders: 0, messages: [], calls: [] };
-  const api = newStateFunction('state', 'renderGroups', definitions + '\n' + clearErrorsSource + '\n' + dirtySource + '\n' + loadSource + '\n' + saveSource + '\n' + toggleSource + `
+  const api = newStateFunction('state', 'renderGroups', definitions + '\n' + clearErrorsSource + '\n' + dirtySource + '\n' + compatibilitySource + '\n' + loadSource + '\n' + saveSource + '\n' + toggleSource + `
     const current = 'isolated-account', accounts = [];
     const savingTasks = new Set(), loopIntervalSaves = new Map();
     let loopVersion = 0, loopSettingsRevision = 7;

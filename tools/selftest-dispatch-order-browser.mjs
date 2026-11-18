@@ -72,10 +72,11 @@ try {
   observe(page); await page.goto(base); await openConfig(page);
   assert.deepEqual(await displayedOrder(page), original);
   const labels = await page.locator(rowSelector + ' .config-order-name').allTextContents();
-  assert.equal(labels.length, 7); assert(labels.every(label => label.trim().length > 0));
+  assert.equal(labels.length, 8); assert(labels.every(label => label.trim().length > 0));
   assert.equal(labels[6], '硅矿采集');
-  assert.equal(await page.getByRole('button', { name: '硅矿采集下移', exact: true }).isDisabled(), true);
-  console.log('通过：默认七项完整显示，第七项硅矿采集名称与无障碍按钮完整');
+  assert.equal(labels[7], '资源田占领');
+  assert.equal(await page.getByRole('button', { name: '资源田占领下移', exact: true }).isDisabled(), true);
+  console.log('通过：默认八项完整显示，硅矿和资源田名称与无障碍按钮完整');
 
   const mouse = await points(page, 'silicon', 0);
   const beforeMouse = posts;

@@ -6,7 +6,7 @@ const schedules = new WeakMap();
 // 红点类型与自动领奖任务的兼容映射，保留旧版事件驱动调度入口。
 export const redPointTasks = {
   33: 'crossRankDaily', 41: 'treasureLoot', 42: 'guildAidCollect', 43: 'guildAidHelp', 53: 'tradeTasks',
-  64: 'guildTitleReward', 65: 'museumRevenue',
+  64: 'guildTitleReward', 65: 'museum.revenue',
 };
 const day = 86400;
 const beijing = 8 * 3600;
@@ -94,8 +94,8 @@ export function rewardSchedule(client) {
       case 'SCUpdateWaterBuilding':
         clearTasks(['equipmentCollect', 'equipmentCraft', 'petCollect', 'petBreed', 'museumCollect', 'museumExplore']);
         break;
-      case 'SCMuseumPopularityChanged': clearTasks(['museumCollect', 'museumExplore', 'museumAchievements']); break;
-      case 'SCMuseumRevenueUpdate': clearTask('museumRevenue'); break;
+      case 'SCMuseumPopularityChanged': clearTasks(['museumCollect', 'museumExplore', 'museumAchievements', 'museum.enabled', 'museum.achievements']); break;
+      case 'SCMuseumRevenueUpdate': clearTasks(['museumRevenue', 'museum.revenue']); break;
       case 'SCTradeGuildTask': clearTask('tradeTasks'); break;
       case 'SCNewGuildWelfarePack': clearTask('guildWelfare'); break;
       case 'SCOrderOfTheDay': clearTask('orderDaily'); break;

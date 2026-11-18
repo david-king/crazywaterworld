@@ -4,10 +4,12 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { defaultSettings, validateSettings, saveAutomationSettings, loadAutomationSettings, importAutomationSettings, exportAutomationSettings } from '../src/automation-settings.mjs';
+import { SETTINGS_SCHEMA_VERSION, defaultSettings, validateSettings, saveAutomationSettings, loadAutomationSettings, importAutomationSettings, exportAutomationSettings } from '../src/automation-settings.mjs';
 
 const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'cw-settings-autosave-'));
 const script = fs.readFileSync(new URL('../src/settings-ui.js', import.meta.url), 'utf8');
+const pageSource = fs.readFileSync(new URL('../src/page.mjs', import.meta.url), 'utf8');
+const renderLoopSource = pageSource.slice(pageSource.indexOf('function renderLoop('), pageSource.indexOf('let loopReads = 0;'));
 const section = (from, to) => {
   const start = script.indexOf(from), end = script.indexOf(to, start);
   assert(start >= 0 && end > start, from);
@@ -17,9 +19,10 @@ const sources = [
   section('// 游戏配置编辑器', 'function configGet('),
   section('function configGet(', 'function configRevealTab('),
   section('function configRevealSection(', 'function configRender()'),
-  section('async function configLoad(', 'async function configRefreshPlayers('),
+  section('function configSyncRecovery(', 'async function configRefreshPlayers('),
   section('function configSave(', 'async function configExport('),
   section('async function configExport(', 'async function configPreview('),
+  section('async function configPreview(', "$('config-form').onsubmit"),
 ].join('\n');
 const settle = async () => { for (let i = 0; i < 30; i++) await Promise.resolve(); };
 const deferred = () => { let resolve; const promise = new Promise(r => { resolve = r; }); return { promise, resolve }; };
@@ -37,12 +40,17 @@ function fixture({ catalog = {} } = {}) {
     });
     return nodes.get(id);
   };
-  const view = account => ({ ...loadAutomationSettings(account, { file }), catalog, rules: {}, tasks: [], usage: {}, pendingUsage: {}, running: false });
+  const view = account => {
+    const saved = loadAutomationSettings(account, { file });
+    return { ...saved, catalog, rules: {}, tasks: [], usage: {}, pendingUsage: {}, running: false,
+      recoveryToken: env.recovery[account] ? 'recovery:' + account + ':' + saved.revision : null,
+      ...(env.recovery[account] ? { recovery: structuredClone(env.recovery[account]) } : {}) };
+  };
   const env = {
-    node, calls: [], downloads: [], renders: 0, focuses: 0, confirmations: 0, failPosts: 0, inFlight: 0, maxInFlight: 0,
+    node, calls: [], downloads: [], renders: 0, focuses: 0, confirmations: 0, failPosts: 0, inFlight: 0, maxInFlight: 0, recovery: {}, confirmResult: false, stale: false,
     setTimeout(callback, delay) { const id = ++timerId; timers.set(id, { at: now + delay, callback }); return id; },
     clearTimeout(id) { timers.delete(id); },
-    confirm() { env.confirmations++; return false; },
+    confirm() { env.confirmations++; return env.confirmResult; },
     async call(account, route, options) {
       const payload = options?.body ? JSON.parse(options.body) : null;
       env.calls.push({ account, route, payload });
@@ -57,7 +65,9 @@ function fixture({ catalog = {} } = {}) {
       try {
         if (env.failPosts-- > 0) throw new TypeError('模拟网络断开');
         await env.beforePost?.(payload);
+        if (env.recovery[account] && payload.recoveryToken !== view(account).recoveryToken) throw Object.assign(new Error('配置已恢复，请重新载入'), { fields: { revision: '恢复标识已变化，请重新载入' } });
         saveAutomationSettings(account, payload.settings, { file, revision: payload.revision });
+        delete env.recovery[account];
         const data = view(account);
         await env.onPost?.(payload);
         return data;
@@ -65,9 +75,12 @@ function fixture({ catalog = {} } = {}) {
     },
   };
   const api = newStateFunction('env', sources + `
-    let current = 'a', loopSettingsRevision = 1, loopFieldDefaults = null;
+    let current = 'a', loopSettingsRevision = 1, loopFieldDefaults = null, loopAccount = null, accountStatusRevision = 0, snapshot = {};
+    stateActions.replaceAccounts([{id:'a',status:{}},{id:'b',status:{}}],'a');
     const accounts = [], $ = env.node, window = { confirm: env.confirm }, loopIntervalSaves = new Map();
     const document = { body: { append() {} }, createElement: () => ({ click() {}, remove() {} }) };
+    window.document = document; window.cwConsoleVersion = { isStale: () => env.stale };
+    const consoleDraftFormat = {format:'crazywaterworld-automation',version:${SETTINGS_SCHEMA_VERSION}};
     const URL = { createObjectURL(blob) { env.downloads.push(blob); return 'blob:settings-fixture'; }, revokeObjectURL() {} };
     const setTimeout = env.setTimeout, clearTimeout = env.clearTimeout;
     const call = (route, options) => env.call(current, route, options);
@@ -77,13 +90,19 @@ function fixture({ catalog = {} } = {}) {
     const resetWorldMap = () => {};
     const configWeeklyRankingReset = () => {};
     const configWeeklyRankingSync = () => {};
+    const renderAutomationOverview = () => {}, renderPirateAdvance = () => {}, renderHostingControl = () => {}, paintConnection = () => {}, renderAccounts = () => {};
     const clear = node => node, el = () => ({});
+    ${renderLoopSource}
     return {
-      editor: configEditor, groups: configGroups, strategyFields: cityWarStrategyFields, set: configSet, load: configLoad, save: configSave, flush: configFlush,
+      editor: configEditor, groups: configGroups, strategyFields: cityWarStrategyFields, set: configSet, load: configLoad, reload: configReload, save: configSave, flush: configFlush,
+      message: configMessage, compatibilityMessage: configCompatibilityMessage,
+      expire() { env.stale = true; configVersionStale(); }, preview: configPreview,
+      renderLoop,
       dirty: configIsDirty, importFile: configImportFile, exportFile: configExport, mayChange: configMayChangeAccount,
       revision: () => loopSettingsRevision,
       setLoopRevision(revision) { loopSettingsRevision = revision; },
       intervalSaved: configIntervalSaved,
+      compatibilityMessage: configCompatibilityMessage,
       intervalSaves: loopIntervalSaves,
       change(next) { current = next; configAccountChanged(); },
     };
@@ -103,6 +122,197 @@ function fixture({ catalog = {} } = {}) {
     },
   };
 }
+
+await test('页面过期立即冻结自动保存并保留草稿，导入预览和flush不再发送请求', async () => {
+  const f = fixture(); await f.load(); f.set('factory.keepStock', 321);
+  const draft = structuredClone(f.editor.draft), calls = f.env.calls.length; f.expire();
+  await f.tick(10000); assert.equal(await f.flush(), false); assert.equal(await f.save(), false);
+  await f.importFile({target:{files:[{size:20,text:async()=>JSON.stringify(exportAutomationSettings(defaultSettings()))}]}});
+  await f.preview(); await f.load(); await f.reload();
+  assert.equal(f.env.calls.length, calls); assert.deepEqual(f.editor.draft, draft);
+  assert.match(f.node('config-state').textContent, /页面已过期/); assert.match(f.node('config-message').textContent, /草稿.*保留/);
+  assert.equal(f.node('config-import').disabled, true); assert.equal(f.node('config-preview').disabled, true);
+  f.compatibilityMessage({compatibility:null}); assert.match(f.node('config-message').textContent, /页面已过期/);
+  f.set('factory.keepStock', 654); await f.tick(10000); assert.equal(f.posts().length, 0);
+});
+
+await test('过期页面可在本地下载当前未校验草稿，不依赖服务器validate', async () => {
+  const f = fixture(); await f.load(); f.set('factory.keepStock', null); f.expire();
+  const calls = f.env.calls.length; await f.exportFile();
+  assert.equal(f.env.calls.length, calls); assert.equal(f.env.downloads.length, 1);
+  const exported = JSON.parse(await f.env.downloads[0].text());
+  assert.equal(exported.format, 'crazywaterworld-automation'); assert.equal(exported.version, SETTINGS_SCHEMA_VERSION);
+  assert.deepEqual(exported.settings, f.editor.draft); assert.equal(exported.settings.factory.keepStock, null);
+  assert.match(f.node('config-message').textContent, /页面已过期.*\n.*未发送到服务器/s);
+});
+
+await test('保存成功响应晚于页面过期时不覆盖草稿基线也不显示同步成功', async () => {
+  const f = fixture(); await f.load(); const baseline = structuredClone(f.editor.baseline);
+  f.set('factory.keepStock', 321); const pending = deferred(); f.env.onPost = () => pending.promise;
+  const save = f.save(); await settle(); f.expire(); f.set('factory.keepStock', 654);
+  pending.resolve(); assert.equal(await save, false);
+  assert.deepEqual(f.editor.baseline, baseline); assert.equal(f.editor.draft.factory.keepStock, 654);
+  assert.match(f.node('config-state').textContent, /页面已过期/); assert.doesNotMatch(f.node('config-state').textContent, /配置已同步/);
+  await f.tick(30000); assert.equal(f.posts().length, 1, '已过期不能重试或继续保存后一批');
+});
+
+await test('设置读取晚于版本变化时不把新服务配置套入旧页面', async () => {
+  const f = fixture(); await f.load(); const old = structuredClone(f.editor.draft), pending = deferred();
+  const changed = structuredClone(f.view('a').settings); changed.factory.keepStock = 789;
+  saveAutomationSettings('a', changed, {file:f.file,revision:f.view('a').revision});
+  f.env.onGet = () => pending.promise; const loading = f.load(); await settle(); f.expire(); pending.resolve(); await loading;
+  assert.deepEqual(f.editor.draft, old); assert.match(f.node('config-state').textContent, /页面已过期/);
+});
+
+await test('配置丢失或损坏首次载入关闭默认值，恢复警告持续至重新配置保存', async () => {
+  for (const reason of ['missing', 'corrupt']) {
+    const f = fixture();
+    f.env.recovery.a = { required: true, reason, message: '需要重新配置', ...(reason === 'corrupt' ? { backupFile: 'C:\\备份\\配置损坏.json' } : {}) };
+    await f.load();
+    assert.deepEqual(f.editor.draft, defaultSettings());
+    assert.equal(f.editor.recoveryBlocked, false);
+    assert.match(f.node('config-message').textContent, reason === 'missing' ? /配置丢失/ : /配置损坏/);
+    assert.match(f.node('config-message').textContent, /已恢复关闭的默认配置.*自动挂机已停止.*重新配置并保存后手动启动/);
+    if (reason === 'corrupt') assert(f.node('config-message').textContent.includes(f.env.recovery.a.backupFile));
+    assert.match(f.node('config-state').textContent, /请重新配置保存/);
+    f.message(''); f.compatibilityMessage({ compatibility: null });
+    assert.equal(f.node('config-message').hidden, false); assert.equal(f.node('config-message').dataset.kind, 'error');
+    f.set('factory.keepStock', 123);
+    assert.match(f.node('config-message').textContent, /自动挂机已停止/);
+    const recoveryToken = f.editor.data.recoveryToken;
+    await f.tick(600);
+    assert.equal(f.posts().length, 1); assert.equal(f.editor.data.recovery, undefined);
+    assert.equal(f.posts()[0].payload.recoveryToken, recoveryToken); assert.equal(f.editor.data.recoveryToken, null);
+    assert.equal(f.node('config-message').hidden, true);
+    assert.equal(f.view('a').settings.factory.enabled, false);
+    assert(f.env.calls.every(call => ['/api/settings', '/api/settings?fleets=1', '/api/loop'].includes(call.route)), '保存不会调用启动接口');
+  }
+});
+
+await test('无未保存草稿时发现配置恢复，直接显示关闭的默认配置', async () => {
+  const f = fixture(), old = f.view('a'); old.settings.factory.enabled = true;
+  saveAutomationSettings('a', old.settings, { file: f.file, revision: old.revision }); await f.load();
+  saveAutomationSettings('a', defaultSettings(), { file: f.file, revision: f.view('a').revision });
+  f.env.recovery.a = { required: true, reason: 'missing', message: '重新配置' };
+  await f.load();
+  assert.equal(f.editor.draft.factory.enabled, false); assert.equal(f.editor.recoveryBlocked, false);
+  assert.equal(f.editor.data.revision, f.view('a').revision); assert.equal(f.posts().length, 0);
+  const g = fixture(); await g.load();
+  g.env.recovery.a = { required: true, reason: 'missing' }; await g.load();
+  assert.equal(g.editor.recoveryBlocked, false, '旧值恰好也是默认值时不强迫丢弃草稿');
+  assert.match(g.node('config-state').textContent, /请重新配置保存/);
+});
+
+await test('配置恢复保留旧草稿但冻结自动保存，确认重新载入后才能保存新配置', async () => {
+  const f = fixture(); await f.load(); f.set('factory.enabled', true);
+  const old = structuredClone(f.editor.draft);
+  saveAutomationSettings('a', defaultSettings(), { file: f.file, revision: f.view('a').revision });
+  f.env.recovery.a = { required: true, reason: 'corrupt', message: '重新配置', backupFile: 'C:\\备份\\损坏.json' };
+  await f.load();
+  assert.deepEqual(f.editor.draft, old); assert.equal(f.editor.recoveryBlocked, true);
+  assert.equal(f.editor.data.recoveryToken, f.view('a').recoveryToken);
+  assert.match(f.node('config-message').textContent, /未生效的旧草稿.*自动保存已暂停/);
+  assert.match(f.node('config-state').textContent, /旧草稿未生效/);
+  assert.equal(f.editor.recoveryReloadButton.disabled, false);
+  await f.tick(10000); assert.equal(f.posts().length, 0);
+  f.set('factory.keepStock', 456); await f.tick(10000);
+  assert.equal(await f.save(), false); assert.equal(await f.flush(), false); assert.equal(f.posts().length, 0);
+  await f.load(); assert.equal(f.editor.recoveryBlocked, true, '再次读取同一恢复状态不解除保护');
+  await f.reload(); assert.equal(f.env.confirmations, 1); assert.equal(f.editor.draft.factory.keepStock, 456);
+  f.env.confirmResult = true; await f.reload();
+  assert.equal(f.env.confirmations, 2); assert.equal(f.editor.recoveryBlocked, false); assert.deepEqual(f.editor.draft, defaultSettings());
+  assert.match(f.node('config-message').textContent, /自动挂机已停止/);
+  assert.doesNotMatch(f.node('config-message').textContent, /未生效的旧草稿/);
+  const recoveryToken = f.editor.data.recoveryToken;
+  f.set('factory.keepStock', 789); await f.tick(600);
+  assert.equal(f.posts().length, 1); assert.equal(f.view('a').settings.factory.keepStock, 789);
+  assert.equal(f.posts()[0].payload.recoveryToken, recoveryToken); assert.equal(f.editor.data.recoveryToken, null);
+  assert.equal(f.view('a').settings.factory.enabled, false); assert.equal(f.node('config-message').hidden, true);
+});
+
+await test('恢复重载期间继续编辑保留草稿和保护，切换账号不沿用恢复警告', async () => {
+  const f = fixture(); await f.load(); f.set('factory.keepStock', 123);
+  f.env.recovery.a = { required: true, reason: 'missing' }; await f.load();
+  f.env.confirmResult = true;
+  const reading = deferred(); f.env.onGet = () => reading.promise;
+  const reload = f.reload(); await settle(); f.set('factory.keepStock', 456);
+  reading.resolve(); await reload;
+  assert.equal(f.editor.draft.factory.keepStock, 456); assert.equal(f.editor.recoveryBlocked, true);
+  await f.tick(2000); assert.equal(f.posts().length, 0);
+  f.env.onGet = null; f.change('b'); await f.load();
+  assert.equal(f.editor.recoveryBlocked, false); assert.equal(f.node('config-message').hidden, true);
+  f.set('factory.keepStock', 789); await f.tick(600); assert.equal(f.posts().length, 1); assert.equal(f.posts()[0].account, 'b');
+});
+
+await test('恢复标识变化仍冻结草稿，相同配置版本的旧页面不能确认恢复', async () => {
+  const f = fixture(); await f.load(); f.set('factory.enabled', true);
+  f.env.recovery.a = { required: true, reason: 'missing' };
+  await f.tick(600);
+  assert.equal(f.posts()[0].payload.recoveryToken, null);
+  assert(f.editor.saveError.fields.revision); assert.equal(f.view('a').settings.factory.enabled, false);
+  await f.load(); assert.equal(f.editor.recoveryBlocked, true); assert.equal(f.editor.data.recoveryToken, f.view('a').recoveryToken);
+  f.env.confirmResult = true; await f.reload(); f.set('factory.keepStock', 123);
+  const priorToken = f.editor.data.recoveryToken;
+  saveAutomationSettings('a', defaultSettings(), { file: f.file, revision: f.view('a').revision });
+  await f.load();
+  assert.notEqual(f.editor.data.recoveryToken, priorToken); assert.equal(f.editor.recoveryBlocked, true);
+  assert.equal(f.editor.draft.factory.keepStock, 123, '同一恢复原因的新事件仍保留旧草稿');
+  await f.tick(600); assert.equal(f.posts().length, 1, '已获取新标识也不能绕过明确重载');
+});
+
+await test('不兼容版本或权限失败保留原文件，页面不声称已恢复默认配置', async () => {
+  const f = fixture();
+  const message = '配置版本高于当前程序；自动挂机已停止，原文件未覆盖，请使用兼容版本后重新配置。';
+  f.env.recovery.a = { required: true, reason: 'unavailable', message }; await f.load();
+  assert(f.node('config-message').textContent.startsWith(message));
+  assert.doesNotMatch(f.node('config-message').textContent, /已恢复.*默认/);
+  assert.match(f.node('config-state').textContent, /配置暂不可用/);
+  f.set('factory.keepStock', 123); await f.tick(3000);
+  assert.equal(f.posts().length, 0); assert.equal(await f.flush(), false);
+  f.compatibilityMessage({ compatibility: null }); assert(f.node('config-message').textContent.startsWith(message));
+});
+
+await test('运行状态轮询发现恢复时立即冻结已打开设置页的旧草稿，只读取一次新状态', async () => {
+  const f = fixture(); await f.load(); f.node('tab-settings').classList.contains = () => false;
+  f.set('factory.enabled', true);
+  saveAutomationSettings('a', defaultSettings(), { file: f.file, revision: f.view('a').revision });
+  f.env.recovery.a = { required: true, reason: 'missing' };
+  const runtime = () => ({ settingsRecovery: f.env.recovery.a, settingsRevision: f.view('a').revision, everyMs: 60000, completed: 0, running: false });
+  const reads = () => f.env.calls.filter(call => call.route === '/api/settings?fleets=1').length;
+  const initialReads = reads(), pending = deferred(); f.env.onGet = () => pending.promise;
+  f.renderLoop(runtime());
+  assert.equal(f.editor.recoveryBlocked, true); assert.match(f.node('loop-hint').textContent, /配置丢失.*重新配置/);
+  assert.match(f.node('config-message').textContent, /旧草稿.*自动保存已暂停/);
+  await f.tick(3000); assert.equal(f.posts().length, 0, '读取未完成也必须先取消旧定时保存');
+  f.renderLoop(runtime()); assert.equal(reads(), initialReads + 1, '轮询不能并发重复读取');
+  pending.resolve(); await settle();
+  assert.equal(f.editor.draft.factory.enabled, true); assert.equal(f.editor.recoveryBlocked, true);
+  assert.notEqual(f.editor.data.revision, runtime().settingsRevision, '保留旧草稿版本，不替它领取新版本');
+  f.renderLoop(runtime()); await settle(); f.renderLoop(runtime()); await settle();
+  assert.equal(reads(), initialReads + 1, '已核对恢复状态不因旧草稿版本不同而反复读取');
+  f.env.onGet = null;
+  saveAutomationSettings('a', defaultSettings(), { file: f.file, revision: f.view('a').revision });
+  f.renderLoop(runtime()); await settle(); assert.equal(reads(), initialReads + 2, '新的恢复版本仍需重新核对');
+  f.env.recovery.a = { ...f.env.recovery.a, id: 'another-recovery' };
+  f.renderLoop(runtime()); await settle(); assert.equal(reads(), initialReads + 3, '同版本的新恢复事件由独立标识区分');
+  assert.equal(f.posts().length, 0);
+});
+
+await test('恢复同步读取失败可在下次轮询重试，隐藏设置页仅显示页头警告', async () => {
+  const f = fixture(); await f.load(); f.node('tab-settings').classList.contains = () => false;
+  f.set('factory.keepStock', 123); f.env.recovery.a = { required: true, reason: 'corrupt', backupFile: 'C:\\很长的备份目录\\'.repeat(20) + '损坏.json' };
+  const runtime = { settingsRecovery: f.env.recovery.a, settingsRevision: f.view('a').revision, everyMs: 60000, completed: 0, running: false };
+  f.env.onGet = () => { throw new Error('临时读取失败'); }; f.renderLoop(runtime); await settle();
+  assert.equal(f.editor.recoveryBlocked, true); assert.match(f.node('config-message').textContent, /临时读取失败/);
+  f.env.onGet = null; f.renderLoop(runtime); await settle();
+  assert.equal(f.editor.data.recovery.reason, 'corrupt'); assert.equal(f.editor.recoverySync.complete, true);
+  assert(f.node('config-message').textContent.includes(f.env.recovery.a.backupFile));
+  assert(!f.node('loop-hint').textContent.includes(f.env.recovery.a.backupFile), '页头只保留短警告，备份详情留在配置页');
+  const g = fixture(); await g.load(); const reads = g.env.calls.length;
+  g.renderLoop(runtime); await settle();
+  assert.equal(g.env.calls.length, reads, '设置页隐藏时不额外读取');
+  assert.match(g.node('loop-hint').textContent, /配置损坏.*自动挂机已停止/);
+});
 
 await test('页头间隔保存同步配置版本，后续草稿保存保留新间隔', async () => {
   const f = fixture();
@@ -329,6 +539,104 @@ await test('跨字段校验失败不会循环提交，修正后自动重试', as
   assert.equal(f.posts().length, 2); assert.equal(f.view('a').settings.treasure.enabled, true); assert(!f.dirty());
 });
 
+function followValidationView(f) {
+  const key = 'treasure.followNames', attributes = new Map(), error = { hidden: true };
+  let scrolls = 0;
+  const control = { setAttribute: (name, value) => attributes.set(name, value), removeAttribute: name => attributes.delete(name),
+    focus() { f.env.focuses++; } };
+  f.editor.widgets.set(key, { row: { querySelectorAll: () => [], scrollIntoView() { scrolls++; } }, control, error,
+    clearError() { error.hidden = true; control.removeAttribute('aria-invalid'); } });
+  f.node('config-message').scrollIntoView = () => { scrolls++; };
+  return {
+    visible(label) {
+      assert(f.editor.errors[key], label + '：跟随名单错误仍保留');
+      assert.equal(error.hidden, false, label + '：字段提示持续显示');
+      assert.equal(attributes.get('aria-invalid'), 'true', label);
+      assert.equal(f.node('config-message').hidden, false, label + '：顶部错误提示持续显示');
+      assert.equal(f.node('config-message').dataset.kind, 'error', label);
+      assert.equal(f.env.focuses, 0, label + '：不抢焦点');
+      assert.equal(scrolls, 0, label + '：不滚动页面');
+    },
+    cleared() {
+      assert.deepEqual(f.editor.errors, {});
+      assert.equal(error.hidden, true);
+      assert.equal(attributes.has('aria-invalid'), false);
+      assert.equal(f.node('config-message').hidden, true);
+      assert.equal(f.env.focuses, 0);
+      assert.equal(scrolls, 0);
+    },
+  };
+}
+
+await test('跟随名单仍为空时，连续修改其他配置及等待失败响应都不闪烁错误提示', async () => {
+  const f = fixture(); await f.load(); const ui = followValidationView(f), renders = f.env.renders;
+  f.set('treasure.follow', true); await f.tick(600); ui.visible('首次校验失败');
+  const message = f.node('config-message').textContent;
+  for (const [key, value] of [['treasure.repeatAttack', true], ['treasure.followMode', 'eachTime'],
+    ['factory.keepStock', 61], ['treasure.onlyTenThousand', true]]) {
+    const gate = deferred(); f.env.beforePost = () => gate.promise;
+    const priorPosts = f.posts().length;
+    f.set(key, value); ui.visible(key + ' 编辑后');
+    f.compatibilityMessage(f.editor.data); ui.visible(key + ' 后台状态刷新后');
+    if (key === 'treasure.repeatAttack') {
+      const poll = deferred(); f.env.onGet = () => poll.promise;
+      const loading = f.load(); ui.visible('保留草稿的后台配置读取中');
+      f.env.onGet = null; poll.resolve(); await loading; ui.visible('后台配置读取完成');
+    }
+    await f.tick(599); ui.visible(key + ' 等待自动保存');
+    assert.equal(f.posts().length, priorPosts);
+    await f.tick(1); assert(f.editor.saving); ui.visible(key + ' 请求进行中');
+    assert.equal(f.posts().length, priorPosts + 1);
+    assert.equal(f.node('config-message').textContent, message);
+    f.env.beforePost = null; gate.resolve(); await settle(); ui.visible(key + ' 再次校验失败');
+  }
+  assert.equal(f.env.renders, renders);
+  assert.equal(f.view('a').settings.treasure.follow, false, '无效草稿不落盘');
+  await f.tick(10000); assert.equal(f.posts().length, 5, '失败后等待输入，不循环请求');
+});
+
+await test('在失败请求中补齐昵称、角色ID或关闭跟随后，旧错误保留至新校验成功且不阻塞保存', async () => {
+  for (const [key, value] of [['treasure.followNames', ['海上的风']], ['treasure.followPlayerIds', ['9007199254740999']], ['treasure.follow', false]]) {
+    const f = fixture(); await f.load(); const ui = followValidationView(f);
+    f.set('treasure.follow', true); await f.tick(600); ui.visible('首次校验失败');
+    const failed = deferred(); f.env.beforePost = () => failed.promise;
+    f.set('factory.keepStock', 62); await f.tick(600); assert(f.editor.saving); ui.visible('旧草稿校验进行中');
+    f.set(key, value); assert(f.dirty(), '保留其他修改，不能通过还原基线绕过验证');
+    ui.visible('修正后等待响应');
+    const corrected = deferred(); f.env.beforePost = () => corrected.promise;
+    failed.resolve(); await settle();
+    assert.equal(f.editor.saveError, null, '迟到的旧草稿失败不能阻止新草稿自动保存');
+    ui.visible('忽略旧失败结果');
+    await f.tick(600); assert(f.editor.saving); ui.visible('新草稿校验进行中');
+    assert.equal(f.posts().length, 3);
+    f.env.beforePost = null; corrected.resolve(); await settle();
+    assert(!f.dirty()); ui.cleared();
+    assert.equal(f.editor.saveError, null);
+    assert.deepEqual(f.view('a').settings, validateSettings(f.editor.draft));
+    await f.tick(10000); assert.equal(f.posts().length, 3);
+  }
+});
+
+await test('旧有效草稿保存成功时，仍有错误的新草稿保持提示直至重新校验或还原已保存值', async () => {
+  const f = fixture(); await f.load(); const ui = followValidationView(f);
+  f.set('treasure.follow', true); await f.tick(600); ui.visible('首次校验失败');
+  const valid = deferred(); f.env.onPost = () => valid.promise;
+  f.set('treasure.followNames', ['海上的风']); await f.tick(600);
+  assert(f.editor.saving); assert.deepEqual(f.view('a').settings.treasure.followNames, ['海上的风']);
+  ui.visible('有效草稿等待保存响应');
+  f.set('treasure.followNames', []); ui.visible('等待期间再次清空名单');
+  const invalid = deferred(); f.env.beforePost = () => invalid.promise;
+  f.env.onPost = null; valid.resolve(); await settle();
+  assert(f.dirty()); ui.visible('较早的成功响应不能清除当前错误');
+  f.compatibilityMessage(f.editor.data); ui.visible('成功响应后的后台状态刷新');
+  await f.tick(600); assert(f.editor.saving); ui.visible('最新无效草稿等待校验');
+  assert.equal(f.posts().length, 3);
+  f.env.beforePost = null; invalid.resolve(); await settle(); ui.visible('最新草稿校验失败');
+  f.set('treasure.followNames', ['海上的风']);
+  assert(!f.dirty(), '恢复为服务器最新保存的基线'); ui.cleared();
+  await f.tick(10000); assert.equal(f.posts().length, 3, '恢复基线无需另发请求');
+});
+
 const conditionalCases = [
   ['进攻目标来源', {'cityWar.fleetIds':['1远征船'],'cityWar.enabled':true}, 'cityWar.targetMode', 'selected', 'cityWar.cityRefs'],
   ['防守目标来源', {'cityWar.fleetIds':['1远征船'],'cityWar.defenceFleetIds':['1远征船'],'cityWar.enabled':true}, 'cityWar.defenceTargetMode', 'selected', 'cityWar.defenceCityRefs'],
@@ -457,7 +765,7 @@ await test('草稿导出使用后端当前版本且不提前保存用户修改',
   await f.exportFile();
   assert.equal(f.env.downloads.length, 1);
   const document = JSON.parse(await f.env.downloads[0].text());
-  assert.equal(document.version, 2);
+  assert.equal(document.version, SETTINGS_SCHEMA_VERSION);
   assert.deepEqual(Object.keys(document), ['format', 'version', 'settings']);
   assert.equal(document.settings.factory.keepStock, 129);
   assert.equal(importAutomationSettings(document).factory.keepStock, 129);
@@ -603,8 +911,9 @@ await test('攻守目标控件独立显示、校验和自动保存，刷新及�
   assert.equal(widget('defenceCityRefs').error.hidden, false);
   assert.deepEqual(f.view('a').settings.cityWar.cityRefs, []);
   checkCity('defenceCityRefs', '城市乙');
-  assert.equal(widget('defenceCityRefs').error.hidden, true);
+  assert.equal(widget('defenceCityRefs').error.hidden, false, '继续显示校验错误，等待修改后的草稿通过校验');
   await f.tick(600);
+  assert.equal(widget('defenceCityRefs').error.hidden, true);
   const saved = f.view('a').settings.cityWar;
   assert.equal(saved.targetMode, 'selected'); assert.equal(saved.defenceTargetMode, 'selected');
   assert.equal(saved.targetPriority, 'original'); assert.equal(saved.defenceTargetPriority, 'fewestAllied');
@@ -631,7 +940,7 @@ await test('攻守目标控件独立显示、校验和自动保存，刷新及�
   assert.deepEqual(f.editor.draft.cityWar.cityRefs, ['1:2']);
 });
 
-function lineupPickerFixture(f) {
+function lineupPickerFixture(f, { boss = false } = {}) {
   const node = (tag, className = '', textContent = '') => ({
     tag, className, textContent, children: [], attributes: {}, dataset: {}, value: '', disabled: false,
     append(...items) { this.children.push(...items); },
@@ -645,9 +954,12 @@ function lineupPickerFixture(f) {
   `)(f.editor, key => key.split('.').reduce((value, part) => value[part], f.editor.draft), f.set, node,
     (text, onclick) => Object.assign(node('button', '', text), { onclick }),
     (account, id) => viewed.push({ account, id }));
-  const fields = f.groups.find(group => group.id === 'progression').fields.filter(field => field.key.startsWith('lineups.'));
-  assert.deepEqual(fields.map(field => field.key), ['lineups.mainlinePresetId', 'lineups.trialPresets']);
-  assert.deepEqual(fields.map(field => field.parent), ['progression.mainline', 'progression.trials']);
+  const fields = boss ? f.groups.find(group => group.id === 'worldBoss').fields.filter(field => field.kind === 'fleetLineups')
+    : f.groups.find(group => group.id === 'progression').fields.filter(field => field.key.startsWith('lineups.'));
+  if (!boss) {
+    assert.deepEqual(fields.map(field => field.key), ['lineups.mainlinePresetId', 'lineups.trialPresets']);
+    assert.deepEqual(fields.map(field => field.parent), ['progression.mainline', 'progression.trials']);
+  }
   const roots = fields.map(field => render(field, 'config-field-' + field.key.replaceAll('.', '-')));
   const controls = roots.flatMap(root => root.children.flatMap(row => row.children));
   const select = binding => controls.find(control => control.dataset.lineupBinding === binding);
@@ -660,6 +972,30 @@ const lineupPresets = [
   { id: 'second', name: '副本队', formation: { presetId: 7, heroPositions: [{ heroId: 'b', pos: { x: 5, y: 1 } }], petUid: '9007199254740993' } },
 ];
 const lineupCatalog = { trialRaids: [{ value: '1', label: '金币副本' }, { value: '2', label: '强化石副本' }, { value: '3', label: '藏品副本' }] };
+
+await test('世界Boss逐队阵容跟随舰队勾选显隐，保存刷新与切号保留独立选择', async () => {
+  const f = fixture({ catalog: { expeditionFleets: [1, 2, 3].map(id => ({ value: id + '远征船', label: '舰队' + id })) } });
+  const initial = f.view('a'); initial.settings.lineups.presets = structuredClone(lineupPresets);
+  initial.settings.worldBoss.fleetIds = ['1远征船', '2远征船'];
+  saveAutomationSettings('a', initial.settings, { file: f.file, revision: initial.revision });
+  await f.load();
+  const picker = lineupPickerFixture(f, { boss: true }), root = picker.roots[0];
+  const row = id => root.children.find(node => node.children.includes(picker.select('fleet:' + id + '远征船')));
+  assert.equal(row(1).hidden, false); assert.equal(row(2).hidden, false); assert.equal(row(3).hidden, true);
+  picker.choose('fleet:1远征船', 'first'); picker.choose('fleet:2远征船', 'second');
+  picker.button('fleet:2远征船').onclick(); assert.deepEqual(picker.viewed, [{ account: 'a', id: 'second' }]);
+  f.set('worldBoss.fleetIds', ['2远征船']); root.refresh();
+  assert.equal(row(1).hidden, true); assert.equal(picker.select('fleet:1远征船').value, 'first');
+  await f.tick(600); await f.load(true);
+  assert.deepEqual(f.view('a').settings.worldBoss.fleetPresets, [{ buildingId: '1远征船', presetId: 'first' }, { buildingId: '2远征船', presetId: 'second' }]);
+  assert.equal(f.view('a').settings.worldBoss.enabled, false, '配置阵容不自动启用派遣');
+  f.set('worldBoss.fleetIds', []); root.refresh(); assert.equal(root.children.at(-1).hidden, false);
+  await f.tick(600);
+  assert.equal(await f.mayChange('b'), true); f.change('b'); await f.load();
+  assert.deepEqual(f.editor.draft.worldBoss.fleetPresets, []);
+  assert.equal(await f.mayChange('a'), true); f.change('a'); await f.load();
+  assert.equal(f.editor.draft.worldBoss.fleetPresets.length, 2);
+});
 
 await test('推关与试炼逐项选择阵容并查看，合并自动保存保留预设、其他副本和普通配置', async () => {
   const f = fixture({ catalog: lineupCatalog });
@@ -810,33 +1146,6 @@ await test('配置曾打开后经真实管理保存流程新增、改名和删�
   assert.equal(f.view('a').settings.factory.keepStock, 126);
   assert.equal(f.env.maxInFlight, 1);
   assert.equal(f.editor.saveError, null);
-});
-
-await test('管理自定义阵容入口等候全部在途草稿保存后再打开阵容页', async () => {
-  const f = fixture(); await f.load();
-  const gate = deferred(), actions = [], host = { append(button) { this.button = button; } };
-  const createLink = newStateFunction('env', `
-    const current = 'a', group = { id: 'progression' }, section = env.host;
-    const el = () => ({}), configFlush = env.flush;
-    const tab = { dataset: { tab: 'lineups' }, focus() {} };
-    const document = { querySelector: selector => selector === '#tabs [data-tab="lineups"]' ? tab : null };
-    const window = { scrollTo() {} };
-    const activateConsolePage = button => env.actions.push({ tab: button.dataset.tab, revision: env.revision() });
-    ${section("if (group.id === 'progression') {", 'groupHost.append(section);')}
-    return section.button;
-  `);
-  const button = createLink({ host, actions, flush: f.flush, revision: () => f.view('a').revision });
-  f.env.onPost = () => gate.promise;
-  f.set('factory.keepStock', 127);
-  const opening = button.onclick(); await settle();
-  assert.deepEqual(actions, []);
-  f.set('factory.keepStock', 128);
-  f.env.onPost = null; gate.resolve();
-  await opening;
-  assert.deepEqual(actions, [{ tab: 'lineups', revision: f.view('a').revision }]);
-  assert.equal(f.posts().length, 2);
-  assert.equal(f.view('a').settings.factory.keepStock, 128);
-  assert.equal(f.dirty(), false);
 });
 
 console.log('配置自动保存专项 ' + passed + '/' + passed + ' 通过');
