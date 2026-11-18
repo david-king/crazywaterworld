@@ -2,6 +2,7 @@ name: Build Windows portable ZIP
 
 on:
   workflow_dispatch:
+  # Trial builds: packaging changes only; upstream source updates do not trigger builds.
   push:
     branches: [main]
     paths:
