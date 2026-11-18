@@ -34,25 +34,8 @@ if ((Get-FileHash $nodeZip -Algorithm SHA256).Hash -ne $match.Groups[1].Value) {
 $runtime = Join-Path $stage 'runtime'
 Move-Item (Join-Path $work ([IO.Path]::GetFileNameWithoutExtension($nodeFile))) $runtime
 
-# Build a native OpenSSL CLI with static MSVC runtime via the runner's vcpkg.
-$vcpkg = $env:VCPKG_INSTALLATION_ROOT
-if (-not $vcpkg -or -not (Test-Path "$vcpkg\vcpkg.exe")) { throw 'vcpkg not available' }
-& "$vcpkg\vcpkg.exe" install 'openssl[tools]:x64-windows-static' --classic
-$installed = Join-Path $vcpkg 'installed\x64-windows-static'
-$ssl = Join-Path $runtime 'openssl'
-Copy-Item (Join-Path $installed 'tools\openssl') $ssl -Recurse
-Copy-Item (Join-Path $installed 'share\openssl\copyright') (Join-Path $ssl 'LICENSE.txt')
-$modules = Join-Path $installed 'lib\ossl-modules'
-if (Test-Path $modules) { Copy-Item $modules (Join-Path $ssl 'ossl-modules') -Recurse }
-foreach ($required in @('openssl.exe', 'openssl.cnf')) {
-    if (-not (Test-Path (Join-Path $ssl $required))) { throw "Missing OpenSSL file: $required" }
-}
-
 # Build using precisely the Node/npm that the user will receive.
-$env:PATH = "$runtime;$ssl;$env:PATH"
-$env:CW_OPENSSL = Join-Path $ssl 'openssl.exe'
-$env:OPENSSL_CONF = Join-Path $ssl 'openssl.cnf'
-$env:OPENSSL_MODULES = Join-Path $ssl 'ossl-modules'
+$env:PATH = "$runtime;$env:PATH"
 Push-Location $stage
 try {
     & "$runtime\node.exe" --version
@@ -62,10 +45,7 @@ try {
 
 @'
 @echo off
-set "PATH=%~dp0runtime;%~dp0runtime\openssl;%PATH%"
-set "CW_OPENSSL=%~dp0runtime\openssl\openssl.exe"
-set "OPENSSL_CONF=%~dp0runtime\openssl\openssl.cnf"
-set "OPENSSL_MODULES=%~dp0runtime\openssl\ossl-modules"
+set "PATH=%~dp0runtime;%PATH%"
 '@ | Set-Content (Join-Path $stage 'env.cmd') -Encoding ascii
 
 @'
@@ -73,7 +53,7 @@ set "OPENSSL_MODULES=%~dp0runtime\openssl\ossl-modules"
 setlocal
 cd /d "%~dp0"
 call "%~dp0env.cmd"
-"%~dp0runtime\node.exe" src/app.mjs console %*
+call "%~dp0runtime\npm.cmd" start %*
 set "code=%ERRORLEVEL%"
 if not "%code%"=="0" pause
 exit /b %code%
@@ -90,17 +70,19 @@ cmd /k
 @'
 # Windows portable build
 Extract to a writable folder. Follow the upstream README to prepare the local game protocol before starting. Double-click start.cmd to run the local console.
-Double-click terminal.cmd to use the bundled node, npm and openssl commands.
+Double-click terminal.cmd to use the bundled node and npm commands.
 The original start-console.cmd can also be run from that terminal.
 Keep data/, work/ and certificates/ when upgrading. Game clients, local game
 protocol packages and any required browser downloads are still prerequisites
 as described in the upstream README. No credentials or certificates are bundled.
 Packaging-only changes: portable runtime, dependencies and CMD launchers.
-See LICENSE, runtime/LICENSE, runtime/openssl/LICENSE.txt and dependency licenses.
+OpenSSL CLI is not bundled. Features that require it use the upstream
+lookup mechanism (system OpenSSL, Git for Windows, or CW_OPENSSL).
+See LICENSE, runtime/LICENSE and dependency licenses.
 '@ | Set-Content (Join-Path $stage 'PORTABLE.md') -Encoding utf8
 git rev-parse HEAD | Set-Content (Join-Path $stage 'BUILD-COMMIT.txt') -Encoding ascii
 
-# Archive before smoke-testing so temporary certificate and logs are not shipped.
+# Archive before smoke-testing so temporary test data and logs are not shipped.
 $zip = Join-Path $out 'crazywaterworld-win-x64.zip'
 if (Test-Path $zip) { Remove-Item $zip }
 & $tar -a -cf $zip -C $work crazywaterworld
@@ -111,11 +93,7 @@ New-Item -ItemType Directory $testDir | Out-Null
 & $tar -xf $zip -C $testDir
 $test = Join-Path $testDir 'crazywaterworld'
 $testRuntime = Join-Path $test 'runtime'
-$testSsl = Join-Path $testRuntime 'openssl'
-$env:PATH = "$testRuntime;$testSsl;$env:SystemRoot\System32;$env:SystemRoot"
-$env:CW_OPENSSL = Join-Path $testSsl 'openssl.exe'
-$env:OPENSSL_CONF = Join-Path $testSsl 'openssl.cnf'
-$env:OPENSSL_MODULES = Join-Path $testSsl 'ossl-modules'
+$env:PATH = "$testRuntime;$env:SystemRoot\System32;$env:SystemRoot"
 $env:CW_CA_DIR = Join-Path $test 'certificates'
 $env:CW_NO_BROWSER = '1'
 $env:CW_RESOURCE_AUTO_UPDATE = '0'
@@ -125,8 +103,6 @@ Push-Location $test
 try {
     & $node --version
     & "$testRuntime\npm.cmd" --version
-    & $env:CW_OPENSSL version
-    & $node --input-type=module -e "import { initCa, leafFor } from './src/platform/certificates.mjs'; initCa(); leafFor('localhost');"
     # The real console requires a game protocol from the user's local client.
     # Validate its failure mode without a protocol, then use the same offline
     # dependency-injection approach as the upstream HTTP regression tests.
