@@ -10,9 +10,9 @@
 
 ```powershell
 npm start                     # prestart 先构建界面，再启动；端口 17321
-.\start-console.cmd           # 用户入口，端口 17323，不自动开浏览器，输出地址和实时业务日志
+.\start-console.cmd           # 检查环境、按需安装依赖、构建后启动；端口 17323，不自动开浏览器
 .\start-console.cmd url       # 只输出地址并保持窗口，不启动控制台
-.\start-console.cmd status    # 只检查 MITM 证书状态，不启动控制台
+.\start-console.cmd status    # 按需准备依赖后检查证书与采集恢复状态，不构建或启动控制台
 npm run build:ui              # 改 TSX 或 theme.css 后运行，提交 src/ui/dist 产物
 npm test                      # pretest 先构建，再执行规范、类型与全部分组，遇错即停
 npm run test:offline           # 构建、类型检查及无需本机协议的核心回归
@@ -83,7 +83,7 @@ npm run sync-art              # 同步素材；缓存缺图可加 -- --fetch
 - 样式层顺序为 `properties, theme, base, components, page, utilities`。`console.css`、`settings.css` 在 `page` 层，只放布局和间距，不用 Tailwind 处理，所以不能写 `@apply`。模板克隆元素带工具类，变体颜色写在 `theme.css` 的 `@layer utilities`。新增运行时模板需在 `layout.tsx` 的 `templates()` 声明。修改 TSX 或 `theme.css` 后执行 `npm run build:ui`，将 `src/ui/dist/` 一起提交；`npm start`、`npm test` 也会先构建。
 - CSS Modules 仅用于迁移页面的局部布局，并放在 `page` 层，主题和通用控件继续使用 Tailwind v4。Biome 只检查 `biome.json` 中声明的迁移范围，新增页面应纳入其中。Day.js 只用于北京时间展示，不改后端计时和换日规则。完整接线、构建及验证约定见 `docs/frontend-architecture.md`。
 - 手机布局以 768px 为界：导航固定到底部，页头不吸顶。`table()` 生成的四列以上表格在 `main` 窄于 600px 时变为卡片，列名来自 `td[data-label]`。图标走 `art-thumbs.mjs` 的单图缩略图，页面不要再引用整张图集。
-- 顶层导航为总览、挂机配置、建筑一览、挑战、阵容、资源与玩法、账号、登录设置。阵容页集中管理自定义阵容和推荐阵容。各模块启停与参数在同一配置分组编辑，全局挂机启停和间隔保留在页头。总览提供运行状态和只读世界地图。手动玩法归建筑一览、挑战或资源与玩法。
+- 顶层导航为总览、挂机配置、建筑一览、挑战、阵容、资源与玩法、账号、登录设置。阵容页集中管理自定义阵容和推荐阵容。各模块启停与参数在同一配置分组编辑，全局挂机启停和间隔保留在页头。总览提供运行状态、世界地图与点城快捷操作。手动玩法归建筑一览、挑战或资源与玩法。
 - 挂机配置按账号草稿编辑。导入、保存、预览分别处理，保存不启动挂机；预览可连接读取真实状态但不写资源。网页开始或恢复挂机固定持续循环，不继承旧的有限轮数；显式 API 轮数参数和 CLI 行为保持兼容。
 - 新添加账号默认关闭挂机，未保存启停偏好的旧账号同样保持停止；更新已有账号凭据保留显式启停选择。用户通过页头或账号卡片手动开始后才保存自动恢复意向，暂停挂机清除该意向。卡片直接按目标账号请求，不切换当前账号。
 - 不使用 GitHub Actions，验证通过本地构建与离线测试执行。
@@ -95,7 +95,7 @@ npm run sync-art              # 同步素材；缓存缺图可加 -- --fetch
 3. 在 `loop.mjs` 接入实际执行与 `report`，通过 `reward-schedule` 或模块调度控制复查；手动日常单项还涉及 `daily-single.mjs`。报告明确区分完成、已发送、跳过与失败。
 4. 新增路由在 `operation-labels.mjs` 补中文名称；测试放入 core、progression 或 extra，并更新用户文档。
 
-装备自动化由 `forge.enabled` 总控，`forge.collect/craft` 分别控制领取和续产，随主循环检查；旧配置缺省两项均为 true，保持原行为。`forge.nativeAuto` 默认 false，开启后同步所选工厂的游戏原生开关，本组工具领取、续产、分解及资源策略均暂停；关闭模式只撤销本工具此前开启的原生开关，回读确认后才接续。总控暂停和停止挂机不关闭游戏原生开关。`schedule.equipmentCollect/equipmentCraft` 仅兼容旧配置，归一化为关闭，不再暴露控制或执行旧策略。原有 `schedule.guildOrders/radarAuto/radarRepair/museumCollect/museumExplore/petCollect/petBreed` 独立保存，不强行映射成需要舰队、配方等参数的新模块。对应详细模块有效开启时接管相同功能，避免双跑；停用详细模块后可恢复旧规则。周订单手动、自动和活动入口统一调用 `activities.mjs` 的 `runWeekOrder`，共用持久防重键和材料预留。
+装备自动化由 `forge.enabled` 总控，`forge.collect/craft` 分别控制领取和续产，随主循环检查；旧配置缺省两项均为 true，保持原行为。`forge.nativeAuto` 默认 false，开启后同步所选工厂的游戏原生开关，本组工具领取、续产、分解及资源策略均暂停；关闭模式只撤销本工具此前开启的原生开关，回读确认后才接续。总控暂停和停止挂机不关闭游戏原生开关。`schedule.equipmentCollect/equipmentCraft` 仅兼容旧配置，归一化为关闭，不再暴露控制或执行旧策略。旧 `schedule.guildOrders/radarAuto/radarRepair/museumCollect/museumExplore/petCollect/petBreed` 已列入退休任务，加载和导入时强制关闭，停用详细模块后不恢复旧任务。联盟募兵由 `alliance.enabled && alliance.recruit` 控制，继续复用 `guild-orders.mjs` 的协议、额度与材料预留逻辑。周订单手动、自动和活动入口统一调用 `activities.mjs` 的 `runWeekOrder`，共用持久防重键和材料预留。
 
 门控有各自范围：`loop.world` 管基地，`loop.dailies` 管招募、点金、竞技场等日常动作，英雄自动养成需要 `loop.heroes && heroes.enabled`。免费领奖有独立开关。新增资源消费应由用户主动开启，海商王走商 `merchantTrade`、风采投票 `beautyVotes` 和罗盘用券 `compassSpin` 默认 false；不要笼统把所有“活动”都当成免费领奖。
 
@@ -118,7 +118,7 @@ npm run sync-art              # 同步素材；缓存缺图可加 -- --fetch
 - `world-boss.mjs` 只在服务器当天参与次数为 0 时派一支空闲舰队；城战接续、万吨巨轮、首杀各自检查目标、耐久、汽油和持久防重记录。城战原生委任额度来自服务器 VIP 规则，不能写死次数；`cityWar.nativeCommissionLimit` 默认 -1 按 VIP 等待，0 关闭所选舰队的原生委任后接管，N 表示先用 N 次再关闭，关闭结果需回读 `MyFleetsResponse` 确认。
 - `equipment-forge.mjs` 管详细锻造，`equipment-crafting.mjs` 保留原手动制造；达到下单上限不应阻止完工领取。海兽放生与装备分解不能读取客户端本地锁定，页面帮助必须说明限制。`antique-upgrade.mjs` 管藏品激活、升星、大师等级和套装升级；激活只消耗对应碎片，升星可用万能碎片，套装与大师消耗金币/经验；结果未知时按持久键阻止重复发送。
 - `seasonal-activities.mjs` 与奖励模块处理新活动；消费动作与免费奖励分别门控。`side-rewards.mjs` 处理漫剧、擂台赛每日礼包和赛季宝箱；擂台赛状态只有推送，由 `server.mjs` 记在连接上。`gift-codes.mjs` 按账号保存记录，多账号各自排队、发送跨账号串行；未知或连接失败只停该账号，限频停止同批未发送账号，未知码不重发。
-- 世界地图为只读展示。地图移动位置为已同步行军数据的推算，自动刷新间隔与挂机独立，不能承诺实时坐标。
+- 世界地图自动刷新只读，移动位置按已同步行军数据推算。城池详情的手动派遣和宣战绑定账号、场景和预览，通过账号写队列复核后执行。
 
 ## 数据与验证约定
 

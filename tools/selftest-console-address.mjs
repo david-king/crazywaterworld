@@ -41,7 +41,7 @@ try {
   await test('原启动工具的地址模式读取 CW_HOST，正常启动保留配置', async () => {
     const env = { CW_HOST: 'localhost', CW_PORT: '18000' }, printed = [];
     let held = 0, launches = 0;
-    const dependencies = { env, print: value => printed.push(value), hold: async () => { held++; }, launch: async () => { launches++; } };
+    const dependencies = { env, print: value => printed.push(value), prepare: async () => {}, hold: async () => { held++; }, launch: async () => { launches++; } };
     await startConsole(['url'], dependencies);
     assert.equal(printed.at(-1), 'http://localhost:18000/');
     env.CW_HOST = '::'; await startConsole(['address'], dependencies);
