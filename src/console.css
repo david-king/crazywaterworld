@@ -175,7 +175,40 @@ section h2:first-child { margin-top:0 }
 .inventory-search input { width:240px }
 .inventory-category .icons { margin-bottom:12px }
 #world-stock-panel>summary { width:fit-content }
-label[for=gift-code-input] { display:block; margin-bottom:8px }
+/* ---- 礼包码 ---- */
+.gift-library-toolbar { flex-wrap:wrap }
+.gift-library-toolbar label { display:flex; align-items:center; gap:6px; font-weight:400 }
+.gift-library-table { max-height:360px; overflow:auto; margin-top:12px; border:1px solid var(--border); border-radius:var(--radius) }
+.gift-library-table table { width:100%; table-layout:fixed }
+.gift-library-table th { position:sticky; top:0; background:var(--card); z-index:1 }
+.gift-library-table td { overflow-wrap:anywhere }
+.gift-library-table th:first-child { width:40% }
+.gift-redeem-actions { flex-wrap:wrap }
+.gift-redeem-actions [role=status] { min-width:0; overflow-wrap:anywhere }
+.gift-record-toolbar { flex-wrap:wrap }
+.gift-record-toolbar select { max-width:100%; min-width:0 }
+.gift-record-pagination { flex-wrap:wrap; margin-top:12px }
+.gift-record-pagination #gift-page { font-variant-numeric:tabular-nums }
+.gift-account>button,#gift-code-history button { flex:none }
+#gift-batch-dialog { width:min(540px,calc(100vw - 32px)); max-height:calc(100dvh - 32px) }
+#gift-batch-dialog[open] { display:grid; grid-template-rows:auto minmax(0,1fr) auto; gap:20px; overflow:hidden }
+.gift-batch-fields { display:grid; gap:8px; min-height:0; overflow-y:auto }
+.gift-batch-fields textarea { width:100%; resize:vertical; min-height:120px }
+.gift-batch-fields input { width:100%; min-width:0 }
+#gift-batch-error:empty,#gift-record-notice:empty { display:none }
+@media(max-width:600px) {
+  .gift-library-table thead { display:none }
+  .gift-library-table tbody { display:block }
+  .gift-library-table tr { display:block; padding:10px 12px; border-bottom:1px solid var(--border) }
+  .gift-library-table td { display:grid; grid-template-columns:90px minmax(0,1fr); gap:8px; padding:5px 0; border:0 }
+  .gift-library-table td::before { content:attr(data-label); color:var(--muted-foreground); font-size:12px }
+  .gift-library-table td:first-child { font-weight:600 }
+  .gift-library-table td[colspan] { display:block }
+  .gift-library-table td[colspan]::before { display:none }
+  .gift-record-toolbar { display:grid; grid-template-columns:auto minmax(0,1fr) }
+  .gift-record-toolbar>button { grid-column:1 / -1 }
+  .gift-account>.dim { flex-basis:100%; padding-left:24px }
+}
 
 /* ---- 挑战 ---- */
 #stage-view { display:inline; font-size:14px; font-weight:400; color:var(--muted-foreground) }
@@ -310,10 +343,7 @@ label[for=gift-code-input] { display:block; margin-bottom:8px }
 .phone-role-failures { display:grid; gap:8px }
 #phone-success>button { justify-self:start }
 @container main (max-width:700px) { .phone-layout { grid-template-columns:minmax(0,1fr) } }
-.gift-accounts { border:1px solid var(--border); border-radius:calc(var(--radius) * 1.4); padding:12px 16px; margin:12px 0 }
-.gift-accounts legend { padding:0 6px; font-weight:500 }
-.gift-accounts p { margin:8px 0 0 }
-.gift-account-list { display:grid; gap:4px; max-height:240px; overflow:auto }
+.gift-account-list { display:grid; gap:4px; margin:12px 0; max-height:240px; overflow:auto }
 .gift-account { display:flex; align-items:center; flex-wrap:wrap; gap:4px 8px; padding:4px 2px; min-height:32px; font-weight:400 }
 
 /* ---- 联盟 ---- */
@@ -498,3 +528,8 @@ label[for=gift-code-input] { display:block; margin-bottom:8px }
 @media (prefers-reduced-motion:reduce) {
   #page-progress::after { animation:none }
 }
+
+/* 微信扫码沿用现有扫码弹窗布局。 */
+.wechat-qr { display:block; max-width:100%; width:256px; height:auto; margin:12px auto }
+.wechat-qr[hidden] { display:none }
+.wechat-flow { display:grid; gap:12px; min-width:0 }

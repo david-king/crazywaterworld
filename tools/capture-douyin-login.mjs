@@ -89,7 +89,7 @@ export async function main(argv = process.argv.slice(2), dependencies = {}) {
     io.error('此采集工具需要 Windows 抖音客户端和当前用户系统代理。');
     return 2;
   }
-  io.log('这是待验证的抖音登录样本采集，尚不支持直接扫码添加账号。');
+  io.log('这是抖音电脑客户端登录样本采集，样本需验证后才能用于添加账号。');
   io.log(`仅解密以下主机：${options.hosts.join(', ')}`);
   if (options.hosts.includes(DEFAULT_HOST)) {
     io.log('默认主机仅为微信版已知网关假设；抖音网关尚未确认。');

@@ -1,4 +1,5 @@
 import { shutdownSignals } from './platform/terminal.mjs';
+import { consoleHost } from './console-address.mjs';
 import fs from 'node:fs';
 import readline from 'node:readline';
 import { parseArgs } from 'node:util';
@@ -1060,7 +1061,7 @@ async function main() {
   const output = consoleOutput = createConsoleOutput();
   const restoreOutput = () => output.restore();
   process.once('exit', restoreOutput);
-  const console_ = createConsole({ port, onLog: entry => output.log(entry), resourceUpdates: true });
+  const console_ = createConsole({ host: consoleHost(), port, onLog: entry => output.log(entry), resourceUpdates: true });
   const url = await console_.listen();
   output.start(url);
   let shuttingDown = false;

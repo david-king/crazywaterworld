@@ -1,4 +1,5 @@
 import { serveClientAsset } from './ui-assets.mjs';
+import { normalizeConsoleHost, consoleUrl } from './console-address.mjs';
 import { createConsoleVersion, renderVersionedPage, consoleVersionError } from './console-version.mjs';
 import { createTraceLog, traceJson, redactLog } from './trace-log.mjs';
 import { createProtocolDiagnostics } from './protocol-diagnostics.mjs';
@@ -13,8 +14,10 @@ import {activityRankCatalog,readActivityRanking} from './activity-rankings.mjs';
 import {readActivityStatistics} from './activity-statistics.mjs';
 import { merchantActivity, readMerchantStatus, readMerchantJournal, merchantJournalSummary } from './merchant-activity.mjs';
 import { watchMerchant } from './merchant-monitor.mjs';
-import { giftCodeSummary, startGiftCodeBatch } from './gift-codes.mjs';
-import { initialGiftCodeCatalog } from './gift-code-catalog.mjs';
+import { giftCodeStatus, giftCodeSummary, startGiftCodes, startGiftCodeBatch } from './gift-codes.mjs';
+import { publicGiftCodes } from './gift-code-library.mjs';
+import { createGiftCodeAutomation } from './gift-code-automation.mjs';
+import { paginateGiftRecords, giftRecordsCsv, canRetryGiftRecord, canRetryGiftCode } from './gift-code-records.mjs';
 import {runtimeProgress, museumRuntimeStatus} from './runtime-progress.mjs';
 import {watchTreasureTravel} from './treasure-follow.mjs';
 import { watchGuildShipPushes } from './guild-ships.mjs';
@@ -113,7 +116,7 @@ import { ACCOUNT_BACKUP_MAX_BYTES, exportAccountBackup, previewAccountImport, im
 import { startCapture, stopCapture, captureState, inspectCaptureRecovery, recoverCapture, DEFAULT_PROXY_PORT } from './capture.mjs';
 import { createPhoneLogin, loadDeviceProfile, saveDeviceProfile, DEVICE_PROFILE_PATH } from './phone-login.mjs';
 import { createAlipayLogin } from './alipay-login.mjs';
-import { createDouyinLogin } from './douyin-login.mjs';
+import { createWechatLogin } from './wechat-login.mjs';
 import { iconIndex, atlasFile, itemIcon, resourceIcon, materialIcon, heroIcon, heroCard, buildingIcon, workerIcon } from './art.mjs';
 
 const LOG_LIMIT = 400;
@@ -144,10 +147,10 @@ const STATE_TEXT = {
   STOPPED: '已停止',
 };
 
-export function createConsole({ host = '127.0.0.1', port = 17321, onLog, recoveryDelayMs, resourceUpdates = false, resourceUpdater = null, protocol: protocolOverride,
-  alipayLoginController = null,
-  douyinLoginController = null,
+export function createConsole({ host = '127.0.0.1', port = 17321, onLog, recoveryDelayMs, resourceUpdates = false, resourceUpdater = null, protocol: protocolOverride, giftCodeUpdates = resourceUpdates,
+  alipayLoginController = null, wechatLoginController = null,
   captureController = { startCapture, stopCapture, captureState, inspectCaptureRecovery, recoverCapture } } = {}) {
+  host = normalizeConsoleHost(host);
   const consoleVersion = createConsoleVersion(PAGE);
   const pageRaw = Buffer.from(renderVersionedPage(PAGE, consoleVersion));
   const pageAsset = { raw: pageRaw, gzip: zlib.gzipSync(pageRaw, { level: 9 }),
@@ -161,10 +164,10 @@ export function createConsole({ host = '127.0.0.1', port = 17321, onLog, recover
   let alipaySaving = false;
   let pendingAlipayLogin = null;
   let cancelledAlipayLoginId = null;
-  const douyinLogin = douyinLoginController ?? createDouyinLogin();
-  let douyinSaving = false;
-  let pendingDouyinLogin = null;
-  let cancelledDouyinLoginId = null;
+  const wechatLogin = wechatLoginController ?? createWechatLogin({
+    onEvent: event => { if (event.type === 'error') emit(null, 'warn', event.message, { category: 'system', diagnostic: event.diagnostic }); },
+  });
+  let wechatSaving = false, pendingWechatLogin = null, cancelledWechatLoginId = null;
   const traceLog = createTraceLog(TRACE_PATH, { maxBytes: TRACE_MAX_BYTES });
   const protocolDiagnostics = createProtocolDiagnostics(path.join(DATA_DIR, 'protocol-errors'));
   const globalLog = [];
@@ -287,13 +290,13 @@ export function createConsole({ host = '127.0.0.1', port = 17321, onLog, recover
     return result;
   }
 
-  function clearDouyinRoles() {
-    pendingDouyinLogin?.controller?.abort();
-    clearTimeout(pendingDouyinLogin?.expiryTimer);
-    pendingDouyinLogin = null;
+  function clearWechatRoles() {
+    pendingWechatLogin?.controller?.abort();
+    clearTimeout(pendingWechatLogin?.expiryTimer);
+    pendingWechatLogin = null;
   }
 
-  function readDouyinRoles(pending) {
+  function readWechatRoles(pending) {
     if (pending.reading) return pending.reading;
     pending.entry.choices = [];
     pending.entry.roleError = null;
@@ -305,33 +308,33 @@ export function createConsole({ host = '127.0.0.1', port = 17321, onLog, recover
     return reading;
   }
 
-  function douyinLoginStatus(id) {
-    const state = douyinLogin.status(id);
-    if (cancelledDouyinLoginId !== state.id) cancelledDouyinLoginId = null;
-    if (state.id && state.id === cancelledDouyinLoginId) {
-      clearDouyinRoles();
+  function wechatLoginStatus(id) {
+    const state = wechatLogin.status(id);
+    if (cancelledWechatLoginId !== state.id) cancelledWechatLoginId = null;
+    if (state.id && state.id === cancelledWechatLoginId) {
+      clearWechatRoles();
       return { ...state, phase: 'cancelled', qrImage: null };
     }
     if (state.phase !== 'captured') {
-      clearDouyinRoles();
+      clearWechatRoles();
       return state;
     }
-    if (pendingDouyinLogin?.id !== state.id) {
-      clearDouyinRoles();
-      const credential = douyinLogin.takeCredential(state.id);
-      if (!accountId(credential) || credential.source !== 'douyin') throw new Error('抖音游戏登录凭证无效，请重新扫码');
-      pendingDouyinLogin = {
+    if (pendingWechatLogin?.id !== state.id) {
+      clearWechatRoles();
+      const credential = wechatLogin.takeCredential(state.id);
+      if (!accountId(credential) || credential.source !== 'wechat') throw new Error('微信游戏登录凭证无效，请重新扫码');
+      pendingWechatLogin = {
         id: state.id, reading: null, controller: null,
-        entry: { credential, userName: '抖音账号', choices: [], roleError: null },
+        entry: { credential, userName: '微信账号', choices: [], roleError: null },
       };
-      const pending = pendingDouyinLogin;
+      const pending = pendingWechatLogin;
       pending.expiryTimer = setTimeout(() => {
-        if (pendingDouyinLogin === pending) clearDouyinRoles();
+        if (pendingWechatLogin === pending) clearWechatRoles();
       }, Math.max(0, state.expiresAt - Date.now()));
       pending.expiryTimer.unref?.();
-      void readDouyinRoles(pendingDouyinLogin);
+      void readWechatRoles(pendingWechatLogin);
     }
-    const pending = pendingDouyinLogin;
+    const pending = pendingWechatLogin;
     const store = loadStore();
     const idOfAccount = accountId(pending.entry.credential);
     const existing = store.accounts.find(account => account.id === idOfAccount);
@@ -340,39 +343,38 @@ export function createConsole({ host = '127.0.0.1', port = 17321, onLog, recover
       phase: pending.reading ? 'reading-roles' : 'captured',
       choices: roleChoices(pending.entry, store),
       roleError: pending.entry.roleError,
-      account: { id: idOfAccount, title: existing ? describeAccount(existing).title : '抖音账号' },
+      account: { id: idOfAccount, title: existing ? describeAccount(existing).title : '微信账号' },
     };
   }
 
-  function requireDouyinRoles(id) {
+  function requireWechatRoles(id) {
     if (closing) throw new Error('控制台已关闭');
-    const state = douyinLoginStatus(id);
-    const pending = pendingDouyinLogin;
+    const state = wechatLoginStatus(id);
+    const pending = pendingWechatLogin;
     if (!pending || pending.id !== id || !['captured', 'reading-roles'].includes(state.phase)
       || state.expiresAt <= Date.now()) throw new Error('扫码结果已过期或已保存，请重新扫码');
     return pending;
   }
 
-  async function saveDouyinRole(pending, choice) {
+  async function saveWechatRole(pending, choice) {
     // 排队期间扫码可能被取消、过期或刷新，落盘前重新检查本次选择。
-    if (requireDouyinRoles(pending.id) !== pending || pending.reading || !pending.entry.choices.includes(choice)) {
+    if (requireWechatRoles(pending.id) !== pending || pending.reading || !pending.entry.choices.includes(choice)) {
       throw new Error('角色列表已变化，请重新选择角色');
     }
-    pending.entry.credential = douyinLogin.takeCredential(pending.id);
-    const result = await saveSelectedRole(pending.entry, choice, { sourceLabel: '抖音扫码', stopExisting: true,
+    pending.entry.credential = wechatLogin.takeCredential(pending.id);
+    const result = await saveSelectedRole(pending.entry, choice, { sourceLabel: '微信扫码', stopExisting: true,
       validateSelection() {
-        if (requireDouyinRoles(pending.id) !== pending || pending.reading || !pending.entry.choices.includes(choice)) {
+        if (requireWechatRoles(pending.id) !== pending || pending.reading || !pending.entry.choices.includes(choice)) {
           throw new Error('角色列表已变化或扫码已结束，请重新扫码');
         }
       },
     });
     pending.entry.credential = null;
     pending.entry.choices = [];
-    cancelledDouyinLoginId = pending.id;
-    clearDouyinRoles();
+    cancelledWechatLoginId = pending.id;
+    clearWechatRoles();
     return result;
   }
-
 
   async function readPhoneWorlds(credential, { signal } = {}) {
     if (closing) throw new Error('控制台已关闭');
@@ -480,7 +482,7 @@ export function createConsole({ host = '127.0.0.1', port = 17321, onLog, recover
     const store = loadStore();
     const existing = store.accounts.find(account => account.id === idOfAccount);
     const credential = { ...entry.credential, login: { ...entry.credential.login, worldId: choice.worldId } };
-    const fallbackLabel = ['alipay', 'douyin'].includes(entry.credential.source) ? '未命名角色' : entry.userName;
+    const fallbackLabel = ['alipay', 'wechat', 'douyin'].includes(entry.credential.source) ? '未命名角色' : entry.userName;
     const label = existing?.label && existing.label !== existing.lastSeen?.nickname ? existing.label : choice.role.nickname || fallbackLabel;
     const { account, created } = upsertAccount(store, credential, { label });
     account.automation = { ...account.automation, autoStart: autoStartEnabled(account), loginBlocked: false, loginRecovery: null };
@@ -679,11 +681,12 @@ export function createConsole({ host = '127.0.0.1', port = 17321, onLog, recover
     });
   }
 
-  function progressionJob(session, account, key, label, action, { read = false } = {}) {
+  function progressionJob(session, account, key, label, action, { read = false, shouldStart } = {}) {
     if (!session.progressionJobs.has(key)) {
       const generation = session.generation;
       const schedule = read ? work => readJob(session, work) : work => enqueue(session, work, label);
       const job = schedule(async () => {
+        if (shouldStart?.() === false) throw new Error('操作已取消，尚未连接游戏');
         if (!read) validateRuntimeSettings(session.preferences, loadConfigSafe());
         const client = await ensureConnected(session, account);
         const enabled = () => session.client === client && client.connected && !session.paused && generation === session.generation;
@@ -2632,6 +2635,8 @@ export function createConsole({ host = '127.0.0.1', port = 17321, onLog, recover
         removed?.pirateAdvance.stop('账号已删除'); removed?.stages.stop('账号已删除'); removed?.mutualAid.stop('账号已删除'); for (const task of removed?.trials.values() ?? []) task.stop('账号已删除');
         if (removed) await closeSessionConnection(removed, { includeWorld: true });
         sessions.delete(account.id);
+        try { publicGiftCodes.removeAccount(account.id); }
+        catch (error) { emit(null, 'warn', '账号已删除，礼包自动兑换设置清理失败：' + error.message); }
         emit(null, 'info', `已删除账号 ${describeAccount(account).title}`);
         json({ ok: true });
         return;
@@ -2701,70 +2706,69 @@ export function createConsole({ host = '127.0.0.1', port = 17321, onLog, recover
         return;
       }
 
-      // ---- 抖音扫码登录 ----
-      if (route === 'POST /api/accounts/douyin-login/start') {
+      // ---- 微信扫码登录 ----
+      if (route === 'POST /api/accounts/wechat-login/start') {
         needConfirm(jsonBody());
         if (closing) throw new Error('控制台已关闭');
-        if (douyinSaving) throw new Error('正在保存抖音账号，请稍候');
-        const previous = douyinLogin.status();
-        if (previous.id && previous.id === cancelledDouyinLoginId) await douyinLogin.cancel(previous.id);
-        const starting = douyinLogin.start();
-        const currentState = douyinLogin.status();
-        if (pendingDouyinLogin && (pendingDouyinLogin.id !== currentState.id || currentState.phase !== 'captured')) clearDouyinRoles();
+        if (wechatSaving) throw new Error('正在保存微信账号，请稍候');
+        const previous = wechatLogin.status();
+        if (previous.id && previous.id === cancelledWechatLoginId) await wechatLogin.cancel(previous.id);
+        const starting = wechatLogin.start();
+        const currentState = wechatLogin.status();
+        if (pendingWechatLogin && (pendingWechatLogin.id !== currentState.id || currentState.phase !== 'captured')) clearWechatRoles();
         const state = await starting;
-        json(douyinLoginStatus(state.id));
+        json(wechatLoginStatus(state.id));
         return;
       }
-      if (route === 'GET /api/accounts/douyin-login/status') {
-        json(douyinLoginStatus(parsed.searchParams.get('id') || undefined));
+      if (route === 'GET /api/accounts/wechat-login/status') {
+        json(wechatLoginStatus(parsed.searchParams.get('id') || undefined));
         return;
       }
-      if (route === 'POST /api/accounts/douyin-login/cancel') {
+      if (route === 'POST /api/accounts/wechat-login/cancel') {
         const { id } = jsonBody();
         if (typeof id !== 'string' || !id) throw new Error('请选择要取消的扫码会话');
-        douyinLogin.status(id);
-        cancelledDouyinLoginId = id;
-        clearDouyinRoles();
-        await douyinLogin.cancel(id);
+        wechatLogin.status(id);
+        cancelledWechatLoginId = id;
+        clearWechatRoles();
+        await wechatLogin.cancel(id);
         json({ ok: true });
         return;
       }
-      if (route === 'POST /api/accounts/douyin-login/roles') {
+      if (route === 'POST /api/accounts/wechat-login/roles') {
         const payload = jsonBody();
         needConfirm(payload);
         if (typeof payload.id !== 'string' || !payload.id) throw new Error('扫码结果已过期，请重新扫码');
-        if (douyinSaving) throw new Error('正在保存抖音账号，请稍候');
-        const pending = requireDouyinRoles(payload.id);
-        void readDouyinRoles(pending);
-        json(douyinLoginStatus(payload.id));
+        if (wechatSaving) throw new Error('正在保存微信账号，请稍候');
+        const pending = requireWechatRoles(payload.id);
+        void readWechatRoles(pending);
+        json(wechatLoginStatus(payload.id));
         return;
       }
-      if (route === 'POST /api/accounts/douyin-login/save') {
+      if (route === 'POST /api/accounts/wechat-login/save') {
         const payload = jsonBody();
         needConfirm(payload);
         if (typeof payload.id !== 'string' || !payload.id) throw new Error('扫码结果已过期，请重新扫码');
-        if (douyinSaving) throw new Error('正在保存抖音账号，请稍候');
-        const pending = requireDouyinRoles(payload.id);
+        if (wechatSaving) throw new Error('正在保存微信账号，请稍候');
+        const pending = requireWechatRoles(payload.id);
         if (pending.reading) throw new Error('正在读取区服和角色，请稍候');
         if (pending.entry.roleError) throw new Error('角色列表读取失败，请重试后再保存');
         const choices = pending.entry.choices;
         const choice = payload.choiceId ? choices.find(item => item.id === String(payload.choiceId))
           : choices.length === 1 ? choices[0] : null;
         if (!choice || payload.worldId !== undefined) throw new Error('请选择列表中的区服和角色后再保存');
-        douyinSaving = true;
+        wechatSaving = true;
         try {
           const session = sessions.get(accountId(pending.entry.credential));
-          const save = () => saveDouyinRole(pending, choice);
+          const save = () => saveWechatRole(pending, choice);
           const result = session && !session.paused ? await enqueue(session, save) : await save();
-          // 凭证已落盘，临时浏览器清理失败也应返回已保存的账号。
-          try { await douyinLogin.cancel(payload.id); } catch {}
+          // 凭证已落盘，临时授权会话清理失败也应返回已保存的账号。
+          try { await wechatLogin.cancel(payload.id); } catch {}
           json(result);
         } finally {
-          douyinSaving = false;
+          wechatSaving = false;
         }
         return;
       }
-
 
       // ---- 手机号登录 ----
       if (route === 'GET /api/accounts/phone-login/status') {
@@ -3014,14 +3018,87 @@ export function createConsole({ host = '127.0.0.1', port = 17321, onLog, recover
       }
 
       // ---- 只读视图 ----
-      if(route==='GET /api/gift-codes/initial'){
-        json(initialGiftCodeCatalog());return;
+      if (parsed.pathname.startsWith('/api/gift-codes')) res.setHeader('cache-control', 'no-store');
+      if (route === 'GET /api/gift-codes/initial' || route === 'POST /api/gift-codes/load') {
+        const payload = req.method === 'POST' ? jsonBody() : null;
+        if (payload) needConfirm(payload);
+        const known = new Map(loadStore().accounts.map(account => [account.id, account]));
+        const selected = payload ? payload.accounts
+          : parsed.searchParams.has('accounts') ? JSON.parse(parsed.searchParams.get('accounts'))
+          : parsed.searchParams.has('account') ? [resolve(parsed).account.id] : [...known.keys()].slice(0, 1);
+        if (!Array.isArray(selected) || selected.some(id => typeof id !== 'string' || !known.has(id))) throw Error('所选账号不存在，请刷新账号列表');
+        if (payload) {
+          try { await publicGiftCodes.refresh({ force: true }); }
+          catch (error) { if (!publicGiftCodes.entries().length) throw error; }
+        }
+        const histories = [...new Set(selected)].map(id => giftCodeStatus(id).rows);
+        for (const rows of histories) publicGiftCodes.reconcile(rows);
+        const available = new Set(histories.flatMap(rows => publicGiftCodes.available(rows)));
+        const displayRows = publicGiftCodes.entries().map(entry => ({
+          code: entry.code, expiresAt: entry.expiresAt ?? null,
+          eligible: !selected.length || available.has(entry.code),
+        }));
+        const tryCodes = displayRows.filter(row => row.eligible).map(row => row.code);
+        json({ ...publicGiftCodes.view(), displayRows, tryCodes, available: tryCodes.length });
+        if (payload) void giftAutomation.check();
+        return;
+      }
+      if (route === 'POST /api/gift-codes/manual') {
+        const payload = jsonBody(); needConfirm(payload);
+        const result = publicGiftCodes.addManualBatch(payload.codes, payload.expiresAt);
+        void giftAutomation.check();
+        json(result);
+        return;
+      }
+      if (route === 'POST /api/gift-codes/auto') {
+        const payload = jsonBody(); needConfirm(payload);
+        const { account } = resolve(parsed);
+        const preference = publicGiftCodes.setAuto(account.id, payload.enabled);
+        let syncError = '';
+        if (preference.enabled) {
+          try { await publicGiftCodes.refresh({ force: true }); } catch (error) { syncError = error.message; }
+          void giftAutomation.check();
+        }
+        json({ enabled: preference.enabled, syncError });
+        return;
+      }
+      if (route === 'GET /api/gift-codes' || route === 'GET /api/gift-codes/export') {
+        const { account } = resolve(parsed);
+        const data = giftCodeStatus(account.id);
+        const status = parsed.searchParams.get('status') || 'exclude-invalid';
+        if (route.endsWith('/export')) {
+          const csv = giftRecordsCsv(data.rows, status);
+          res.writeHead(200, { 'content-type': 'text/csv; charset=utf-8', 'content-disposition': 'attachment; filename="gift-code-records.csv"', 'cache-control': 'no-store' });
+          res.end(csv);
+          return;
+        }
+        const page = paginateGiftRecords(data.rows, {
+          status, page: parsed.searchParams.get('page') || '1', pageSize: parsed.searchParams.get('pageSize') || '10',
+        });
+        json({ ...page, running: data.running, rows: page.rows.map(row => ({ ...row,
+          retryable: canRetryGiftRecord(row) && canRetryGiftCode(data.rows, row.code) && !publicGiftCodes.isExpired(row.code),
+        })) });
+        return;
+      }
+      if (route === 'POST /api/gift-codes/retry') {
+        const payload = jsonBody(); needConfirm(payload);
+        if (typeof payload.code !== 'string' || !payload.code || payload.code.length > 128 || /[\s,，;；]/u.test(payload.code)) throw Error('请选择一条礼包码记录');
+        const { account } = resolve(parsed), target = giftCodeTarget(account);
+        if (target.blocked) throw Error(target.blocked);
+        const job = startGiftCodes(account.id, payload.code, target.dispatch, { stop: '' }, { retry: true });
+        job.done.catch(() => emit(target.session, 'error', '礼包兑换中断，请核对游戏内奖励'));
+        json({ accepted: true });
+        return;
       }
       if(route==='GET /api/gift-codes/accounts'){
         json({accounts:loadStore().accounts.map(account=>{
           const session=sessionFor(account.id);
           const base={id:account.id,title:describeAccount(account).title,paused:session.paused,connected:Boolean(session.client?.connected)};
-          try{return {...base,...giftCodeSummary(account.id)};}
+          try {
+            const { rows } = giftCodeStatus(account.id);
+            publicGiftCodes.reconcile(rows);
+            return { ...base, ...giftCodeSummary(account.id), autoRedeem: publicGiftCodes.auto(account.id).enabled, available: publicGiftCodes.available(rows).length };
+          }
           catch(error){return {...base,running:false,total:0,counts:{},error:error.message};}
         })});return;
       }
@@ -3033,14 +3110,15 @@ export function createConsole({ host = '127.0.0.1', port = 17321, onLog, recover
         const targets=[...new Set(payload.accounts)].map(id=>{
           const account=known.get(id);
           if(!account)return {id,title:id,blocked:'账号不存在'};
-          const session=sessionFor(id),generation=session.generation;
-          return {id,session,title:describeAccount(account).title,blocked:session.paused?'账号已暂停托管':'',dispatch:action=>{
-            const latest=loadStore().accounts.find(item=>item.id===id);
-            if(!latest||session.generation!==generation||session.paused)throw Error('原账号连接已变化');
-            return progressionJob(session,latest,'gift-code-redeem',null,action);
-          }};
+          const target = giftCodeTarget(account);
+          if (payload.library === true) {
+            const { rows } = giftCodeStatus(id);
+            publicGiftCodes.reconcile(rows);
+            target.codes = publicGiftCodes.available(rows).join('\n');
+          }
+          return target;
         });
-        const results=startGiftCodeBatch(targets,payload.codes).map((result,index)=>({...result,...targets[index]}));
+        const results=startGiftCodeBatch(targets,payload.library===true?null:payload.codes).map((result,index)=>({...result,...targets[index]}));
         const started=results.filter(result=>result.accepted);
         if(!started.length)throw Error(results.map(result=>result.title+'：'+result.error).join('；'));
         for(const {done,session} of started)done.then(()=>emit(session,'info','礼包兑换完成，请查看账号结果汇总'),()=>emit(session,'error','礼包兑换中断，请核对游戏内奖励'));
@@ -4376,6 +4454,18 @@ export function createConsole({ host = '127.0.0.1', port = 17321, onLog, recover
     };
   }
 
+  function giftCodeTarget(account) {
+    const id = account.id, session = sessionFor(id), generation = session.generation;
+    return { id, session, title: describeAccount(account).title, blocked: session.paused ? '账号已暂停托管' : '', dispatch: (action, { shouldStart } = {}) => {
+      const latest = loadStore().accounts.find(item => item.id === id);
+      if (!latest || session.generation !== generation || session.paused) throw Error('原账号连接已变化');
+      return progressionJob(session, latest, 'gift-code-redeem', null, action, { shouldStart });
+    } };
+  }
+  const giftAutomation = createGiftCodeAutomation({
+    library: publicGiftCodes, accounts: () => loadStore().accounts, targetFor: giftCodeTarget,
+    refresh: giftCodeUpdates, report: message => emit(null, 'warn', message),
+  });
   const server = http.createServer((req, res) => {
     res.on('error', () => { streams.delete(res); res.destroy(); });
     req.on('error', () => res.destroy());
@@ -4398,10 +4488,15 @@ export function createConsole({ host = '127.0.0.1', port = 17321, onLog, recover
       const recovery = captureController.inspectCaptureRecovery();
       if (recovery.pending) emit(null, 'warn', recovery.error || recovery.message || '检测到上次采集残留，请在账号页恢复', { category: 'system' });
       await resources?.start();
-      return new Promise((resolve) => {
+      return new Promise((resolve, reject) => {
+        const listenFailed = error => reject(error);
+        server.once('error', listenFailed);
         server.listen(port, host, () => {
-          const address = `http://${host}:${server.address().port}`;
+          server.off('error', listenFailed);
+          const address = consoleUrl(host, server.address().port);
+          if (host === '0.0.0.0' || host === '::' || host === '0:0:0:0:0:0:0:0') emit(null, 'info', `控制台监听 ${host}，其他设备请使用这台电脑的局域网 IP 和端口 ${server.address().port}`);
           emit(null, 'info', `控制台已启动 ${address}`);
+          giftAutomation.start();
           fs.watchFile(settingsFile(), { interval: 1000, persistent: false }, settingsFileChanged);
           settingsWatchStarted = true;
           for (const account of loadStore().accounts) {
@@ -4422,12 +4517,13 @@ export function createConsole({ host = '127.0.0.1', port = 17321, onLog, recover
       });
     },
     close: async () => {
+      giftAutomation.close();
       closing = true;
       if (settingsWatchStarted) fs.unwatchFile(settingsFile(), settingsFileChanged);
       clearAlipayRoles();
       await alipayLogin.close();
-      clearDouyinRoles();
-      await douyinLogin.close();
+      clearWechatRoles();
+      await wechatLogin.close();
       for (const client of phonePreviewClients) client.stop();
       phonePreviewClients.clear();
       pendingPhoneLogins.clear();

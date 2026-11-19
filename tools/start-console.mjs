@@ -1,6 +1,7 @@
 import { pathToFileURL, fileURLToPath } from 'node:url';
 import { certificateCommand } from '../src/platform/certificates.mjs';
 import { inspectCaptureRecovery, recoverCapture } from '../src/capture.mjs';
+import { consoleHost, consoleUrl } from '../src/console-address.mjs';
 
 export async function startConsole(args = process.argv.slice(2), dependencies = {}) {
   const env = dependencies.env ?? process.env;
@@ -8,7 +9,7 @@ export async function startConsole(args = process.argv.slice(2), dependencies = 
   const command = String(args[0] ?? '').toLowerCase();
   env.CW_PORT ||= '17323';
   if (command === 'url' || command === 'address') {
-    print(`http://127.0.0.1:${env.CW_PORT}/`);
+    print(consoleUrl(consoleHost(env), env.CW_PORT) + '/');
     const hold = dependencies.hold ?? (() => new Promise(() => { setInterval(() => {}, 60_000); }));
     await hold();
     return;

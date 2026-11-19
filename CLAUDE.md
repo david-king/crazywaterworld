@@ -4,7 +4,7 @@
 
 ## 项目概述
 
-微信/抖音小游戏《疯狂水世界》的协议侧挂机工具：直连游戏 WebSocket 网关，并提供本地网页控制台。仅面向 Windows，Node.js ^20.19.0 或 >=22.12.0，ESM。文档、界面和日志均为中文。
+微信/抖音小游戏《疯狂水世界》的协议侧挂机工具：直连游戏 WebSocket 网关，并提供本地网页控制台。主要面向 Windows，提供 macOS 微信缓存路径识别、默认浏览器打开和读取权限提示等基础兼容；电脑微信和电脑抖音采集仍仅适用于 Windows。Node.js ^20.19.0 或 >=22.12.0，ESM。文档、界面和日志均为中文。
 
 ## 常用命令
 
@@ -32,7 +32,7 @@ npm run sync-resources        # 从游戏发布清单更新配置表和世界地
 npm run sync-art              # 同步素材；缓存缺图可加 -- --fetch
 ```
 
-`CW_PORT` 可改端口，`CW_NO_BROWSER=1` 禁止自动开浏览器。测试用 `node:assert/strict`，新文件需加入对应 `package.json` 脚本，核心离线专项同时登记到 `tools/selftest-offline.mjs`。单跑某个测试分组不会触发顶层 `pretest`，涉及界面标记时先构建。`test:offline` 会将协议路径指向缺失文件，依赖真实协议的测试应明确使用自有协议包进行验证。
+`CW_HOST` 可改监听 IP/主机名（默认 `127.0.0.1`），`CW_PORT` 可改端口，`CW_NO_BROWSER=1` 禁止自动开浏览器。`console-address.mjs` 统一监听主机校验与本机访问 URL，通配监听使用回环 URL，IPv6 URL 带方括号。测试用 `node:assert/strict`，新文件需加入对应 `package.json` 脚本，核心离线专项同时登记到 `tools/selftest-offline.mjs`。单跑某个测试分组不会触发顶层 `pretest`，涉及界面标记时先构建。`test:offline` 会将协议路径指向缺失文件，依赖真实协议的测试应明确使用自有协议包进行验证。
 
 - `selftest-{fishing,fishing-upgrade,antique-recruit,activity-schedule,resident-orders,resident-http}.mjs` 由 `selftest-automation.mjs` 调用，单独执行不会跑测试。
 - `selftest-registry.mjs` 与 `selftest-describe.mjs` 不在 npm 测试脚本内；注册表测试会写测试键并自行清理。
@@ -49,9 +49,11 @@ npm run sync-art              # 同步素材；缓存缺图可加 -- --fetch
 
 ### 协议与配置
 
+- `src/wechat/` 是仅用于微信扫码的 Node 原生协议模块（二维码、票据、MMTLS、小游戏 code），`wechat-login.mjs` 管理临时会话；禁止引入第三方授权可执行程序/额外服务。参考版本与数据边界见 `docs/wechat-native-login.md`。新增测试进入 `test:wechat-native` 和核心离线分组，真实扫码需用户参与，不能用真实账号自动回归。
+
 仓库不分发 `.proto` 或配置表，运行和部分测试需要本机游戏缓存。
 
-- `proto.mjs` 执行游戏自带 `game.js`，取得 protobufjs 编解码类。`protocol-source.mjs` 按 `CW_PROTO_BUNDLE`、微信缓存最高版本 `_src_chunks_.wxapkg`、`work/extracted/` 查找。
+- `proto.mjs` 执行游戏自带 `game.js`，取得 protobufjs 编解码类。`protocol-source.mjs` 为来源描述和实际读取共用同一解析入口：显式参数/`CW_PROTO_BUNDLE` → 最高版本微信缓存 → 程序根目录 `_src_chunks_.wxapkg` → `protocol/_src_chunks_.wxapkg` → `work/extracted/_src_chunks_/src/chunks/game.js`。相对位置基于程序目录；缓存权限失败可使用自备文件，最新主包缺分包或所选协议损坏不得静默回退旧协议。
 - 无反射信息，使用 `tools/describe.mjs` 还原字段、`tools/ctx.mjs` 查压缩代码上下文。`work/extracted/` 可能落后于微信缓存，客户端逻辑以缓存最高版本的主包为准。请求名和响应名必须核对真实 `protocol[name]`，不能凭名称推测接口。
 - `config.mjs` 按 `CW_CONFIG_PACK`、已验证的远程资源快照、较新的本地同步副本或微信缓存查找。`resource-updater.mjs` 在控制台和 CLI 持续挂机启动时及每 30 分钟检查发布清单（`CW_RESOURCE_UPDATE_MINUTES` 可调），验证配置和地图后原子启用；`config.resources` 保留任务的地图快照，挂机只在下一轮切换。`npm run sync-resources` 手动更新远程资源，`npm run sync-config` 备份本地配置来源；旧注释中的 `tools/fetch-config.mjs` 已不存在。测试应使用临时 `CW_RESOURCE_DIR`，控制台测试默认不启用远程更新。
 - `actions.mjs` 是协议操作目录，`mutate` 区分读写；`CW_DEBUG=1` 可同时在终端输出协议日志，原始日志默认写项目 `data/protocol.log`，主日志与 `.1` 按 `CW_PROTOCOL_LOG_MAX_BYTES`（默认 5 MB）轮转。
@@ -67,9 +69,9 @@ npm run sync-art              # 同步素材；缓存缺图可加 -- --fetch
 - 网页仅控制和订阅日志，关闭网页不停止后台 `loop.job`。业务日志经 `createConsole({ onLog })` 输出到 CLI；日志回调和 SSE 异常不能影响游戏任务，显式关闭控制台时再关闭 SSE。验证使用 `selftest-console-background.mjs` 的隔离账号与假客户端。
 - `activity-availability.mjs` 集中记录已确认结束活动的配置下线规则，依据见 `docs/activity-availability.md`。只过滤配置视图和有效调度，不删除 `automationTasks`、设置 schema 或历史值。服务器当前开放的对应子活动可覆盖旧下线记录；配置静态字段、动态补全、旧控制 API 和 loop 别名门控须一起检查，不能按“限时活动”整个分组停用。
 - 挂机使用外层运行 controller 和每连接独立 attemptController。普通网络、心跳连续超时和重传失败会中断旧轮次，待其退出后退避重连（3 秒起、最高 60 秒），保留进度、账本与预留。异地登录按账号的 `login.autoReconnect` 授权恢复，登录设置提供常规/深夜间隔、随机抖动及重试上限。未运行挂机的账号也按策略恢复连接并保持挂机停止状态。等待时间与已尝试次数持久保存以便重启接续，等待中保存配置立即重算下一次重试时间，页面读取遵守账号的重连等待。手动暂停、停止、断开或关闭自动重连取消重试，拒绝登录、协议错误及次数耗尽终止重试，手动暂停需明确恢复托管。重连后先自动同步工厂、农田和库存再接续原有任务，同步失败保留旧记录并暂缓写入。`GameClient.closeReason` 和登录错误 `recoverable` 决定分类。Webhook 仍未恢复。
-- CLI 的 `console-output.mjs` 在支持 VT 的 TTY 使用滚动区固定地址/提示，日志分批且有界，非 TTY 保留纯文本；关闭恢复滚动区。不要绕过此输出器打印普通控制台日志或全局替换 console；`CW_PIN_HEADER=0` 可关闭顶部固定。
+- CLI 的 `console-output.mjs` 在支持 VT 的 TTY 使用滚动区固定地址/提示，可信 HTTP(S) 启动地址以 OSC 8 超链接高亮，窄屏片段保持同一完整目标；日志分批且有界，非 TTY、dumb 或禁用固定区时保留纯文本；关闭恢复滚动区。不要绕过此输出器打印普通控制台日志或全局替换 console；`CW_PIN_HEADER=0` 可关闭顶部固定。
 - `reward-schedule.mjs` 记录奖励下次检查时间，相关推送提前唤醒。推送只触发串行检查，不能另开并行派遣绕过预算。
-- `accounts.mjs`、`capture.mjs`、`tools/mitm-*.mjs` 管理账号与采集。`src/platform/` 封装 Windows 代理、证书、客户端路径、浏览器和终端能力，`tools/start-console.mjs` 承担启动脚本逻辑。采集阶段与归属持久保存在 `data/capture-session.json`，恢复入口包括账号页按钮和 `start-console.cmd recover`。
+- `accounts.mjs`、`capture.mjs`、`tools/mitm-*.mjs` 管理账号与采集。`src/platform/` 封装 Windows 代理和证书，以及客户端路径、浏览器和终端能力；macOS 使用微信容器缓存路径和系统 `open` 命令，缓存权限错误提供授权指引。`tools/start-console.mjs` 承担启动脚本逻辑。采集阶段与归属持久保存在 `data/capture-session.json`，恢复入口包括账号页按钮和 `start-console.cmd recover`。
 
 ### 控制台页面
 

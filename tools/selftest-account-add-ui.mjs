@@ -38,7 +38,7 @@ function fixture() {
     }
     return nodes.get(id);
   };
-  const buttons = ['alipay', 'douyin-qr', 'phone', 'wechat', 'douyin'].map(channel => {
+  const buttons = ['alipay', 'phone', 'wechat', 'douyin', 'wechat-qr'].map(channel => {
     const button = env.node('choose-' + channel);
     button.dataset.loginChannel = channel;
     return button;
@@ -60,8 +60,8 @@ function fixture() {
   new Function('env', `
     const $ = env.node, document = env.document;
     const resetAlipayLogin = () => env.clean('alipay');
-    const resetDouyinLogin = () => env.clean('douyin-qr');
     const resetPhoneLogin = () => env.clean('phone');
+    const resetWechatLogin = () => env.clean('wechat-qr');
     const resetAccountAddCapture = () => env.clean('capture');
     const refreshPhoneDevice = async () => { env.deviceReads++; };
     const pollCapture = async () => { env.captureReads++; };
@@ -93,14 +93,14 @@ await test('打开弹窗只显示渠道选择，首次渲染钩子不触发请�
 });
 
 await test('选中各渠道只显示对应入口，采集按钮按渠道呈现', async () => {
-  for (const channel of ['alipay', 'douyin-qr', 'phone', 'wechat', 'douyin']) {
+  for (const channel of ['alipay', 'phone', 'wechat', 'douyin', 'wechat-qr']) {
     const env = fixture();
     env.open();
     env.choose(channel);
     assert.equal(env.channel(), channel);
     assert.equal(env.node('account-add-channels').hidden, true);
     assert.equal(env.node('account-add-alipay').hidden, channel !== 'alipay');
-    assert.equal(env.node('account-add-douyin').hidden, channel !== 'douyin-qr');
+    assert.equal(env.node('account-add-wechat').hidden, channel !== 'wechat-qr');
     assert.equal(env.node('account-add-phone').hidden, channel !== 'phone');
     assert.equal(env.node('account-add-capture').hidden, !['wechat', 'douyin'].includes(channel));
     assert.equal(env.node('cap-start').hidden, channel !== 'wechat');
@@ -111,6 +111,18 @@ await test('选中各渠道只显示对应入口，采集按钮按渠道呈现',
     env.choose(channel === 'phone' ? 'alipay' : 'phone');
     assert.equal(env.channel(), channel, '完成当前渠道清理后才可重新选择');
   }
+});
+
+await test('微信扫码与电脑微信采集入口独立，返回时清理正确会话', async () => {
+  const env = fixture(); env.open(); env.choose('wechat-qr');
+  assert.equal(env.node('account-add-wechat').hidden, false);
+  assert.equal(env.node('account-add-capture').hidden, true);
+  assert.equal(env.captureReads, 0);
+  env.changed('wechat-qr', 'captured');
+  assert.equal(env.node('account-add-step').textContent, '选择区服和角色');
+  await env.click('back'); assert.deepEqual(env.cleanup, ['wechat-qr']);
+  env.choose('wechat'); assert.equal(env.captureReads, 1);
+  assert.equal(env.node('account-add-capture').hidden, false);
 });
 
 await test('微信和抖音采集后显示验证清理步骤，清理成功后显示完成', async () => {
@@ -130,7 +142,7 @@ await test('微信和抖音采集后显示验证清理步骤，清理成功后�
 });
 
 await test('角色选择和成功状态显示明确步骤，完成后由用户关闭', async () => {
-  for (const [channel, phase] of [['alipay', 'captured'], ['douyin-qr', 'captured'], ['phone', 'selecting']]) {
+  for (const [channel, phase] of [['alipay', 'captured'], ['phone', 'selecting']]) {
     const env = fixture();
     env.open();
     env.choose(channel);
@@ -238,32 +250,28 @@ await test('Escape沿用清理路径，继续添加也先清理上一渠道', as
   assert.equal(env.channel(), 'douyin');
 });
 
-await test('抖音扫码关闭只清理扫码会话，二次验证中仍可返回，失败可重试', async () => {
-  const env = fixture(); env.open(); env.choose('douyin-qr');
-  assert.equal(env.node('account-add-title').textContent, '抖音扫码登录');
-  assert.equal(env.focus, 'douyin-start');
-  assert.equal(env.captureReads, 0);
-  env.changed('douyin-qr', 'verifying');
-  assert.equal(env.node('account-add-close').disabled, false);
-  env.onClean = async () => { throw new Error('扫码会话尚未结束'); };
-  assert.equal(await env.click('back'), false);
-  assert.equal(env.channel(), 'douyin-qr');
-  assert.deepEqual(env.cleanup, ['douyin-qr']);
-  env.onClean = async () => true;
-  assert.equal(await env.click('back'), true);
-  env.choose('douyin');
-  assert.equal(env.node('account-add-capture').hidden, false);
-  assert.equal(env.node('account-add-douyin').hidden, true);
+await test('电脑抖音采集为直接入口，扫码与手动验证页面已移除', async () => {
+  const template = fs.readFileSync(new URL('../src/ui/pages.tsx', import.meta.url), 'utf8');
+  const page = fs.readFileSync(new URL('../src/page.mjs', import.meta.url), 'utf8');
+  assert.match(template, /data-login-channel="douyin"[\s\S]*电脑抖音采集/);
+  assert.doesNotMatch(template, /data-login-channel="douyin-qr"|备用登录方式|id="account-add-douyin"|douyin-verification/);
+  assert.doesNotMatch(page, /douyinLoginScript|douyin-login-ui\.js|\/api\/accounts\/douyin-login/);
+  const env = fixture(); env.open(); env.choose('douyin');
+  assert.equal(env.focus, 'cap-douyin');
   assert.equal(env.captureReads, 1);
-  env.changed('douyin-qr', 'captured');
+  assert.equal(env.node('account-add-title').textContent, '电脑抖音采集');
   assert.equal(env.node('account-add-step').textContent, '采集游戏登录信息');
+  await env.click('close'); assert.deepEqual(env.cleanup, ['capture']);
 });
 
-await test('主抖音入口为扫码，备用电脑采集入口仍保留且可发现', async () => {
-  const template = fs.readFileSync(new URL('../src/ui/pages.tsx', import.meta.url), 'utf8');
-  assert.match(template, /data-login-channel="douyin-qr"/);
-  assert.match(template, /备用登录方式[\s\S]*data-login-channel="douyin"[\s\S]*电脑抖音采集/);
-  assert.match(template, /id="account-add-douyin"/);
+await test('移除扫码入口后仍识别历史抖音账号，拒绝旧扫码渠道', async () => {
+  const page = fs.readFileSync(new URL('../src/page.mjs', import.meta.url), 'utf8');
+  const label = new Function(page.slice(page.indexOf('function accountChannel(source)'), page.indexOf('async function useAccountCard')) + '\nreturn accountChannel;')();
+  assert.equal(label('douyin'), '抖音小游戏');
+  assert.equal(label('douyin-mitm'), '抖音小游戏');
+  const env = fixture(); env.open();
+  env.node('choose-douyin').dataset.loginChannel = 'douyin-qr';
+  env.choose('douyin'); assert.equal(env.channel(), null); assert.equal(env.captureReads, 0);
 });
 
 console.log(`添加账号弹窗自检通过 ${passed} 项`);

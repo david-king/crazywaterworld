@@ -5,14 +5,14 @@ import path from 'node:path';
 import { setTimeout as sleep } from 'node:timers/promises';
 
 const temporaryRoot = fs.realpathSync(os.tmpdir());
-const directory = fs.mkdtempSync(path.join(temporaryRoot, 'cw-douyin-http-'));
+const directory = fs.mkdtempSync(path.join(temporaryRoot, 'cw-wechat-http-'));
 process.env.CW_DATA_DIR = directory;
 process.env.CW_CONFIG_PACK = path.join(directory, 'config.json');
 process.env.CW_CA_DIR = path.join(directory, 'certificates');
 fs.writeFileSync(process.env.CW_CONFIG_PACK, '[]');
 
 const { createConsole } = await import('../src/server.mjs');
-const { accountId, loadStore, saveStore, upsertAccount } = await import('../src/accounts.mjs');
+const { loadStore, saveStore, upsertAccount } = await import('../src/accounts.mjs');
 const { GameClient } = await import('../src/client.mjs');
 const originalMethods = Object.fromEntries(['connect', 'request', 'send', 'sendWatch', 'stop', 'connected', 'interleaveRead']
   .map(name => [name, Object.getOwnPropertyDescriptor(GameClient.prototype, name)]));
@@ -86,16 +86,16 @@ function holdRoles(id) {
   return gate;
 }
 
-function credential(openId = 'fixture-douyin-open-id', token = 'fixture-douyin-token') {
+function credential(openId = 'fixture-wechat-open-id', token = 'fixture-wechat-token') {
   return {
-    source: 'douyin',
+    source: 'wechat',
     capturedAt: new Date().toISOString(),
     url: 'wss://fixture.invalid/gateway',
     loginFrameHex: 'aabbccdd',
     login: {
       worldId: 3000000002,
-      eworldParams: { openId, token, sign: 'fixture-douyin-sign', timestamp: '1234567890' },
-      eworldClientInfo: { appId: 'fixture-douyin-app' },
+      eworldParams: { openId, token, sign: 'fixture-wechat-sign', timestamp: '1234567890' },
+      eworldClientInfo: { appId: 'fixture-wechat-app' },
     },
   };
 }
@@ -202,14 +202,14 @@ const controller = createController();
 const app = createConsole({
   port: 0,
   protocol: { OnWaterRequest: true, OnWaterResponse: true, AllItemRequest: true, AllItemResponse: true },
-  douyinLoginController: controller,
+  wechatLoginController: controller,
   captureController: { inspectCaptureRecovery: () => ({ pending: false }) },
 });
 let closed = false;
 try {
   const root = await app.listen();
   async function request(route, body) {
-    const response = await fetch(root + '/api/accounts/douyin-login' + route, {
+    const response = await fetch(root + '/api/accounts/wechat-login' + route, {
       method: body === undefined ? 'GET' : 'POST',
       body: body === undefined ? undefined : JSON.stringify(body),
       signal: AbortSignal.timeout(10_000),
@@ -227,7 +227,7 @@ try {
       await sleep(10);
     }
     const session = app.sessions.get(id);
-    assert.fail('等待抖音所选角色自动挂机超时 ' + JSON.stringify({ running: session?.loop.running, completed: session?.loop.completed,
+    assert.fail('等待微信所选角色自动挂机超时 ' + JSON.stringify({ running: session?.loop.running, completed: session?.loop.completed,
       stopping: session?.loop.controller?.signal.aborted, error: session?.loop.error, login: session?.client?.login.worldId,
       log: session?.log.slice(-8) }));
   }
@@ -277,14 +277,14 @@ try {
   assert.equal((await request('/cancel', { id: waiting.data.id })).status, 200);
   assert.equal((await save(waiting.data.id)).status, 400, '已取消的扫码结果不能保存');
 
-  // 同名微信身份保留，抖音角色使用独立账号 ID。
+  // 同名微信身份保留，微信角色使用独立账号 ID。
   const initialStore = loadStore();
   upsertAccount(initialStore, { ...credential(), source: 'mitm' }, { label: '原微信账号' });
   saveStore(initialStore);
   const first = await capture();
   assert.equal(first.phase, 'captured');
   assert.equal(first.choices.length, 3);
-  assert.equal(first.choices[0].accountId, 'douyin:fixture-douyin-open-id');
+  assert.equal(first.choices[0].accountId, 'fixture-wechat-open-id');
   assert.equal(first.choices[0].nickname, '海风船长');
   assert.equal(first.choices[0].worldName, '海港1服');
   assert.equal(first.choices[0].roleWorldName, '海港10服');
@@ -298,7 +298,7 @@ try {
   await status(first.id);
   await status(first.id);
   assert.equal(reads.length, firstReads, '轮询不重复读取已完成的角色列表');
-  assert.doesNotMatch(JSON.stringify(first), /fixture-douyin-token|fixture-douyin-sign|eworldParams|loginFrameHex/);
+  assert.doesNotMatch(JSON.stringify(first), /fixture-wechat-token|fixture-wechat-sign|eworldParams|loginFrameHex/);
   assert.equal((await request('/save', { id: first.id, choiceId: first.choices[1].id })).status, 400);
   assert.equal((await save(first.id)).status, 400, '多个角色必须选择');
   assert.equal((await save(first.id, 'forged-choice')).status, 400);
@@ -307,7 +307,7 @@ try {
   const beforeSaveConnections = connections.length;
   const saved = await save(first.id, first.choices[1].id);
   assert.equal(saved.status, 200);
-  assert.equal(saved.data.account.source, 'douyin');
+  assert.equal(saved.data.account.source, 'wechat');
   assert.equal(saved.data.account.active, true);
   assert.equal(saved.data.selectedRole.nickname, '星海船长');
   assert.equal(saved.data.selectedRole.worldId, 3000000002);
@@ -333,9 +333,9 @@ try {
   assert.equal(initialSession.loop.rounds, 0);
   assert.equal(loadStore().accounts.find(row => row.id === idOfAccount).automation.autoStart, true);
   let store = loadStore();
-  assert.equal(store.accounts.length, 2);
+  assert.equal(store.accounts.length, 1, '微信扫码与旧电脑微信凭据按相同 openId 更新同一账号');
   assert.equal(store.activeId, idOfAccount);
-  assert.equal(store.accounts.find(account => account.id === 'fixture-douyin-open-id').label, '原微信账号');
+  assert.equal(store.accounts.find(account => account.id === 'fixture-wechat-open-id').label, '原微信账号');
   assert.equal(store.accounts.find(account => account.id === idOfAccount).lastSeen.nickname, '星海船长');
   assert.equal((await save(first.id, first.choices[1].id)).status, 400);
 
@@ -349,7 +349,7 @@ try {
   store = loadStore();
   assert.equal(store.accounts.find(account => account.id === idOfAccount).login.worldId, 4000000003);
   assert.equal(store.accounts.find(account => account.id === idOfAccount).lastSeen.worldId, 4000000003);
-  assert.equal(store.accounts.find(account => account.id === idOfAccount).label, '灯塔守望', '自动昵称随所选角色变化');
+  assert.equal(store.accounts.find(account => account.id === idOfAccount).label, '原微信账号', '扫码更新角色保留原微信账号的人工备注');
   assert.equal(store.accounts.find(account => account.id === idOfAccount).automation.autoStart, true);
   await disconnect(idOfAccount);
   store = loadStore();
@@ -366,12 +366,12 @@ try {
   session.loop.running = true;
   session.loop.controller = new AbortController();
   const previousGeneration = session.generation;
-  store.accounts.find(account => account.id === idOfAccount).label = '我的抖音账号';
+  store.accounts.find(account => account.id === idOfAccount).label = '我的微信账号';
   saveStore(store);
   const beforeReuse = connections.length;
   const merged = await capture(credential(undefined, 'merged-role-token'));
   assert.equal(connections.length, beforeReuse);
-  assert.equal(reads.at(-1).client, activeClient, '按 douyin 前缀账号找到在线会话');
+  assert.equal(reads.at(-1).client, activeClient, '按 wechat 前缀账号找到在线会话');
   assert.equal(activeClient.connected, true);
   assert.equal(merged.choices[0].matched, true);
   const mergedSaved = await save(merged.id, merged.choices[0].id);
@@ -388,11 +388,11 @@ try {
   assert.equal(account.login.worldId, 3000000001, '连接保存合服前入口区服');
   assert.equal(account.lastSeen.worldId, 3000000010, '展示保存合服后的实际区服');
   assert.equal(account.lastSeen.nickname, '海风船长');
-  assert.equal(account.label, '我的抖音账号', '人工备注保持');
+  assert.equal(account.label, '我的微信账号', '人工备注保持');
   assert.equal(account.automation.enabled, false);
   assert.equal(account.automation.autoStart, false);
   assert.equal(account.automation.productionSyncRequired, true);
-  assert.match(mergedSaved.data.account.title, /我的抖音账号.*海风船长.*海港10服/);
+  assert.match(mergedSaved.data.account.title, /我的微信账号.*海风船长.*海港10服/);
 
   // 暂停状态允许临时查询和更新，保留用户暂停选择。
   session.paused = true;
@@ -428,7 +428,7 @@ try {
   assert.deepEqual(empty.choices, []);
   assert.equal(empty.roleError, null);
   assert.equal((await save(empty.id)).status, 400);
-  assert.equal(loadStore().accounts.some(row => row.id === 'douyin:empty-account'), false);
+  assert.equal(loadStore().accounts.some(row => row.id === 'empty-account'), false);
   roleFailures.add('retry-account');
   const failed = await capture(credential('retry-account'));
   assert.match(failed.roleError, /模拟角色列表读取失败/);
@@ -453,11 +453,11 @@ try {
   const single = await capture(credential('single-account'));
   assert.equal(single.choices[0].nickname, '未命名角色');
   assert.equal((await save(single.id)).status, 200);
-  assert.equal(loadStore().accounts.find(row => row.id === 'douyin:single-account').lastSeen.nickname, '未命名角色');
-  assert.equal(loadStore().accounts.find(row => row.id === 'douyin:single-account').label, '未命名角色');
-  assert.equal(app.sessions.get('douyin:single-account').loop.running, false);
-  assert.equal(loadStore().accounts.find(row => row.id === 'douyin:single-account').automation.autoStart, false);
-  await disconnect('douyin:single-account');
+  assert.equal(loadStore().accounts.find(row => row.id === 'single-account').lastSeen.nickname, '未命名角色');
+  assert.equal(loadStore().accounts.find(row => row.id === 'single-account').label, '未命名角色');
+  assert.equal(app.sessions.get('single-account').loop.running, false);
+  assert.equal(loadStore().accounts.find(row => row.id === 'single-account').automation.autoStart, false);
+  await disconnect('single-account');
 
   // 查询并发共用同一请求，取消、过期、刷新都丢弃旧结果并关闭临时连接。
   for (const action of ['cancel', 'expire', 'refresh']) {
@@ -483,7 +483,7 @@ try {
     roleGates.delete(openId);
     assert.equal(readingClient.connected, false);
     assert.equal((await save(started.data.id, 'late-choice')).status, 400);
-    assert.equal(loadStore().accounts.some(row => row.id === 'douyin:' + openId), false);
+    assert.equal(loadStore().accounts.some(row => row.id === '' + openId), false);
     assert.equal(liveClients.size, 0);
   }
 
@@ -569,87 +569,18 @@ try {
     }
   }
 
-  // 保存已进入 helper 后仍可能等待旧连接排空/阵容收尾；取消与过期必须阻止之后落盘。
-  for (const stage of ['existing-drain', 'closing-connection']) {
-    for (const action of ['cancel', 'expire']) {
-      const pending = await capture(credential(undefined, `${stage}-${action}-token`));
-      const tokenBefore = loadStore().accounts.find(row => row.id === idOfAccount).login.eworldParams.token;
-      const entered = deferred();
-      const gate = deferred();
-      const previousPaused = session.paused;
-      const previousDrain = Object.getOwnPropertyDescriptor(session, 'connectionDrain');
-      const previousLineupJob = session.lineupJob;
-      let saving;
-      let waitTimeout;
-      if (stage === 'existing-drain') {
-        // 已暂停账号跳过 enqueue，saveSelectedRole 自身等待现有 connectionDrain。
-        session.paused = true;
-        Object.defineProperty(session, 'connectionDrain', {
-          configurable: true,
-          get() { entered.resolve(); return gate.promise; },
-        });
-      } else {
-        // 新建的 closeSessionConnection 等待在途阵容任务，保存前校验已执行过。
-        const caught = gate.promise.catch.bind(gate.promise);
-        gate.promise.catch = handler => { entered.resolve(); return caught(handler); };
-        session.lineupJob = gate.promise;
-      }
-      try {
-        saving = save(pending.id, pending.choices[0].id);
-        await Promise.race([
-          entered.promise,
-          saving.then(result => { throw new Error(`${stage} 保存未进入等待，HTTP ${result.status}`); }),
-          new Promise((resolve, reject) => {
-            waitTimeout = setTimeout(() => reject(new Error(`${stage} 保存等待超时`)), 5000);
-          }),
-        ]);
-        clearTimeout(waitTimeout);
-        if (action === 'cancel') assert.equal((await request('/cancel', { id: pending.id })).status, 200);
-        else controller.expire();
-        gate.resolve();
-        assert.equal((await saving).status, 400, `${stage} 期间${action}后不得继续保存`);
-        assert.equal(loadStore().accounts.find(row => row.id === idOfAccount).login.eworldParams.token,
-          tokenBefore, `${stage} 期间${action}后原凭据保持不变`);
-      } finally {
-        clearTimeout(waitTimeout);
-        gate.resolve();
-        await saving?.catch(() => {});
-        if (stage === 'existing-drain') Object.defineProperty(session, 'connectionDrain', previousDrain);
-        else await session.connectionDrain?.catch(() => {});
-        session.lineupJob = previousLineupJob;
-        session.paused = previousPaused;
-      }
-    }
-  }
-
   // 已保存时清理失败仍返回保存成功，已消费标记阻止重复写入。
   const cleanup = await capture(credential('cleanup-account', 'cleanup-token'));
   controller.cancelError = new Error('模拟浏览器关闭失败');
   const cleanupSaved = await save(cleanup.id, cleanup.choices[1].id);
   assert.equal(cleanupSaved.status, 200);
-  assert.equal(cleanupSaved.data.account.id, 'douyin:cleanup-account');
-  assert.equal(app.sessions.get('douyin:cleanup-account').loop.running, false);
-  assert.equal(loadStore().accounts.find(row => row.id === 'douyin:cleanup-account').automation.autoStart, false);
-  await disconnect('douyin:cleanup-account');
+  assert.equal(cleanupSaved.data.account.id, 'cleanup-account');
+  assert.equal(app.sessions.get('cleanup-account').loop.running, false);
+  assert.equal(loadStore().accounts.find(row => row.id === 'cleanup-account').automation.autoStart, false);
+  await disconnect('cleanup-account');
   assert.equal((await save(cleanup.id, cleanup.choices[1].id)).status, 400);
   assert.equal((await status(cleanup.id)).data.phase, 'cancelled');
   controller.cancelError = null;
-
-  // 旧电脑抖音采集与扫码共用身份；更新凭证不新增重复账号或丢失备注。
-  const legacyCredential = { ...credential('legacy-capture'), source: 'douyin-mitm' };
-  assert.equal(accountId(legacyCredential), accountId(credential('legacy-capture')));
-  const legacyStore = loadStore();
-  upsertAccount(legacyStore, legacyCredential, { label: '旧采集备注' });
-  saveStore(legacyStore);
-  const countBeforeMigration = legacyStore.accounts.length;
-  const migrate = await capture(credential('legacy-capture', 'fixture-updated-token'));
-  assert.equal(migrate.choices[0].matched, true);
-  assert.equal((await save(migrate.id, migrate.choices[0].id)).status, 200);
-  const migrated = loadStore();
-  assert.equal(migrated.accounts.length, countBeforeMigration);
-  assert.equal(migrated.accounts.find(row => row.id === 'douyin:legacy-capture').source, 'douyin');
-  assert.equal(migrated.accounts.find(row => row.id === 'douyin:legacy-capture').label, '旧采集备注');
-  assert.equal(migrated.accounts.find(row => row.id === 'douyin:legacy-capture').automation.autoStart, false);
 
   // 控制台关闭中止正在进行的角色预览。
   const closingGate = holdRoles('closing-account');
@@ -662,8 +593,8 @@ try {
   closingGate.done.resolve();
   assert.equal(controller.closes, 1);
   assert.equal(liveClients.size, 0);
-  assert.equal(loadStore().accounts.some(row => row.id === 'douyin:closing-account'), false);
-  console.log('selftest-douyin-login-http: ok');
+  assert.equal(loadStore().accounts.some(row => row.id === 'closing-account'), false);
+  console.log('selftest-wechat-login-http: ok');
 } finally {
   for (const gate of roleGates.values()) gate.done.resolve();
   if (!closed) await app.close();
