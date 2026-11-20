@@ -1,6 +1,7 @@
 // Operation names shared by the server journal and the browser's network errors.
 export const operationLabels = {
   '/api/world/production-plan': '生成排产计划',
+  '/api/world/production-speed': '手动生产加速',
   '/api/world/fleet-speed/preview': '核对舰队加速费用',
   '/api/world/fleet-speed/action': '加速舰队至完成',
   '/api/merchant': '查看海商王实况', '/api/merchant/history': '查看海商王成交记录', '/api/merchant/step': '海商王单步验证',
@@ -71,6 +72,7 @@ export const operationLabels = {
   '/api/guild/mutual/start': '开启单次联盟互助', '/api/guild/mutual/stop': '停止单次联盟互助',
   '/api/dailies/single': '完成单项日常',
   '/api/fleets/formation': '远征舰队编队',
+  '/api/fleets/current-formation': '查看舰队当前阵容',
   '/api/world': '查看海面', '/api/world/run': '执行海面经营', '/api/worlds': '查看海域',
   '/api/world/order/submit': '手动提交居民订单',
   '/api/worlds/enter': '进入海域', '/api/worlds/save-role': '添加区服角色', '/api/trials/challenge': '挑战试炼副本',
@@ -82,5 +84,5 @@ export const operationLabels = {
   '/api/loop': '查看挂机设置', '/api/loop/start': '开始挂机', '/api/loop/stop': '暂停挂机',
   '/api/loop/auto-start': '设置自动开始挂机', '/api/loop/interval': '设置挂机间隔',
   '/api/login-settings': '保存登录设置',
-  '/api/loop/task': '修改自动任务', '/api/loop/fishing-reserve': '设置钓具预留金币',
+  '/api/loop/task': '修改自动任务',
 };

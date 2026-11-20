@@ -1,5 +1,6 @@
 import { readWeekOrder } from './activities.mjs';
 import { displayMaterial } from './config.mjs';
+import { linkOperationResult } from './operation-log.mjs';
 import { normalize } from './worlds.mjs';
 import { SPEED_UP_ITEM, SPEED_UP_ITEM_TYPE } from './world.mjs';
 
@@ -21,13 +22,13 @@ export async function serviceCargo(client, config, { enabled, log, testSpeedUp =
       writePending = false;
       const outcome = await verify(reply);
       await afterAction?.(action, ticket, outcome);
-      return outcome;
+      return linkOperationResult(outcome, ticket);
     } catch (error) {
       const notSent = !dispatched || (writePending && error.notSent === true);
       if (prepared) {
         await cancelAction?.(action, ticket, { notSent, error });
       }
-      throw error;
+      throw linkOperationResult(error, ticket);
     }
   };
   const ships = async () => normalize(await client.request('CargoShipsRequest', {})).ship ?? [];
@@ -72,7 +73,7 @@ export async function serviceCargo(client, config, { enabled, log, testSpeedUp =
           return { ok: true, body: reply };
         });
         if (!outcome) break;
-        log(label + '交货：' + labels.join('、'));
+        log(label + '交货：' + labels.join('、'), { operationId: outcome.operationId });
       }
     }
     if (state?.status === 1 && testSpeedUp && !speedUsed && active()) {
@@ -88,7 +89,7 @@ export async function serviceCargo(client, config, { enabled, log, testSpeedUp =
           return { ok: true, sent: true };
         });
         if (!outcome) break;
-        log(label + '测试加速 1 次，' + (state?.status === 2 ? '已到港' : '当前仍在运输'));
+        log(label + '测试加速 1 次，' + (state?.status === 2 ? '已到港' : '当前仍在运输'), { operationId: outcome.operationId });
       }
     }
     if (state?.status === 2 && active()) {

@@ -67,4 +67,24 @@ await test('情报已完成奖励逐条领取，无需月卡批量接口，空�
 await test('联盟情报独立开关能驱动整轮挂机，不依赖基地项目',async()=>{
  const f=pirateAdvanceFixture(),s=f.settings;f.player.guildId='1001007';s.loop.world=false;s.radar.runEnabled=true;s.radar.enabled=true;s.radar.fleetIds=['1远征船'];s.radar.petrolReserve=0;f.config.tables.ModuleOpenCfg.data.push({moduleId:'联盟情报',playerLevel:18});f.config.tables.WorldParamCfg.data.push({paramName:'情报事件消耗汽油',paramValue:500});let status=1;const read=f.client.request;f.client.request=async(n,b,r)=>n==='RadarInfoRequest'?{radarInfo:{events:[{uid:'9007199254740995',eventId:10001,state:status,createTime:10,pirate:{type:1,level:1}}]}}:read(n,b,r);f.client.sendWatch=async(n,b)=>{assert.equal(n,'RadarSendFleetsRequest');f.client.writes.push({n,b});status=3;};await runLoop(f.client,p,{config:f.config,player:f.player,getSettings:()=>s,usageLedger:ledger(),allowMutate:true,rounds:1,isEnabled:()=>false});assert.equal(f.client.writes.length,1);
 });
+await test('开启自动处理情报后随挂机识别普通月卡并一键领奖', async () => {
+  const { client, config, player, settings } = pirateAdvanceFixture();
+  player.guildId = '1001007';
+  settings.radar.runEnabled = settings.radar.enabled = true;
+  const read = client.request;
+  let events = [{ uid: '9007199254740995', eventId: 10001, state: 4, createTime: 10 }];
+  client.request = async (name, body, response) => {
+    if (name === 'MonthCardRequest') return { cardItem: [{ type: p.MonthCardType.MONTH_CARD_NORMAL, endTime: -1 }] };
+    if (name === 'RadarInfoRequest') return { radarInfo: { events } };
+    return read(name, body, response);
+  };
+  client.sendWatch = async (name, body, { beforeSend }) => {
+    beforeSend();
+    client.writes.push({ name, body });
+    events = [];
+  };
+  await runLoop(client, p, { config, player, getSettings: () => settings, usageLedger: ledger(),
+    allowMutate: true, rounds: 1, isEnabled: () => false });
+  assert.deepEqual(client.writes, [{ name: 'RadarGetAllRewardsRequest', body: {} }]);
+});
 console.log('补充自动化专项 '+total+'/'+total+' 通过');

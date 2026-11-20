@@ -81,11 +81,12 @@ try {
       'weekPass', 'weekGift', 'weekChipFree', 'compassReward', 'vipDaily', 'campaignReports', 'weekSupplyFree']) {
       const converted = settingsFromLegacyNative({ museumCollect: true, [key]: true });
       assert(nativePreferenceEnabled(converted, key), key + ' 保持可执行');
-      assert.equal(converted.schedule.mail, false); assert.equal(converted.schedule.ticketRecruit, false);
+      assert.equal(converted.schedule.mail, false);
       assert.equal(converted.museum.enabled, true); assert.equal(converted.pet.enabled, false);
       assert(!Object.hasOwn(converted.museum, 'claim')); assert(!Object.hasOwn(converted.museum, 'explore'));
     }
     const farm = settingsFromLegacyNative({ farm: true, museumCollect: true });
+    assert.deepEqual(settingsFromLegacyNative({ ticketRecruit: true }), settingsFromLegacyNative({}));
     assert.equal(farm.farm.harvest, true); assert.equal(farm.farm.autoPlant, true); assert.equal(farm.farm.speedUp, false);
     const repair = settingsFromLegacyNative({ radarRepair: true });
     assert.equal(repair.radar.runEnabled, true); assert.equal(repair.radar.repairIdle, true);

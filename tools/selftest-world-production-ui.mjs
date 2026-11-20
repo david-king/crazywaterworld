@@ -1,6 +1,7 @@
 import { newStateFunction } from './fixtures/console-state.mjs';
 import assert from 'node:assert/strict';
 import { PAGE } from '../src/page.mjs';
+import { inventoryStockRows } from '../src/world.mjs';
 
 const script = [...PAGE.matchAll(/<script\b[^>]*>([\s\S]*?)<\/script>/g)]
   .map(match => match[1]).find(value => value.includes('function renderWorld('));
@@ -111,7 +112,7 @@ function fixture() {
     }, iconEl = () => el('img');
     const renderInventory = () => {}, fmt = value => String(value);
     const resetInventory = () => {};
-    const call = () => new Promise(() => {});
+    const call = (...args) => env.call ? env.call(...args) : new Promise(() => {});
     const snapshot = { paused: false }, disconnected = new Set();
     let current = 'account-a';
     let orderClockOffset = 0;
@@ -428,6 +429,55 @@ test('未同步队列和缺少成熟时间明确显示未知状态', () => {
   assert.equal(env.document.querySelectorAll('[data-production-finish-at]').length, 0);
 });
 
+{
+  const env = fixture(), now = env.now / 1000 + 5;
+  const data = worldData(env, { accelerators: 2, factories: [factory([
+    { index: 8, productId: '面包', finishTime: now + 65 },
+    { index: 0, productId: '饼干', finishTime: now + 601 },
+    { index: 3, productId: '面条' }, { index: 7, productId: '糕点', finishTime: now - 1 },
+  ])], farms: [
+    { plot: '1农田', productId: '小麦', ripeTime: now + 75, state: 'growing' },
+    { plot: '2农田', productId: '小麦', ripeTime: now - 2, state: 'ready' },
+  ] });
+  env.render(data);
+  productionButton(env).onclick();
+  const speeds = () => env.document.querySelectorAll('[data-production-speed-until]');
+  const [bread, biscuit, farm] = speeds();
+  assert.deepEqual(speeds().map(button => button.textContent), ['加速 ×2', '加速 ×2', '加速 ×2']);
+  env.now += 6000;
+  env.updateTimers();
+  assert.equal(bread.textContent, '加速 ×1');
+  const writes = [];
+  let reply;
+  env.call = (url, options) => {
+    if (url === '/api/world') return Promise.resolve({ ...data, accelerators: 0 });
+    assert.equal(url, '/api/world/production-speed');
+    writes.push(JSON.parse(options.body));
+    return new Promise(resolve => { reply = resolve; });
+  };
+  const click = biscuit.onclick();
+  await biscuit.onclick();
+  assert.equal(biscuit.disabled, true);
+  assert.deepEqual(writes, [{ kind: 'factory', buildingId: '1食品厂', index: 0, productId: '饼干',
+    finishTime: now + 601, maxUse: 2, confirm: true }]);
+  reply({ label: '已加速' });
+  await click;
+  assert(speeds().every(button => button.disabled && button.textContent === '加速器不足'));
+  env.render(data);
+  const cropButton = speeds().at(-1);
+  const cropClick = cropButton.onclick();
+  assert.equal(writes[1].kind, 'farm');
+  assert.equal(writes[1].buildingId, '1农田');
+  assert.equal(writes[1].finishTime, farm.dataset.productionSpeedUntil * 1);
+  reply({ label: '已催熟' });
+  await cropClick;
+  env.now += 80000;
+  env.updateTimers();
+  assert(speeds().at(-1).hidden && speeds().at(-1).disabled);
+  passed++;
+  console.log('通过：在产双格和农田按实时分钟与库存显示消耗，点击防重并刷新库存，成熟自动隐藏');
+}
+
 test('农田施工使用建造倒计时，重新读取后清理旧倒计时', () => {
   const env = fixture();
   const now = env.now / 1000 + 5;
@@ -440,6 +490,27 @@ test('农田施工使用建造倒计时，重新读取后清理旧倒计时', ()
   assert.equal(env.document.querySelectorAll('[data-production-finish-at]').length, 0);
   assert.match(env.node('world-factories').textContent, /空闲/);
   assert.doesNotMatch(env.node('world-factories').textContent, /待竣工/);
+});
+
+test('工厂产物和作物按各自的上限显示，完整库存才补已解锁的零库存', () => {
+  const config = { tables: {
+    BuildingProduceCfg: { data: [
+      { buildType: '种子厂', itemId: '小麦种子', unlockLevel: 1 },
+      { buildType: '种子厂', itemId: '南瓜种子', unlockLevel: 3 },
+    ] },
+    FarmlandPlantCfg: { data: [{ id: '小麦', material: ['小麦种子', 1] }] },
+  } };
+  const survey = { stock: new Map([['木材', 1]]), stockCap: 55, stockKnown: true,
+    factories: [{ type: '种子厂', level: 1 }], buildings: [{ type: '农田', level: 1 }] };
+  const rows = inventoryStockRows(survey, config);
+  assert.deepEqual(rows.map(row => [row.id, row.num, row.cap]), [
+    ['木材', 1, undefined], ['小麦种子', 0, 55], ['小麦', 0, 275],
+  ]);
+  assert.equal(survey.stock.size, 1);
+  assert.deepEqual(inventoryStockRows({ ...survey, stockKnown: false }, config), [rows[0]]);
+  survey.stock.set('小麦种子', 60);
+  assert.equal(inventoryStockRows(survey, config)[0].num, 60);
+  assert(inventoryStockRows({ ...survey, stockCap: 0 }, config).every(row => !('cap' in row)));
 });
 
 console.log('海面生产界面测试 ' + passed + '/' + passed + ' 通过');

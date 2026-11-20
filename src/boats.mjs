@@ -1,4 +1,5 @@
 import { displayMaterial } from './config.mjs';
+import { linkOperationResult } from './operation-log.mjs';
 import { normalize } from './worlds.mjs';
 import { makeTypeResolver } from './world.mjs';
 
@@ -30,7 +31,7 @@ async function enhance(client, boat, info, cfg, next, buildingCount, enabled, op
   const ticket = await options.beforeAction?.(action);
   let dispatched = false, writePending = false;
   try {
-    if (!enabled(boat.enhance)) { await options.cancelAction?.(action, ticket, { notSent: true }); return { reason: '已暂停' }; }
+    if (!enabled(boat.enhance)) { await options.cancelAction?.(action, ticket, { notSent: true }); return linkOperationResult({ reason: '已暂停' }, ticket); }
     dispatched = writePending = true;
     const reply = await client.request(action.request, action.body, action.response);
     writePending = false;
@@ -42,11 +43,11 @@ async function enhance(client, boat, info, cfg, next, buildingCount, enabled, op
     // if bookkeeping after the successful upgrade needs a later reconciliation.
     Object.assign(info, after, { enhance: after.enhance ?? 0 });
     await options.afterAction?.(action, ticket, { ok: true, body: reply });
-    return '已' + (promote ? '升级' : '强化') + '，等级 ' + after.level + '，强化 ' + (after.enhance ?? 0);
+    return linkOperationResult({ note: '已' + (promote ? '升级' : '强化') + '，等级 ' + after.level + '，强化 ' + (after.enhance ?? 0) }, ticket);
   } catch (error) {
     const notSent = !dispatched || writePending && error.notSent === true;
     await options.cancelAction?.(action, ticket, { notSent, error });
-    throw error;
+    throw linkOperationResult(error, ticket);
   }
 }
 
@@ -124,10 +125,10 @@ export async function serviceBoats(client, config, enabled, report, options = {}
         const result = reason ? { reason } : key === boat.enhance
           ? await enhance(client, boat, info, cfg, levels.find(r => r.level === info.level + 1), count, enabled, options)
           : await gather(client, config, boat, cfg, enabled, options);
-        if (result?.reason) report({ key, label, skipped: true, reason: result.reason });
+        if (result?.reason) report({ key, label, skipped: true, reason: result.reason, operationId: result.operationId });
         else if (result?.action) report({ key, label, planned: true, action: result.action });
-        else if (result) report({ key, label: label + ' · ' + result, ok: true });
-      } catch (error) { report({ key, label, ok: false, ...(error.code === 'AUTOMATION_SKIP' ? { skipped: true, reason: error.message } : {}), error: error.message }); }
+        else if (result) report({ key, label: label + ' · ' + (result.note ?? result), ok: true, operationId: result.operationId });
+      } catch (error) { report({ key, label, ok: false, operationId: error.operationId, ...(error.code === 'AUTOMATION_SKIP' ? { skipped: true, reason: error.message } : {}), error: error.message }); }
     }
   }
 }

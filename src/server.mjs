@@ -1,12 +1,12 @@
 import { createSettingsHistory } from './settings-history.mjs';
 import { serveClientAsset } from './ui-assets.mjs';
-import { normalizeConsoleHost, consoleUrl } from './console-address.mjs';
+import { normalizeConsoleHost, consoleAccessHints, consoleUrl } from './console-address.mjs';
 import { createConsoleVersion, renderVersionedPage, consoleVersionError } from './console-version.mjs';
 import { createTraceLog, traceJson, redactLog } from './trace-log.mjs';
 import { createProtocolDiagnostics } from './protocol-diagnostics.mjs';
 import { createResourceUpdater } from './resource-updater.mjs';
 import {checkFleetSettlement,invalidateFleetReports} from './fleet-settlement.mjs';
-import {recoverWorldBossLineups} from './world-boss-lineups.mjs';
+import {recoverFleetLineups, isFleetLineupRecord} from './fleet-lineups.mjs';
 import { recoverPirateHunts } from './pirate-recovery.mjs';
 import {readGuildTech,upgradeGuildTech} from './guild-tech.mjs';
 import {resourceFieldRows,resourceFieldTotals} from './resource-fields.mjs';
@@ -19,11 +19,11 @@ import { giftCodeStatus, giftCodeSummary, startGiftCodes, startGiftCodeBatch } f
 import { publicGiftCodes } from './gift-code-library.mjs';
 import { createGiftCodeAutomation } from './gift-code-automation.mjs';
 import { paginateGiftRecords, giftRecordsCsv, canRetryGiftRecord, canRetryGiftCode } from './gift-code-records.mjs';
-import {runtimeProgress, museumRuntimeStatus} from './runtime-progress.mjs';
+import {runtimeProgress, runtimeSources, museumRuntimeStatus, stepObservation} from './runtime-progress.mjs';
 import {watchTreasureTravel} from './treasure-follow.mjs';
 import { watchGuildShipPushes } from './guild-ships.mjs';
 import { watchHeroRaidPushes } from './hero-raid-automation.mjs';
-import { watchSiliconMining, previewSiliconShortcut, runSiliconShortcut } from './silicon-mining.mjs';
+import { watchSiliconMining, previewSiliconEventRecall, previewSiliconShortcut, runSiliconShortcut } from './silicon-mining.mjs';
 import { readSiliconOverview } from './silicon-overview.mjs';
 import { previewExtended } from './extended-preview.mjs';
 import {watchFleetMaintenance,fleetMaintenanceEnabled} from './fleet-maintenance.mjs';
@@ -32,7 +32,7 @@ import { previewManualFleetSpeed, runManualFleetSpeed } from './manual-fleet-spe
 import {observeOwnedFleets,ownedFleetCatalog} from './fleet-catalog.mjs';
 import {readPirateSweeps} from './pirate-sweeps.mjs';
 import { readArena } from './arena.mjs';
-import { readLeagueChallenge, leagueChallengeKey } from './league-challenge.mjs';
+import { readLeagueChallenge } from './league-challenge.mjs';
 import {readWorldTarget} from './world-target.mjs';
 import {readWorldBoss} from './world-boss.mjs';
 import { readWeekCalendar, claimReportRewards, claimableLeaguePassTiers, rewardData } from './missing-rewards.mjs';
@@ -42,6 +42,7 @@ import { readCityDeclare, declareCity, readCityCancelDeclare, cancelCityDeclare,
 import { readCityAssemble, assembleCity } from './world-city-assemble.mjs';
 import { readWorldCityDefence, readWorldCityDefenders, runWorldCityRecruit, reconcileWorldCityRecruit } from './world-city-defence.mjs';
 import { readAllianceRadar } from './alliance-radar.mjs';
+import { previewRadarSweep } from './radar-sweep.mjs';
 import { planRadarPreview, pendingPetrol } from './dispatch-preview.mjs';
 import { inspectHunt } from './pirates.mjs';
 import { selectPirateAdvance, runSinglePirateHunt } from './pirate-advance.mjs';
@@ -63,12 +64,13 @@ import { readTrialSweeps, executeTrialSweep } from './trial-sweeps.mjs';
 import { readHeroEquipment, equipHeroEmptySlots, enhanceHeroEquipment, uidText } from './hero-equipment.mjs';
 import { readEquipmentCrafting, startEquipmentCraft, collectEquipmentCraft } from './equipment-crafting.mjs';
 import { readLineups, applyLineup, editorLineupRecommendations } from './lineups.mjs';
-import { getLineupCatalog, readLineupEditor, validateLineupSettings } from './saved-lineups.mjs';
+import { getLineupCatalog, normalizeFormation, readLineupEditor, validateLineupSettings } from './saved-lineups.mjs';
 import { readLineupRuntime, recoverLineup } from './lineup-runtime.mjs';
 import { createLineupExecutor, lineupRole, selectedSavedLineup } from './lineup-execution.mjs';
 import { lineupArt } from './lineup-art.mjs';
 import { pirateBoard } from './pirate-board.mjs';
 import { readGuild, readGuildMembers, claimGuildWelfare, claimMyGuildAid } from './guild.mjs';
+import { readGuildForts } from './guild-forts.mjs';
 import { createGuildMutualTask, readMutualOptions, mutualOptions, loadMutualPreset, saveMutualPreset } from './guild-mutual.mjs';
 import { readFleetFormations, initializeFleetFormation } from './fleet-formation.mjs';
 import { getProtocol, getProtocolSource } from './proto.mjs';
@@ -86,17 +88,19 @@ import { activityCatalogPushNames, readActivityCatalog, rememberActivityCatalog,
 import { displayMaterial, getConfig } from './config.mjs';
 import { readHeroGrowthPlan, heroStepLabel, runHeroPlan, formatHeroPlan } from './heroes.mjs';
 import { appointments } from './appointments.mjs';
-import { APPOINTMENT_PRIORITIES } from './appointment-priorities.mjs';
-import { surveyDailies, runDailies, formatSurvey } from './dailies.mjs';
+import { surveyDailies, runDailies, formatSurvey, canClaimDailyReward } from './dailies.mjs';
 import { dailySingleState, addDailyOptions, runDailySingle } from './daily-single.mjs';
 import { surveyTasks, runTasks, formatTaskPlan, selectTaskSettings } from './tasks.mjs';
-import { makeTypeResolver, displayBuilding, weekFactoryInfo, surveyWorld, planWorld, runWorldRound, submitResidentOrder, rerollResidentOrder, watchResidentRefreshes, formatWorldPlan, formatFieldReport, loadMapAsset } from './world.mjs';
+import { makeTypeResolver, displayBuilding, weekFactoryInfo, surveyWorld, inventoryStockRows, planWorld, runWorldRound, speedUpProduction, SPEED_UP_ITEM, submitResidentOrder, rerollResidentOrder, watchResidentRefreshes, formatWorldPlan, formatFieldReport, loadMapAsset } from './world.mjs';
 import { runLoop, formatLoopRound, formatLoopStep } from './loop.mjs';
+import { foldBusinessEntry, createOperationJournal } from './business-journal.mjs';
+import { upgradeChanges } from './building-upgrade-log.mjs';
 import { describeLogError } from './log-errors.mjs';
 import { classifyLog } from './log-categories.mjs';
+import { resolveLogFeature } from './log-features.mjs';
 import { createLogAccountLabels } from './log-accounts.mjs';
 import { operationLabels } from './operation-labels.mjs';
-import { automationTasks, retiredAutomationTasks, migratedAutomationTasks, defaultFishingGoldReserve, defaultCompassSpinCount, maxCompassSpinCount, taskSettings, worldTaskKey, dailyTaskKey } from './automation.mjs';
+import { automationTasks, retiredAutomationTasks, migratedAutomationTasks, defaultCompassSpinCount, maxCompassSpinCount, taskSettings, worldTaskKey, dailyTaskKey } from './automation.mjs';
 import { rewardSchedule } from './reward-schedule.mjs';
 import { beijingDay, loadAutomationSettings, loadRecoverableAutomationSettings, settingsFile, defaultSettings, saveAutomationSettings, validateSettings, settingsCatalog, settingsFromNative, settingsFromLegacyNative, nativeTaskValues, applyNativeTask, hasExtraWork, createUsageLedger, exportAutomationSettings, importAutomationSettings, SettingsError, settingsUiRules } from './automation-settings.mjs';
 import { budgetPreview, exactAutomationId, createActionGuard, nativePreferenceEnabled, needsCargoDemand, AutomationSkip } from './automation-policy.mjs';
@@ -114,7 +118,7 @@ import { reconcileManualProduction } from './manual-production-sync.mjs';
 import { configuredMaterialRecipes, readProductionSnapshot } from './production-snapshot.mjs';
 import { materialTreeRecipes, planProduction } from './production-planning.mjs';
 import { createProductionTiming, watchProductionTimings } from './production-timing.mjs';
-import { captureManualProductionMaterialState } from './order-reservations.mjs';
+import { captureManualProductionMaterialState, refreshOrderMaterialSpends } from './order-reservations.mjs';
 import { createStageTask } from './stages.mjs';
 import { createChallengeRun } from './challenge-automation.mjs';
 import { runAction } from './actions.mjs';
@@ -143,6 +147,7 @@ const overviewQueries = ENTRY_QUERIES.filter(({ name }) => [
   'AllResourceRequest', 'AllItemRequest', 'AllHeroRequest', 'MainTaskInfoRequest', 'DailyTaskInfoRequest',
   'AchievementInfoRequest', 'EmailBoxRequest', 'AfkInfoRequest', 'OnWaterRequest', 'MyResFieldsRequest', 'MonthCardRequest',
 ].includes(name));
+const accountCardQueries = overviewQueries.filter(({ name }) => ['AllResourceRequest', 'AllItemRequest', 'AfkInfoRequest'].includes(name));
 // 协议帧不再进界面，但仍然要能事后查。默认只写文件，CW_DEBUG=1 时才同时打到终端。
 const TRACE_PATH = path.join(DATA_DIR, 'protocol.log');
 const TRACE_MAX_BYTES = (() => {
@@ -573,10 +578,6 @@ export function createConsole({ host = '127.0.0.1', port = 17321, onLog, recover
   }
   trace(null, 'runtime', { startedAt: RUN_VERSION, node: process.version });
 
-  const logLimit = (list) => {
-    while (list.length > LOG_LIMIT) list.shift();
-  };
-
   // Browsers only subscribe to progress. A closed or slow tab must never stop
   // the account's background job or keep buffering logs without a limit.
   function writeStream(res, payload) {
@@ -596,24 +597,54 @@ export function createConsole({ host = '127.0.0.1', port = 17321, onLog, recover
     }
   }
 
-  function emit(session, level, message, extra) {
+  function terminal(entry) {
+    try { if (onLog) Promise.resolve(onLog(entry)).catch(() => {}); } catch { /* Logging is an observer. */ }
+  }
+  function flushBatch(session) {
+    if (!session?.batchOutput) return;
+    clearTimeout(session.batchOutput.timer);
+    terminal(session.batchOutput.entry);
+    session.batchOutput = null;
+  }
+  function emit(session, level, message, extra, quiet = false) {
     const display = describeLogError(message, extra);
     const detail = [extra?.diagnostic, display.detail].filter(Boolean).join('\n');
-    const entry = redactLog({ id: ++logId, t: Date.now(), level, category: classifyLog(display.message, extra), message: display.message, detail: detail || undefined, extra, account: session?.id ?? null,
+    const feature = resolveLogFeature(extra?.taskKey, extra?.module);
+    const category = feature?.category || classifyLog(display.message, extra);
+    const entry = redactLog({ id: ++logId, t: Date.now(), level, category, feature, message: display.message, detail: detail || undefined,
+      extra: extra?.diagnostic ? { ...extra, diagnostic: undefined } : extra, account: session?.id ?? null,
       accountName: session ? logAccountLabels.get(session.id) || session.player?.nickname || '未命名账号' : undefined,
       operationId: extra?.operationId, dedupeKey: extra?.dedupeKey, module: extra?.module, phase: extra?.phase, result: extra?.result });
-    trace(session, 'business', entry);
     const list = session ? session.log : globalLog;
-    list.push(entry);
-    logLimit(list);
-    // Logging is an observer too: a broken terminal sink cannot cancel a job.
-    try { if (onLog) Promise.resolve(onLog(entry)).catch(() => {}); } catch { /* Preserve the in-memory log. */ }
-    const payload = `id: ${entry.id}\ndata: ${JSON.stringify(entry)}\n\n`;
+    const updated = foldBusinessEntry(list, entry, LOG_LIMIT);
+    if (!updated || !extra?.waitKey) trace(session, 'business', entry);
+    if (session?.batchOutput && session.batchOutput.entry.rowId !== entry.rowId) flushBatch(session);
+    if (session && extra?.batch) {
+      clearTimeout(session.batchOutput?.timer);
+      session.batchOutput = { entry, timer: setTimeout(() => flushBatch(session), 500).unref() };
+    } else if (!quiet && !(updated && extra?.waitKey)) terminal(entry);
+    let payload, compact;
     for (const res of streams) {
       if (!res.allAccounts && entry.account !== null && res.account !== entry.account) continue;
-      writeStream(res, payload);
+      if (res.compact && extra?.waitKey && entry.detail && updated?.detail === entry.detail) {
+        compact ??= `id: ${entry.id}\ndata: ${JSON.stringify({ ...entry, detail: undefined, reuseDetail: true })}\n\n`;
+        writeStream(res, compact);
+      } else {
+        payload ??= `id: ${entry.id}\ndata: ${JSON.stringify(entry)}\n\n`;
+        writeStream(res, payload);
+      }
     }
     return entry;
+  }
+
+  function reportOperationStep(session, entry, level, message, scope) {
+    if (!entry.operationId) return false;
+    if (entry.operationMember) return session.operations.has(entry.operationId);
+    const title = entry.operationSummary || entry.step?.label || entry.note || entry.title || entry.label;
+    return session.operations.step(entry.operationId, level, message, { title, scope, taskKey: entry.logTaskKey || entry.taskKey || entry.step?.setting || entry.step?.kind,
+      detail: entry.operationDetail, reason: entry.error || entry.reason,
+      pending: entry.pending || entry.materialsPending || ['pending', 'unknown'].includes(entry.status),
+      category: classifyLog(title || message, { request: entry.request || entry.step?.request }) });
   }
 
   // 协议层细节（帧、序号、字节数、原始 JSON）只落盘，不进运行记录。
@@ -707,6 +738,7 @@ export function createConsole({ host = '127.0.0.1', port = 17321, onLog, recover
       residentJobs: new Map(),
       progressionJobs: new Map(),
       log: [],
+      upgradeRevision: 0,
       logClearBefore: 0,
       logClearAt: 0,
       dailySingle: dailySingleState(),
@@ -717,7 +749,6 @@ export function createConsole({ host = '127.0.0.1', port = 17321, onLog, recover
         completed: 0,
         everyMs: (preferences?.loop.everySeconds ?? saved?.everySeconds ?? 60) * 1000,
         tasks: preferences ? nativeTaskValues(preferences, taskSettings(saved?.tasks)) : taskSettings(saved?.tasks),
-        fishingGoldReserve: preferences?.gather.fishingGoldReserve ?? saved?.fishingGoldReserve ?? defaultFishingGoldReserve,
         compassSpinCount: validSpinCount(saved?.compassSpinCount) ? saved.compassSpinCount : defaultCompassSpinCount,
         controller: null, job: null,
         attemptController: null, connectionFailure: null, recovery: null,
@@ -740,13 +771,13 @@ export function createConsole({ host = '127.0.0.1', port = 17321, onLog, recover
     });
   }
 
-  function progressionJob(session, account, key, label, action, { read = false, shouldStart } = {}) {
+  function progressionJob(session, account, key, label, action, { read = false, shouldStart, checkSettings = !read } = {}) {
     if (!session.progressionJobs.has(key)) {
       const generation = session.generation;
       const schedule = read ? work => readJob(session, work) : work => enqueue(session, work, label);
       const job = schedule(async () => {
         if (shouldStart?.() === false) throw new Error('操作已取消，尚未连接游戏');
-        if (!read) validateRuntimeSettings(session.preferences, loadConfigSafe());
+        if (checkSettings) validateRuntimeSettings(session.preferences, loadConfigSafe());
         const client = await ensureConnected(session, account);
         const enabled = () => session.client === client && client.connected && !session.paused && generation === session.generation;
         if (!enabled()) throw new Error('账号连接已变化，请刷新后再试');
@@ -760,6 +791,7 @@ export function createConsole({ host = '127.0.0.1', port = 17321, onLog, recover
   function sessionFor(id) {
     if (!sessions.has(id)) {
       const session = newSession(id);
+      session.operations = createOperationJournal((level, message, data, quiet) => emit(session, level, message, data, quiet), LOG_LIMIT);
       sessions.set(id, session);
       if (session.settingsRecovery) emit(session, 'error', session.settingsRecovery.message);
       try {
@@ -784,7 +816,6 @@ export function createConsole({ host = '127.0.0.1', port = 17321, onLog, recover
     if (entry.revision && !loadStore().accounts.find(account => account.id === session.id)?.automation?.settingsConfigured)
       saveAutomation(session.id, { settingsConfigured: true });
     session.loop.tasks = nativeTaskValues(entry.settings, session.loop.tasks);
-    session.loop.fishingGoldReserve = entry.settings.gather.fishingGoldReserve;
     session.loop.everyMs = entry.settings.loop.everySeconds * 1000;
     if (!session.loop.running) session.loop.rounds = entry.settings.loop.rounds;
     session.client?.emit?.('automationSettingsChanged');
@@ -850,9 +881,9 @@ export function createConsole({ host = '127.0.0.1', port = 17321, onLog, recover
   function settingsView(session) {
     const saved = refreshSessionSettings(session, true);
     const settings = saved.revision ? saved.settings : session.preferences ?? settingsFromNative(session.loop.tasks, {
-      rounds: session.loop.rounds, everySeconds: session.loop.everyMs / 1000, fishingGoldReserve: session.loop.fishingGoldReserve,
+      rounds: session.loop.rounds, everySeconds: session.loop.everyMs / 1000,
     });
-    const baseRevision = createHash('sha256').update(JSON.stringify([session.loop.tasks, session.loop.rounds, session.loop.everyMs, session.loop.fishingGoldReserve])).digest('hex');
+    const baseRevision = createHash('sha256').update(JSON.stringify([session.loop.tasks, session.loop.rounds, session.loop.everyMs])).digest('hex');
     const availability = activityAvailability(session.client);
     // Keep the editor available while execution is blocked so obsolete choices can be repaired.
     const config = loadConfigSafe({ allowStale: true });
@@ -1034,7 +1065,7 @@ export function createConsole({ host = '127.0.0.1', port = 17321, onLog, recover
       settings: current.settings.appointments,
       revision: current.revision,
       baseRevision: current.baseRevision,
-      options: APPOINTMENT_PRIORITIES.map(({ id, label }) => ({ value: id, label })),
+      options: current.catalog.appointmentPriorities,
     };
   }
 
@@ -1081,9 +1112,10 @@ export function createConsole({ host = '127.0.0.1', port = 17321, onLog, recover
     };
   }
 
-  async function refreshFleetReservations(session,settings) {
+  async function refreshFleetReservations(session) {
+    if (!session.loop.running) return;
     await refreshCityWarReservations(session.client, protocolFor(session.client), loadConfigSafe(), session.player,
-      () => session.preferences ?? settings);
+      () => session.preferences);
   }
   function actionGuard(session, client, config) {
     const generation = session.generation;
@@ -1116,7 +1148,7 @@ export function createConsole({ host = '127.0.0.1', port = 17321, onLog, recover
       }
       if (name === 'TreasureLootStatsResponse') recordTreasureRewards(instance, body);
     });
-    instance.on('login',()=>{session.loop.controlStatus=new Map();});
+    instance.on('login',()=>{session.loop.controlStatus=new Map();session.loop.fleetMaintenance=null;});
     watchFreeRewardClock(instance);
     watchTreasureTravel(instance);
     watchFleetMaintenance(instance);
@@ -1136,7 +1168,7 @@ export function createConsole({ host = '127.0.0.1', port = 17321, onLog, recover
           settlementDirty=false;
           if(current()){const changes=await checkFleetSettlement(instance,session.player,usageFor(session),{afterPush:true});
             for(const change of changes)if(change.repairRecovery)emit(session,'info','战后维修 · '+change.buildingId+' · '+change.reason+'（已确认）');
-            await recoverWorldBossLineups(instance,session.player,usageFor(session),{enabled:current,report:entry=>emit(session,entry.ok?'info':'warn',entry.label+' · '+(entry.reason||entry.error||''))});}
+            await recoverFleetLineups(instance,session.player,usageFor(session),{enabled:current,report:entry=>emit(session,entry.ok?'info':'warn',entry.label+' · '+(entry.reason||entry.error||''))});}
         }).catch(error=>{if(current())emit(session,'warn','舰队归队状态待核对：'+error.message);}).finally(()=>{
           settlementBusy=false;
           if(settlementDirty&&current())scheduleSettlement();
@@ -1162,8 +1194,8 @@ export function createConsole({ host = '127.0.0.1', port = 17321, onLog, recover
     });
     const lineupRecoveryTimer=setInterval(()=>{
       if(!current())return;
-      try{if(Object.values(usageFor(session).keyRecords()).some(record=>record.details?.kind==='worldBossLineup'&&record.details.active!==false))scheduleSettlement();}
-      catch(error){emit(session,'warn','世界Boss阵容恢复记录待核对：'+error.message);}
+      try{if(Object.values(usageFor(session).keyRecords()).some(isFleetLineupRecord))scheduleSettlement();}
+      catch(error){emit(session,'warn','舰队阵容恢复记录待核对：'+error.message);}
     },15000);
     lineupRecoveryTimer.unref?.();
     instance.on('close',()=>{clearInterval(lineupRecoveryTimer);clearTimeout(settlementTimer);settlementTimer=null;settlementDirty=false;});
@@ -1251,6 +1283,10 @@ export function createConsole({ host = '127.0.0.1', port = 17321, onLog, recover
           `当时等待请求：${requests.join('、') || '无'}；发送序号 ${data.sendSeqNo}，接收序号 ${data.recvSeqNo}`,
           !saved.file ? '本次错误快照未保存' : saved.rawOmitted || (saved.truncated ? '原始报文超过 256 KiB，快照已标记截断' : '原始报文以 frameHex 保存在本机快照中')].join('\n'),
           protocolSnapshot: saved.file, messageName: saved.header?.name, seq: saved.header?.seq });
+      } else if (data.event === 'operation' && data.operationId) {
+        const safe = redactLog(data);
+        trace(session, 'operation', safe);
+        session.operations.phase(safe);
       } else if (data.event === 'operation' || data.event === 'ad-path') {
         const phases = { reserved: '已预留', sent: '已发送，等待确认', confirmed: '已确认', unknown: '结果待确认', cancelled: '已释放预留' };
         const message = data.message ?? `${data.label || data.request} · ${phases[data.phase] ?? data.phase}`;
@@ -1637,10 +1673,10 @@ export function createConsole({ host = '127.0.0.1', port = 17321, onLog, recover
 
     try {await checkFleetSettlement(client,session.player,usageFor(session));}
     catch(error){emit(session,'warn','舰队历史占用待核对：'+error.message);}
-    try {await recoverWorldBossLineups(client,session.player,usageFor(session),{
+    try {await recoverFleetLineups(client,session.player,usageFor(session),{
       enabled:()=>session.client===client&&session.generation===generation&&!session.paused&&client.connected,
       report:entry=>emit(session,entry.ok?'info':'warn',entry.label+' · '+(entry.reason||entry.error||''))});}
-    catch(error){emit(session,'warn','世界Boss阵容仍待恢复：'+error.message);}
+    catch(error){emit(session,'warn','舰队阵容仍待恢复：'+error.message);}
     if (session.client !== client || session.generation !== generation || session.paused || !client.connected) {
       throw new Error('连接初始化期间已断开或取消');
     }
@@ -1758,10 +1794,10 @@ export function createConsole({ host = '127.0.0.1', port = 17321, onLog, recover
     }
   }
 
-  async function overview(session, account) {
-    const instance = await ensureConnected(session, account);
+  async function overview(session, account, cardClient = null) {
+    const instance = cardClient ?? await ensureConnected(session, account);
     const [{ ok, failed }] = await Promise.all([
-      collectState(instance, protocolFor(instance), { queries: overviewQueries, signals: [], timeout: 8000 }),
+      collectState(instance, protocolFor(instance), { queries: cardClient ? accountCardQueries : overviewQueries, signals: [], timeout: 8000 }),
       refreshPlayerPower(session, instance),
     ]);
     const sections = { AllResourceRequest: '资源', AllItemRequest: '仓库', AllHeroRequest: '英雄', MainTaskInfoRequest: '主线任务',
@@ -1778,12 +1814,19 @@ export function createConsole({ host = '127.0.0.1', port = 17321, onLog, recover
       const amount=quantities?.every(n=>Number.isSafeInteger(n)&&n>=0)&&Number.isSafeInteger(total)?total:null;
       return {res:id,name:displayMaterial(config,id),amount,sources:config?.materialSources(id),icon:itemIcon(id)};
     });
+    const card = {
+      player: describeRole(session.player),
+      afk: view.afk,
+      readAt: Date.now(),
+      resources: [...view.resources.map((entry) => ({ ...entry, sources: config?.materialSources(entry.res), icon: resourceIcon(entry.res) })), ...worldResources],
+    };
+    if (instance === session.client && instance.connected) session.lastCard = card;
+    if (cardClient) return session.lastCard ?? null;
     return {
+      ...card,
       account: describeAccount(account, { active: account.id === loadStore().activeId }),
       status: accountStatus(session),
-      player: describeRole(session.player),
       weekCalendar: await readWeekCalendar(instance).then(items=>({items})).catch(error=>({items:[],error:error.message})),
-      resources: [...view.resources.map((entry) => ({ ...entry, sources: config?.materialSources(entry.res), icon: resourceIcon(entry.res) })), ...worldResources],
       items: {
         ...view.items,
         top: view.items.top.map((item) => ({ itemId: item.itemId, name: displayMaterial(config, item.itemId), num: item.num, sources: config?.materialSources(item.itemId), icon: itemIcon(item.itemId) })),
@@ -1795,7 +1838,6 @@ export function createConsole({ host = '127.0.0.1', port = 17321, onLog, recover
         email: view.email?.unclaimed ?? 0,
         afk: view.afk ? Math.max((view.afk.level ?? 0) - (view.afk.rewardedLevel ?? 0), 0) : 0,
       },
-      afk: view.afk,
       heroes: {
         count: view.heroes.count,
         power: view.heroes.power,
@@ -1818,7 +1860,8 @@ export function createConsole({ host = '127.0.0.1', port = 17321, onLog, recover
   async function world(session, account, allowAccelerators = false) {
     const instance = await ensureConnected(session, account);
     const config = loadConfigSafe();
-    const survey = await surveyWorld(instance, protocolFor(instance), { config, player: session.player, includeCargo: session.loop.tasks.cargo || needsCargoDemand(session.preferences) });
+    const survey = await surveyWorld(instance, protocolFor(instance), { config, player: session.player,
+      includeInventoryCaps: true, includeCargo: session.loop.tasks.cargo || needsCargoDemand(session.preferences) });
     const settings = session.preferences;
     const usage = usageFor(session).snapshot();
     const extra = settings ? await surveyBaseAutomation(instance, protocolFor(instance), config, session.player, settings, survey, { ledger: usageFor(session), enabled: () => session.client === instance && instance.connected !== false }) : null;
@@ -1847,6 +1890,7 @@ export function createConsole({ host = '127.0.0.1', port = 17321, onLog, recover
     const now = Date.now() / 1000;
     const result = {
       serverNow:survey.serverNow,
+      accelerators: survey.stockKnown ? survey.have(SPEED_UP_ITEM) : null,
       population: `${survey.population}/${survey.maxPopulation}`,
       farms: survey.buildings.filter(b => b.type === '农田').map(b => {
         const productId = b.farm?.productId || null;
@@ -1876,11 +1920,12 @@ export function createConsole({ host = '127.0.0.1', port = 17321, onLog, recover
           ? timing.factoryQueue(b, [...queue, ...planned.map(step => step.body)]).jobs : [];
         const finishes = new Map(schedule.map(entry => [entry.job, entry.finish]));
         let canEstimate = queueKnown && (!queue.length || queue.some(job => job?.finishTime > 0));
-        const jobs = queue.map((job, index) => {
+        const jobs = queue.map(job => {
+          const index = job?.idx ?? 0;
           const finishTime = Number.isFinite(job?.finishTime) && job.finishTime > 0 ? job.finishTime : null;
           if (!finishTime && !finishes.has(job)) canEstimate = false;
           return {
-            index: Number.isSafeInteger(job?.idx) && job.idx >= 0 ? job.idx : index,
+            index: Number.isSafeInteger(index) && index >= 0 ? index : null,
             productId: job?.productId || null,
             name: job?.productId ? displayMaterial(config, job.productId) : '产物未同步',
             icon: job?.productId ? materialIcon(job.productId) : null,
@@ -1924,7 +1969,9 @@ export function createConsole({ host = '127.0.0.1', port = 17321, onLog, recover
       })),
       idleRunning: session.loop.running && !session.loop.controller?.signal.aborted,
       autoDeliverOrders: session.loop.tasks.finishOrder,
-      stock: [...survey.stock].filter(([, num]) => num > 0).sort((a, b) => b[1] - a[1]).map(([id, num]) => ({ id, name: displayMaterial(config, id), num, category:config?.tables?.ItemCfg?.data?.find(row=>row.id===id)?.type||(config?.tables?.ResourceCfg?.data?.some(row=>row.id===id)?'基础资源':'其他'), sources: config?.materialSources(id), icon: materialIcon(id) })),
+      stock: inventoryStockRows(survey, config).map(row => ({
+        ...row, name: displayMaterial(config, row.id), sources: config?.materialSources(row.id), icon: materialIcon(row.id),
+      })),
       resFields: fields,
       plan: plan.actions,
       notes: [...survey.notes, ...plan.notes],
@@ -1980,7 +2027,7 @@ export function createConsole({ host = '127.0.0.1', port = 17321, onLog, recover
       store = loadStore();
       pinLegacyWorld(store, { credential, choices: worlds.recentWorlds.filter(row => uidText(row.role?.id)), player: worlds.player });
       if (store.accounts.some(row => row.id === unpinned.id && !Number(row.login.worldId))) {
-        throw new Error('未能确认旧角色的登录区服，请先在账号详情加载区服并核对角色');
+        throw new Error('未能确认旧角色的登录区服，请打开对应卡片的区服管理，加载区服并核对角色');
       }
     }
     const { account, created } = upsertAccount(store, credential);
@@ -2336,10 +2383,32 @@ export function createConsole({ host = '127.0.0.1', port = 17321, onLog, recover
         json(members);
         return;
       }
-      if (route === 'GET /api/settings/history' || route === 'POST /api/settings/history') {
+      if (route === 'GET /api/settings/guild-fort-materials') {
+        const { session } = scoped_(parsed);
+        const { client, player, generation } = session;
+        res.setHeader('cache-control', 'no-store');
+        if (!client?.connected || session.paused) {
+          json({ itemIds: null, reason: '账号未连接或已暂停' });
+          return;
+        }
+        const enabled = () => session.client === client && client.connected && !session.paused
+          && session.generation === generation && session.player === player;
+        const view = await enqueue(session, () => readGuildForts(client, protocolFor(client), loadConfigSafe(),
+          { player, enabled, inventory: false }), undefined, { recoverFormation: false });
+        const itemIds = view.state === 'blocked' ? null : [...new Set(view.candidates.map(item => item.id))];
+        json({ itemIds, reason: view.reason });
+        return;
+      }
+      if (['GET /api/settings/history', 'POST /api/settings/history', 'POST /api/settings/history/delete'].includes(route)) {
         const { account } = resolve(parsed);
         if (account.id !== parsed.searchParams.get('account')) throw Error('请选择当前游戏账号');
         res.setHeader('cache-control', 'no-store');
+        if (route === 'POST /api/settings/history/delete') {
+          const payload = jsonBody();
+          needConfirm(payload);
+          json({ entries: settingsHistory.remove(account.id, payload.id) });
+          return;
+        }
         if (req.method === 'GET' && !parsed.searchParams.has('id')) {
           json({ entries: settingsHistory.list(account.id) });
           return;
@@ -2395,7 +2464,7 @@ export function createConsole({ host = '127.0.0.1', port = 17321, onLog, recover
           json({ checkedAt: new Date().toISOString(), usage: usageFor(session).snapshot(), actions: [], counts: {}, viewOnly: true, scopeLabel: '运行安排（仅查看，不执行）',
             notes: [`当前${session.loop.running ? '正在挂机' : '未在挂机'}；配置轮数${settings.loop.rounds === 0 ? '持续运行' : settings.loop.rounds}，间隔${settings.loop.everySeconds}秒。`,
               '已启用：' + automationTasks.filter(task => isActivityTaskAvailable(task.key, session.client) && nativeTaskValues(settings, session.loop.tasks)[task.key]).map(task => task.label).join('、'),
-              '运行安排不是游戏动作计划。基地、英雄、日常、活动、联盟/城战和锻造请在范围中分别选择。'] }); return;
+              '在对应配置页点击「只读预览」可查看该功能的检查结果。'] }); return;
         }
         if (!session.client?.connected || session.paused) throw new Error('请先连接当前账号，再读取真实游戏状态');
         const result = await enqueue(session, async () => {
@@ -2414,26 +2483,30 @@ export function createConsole({ host = '127.0.0.1', port = 17321, onLog, recover
             return output(plan, plan.counts, '资源田自动占领');
           }
           if (category === 'arena') {
-            const { plan, info, tickets } = await readArena(client, () => settings);
-            const notes = [`本人排名 ${info.myself?.rankNo ?? '未知'} · 今日已挑战 ${info.dailyChallengeTimes ?? '未知'} 次 · 挑战券 ${tickets ?? '未知'} 张`];
+            const { plan, info, tickets, task } = await readArena(client, () => settings);
+            const notes = [];
             const enabled = settings.schedule.arena && nativePreferenceEnabled(settings, 'arena');
             if (!enabled) notes.push('开启竞技场挑战、日常行动和每日任务与奖励总开关后执行');
             if (plan.reason) notes.push(plan.reason);
+            notes.push(`本人排名 ${info.myself?.rankNo ?? '未知'} · 今日战斗 ${info.dailyChallengeTimes ?? '未知'} / ${settings.arena.dailyBattleLimit} 次 · 挑战券 ${tickets ?? '未知'} 张`);
             const actions = enabled ? (plan.actions ?? []).map(a => ({ kind: 'arena', label: a.note, costs: [{ id: 'ARENA_POINT', num: 1 }] })) : [];
+            if (canClaimDailyReward(task, settings, 'arena')) actions.push({ kind: 'arena', label: '领取竞技场每日任务奖励' });
             return output({ notes, actions }, {}, '竞技场');
           }
           if (category === 'league') {
-            const state = await readLeagueChallenge(client, config, session.player, () => settings, { preview: true });
+            const state = await readLeagueChallenge(client, config, session.player, () => settings, { preview: true, ledger: usageFor(session) });
             const info = state.info, notes = [], actions = [];
             if (state.reason) notes.push(state.reason);
             if (info) {
               const danName = dan => config.tables.LeagueDanCfg?.data?.find(row => row.dan === dan)?.name ?? dan ?? '未知';
               notes.push(`分组段位 ${danName(info.roomDan)} · 预计结算段位 ${danName(info.predictDan)} · 排名 ${info.mine?.rank ?? '未知'} · 积分 ${info.mine ? toNumber(info.mine.score) : '未知'} · 挑战券 ${Number.isFinite(state.tickets) ? state.tickets : '未知'} 张`);
               if (!settings.schedule.leagueChallenge) notes.push('积分赛每日挑战已关闭');
-              else if (state.target) {
-                if (usageFor(session).hasKey(leagueChallengeKey(session.player, state))) notes.push('本次挑战已提交，等待每日任务进度更新');
-                else actions.push({ kind: 'leagueChallenge', label: state.note, costs: [{ id: 'LEAGUE_POINT', num: 1 }] });
+              else if (state.target || state.refreshTimes !== undefined) {
+                actions.push({ kind: 'leagueChallenge', label: state.note, costs: [{ id: 'LEAGUE_POINT', num: 1 }] });
               }
+              notes.push(`今日战斗 ${state.battles ?? '未知'} / ${settings.league.dailyBattleLimit} 次`);
+              const task = state.task;
+              if (canClaimDailyReward(task, settings, 'league')) actions.push({ kind: 'league', label: '领取积分赛每日任务奖励' });
               if (info.bonusItemNum >= 0) notes.push('累计可收集 ' + info.bonusItemNum);
               if (settings.schedule.leagueCollect && info.bonusItemNum > 0) actions.push({ kind: 'leagueCollect', label: '领取累计收集奖励' });
               const pass = await client.request('LeagueBattlePassInfoRequest', {}, 'LeagueBattlePassInfoResponse');
@@ -2444,6 +2517,15 @@ export function createConsole({ host = '127.0.0.1', port = 17321, onLog, recover
             return output({ actions, notes }, {}, '跨服积分赛');
           }
           // 草稿预览的预留结果仅在本请求使用，绝不写入运行中的调度缓存。
+          if (category === 'radar' && settings.radar.runEnabled && settings.radar.enabled) {
+            const plan = await previewRadarSweep(client, protocolFor(client), session.player, usageFor(session));
+            if (plan) return output(plan, { targets: plan.ready.length }, '联盟情报 · 普通月卡一键扫荡');
+          }
+          if (category === 'pirateSweep' || category === 'pirateHunt') {
+            const note = !settings.pirate.enabled ? '海盗挂机已关闭'
+              : category === 'pirateHunt' && !settings.pirateHunt.enabled ? '「自动挑战下一级」已关闭' : '';
+            if (note) return output({ actions: [], notes: [note] }, {}, category === 'pirateSweep' ? '海盗日常扫荡' : '海盗首杀');
+          }
           let previewCityReserved=[];
           if(['radar','pirateHunt','worldBoss'].includes(category)&&settings.cityWar.enabled&&settings.cityWar.reserveDuringWar){
             const war=await readCityWar(client,protocolFor(client),config,session.player,settings.cityWar);
@@ -2461,10 +2543,10 @@ export function createConsole({ host = '127.0.0.1', port = 17321, onLog, recover
             return {...output({actions:[],notes:['任务顺序：'+settings.fleetDispatch.priority.map(k=>dispatchLabels[k]).join(' → '),'意向仅表示配置允许；派遣前仍核对目标和费用，正在执行的任务不抢占。']},{fleets:table.length},'舰队调度'),viewOnly:true,dispatch:{fleets:table.map(f=>({name:f.buildingId,reason:[f.reason,...f.reserved.map(r=>'预留给'+r),'允许顺序：'+(f.intents.map(i=>i.label).join(' → ')||'无'),'当前目标：'+(f.targetGrid??'主城')].filter(Boolean).join('；')}))}};
           }
           if(category==='pirateSweep'){
-            const state=await readPirateSweeps(client,config,session.player,settings),notes=[state.name+' · 今日已用 '+(state.used??'未同步')+'/'+(state.limit??'未同步')+' 次，剩余 '+(state.left??'未同步')+' 次'];
-            if(state.reason)notes.push(state.reason);if(!settings.schedule.pirate)notes.push('海盗日常扫荡开关未开启');
-            notes.push('三种海盗共用每日次数，不派遣舰队，不消耗汽油、耐久或钻石。');
-            return output({actions:!state.reason&&settings.schedule.pirate?[{kind:'pirateSweep',label:'扫荡'+state.name+' '+state.level+'级（本次最多使用剩余 '+state.left+' 次；逐次回读确认）',costs:[]}]:[],notes},{remaining:state.left},'海盗日常扫荡');
+            const state=await readPirateSweeps(client,config,session.player,settings),notes=[];
+            if(state.left!==null)notes.push('今日剩余 '+state.left+'/'+state.limit+' 次（三种海盗共用）');
+            if(state.reason)notes.push(state.reason);if(!settings.schedule.pirate)notes.push('每日免费扫荡已关闭');
+            return output({actions:!state.reason&&settings.schedule.pirate?[{kind:'pirateSweep',label:'扫荡'+state.name+' '+state.level+'级',costs:[]}]:[],notes},{remaining:state.left},'海盗日常扫荡');
           }
           if(category==='worldBoss'){
             const state=await readWorldBoss(client,config,session.player,settings,usageFor(session),{cityReservedFleetIds:previewCityReserved});
@@ -2483,7 +2565,7 @@ export function createConsole({ host = '127.0.0.1', port = 17321, onLog, recover
             for(const fleet of snapshot.view.fleets??[])fleet.reason ||= (!settings.pirateHunt.fleetIds.includes(fleet.buildingId)?'未选择此舰队':'')|| fleetRecordReason(ledger.keyRecords(),fleet.buildingId,exactAutomationId(session.player.worldId))||(previewCityReserved.includes(fleet.buildingId)?'城战时段预留':dispatchReservationReason(client,settings,'pirateHunt',fleet.buildingId,{ignoreOwners:['cityWar']}));
             const progress=pirateRunState(session);
             const selection=progress.halted?{reason:progress.reason}:selectPirateAdvance(snapshot,settings.pirateHunt,{pendingFuel:pendingPetrol(ledger)});
-            const plan={actions:selection.reason?[]:[{kind:'pirateFirst',label:selection.fleet.name+' → '+selection.target.name+' '+selection.target.level+'级',costs:[{id:'汽油',num:selection.cost}]}],notes:[selection.reason||'开启海盗讨伐后随挂机每轮检查；也可单独手动启动，此处仅预览下一次派遣']};
+            const plan={actions:selection.reason?[]:[{kind:'pirateFirst',label:selection.fleet.name+' → '+selection.target.name+' '+selection.target.level+'级',costs:[{id:'汽油',num:selection.cost}]}],notes:selection.reason?[selection.reason]:[]};
             return {...output(plan,{fleets:snapshot.view.fleets?.length??0,targets:snapshot.view.targets?.length??0},'海盗首杀'),dispatch:{fleets:snapshot.view.fleets,fuel:snapshot.view.fuel,pending:pendingPetrol(ledger)}};
           }
           if (category === 'antique') {
@@ -2496,6 +2578,10 @@ export function createConsole({ host = '127.0.0.1', port = 17321, onLog, recover
             const state = await readCityWar(client, protocolFor(client), config, session.player, settings.cityWar);
             const ledger = usageFor(session), pending = ledger.pendingCounters();
             const plan = planCityWar(state, settings, { keys: ledger.keyRecords(), pendingPetrol: (pending.cityWarPetrol ?? 0) + (pending.treasurePetrol ?? 0) + (pending.piratePetrol ?? 0) + (pending.radarPetrol ?? 0) + (pending.worldBossPetrol ?? 0) + (pending.siliconPetrol ?? 0) + (pending.resourceFieldPetrol ?? 0) });
+            if (!state.reason && settings.cityWar.recallSilicon) {
+              const recall = await previewSiliconEventRecall(client, protocolFor(client), config, session.player, settings, ledger, 'cityWar', state.startTime, state.fleets);
+              plan.actions.push(...recall.actions); plan.notes.push(...recall.notes);
+            }
             const online = await readWorldOnlineReward(client, config, session.player);
             if (!settings.schedule.worldOnlineRewards) plan.notes.push('城战在线奖励自动领取未开启');
             else if (online.ready && worldOnlineRewardKey(session.player, online)) {
@@ -2546,6 +2632,10 @@ export function createConsole({ host = '127.0.0.1', port = 17321, onLog, recover
               dispatchReservationReason(client, settings, task, id, { ignoreOwners: ['cityWar'] })]));
             const plan = planTreasureLoot(snapshot, config, settings, { usage, keys: ledger.keyRecords(), pendingFuel,
               pendingDiamonds: ledger.pendingCounters().diamonds ?? 0, reservedFleetIds, unavailableFleets });
+            if (!snapshot.reason && treasureAutomationEnabled(settings) && settings.treasure.recallSilicon) {
+              const recall = await previewSiliconEventRecall(client, protocolFor(client), config, session.player, settings, ledger, 'treasure', snapshot.nextRefreshTime, snapshot.fleets);
+              plan.actions.push(...recall.actions); plan.notes.push(...recall.notes);
+            }
             return { ...output(plan, plan.counts, '万吨巨轮'), treasure: { targets: plan.targets, fleets: plan.fleets, fuel: snapshot.fuel,
               fuelPerFleet: snapshot.fuelPerFleet, todayRewardTimes: snapshot.todayRewardTimes, rewardLimit: snapshot.rewardLimit,
               participationMode: settings.treasure.participationMode, nextRefreshTime: snapshot.nextRefreshTime } };
@@ -2563,7 +2653,7 @@ export function createConsole({ host = '127.0.0.1', port = 17321, onLog, recover
           }
           if (category === 'daily') {
             const flags = nativeTaskValues(settings, session.loop.tasks);
-            const daily = await surveyDailies(client, protocolFor(client), { config, player: session.player, settings });
+            const daily = await surveyDailies(client, protocolFor(client), { config, player: session.player, settings, allowRecruitTickets: false });
             const tasks = selectTaskSettings(await surveyTasks(client, protocolFor(client), { config, player: session.player }), settings);
             const actions = [...tasks.plan];
             const trialNotes = [];
@@ -2573,7 +2663,11 @@ export function createConsole({ host = '127.0.0.1', port = 17321, onLog, recover
               actions.push({ ...action, kind: key === 'arena' ? 'arena' : 'daily', label: `${entry.task.title}：${action.note ?? '执行一次'}` });
             }
             if (settings.dailies.enabled) {
-              if (settings.dailies.claimTasks) for (const task of daily.daily?.dailyTask ?? []) if (task.progress >= task.targetProgress && !task.rewardClaimed) actions.push({ kind: 'reward', label: `领取每日任务 ${task.id} 奖励` });
+              for (const task of daily.daily?.dailyTask ?? []) {
+                if (canClaimDailyReward(task, settings, 'dailies')) {
+                  actions.push({ kind: 'reward', label: `领取每日任务 ${task.id} 奖励` });
+                }
+              }
               for (const action of daily.chests?.actions ?? []) if (action.request === 'DrawWeeklyRewardRequest' ? settings.dailies.claimWeeklyChest : settings.dailies.claimDailyChest) actions.push({ ...action, kind: 'reward', label: action.note });
               if (settings.dailies.claimGift) for (const action of daily.gift?.actions ?? []) actions.push({ ...action, kind: 'reward', label: action.note });
             }
@@ -2594,8 +2688,10 @@ export function createConsole({ host = '127.0.0.1', port = 17321, onLog, recover
               }
             }
             const checked = budgetPreview(actions, new Map([['RUBY', daily.ruby]]), settings, usage);
-            return output({ ...checked, notes: [...tasks.notes, ...trialNotes, ...daily.tasks.filter(entry => entry.reason).map(entry => entry.task.title + '：' + entry.reason), ...checked.notes,
-              '此处预览日常任务与领奖。限时活动、挑战的开放状态可在对应页面查看。'] }, { dailyTasks: daily.tasks.length }, '日常与任务奖励');
+            const dailyNotes = daily.tasks.filter(entry => entry.reason).map(entry => entry.task.title + '：' + entry.reason);
+            return { ...output({ ...checked, notes: [...tasks.notes, ...trialNotes, ...dailyNotes, ...checked.notes,
+              '此处预览日常任务与领奖。限时活动、挑战的开放状态可在对应页面查看。'] }, { dailyTasks: daily.tasks.length }, '日常与任务奖励'),
+              moduleNotes: { 'daily-actions': dailyNotes, 'daily-challenges': trialNotes, rewards: tasks.notes } };
           }
           const survey = await surveyWorld(client, protocolFor(client), { config, player: session.player, includeCargo: settings.cargo.enabled || settings.factory.demandPriority.includes('cargo') });
           const extra = await surveyBaseAutomation(client, protocolFor(client), config, session.player, settings, survey, { ledger: usageFor(session), enabled: () => session.client === client && client.connected !== false });
@@ -2605,7 +2701,14 @@ export function createConsole({ host = '127.0.0.1', port = 17321, onLog, recover
           const extraPlan = planBaseAutomation(extra, config, settings, usage);
           const nativePlan = await previewNativeAutomation(client, config, session.player, settings, flags, survey, usage);
           const plan = budgetPreview([...worldPlan.actions, ...extraPlan.actions, ...nativePlan.actions], survey.stock, settings, usage);
+          const moduleNotes = { ...nativePlan.moduleNotes, building: worldPlan.upgradeReasons,
+            factory: [...worldPlan.factoryReasons].map(([id, reason]) => id+'：'+reason),
+            resident: worldPlan.orderDecisions.filter(row => row.status !== 'ready' && row.reason).map(row => '订单 #'+row.index+'：'+row.reason) };
+          for (const bySetting of [extraPlan.notesBySetting, plan.notesBySetting]) {
+            for (const [setting, notes] of Object.entries(bySetting)) (moduleNotes[setting.split('.')[0]] ??= []).push(...notes);
+          }
           return { checkedAt: new Date().toISOString(), usage, scopeLabel: '基地与点金',
+            moduleNotes,
             actions: plan.actions.map(step => ({ label: step.label, kind: step.kind, setting:step.setting, costs: (step.costs ?? []).map(item => ({ name: displayMaterial(config, item.id), num: item.num })) })),
             notes: [...new Set([...survey.notes, ...worldPlan.notes, ...extraPlan.notes, ...nativePlan.notes, ...plan.notes])],
             counts: { buildings: survey.buildings.length, factories: survey.factories.length, orders: survey.orders.length, maps: extra.museum?.exploreStages?.length ?? 0 },
@@ -2655,6 +2758,10 @@ export function createConsole({ host = '127.0.0.1', port = 17321, onLog, recover
         const { session } = scoped_(parsed);
         const cleared = { account: session.id, before: logId, at: Date.now() };
         session.log.length = 0;
+        session.operations.clear();
+        clearTimeout(session.batchOutput?.timer);
+        session.batchOutput = null;
+        session.upgradeInspection = null;
         session.logClearBefore = cleared.before;
         session.logClearAt = cleared.at;
         for (const stream of streams) {
@@ -2671,6 +2778,7 @@ export function createConsole({ host = '127.0.0.1', port = 17321, onLog, recover
         });
         res.account = parsed.searchParams.get('account');
         res.allAccounts = parsed.searchParams.get('scope') === 'all';
+        res.compact = parsed.searchParams.get('compact') === '1';
         streams.add(res);
         res.once('close', () => streams.delete(res));
         const logSession = sessions.get(res.account);
@@ -2783,6 +2891,8 @@ export function createConsole({ host = '127.0.0.1', port = 17321, onLog, recover
         removed?.loop.controller?.abort();
         removed?.pirateAdvance.stop('账号已删除'); removed?.stages.stop('账号已删除'); removed?.mutualAid.stop('账号已删除'); for (const task of removed?.trials.values() ?? []) task.stop('账号已删除');
         if (removed) await closeSessionConnection(removed, { includeWorld: true });
+        sessions.get(account.id)?.operations.clear();
+        flushBatch(sessions.get(account.id));
         sessions.delete(account.id);
         try { publicGiftCodes.removeAccount(account.id); }
         catch (error) { emit(null, 'warn', '账号已删除，礼包自动兑换设置清理失败：' + error.message); }
@@ -3320,6 +3430,18 @@ export function createConsole({ host = '127.0.0.1', port = 17321, onLog, recover
         const result=await progressionJob(session,account,route+':'+(parsed.searchParams.get('key')||'catalog')+':'+(parsed.searchParams.get('page')||1),null,client=>route.endsWith('/view')?readActivityRanking(client,loadConfigSafe(),session.player,parsed.searchParams.get('key'),Number(parsed.searchParams.get('page')||1)):{tabs:activityRankCatalog(client,loadConfigSafe(),session.player).map(({key,label})=>({key,label}))},{read:true});
         json(result);return;
       }
+      if (route === 'GET /api/accounts/card') {
+        const { account, session } = scoped_(parsed);
+        const client = session.client;
+        const readable = () => client?.connected && session.client === client && !session.paused && !session.loginBlocked;
+        if (readable()) {
+          session.cardRead ??= readJob(session, () => readable() ? overview(session, account, client) : session.lastCard, { recoverFormation: false })
+            .finally(() => { session.cardRead = null; });
+          await session.cardRead;
+        }
+        json(session.lastCard ?? null);
+        return;
+      }
       if (route === 'GET /api/overview') {
         const { account, session } = scoped_(parsed);
         if (session.claiming) await session.claiming;
@@ -3392,7 +3514,13 @@ export function createConsole({ host = '127.0.0.1', port = 17321, onLog, recover
             return guild;
           }
           if (route === 'GET /api/fleets/formation') return readFleetFormations(client, config, player);
-          if (route === 'GET /api/pirates/hunt') return pirateHuntOptions(client, config, player);
+          if (route === 'GET /api/pirates/hunt') {
+            const view = await pirateHuntOptions(client, config, player, true);
+            const records = usageFor(session).keyRecords();
+            for (const fleet of view.fleets) fleet.reason ||= fleetRecordReason(records, fleet.buildingId, exactAutomationId(player.worldId))
+              || dispatchReservationReason(client, session.preferences, 'pirateHunt', fleet.buildingId);
+            return view;
+          }
           const rows = await trialProgress(client, config, player.level);
           syncLineupRecoveryState(session);
           for (const row of rows) {
@@ -3414,7 +3542,7 @@ export function createConsole({ host = '127.0.0.1', port = 17321, onLog, recover
         const label = operationLabels[parsed.pathname];
         const key = route === 'POST /api/guild/tech/upgrade'
           ? JSON.stringify([route, payload.techId, payload.expectedIdentity, payload.expectedLevel, payload.maxCost])
-          : JSON.stringify([route, payload.techId, payload.heroId, payload.uid, payload.expectedLevel, payload.maxCost, payload.targetKey, payload.fleetKey, payload.buildingId, payload.previewKey]);
+          : JSON.stringify([route, payload.techId, payload.heroId, payload.uid, payload.expectedLevel, payload.maxCost, payload.targetKey, payload.fleetKey, payload.buildingId, payload.previewKey, payload.lineupId]);
         json(await progressionJob(session, account, key, label, async (client, enabled) => {
           const config = loadConfigSafe(), player = session.player;
           if (route === 'POST /api/guild/tech/upgrade') {
@@ -3451,13 +3579,30 @@ export function createConsole({ host = '127.0.0.1', port = 17321, onLog, recover
             emit(session, 'info', result.label);
             return result;
           }
-          await refreshFleetReservations(session,settingsView(session).settings);
-          const result = await runSinglePirateHunt(client, config, player, { ...payload, enabled, getSettings:()=>settingsView(session).settings,ledger:usageFor(session),
-            prepareDispatch:()=>refreshFleetReservations(session,settingsView(session).settings),
+          if (session.pirateAdvance.view().running) throw Error('连续挑战进行中，请先停止再单次出征');
+          const preset = selectedSavedLineup(payload.lineupId ? refreshSessionSettings(session).settings : null, { presetId: payload.lineupId ?? '' });
+          const result = await runSinglePirateHunt(client, config, player, { targetKey:payload.targetKey, fleetKey:payload.fleetKey, preset, enabled, getSettings:()=>session.preferences,ledger:usageFor(session),
+            prepareDispatch:()=>refreshFleetReservations(session),
             report: entry => emit(session, 'info', typeof entry === 'string' ? entry : entry.label) });
           emit(session, 'info', result.label);
           return result;
-        }));
+        }, { checkSettings: route !== 'POST /api/pirates/hunt' }));
+        return;
+      }
+      if (route === 'GET /api/fleets/current-formation') {
+        const { session, account } = scoped_(parsed);
+        const buildingId = parsed.searchParams.get('buildingId');
+        if (!/^[1-9]\d*远征船$/.test(buildingId)) throw new Error('舰队编号无效');
+        json(await readJob(session, async () => {
+          const client = await ensureConnected(session, account, { allowLineupPending: true });
+          const { building } = await client.request('OnWaterRequest', {}, 'OnWaterResponse');
+          if (!Array.isArray(building)) throw new Error('舰队数据尚未同步，请稍后再试');
+          const dock = building.find(row => row.buildingId === buildingId && row.level > 0);
+          if (!dock) throw new Error('未找到这支舰队，请刷新舰队列表');
+          const formation = dock.fleet?.formation;
+          if (!formation || (Array.isArray(formation.heroPositions) && !formation.heroPositions.length)) return { formation: null };
+          return { formation: normalizeFormation(formation), catalog: getLineupCatalog(loadConfigSafe()) };
+        }, { recoverFormation: false }));
         return;
       }
       if (route === 'GET /api/lineup-presets') {
@@ -3611,7 +3756,7 @@ export function createConsole({ host = '127.0.0.1', port = 17321, onLog, recover
       }
       if (route === 'GET /api/dailies') {
         const { account, session } = scoped_(parsed);
-        json(await dailies(session, account));
+        json(await readJob(session, () => dailies(session, account)));
         return;
       }
       if (route === 'GET /api/tasks') {
@@ -3693,12 +3838,16 @@ export function createConsole({ host = '127.0.0.1', port = 17321, onLog, recover
         if (!enabled()) throw Error('账号或配置已变化，请重新操作');
         const quotes = session.siliconShortcutQuotes ??= new Map();
         for (const [key, quote] of quotes) if (Date.now() > quote.expiresAt && (!quote.job || quote.completed)) quotes.delete(key);
-        if (quotes.size >= 30) throw Error('待处理的确认过多，请稍后再试');
+        const previous = quotes.get(intent.previousToken);
+        if (previous && !previous.job && previous.client === client && previous.preview.intent.kind === preview.intent.kind &&
+          previous.preview.intent.gridId === preview.intent.gridId && previous.preview.intent.index === preview.intent.index &&
+          previous.preview.intent.fleetId === preview.intent.fleetId) quotes.delete(intent.previousToken);
         const token = preview.fleets.some(fleet => fleet.step) ? randomUUID() : null, expiresAt = Date.now() + 120000;
+        if (token && quotes.size >= 30) throw Error('待处理的确认过多，请稍后再试');
         if (token) quotes.set(token, { preview, expiresAt, enabled, settings, client, player, job: null });
         json({ token, expiresAt, kind: preview.intent.kind, gridId: preview.intent.gridId,
           index: preview.intent.index ?? null, mineName: preview.mineName, cost: preview.cost, fuel: preview.fuel,
-          reason: preview.reason, automatic: preview.automatic,
+          reason: preview.reason, automatic: preview.automatic, fightsRemaining: preview.fightsRemaining,
           fleets: preview.fleets.map(({ step, ...fleet }) => ({ ...fleet, available: !!step })) }); return;
       }
       if (route === 'POST /api/silicon/action') {
@@ -3716,7 +3865,7 @@ export function createConsole({ host = '127.0.0.1', port = 17321, onLog, recover
             return runSiliconShortcut(quote.client, protocolFor(quote.client), loadConfigSafe(), quote.player, quote.preview, quote.fleetId,
               { getSettings: () => quote.settings, ledger: usageFor(session), enabled: quote.enabled,
                 report: entry => emit(session, entry.ok ? 'info' : 'warn', (entry.label || '硅矿快捷操作') + '：' + (entry.reason || entry.error || '状态待确认')) });
-          }, quote.preview.intent.kind === 'dispatch' ? '手动派遣采矿' : '手动撤回采矿舰队').finally(() => { quote.completed = true; });
+          }, { dispatch: '手动派遣采矿', attack: '手动抢占矿位', retreat: '手动撤回采矿舰队' }[quote.preview.intent.kind]).finally(() => { quote.completed = true; });
         }
         json(await quote.job); return;
       }
@@ -3728,7 +3877,7 @@ export function createConsole({ host = '127.0.0.1', port = 17321, onLog, recover
           const enabled = () => session.client === client && client.connected && !session.paused && generation === session.generation && session.player === player;
           const job = readJob(session, async () => {
             if (!enabled()) throw new Error('账号连接已变化，请重新读取硅矿');
-            const view = await readSiliconOverview(client, protocolFor(client), loadConfigSafe(), player, { enabled });
+            const view = await readSiliconOverview(client, protocolFor(client), loadConfigSafe(), player, { enabled, ledger: usageFor(session) });
             if (!enabled()) throw new Error('账号连接已变化，请重新读取硅矿');
             if (view.fleetsSynced) observeOwnedFleets(session, view.fleets.map(fleet => ({ buildingId: fleet.id })), { complete: true });
             return view;
@@ -3916,6 +4065,7 @@ export function createConsole({ host = '127.0.0.1', port = 17321, onLog, recover
             if (!enabled()) throw new Error('账号或排产设置已变化，请重新计算');
             const config = loadConfigSafe();
             const timing = watchProductionTimings(client, loadConfigSafe);
+            await refreshOrderMaterialSpends(client, player, { enabled, request: 'PetFeedRequest' });
             const snapshot = await readProductionSnapshot(client, protocolFor(client), config, player, view.settings,
               { enabled, observedDurations: timing.snapshot() });
             if (!enabled()) throw new Error('账号或排产设置已变化，请重新计算');
@@ -3939,6 +4089,23 @@ export function createConsole({ host = '127.0.0.1', port = 17321, onLog, recover
           session.worldRead = job; session.worldReadSpeedUp = allowAccelerators;
         }
         json(await session.worldRead);
+        return;
+      }
+      if (route === 'POST /api/world/production-speed') {
+        const payload = jsonBody();
+        needConfirm(payload);
+        const { session } = scoped_(parsed);
+        const { client, player, generation } = session;
+        const enabled = () => client?.connected && session.client === client && session.player === player
+          && session.generation === generation && !session.paused && !session.productionSyncRequired;
+        const result = await enqueue(session, async () => {
+          if (!enabled()) throw new Error('请先连接并同步当前账号，再使用加速器');
+          const result = await speedUpProduction(client, protocolFor(client), payload, { player, enabled });
+          session.worldRead = null;
+          emit(session, result.confirmed ? 'info' : 'warn', result.label, { worldUpdated: true });
+          return result;
+        }, '手动生产加速');
+        json(result);
         return;
       }
       if (route === 'POST /api/world/order/submit' || route === 'POST /api/world/order/reroll') {
@@ -4032,17 +4199,23 @@ export function createConsole({ host = '127.0.0.1', port = 17321, onLog, recover
         const payload=jsonBody();needConfirm(payload);const {session,account}=scoped_(parsed);
         if(route.endsWith('/stop')){json(session.pirateAdvance.stop());return;}
         if(session.paused)throw new Error('账号已暂停，请先恢复托管');
-        const options=settingsView(session).settings.pirateHunt;
+        const { fleetId, type, checkEverySeconds = 15 } = payload;
+        if(typeof fleetId!=='string' || !/^[1-9]\d*远征船$/.test(fleetId))throw Error('请选择出征舰队');
+        if(![1,2,3].includes(type))throw Error('请选择海盗种类');
+        if(!Number.isInteger(checkEverySeconds)||checkEverySeconds<5||checkEverySeconds>60)throw Error('检查间隔须为 5–60 秒');
+        if(![payload.targetKey,payload.fleetKey].every(key=>typeof key==='string' && /^[0-9a-f]{64}$/.test(key)))throw Error('请刷新并选择海盗目标与舰队');
+        const options={fleetIds:[fleetId],types:[String(type)],checkEverySeconds};
+        const preset=selectedSavedLineup(payload.lineupId?refreshSessionSettings(session).settings:null,{presetId:payload.lineupId??''});
         const generation=session.generation;
         let lastReason='';
-        if (session.loop.running && options.enabled) throw new Error('海盗自动讨伐已随挂机运行，请先暂停挂机再手动开始');
         json(session.pirateAdvance.start(options,async()=>{
           const client=await ensureConnected(session,account);
-          return {client,player:session.player,config:loadConfigSafe(),ledger:usageFor(session),getSettings:()=>settingsView(session).settings,
+          return {client,player:session.player,config:loadConfigSafe(),ledger:usageFor(session),getSettings:()=>session.preferences,
+            preset,firstSelection:{targetKey:payload.targetKey,fleetKey:payload.fleetKey},
             enabled:()=>!session.paused && session.generation===generation && session.client===client && client.connected,
-            prepareDispatch:()=>refreshFleetReservations(session,settingsView(session).settings),
+            prepareDispatch:()=>refreshFleetReservations(session),
             schedule:work=>enqueue(session,work)};
-        },state=>{if(state.reason!==lastReason){emit(session,'info','海盗首杀 · '+state.reason+'（已首杀'+state.wins+'级，本次汽油'+state.spent+'）');lastReason=state.reason;}},payload.maxFailures??1));return;
+        },state=>{if(state.reason!==lastReason){emit(session,'info','海盗首杀 · '+state.reason+'（首杀'+state.wins+'次，已用汽油'+state.spent+'）');lastReason=state.reason;}},payload.maxFailures??1));return;
       }
       if (route === 'GET /api/guild/mutual') { json(mutualView(scoped_(parsed).session)); return; }
       if (route === 'POST /api/guild/mutual/preset') {
@@ -4064,7 +4237,11 @@ export function createConsole({ host = '127.0.0.1', port = 17321, onLog, recover
           const client=await ensureConnected(session,account),player=session.player;
           return {client,player,config:loadConfigSafe(),ledger:usageFor(session),schedule:work=>enqueue(session,work),
             enabled:()=>!session.paused && session.generation===generation && session.client===client && session.player===player && client.connected};
-        },state=>emit(session,state.failed||state.pending?'warn':'info',`联盟互助 · ${state.reason}（本轮发起${state.published}条，已确认赠送${state.sent}次，领取${state.received}份）`)));
+        }, state => {
+          const level = state.failed || state.pending ? 'warn' : 'info';
+          const message = `联盟互助 · ${state.reason}（本轮发起${state.published}条，已确认赠送${state.sent}次，领取${state.received}份）`;
+          if (!reportOperationStep(session, { ...state, title: state.reason }, level, message)) emit(session, level, message);
+        }));
         return;
       }
       if (route === 'POST /api/trials/sweep') {
@@ -4194,6 +4371,7 @@ export function createConsole({ host = '127.0.0.1', port = 17321, onLog, recover
               const step = entry.step;
               const label = heroStepLabel(step, entry.targetLevel);
               steps.push({ label, ok: entry.ok, skipped: entry.skipped === true, error: entry.error });
+              if (reportOperationStep(session, entry, entry.ok ? 'info' : entry.skipped ? 'warn' : 'error', label + (entry.error ? ' · ' + entry.error : ''))) return;
               if (entry.skipped) emit(session, 'warn', `英雄 ${label} 已跳过：${entry.error}`);
               else emit(session, entry.ok ? 'info' : 'error', entry.ok ? `英雄 ${label}` : `英雄 ${label} 失败：${entry.error}`);
             },
@@ -4236,8 +4414,9 @@ export function createConsole({ host = '127.0.0.1', port = 17321, onLog, recover
         const results = await runDailies(instance, protocolFor(instance), survey, {
           allowMutate: true,
           allowPaid: payload.paid === true,
-          settings: session.preferences, beforeAction: guard.before, afterAction: guard.after, cancelAction: guard.cancel,
+          settings: session.preferences, getSettings: () => session.preferences, beforeAction: guard.before, afterAction: guard.after, cancelAction: guard.cancel,
           onStep: (entry) => {
+            if (reportOperationStep(session, entry, entry.ok ? 'info' : entry.skipped ? 'warn' : 'error', formatLoopStep(entry))) return;
             if (entry.skipped) emit(session, 'warn', `日常「${entry.title}」跳过：${entry.reason}`);
             else emit(session, entry.ok ? 'info' : 'error', entry.ok ? `日常「${entry.title}」${entry.note}` : `日常「${entry.title}」${entry.note ?? ''}失败：${entry.error}`,
               entry.ok ? undefined : { request: entry.request, way: entry.way });
@@ -4245,7 +4424,7 @@ export function createConsole({ host = '127.0.0.1', port = 17321, onLog, recover
         });
         // 任务奖励、活跃度宝箱与每日赠礼的领取都在 runDailies 内部收尾，这里只把结果重新读一遍给页面。
         await new Promise((resolve) => setTimeout(resolve, 1200));
-        const after = await surveyDailies(instance, protocolFor(instance), { config, player: session.player });
+        const after = await surveyDailies(instance, protocolFor(instance), { config, player: session.player, settings: session.preferences });
         const claimed = results
           .filter((entry) => entry.ok && (entry.request === 'DrawDailyTaskRewardRequest' || entry.id === 'activityChest' || entry.id === 'freeDailyPack'))
           .map((entry) => entry.note);
@@ -4300,6 +4479,7 @@ export function createConsole({ host = '127.0.0.1', port = 17321, onLog, recover
           enabled: kind => generation === session.generation && !session.paused &&
             (!['finishOrder', 'denyOrder'].includes(kind) || protectCargo || !session.loop.tasks.cargo),
           onStep: (entry) => {
+            if (reportOperationStep(session, entry, entry.ok ? 'info' : entry.skipped ? 'warn' : 'error', formatLoopStep(entry))) return;
             if (entry.skipped) emit(session, 'warn', `海面「${entry.step.label}」跳过：${entry.error}`);
             else emit(session, entry.ok ? 'info' : 'error', entry.ok ? `海面 ${entry.step.label}` : `海面 ${entry.step.label} 失败：${entry.error}`);
           },
@@ -4421,20 +4601,6 @@ export function createConsole({ host = '127.0.0.1', port = 17321, onLog, recover
         session.loop.compassSpinCount = compassSpinCount;
         emit(session, 'info', '风水罗盘每次最多使用 ' + compassSpinCount + ' 张抽奖券');
         json({ compassSpinCount });
-        return;
-      }
-      if (route === 'POST /api/loop/fishing-reserve') {
-        const { session } = scoped_(parsed);
-        const { fishingGoldReserve } = jsonBody();
-        if (!Number.isSafeInteger(fishingGoldReserve) || fishingGoldReserve < 0) throw new Error('预留金币必须是非负整数');
-        if (session.preferences) {
-          const next = structuredClone(settingsView(session).settings);
-          next.gather.fishingGoldReserve = fishingGoldReserve;
-          adoptPreferences(session, saveAutomationSettings(session.id, next, { revision: session.preferencesRevision }));
-        } else saveAutomation(session.id, { fishingGoldReserve });
-        session.loop.fishingGoldReserve = fishingGoldReserve;
-        emit(session, 'info', '钓具强化将保留 ' + fishingGoldReserve.toLocaleString('zh-CN') + ' 金币');
-        json({ fishingGoldReserve });
         return;
       }
       if (route === 'POST /api/loop/control') {
@@ -4614,7 +4780,7 @@ export function createConsole({ host = '127.0.0.1', port = 17321, onLog, recover
     }
     saveAutomation(account.id, { enabled: rounds === 0, autoStart: rounds === 0, rounds, everySeconds, loginBlocked: session.loginBlocked });
     Object.assign(loop, { running: true, rounds, completed: 0, everyMs: everySeconds * 1000,
-      history: [], error: null, recovery: null, connectionFailure: null, challengeRun: createChallengeRun(), controller: new AbortController() });
+      history: [], error: null, recovery: null, connectionFailure: null, fleetMaintenance: null, challengeRun: createChallengeRun(), controller: new AbortController() });
     const { signal } = loop.controller;
     emit(session, 'info', `自动挂机开始，${rounds === 0 ? '持续运行' : '共 ' + rounds + ' 轮'}，每 ${everySeconds} 秒检查一次；关闭网页后继续运行，请保留启动窗口`);
     trace(session, 'automation-run', { startedAt: RUN_VERSION, settingsRevision: session.preferencesRevision,
@@ -4654,7 +4820,6 @@ export function createConsole({ host = '127.0.0.1', port = 17321, onLog, recover
           rounds: rounds === 0 ? 0 : rounds - completedBefore, everyMs: loop.everyMs, allowMutate: true, stop: attemptController.signal,
           schedule: work => enqueue(session, work),
           isEnabled: key => loop.tasks[key] === true,
-          getFishingGoldReserve: () => loop.fishingGoldReserve,
           getCompassSpinCount: () => loop.compassSpinCount,
           isStageBusy: () => session.stages.view().running,
           isTrialBusy: id => session.trials.get(id)?.view().running === true,
@@ -4672,6 +4837,7 @@ export function createConsole({ host = '127.0.0.1', port = 17321, onLog, recover
           },
           usageLedger: usageFor(session),
           getEveryMs: () => loop.everyMs,
+          includeRepeatedWaits: true,
           onMaintenance:view=>{loop.fleetMaintenance=view;},
           onRound(summary) {
             summary = { ...summary, round: completedBefore + summary.round };
@@ -4692,14 +4858,31 @@ export function createConsole({ host = '127.0.0.1', port = 17321, onLog, recover
             const statusKey = (entry.step?.request==='SetFactoryAutoProduceRequest'?'nativeProduce':null) || entry.taskKey || (['万吨巨轮','城战接续','装备锻造','藏品养成','联盟情报'].includes(entry.category)?entry.category:null) || (entry.step?.kind ? worldTaskKey(entry.step.kind) : null) || entry.category || entry.title || entry.label;
             loop.controlStatus ??= new Map();
             const previous=loop.controlStatus.get(statusKey);
-            const text=entry.reason||entry.error||entry.note||(entry.ok?'最近执行成功':'等待检查');
-            loop.controlStatus.set(statusKey,{text,state:entry.status==='unknown'||entry.status==='pending'?'pending':entry.skipped?'waiting':entry.ok?'ok':'error',checkedAt:Math.floor(Date.now()/1000)});
-            if(previous?.state==='error'&&(entry.ok||entry.skipped)&&!['pending','unknown'].includes(entry.status)) emit(session,'info',(entry.title||entry.label||entry.step?.label||'任务')+'已恢复');
-            const production = entry.ok && !entry.skipped && entry.step?.request === 'StartFactoryProduceRequest';
+            const {text,state} = stepObservation(entry);
+            loop.controlStatus.set(statusKey,{text,state,checkedAt:Math.floor(Date.now()/1000)});
+            if(previous?.state==='error' && ['ok','waiting'].includes(state)) emit(session,'info',(entry.title||entry.label||entry.step?.label||'任务')+'已恢复', { taskKey: entry.logTaskKey || entry.taskKey });
+            if (entry.upgradeInspection) {
+              const previous = session.upgradeInspection;
+              const check = entry.upgradeInspection;
+              if (!previous && !check.count) return;
+              const change = upgradeChanges(check, previous);
+              if (change) session.upgradeRevision++;
+              const version = session.upgradeRevision;
+              session.upgradeInspection = { ...check, display: change ?? previous.display };
+              emit(session, 'info', '建筑升级检查 · ' + session.upgradeInspection.display, { category: 'building', taskKey: 'upgrade', diagnostic: check.detail,
+                detailLabel: '查看 ' + check.count + ' 栋建筑的检查明细', waitScope: 'upgrade-inspection', waitKey: 'upgrade:' + version });
+              return;
+            }
+            const level = state === 'error' ? 'error' : state === 'pending' ? 'warn' : 'info';
+            const message = formatLoopStep(entry);
+            const scope = JSON.stringify([entry.phase, statusKey, entry.step?.body?.buildingId || entry.waitTarget || '']);
+            if (reportOperationStep(session, entry, level, message, scope)) return;
+            const production = state === 'ok' && entry.step?.request === 'StartFactoryProduceRequest';
             const batch = production ? JSON.stringify([entry.round, entry.step.body.buildingId, entry.step.body.productId]) : undefined;
-            emit(session, entry.skipped || entry.ok || ['pending','unknown'].includes(entry.status) ? 'info' : 'error', formatLoopStep(entry),
-              entry.skipped&&!['pending','unknown'].includes(entry.status) ? { waitKey: String(statusKey)+':'+text } : batch ? { batch, factory: entry.step.displayFactory, product: entry.step.displayProduct }
-                : entry.request && entry.ok === false ? { request: entry.request, way: entry.way } : undefined);
+            emit(session, level, message, { waitScope: scope, taskKey: entry.logTaskKey || entry.taskKey || entry.step?.setting || entry.step?.kind,
+              ...(['waiting', 'pending', 'error'].includes(state) ? { waitKey: JSON.stringify([state, text]) } : {}),
+              ...(batch ? { batch, factory: entry.step.displayFactory, product: entry.step.displayProduct } : {}),
+              ...(entry.request && entry.ok === false ? { request: entry.request, way: entry.way } : {}) });
           },
         });
         if (loop.connectionFailure) throw new Error(loop.connectionFailure.reason);
@@ -4810,22 +4993,27 @@ export function createConsole({ host = '127.0.0.1', port = 17321, onLog, recover
     const displayUsage=usageFor(session).snapshot();
     const observedReward = session.client?.connected ? treasureRewards.get(session.client) : null;
     const treasureReward = observedReward && observedReward.day === displayUsage.day ? observedReward.text : '今日奖励未同步';
+    const settings = settingsView(session).settings;
+    const connected = !!session.client?.connected;
+    const maintenanceConfigured = fleetMaintenanceEnabled(settings);
     return {
       runVersion: RUN_VERSION,
-      fleetMaintenance:{...(loop.fleetMaintenance??{rows:[],reason:'等待首次检查'}),enabled:loop.running&&!!session.client?.connected&&fleetMaintenanceEnabled(settingsView(session).settings)},
+      connected,
+      fleetMaintenance:{...(loop.fleetMaintenance??{rows:[]}),configured:maintenanceConfigured,enabled:loop.running&&connected&&maintenanceConfigured},
       singleTasks: {pirate:session.pirateAdvance.view(), stages:session.stages?.view?.(), mutual:session.mutualAid?.view?.()},
       challenges: { mainline: loop.challengeRun?.mainline ?? {}, trials: loop.challengeRun?.trials ?? {}, pirate: loop.challengeRun?.pirate?.state ?? {} },
       pirateAdvance: session.pirateAdvance.view(),
-      controls: automationControlView(settingsView(session).settings).filter(control => !control.taskKey || isActivityTaskAvailable(control.taskKey, session.client)).map(control=>{
-        const aliases={'factory.produce':'startProduce','factory.cooperateNative':'nativeProduce','factory.gain':'collect','factory.speedUp':'speedUp','building.build':'build','building.upgrade':'upgrade','building.finish':'finishUpgrade','resident.enabled':'finishOrder','resident.reroll':'denyOrder','farm.enabled':'farm','radar.enabled':'联盟情报','treasure.enabled':'万吨巨轮','cityWar.enabled':'城战接续','forge.enabled':'装备锻造','antique.enabled':'藏品养成','dailies.claimTasks':'dailyRewards','dailies.claimDailyChest':'chests','dailies.claimWeeklyChest':'chests','dailies.claimGift':'gift','resident.rewards':'orderDaily','trials.paid':'trialPaidSweep','trials.ads':'trialAdSweep'};
-        const key=control.taskKey||aliases[control.key]||({'worldBoss.enabled':'worldBoss','gather.fishing':'autoFish','gather.upgradeFishing':'fishEnhance','gather.diving':'autoDive','gather.salvage':'autoSalvage','gather.upgradeDiving':'diveEnhance','gather.upgradeSalvage':'salvageEnhance','gather.floaters':'floaters','gather.antiqueFloaters':'antiqueFloaters','cargo.enabled':'cargo','building.collect':'collect','building.supply':'buildSupply','building.speedUp':'speedUp'})[control.key]||control.key;
-        const challengeKeys=control.key==='progression.mainline'?['stageAuto']:control.key==='pirateHunt.enabled'?['pirateAuto']:control.key==='progression.trials'?settingsView(session).settings.progression.raidIds.map(id=>'trialAuto:'+id):[key];
-        const recorded=challengeKeys.map(k=>loop.controlStatus?.get(k)).filter(Boolean).sort((a,b)=>(b.checkedAt??0)-(a.checkedAt??0))[0],observed=rewards?.status(key);
+      controls: automationControlView(settings).filter(control => !control.taskKey || isActivityTaskAvailable(control.taskKey, session.client)).map(control=>{
+        const {key, records, checkKey, scope} = runtimeSources(control, settings);
+        const recorded = records.map(k => loop.controlStatus?.get(k)).filter(Boolean)
+          .sort((a,b) => (b.checkedAt ?? 0) - (a.checkedAt ?? 0))[0];
+        const observed = rewards?.status(key);
         let state=(observed?.checkedAt??0)>(recorded?.checkedAt??0)?observed:recorded||observed;
         if(state?.checkedAt && beijingDay(state.checkedAt*1000)!==displayUsage.day)state=null;
-        let nextCheck = rewards?.nextCheck(key) ?? null;
+        if (state && control.taskKey === 'tradeTasks') state = { ...state, text: '海商王统一领奖的最近记录：' + state.text };
+        let nextCheck = rewards?.nextCheck(checkKey) ?? null;
         if (control.key === 'museum.runEnabled') {
-          const museum = museumRuntimeStatus(settingsView(session).settings, {
+          const museum = museumRuntimeStatus(settings, {
             status(taskKey) {
               const saved = loop.controlStatus?.get(taskKey), current = rewards?.status(taskKey);
               const observation = (current?.checkedAt ?? 0) > (saved?.checkedAt ?? 0) ? current : saved || current;
@@ -4836,8 +5024,14 @@ export function createConsole({ host = '127.0.0.1', port = 17321, onLog, recover
           state = museum.observation;
           nextCheck = museum.nextCheck;
         }
-        state??={text:control.group==='总控制'?'控制项，不单独执行':control.key.endsWith('.enabled')&&['building','factory','heroes','pet','gather','progression'].includes(control.key.split('.')[0])?'分组控制，具体动作状态见下方子项':'本次连接尚无检查结果',state:'unseen',checkedAt:null};
-        if(control.key==='events.enabled'&&session.client){const events=watchBasePushes(session.client);state={text:events.choiceObserved?'已同步 '+events.choices.size+' 条事件（等待匹配可处理选项）':'未同步：本次连接尚未收到随机事件状态',state:events.choiceObserved?'waiting':'pending'};}
+        if (control.key === 'events.enabled' && connected && (!state || state.state === 'waiting')) {
+          const events = watchBasePushes(session.client);
+          if (!events.choiceObserved) state = {text:'等待随机事件推送',state:'unsynced',checkedAt:null};
+          else state ??= {text:'已同步 '+events.choices.size+' 条事件',state:'waiting',checkedAt:null};
+        }
+        if (!state) {
+          state = {text:scope?'分组开关':'等待首次检查',state:scope?'scope':'unseen',checkedAt:null};
+        }
         return {...control,observation:state,...runtimeProgress(control,state,displayUsage,{running:loop.running,connected:!!session.client?.connected,treasureReward,freeTimes:session.client?.freeRecruitTimes,now:Date.now()+(session.client?.serverClockOffsetMs||0)}),nextCheck:loop.running&&session.client?.connected&&control.enabled&&!control.blockedBy.length?nextCheck:null,stale:!loop.running||!session.client?.connected};
       }),
       running: loop.running,
@@ -4848,7 +5042,6 @@ export function createConsole({ host = '127.0.0.1', port = 17321, onLog, recover
         key, label, group, enabled: loop.tasks[key], blockedBySettings: loop.tasks[key] && !nativePreferenceEnabled(session.preferences, key),
         nextCheck: loop.tasks[key] && nativePreferenceEnabled(session.preferences, key) ? rewards?.nextCheck(key === 'paidGold' ? 'gold.enabled' : key) : null,
       })),
-      fishingGoldReserve: loop.fishingGoldReserve,
       compassSpinCount: session.preferences?.eventActions.compassDrawCount ?? loop.compassSpinCount,
       settingsRevision: session.preferencesRevision,
       settingsRecovery: session.settingsRecovery,
@@ -4899,9 +5092,10 @@ export function createConsole({ host = '127.0.0.1', port = 17321, onLog, recover
         server.once('error', listenFailed);
         server.listen(port, host, () => {
           server.off('error', listenFailed);
-          const address = consoleUrl(host, server.address().port);
-          if (host === '0.0.0.0' || host === '::' || host === '0:0:0:0:0:0:0:0') emit(null, 'info', `控制台监听 ${host}，其他设备请使用这台电脑的局域网 IP 和端口 ${server.address().port}`);
+          const bound = server.address();
+          const address = consoleUrl(host, bound.port);
           emit(null, 'info', `控制台已启动 ${address}`);
+          for (const hint of consoleAccessHints(bound.address, bound.port)) emit(null, 'info', hint);
           giftAutomation.start();
           fs.watchFile(settingsFile(), { interval: 1000, persistent: false }, settingsFileChanged);
           settingsWatchStarted = true;
@@ -4946,6 +5140,7 @@ export function createConsole({ host = '127.0.0.1', port = 17321, onLog, recover
         drains.push(closeSessionConnection(session, { includeWorld: true }));
       }
       await Promise.all(drains);
+      for (const session of sessions.values()) { session.operations.clear(true); flushBatch(session); }
       return new Promise((resolve) => server.close(() => { traceLog.close().then(resolve); }));
     },
     emit,

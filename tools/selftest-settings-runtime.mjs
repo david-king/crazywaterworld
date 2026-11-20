@@ -90,6 +90,24 @@ try {
     client.request = async name => assert.fail('关闭所有动作后不应发送：' + name);
     return client;
   }
+  await test('空轮只在轮首和队列边界检查资源，逐项询问关闭的开关不重复读盘', async () => {
+    const client = clientFixture();
+    let requests = 0, scheduled = 0, checks = 0;
+    client.request = client.sendWatch = async () => { requests++; throw Error('空轮出现协议请求'); };
+    const file = path.join(process.env.CW_RESOURCE_DIR, 'check.json');
+    const originalRead = fs.readFileSync;
+    fs.readFileSync = function (target, ...args) {
+      if (target === file) checks++;
+      return originalRead.call(this, target, ...args);
+    };
+    try {
+      await runLoop(client, {}, { refreshConfig: () => null, allowMutate: true, isEnabled: () => false,
+        schedule: work => { scheduled++; return work(); } });
+    } finally { fs.readFileSync = originalRead; }
+    assert.equal(requests, 0);
+    assert(scheduled > 0);
+    assert(checks <= 1 + scheduled * 2, '资源检查不应随关闭的任务数量增长：' + checks);
+  });
   for (const reason of ['settings', 'resources']) {
     await test('异步库存核对期间' + (reason === 'settings' ? '设置失效' : '资源切换') + '，取消未发送预留并阻止写入', async () => {
       const settings = defaultSettings();

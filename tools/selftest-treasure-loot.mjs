@@ -12,6 +12,7 @@ import { treasureFixture, treasureSettings } from './fixtures/treasure-loot.mjs'
 import { treasureCycleFixture, treasureCycleSettings } from './fixtures/treasure-cycle.mjs';
 import { readWorldTarget } from '../src/world-target.mjs';
 import { reserveDispatch } from '../src/fleet-availability.mjs';
+import { nextDailyWindowStart } from '../src/daily-time-windows.mjs';
 
 const parent = path.join(os.tmpdir(),'cw-treasure-test-runs');
 fs.mkdirSync(parent, { recursive: true });
@@ -64,6 +65,112 @@ try {
     bad.treasure.followNames = ['甲']; bad.treasure.followPlayerIds = ['9e15']; assert.throws(() => validateSettings(bad), /完整的正整数/);
     bad.treasure.followPlayerIds = ['9007199254740995']; assert.equal(validateSettings(bad).treasure.followPlayerIds[0], '9007199254740995');
     bad.treasure.checkEverySeconds = 0; assert.throws(() => validateSettings(bad), /5–300/);
+  });
+
+  await check('单独开启追杀可在满奖、满出征和正耐久低于阈值时连续出击，仍服从舰队预留', async () => {
+    const f = treasureFixture(), s = treasureSettings(), usage = ledger();
+    Object.assign(s.treasure, { chase: true, chaseNames: ['同行者甲'], autoJoin: false, follow: false, qualities: [],
+      personalProgressLimit: 0, maxProgress: 1, rewardItems: ['其他奖励'], avoidNames: ['同行者甲'],
+      repeatAttack: false, autoRepair: false, dailyDispatchLimit: 1 });
+    Object.assign(f.state.targets[0], { color: 3, ownerGuildIdx: 8 });
+    f.state.defenders[71][0].guildIdx = f.state.ranks[71][0].guildIdx = 8;
+    f.state.fleets[1].durability = 1;
+    f.state.stats.todayRewardTimes = 3;
+    usage.confirm(usage.reserve({ treasureDispatches: 1 }));
+    const options = { reservedFleetIds: ['1远征船'] };
+    for (let i = 0; i < 2; i++) {
+      const result = await run(f, s, usage, options);
+      assert.deepEqual(result.results.map(entry => [entry.status, entry.step.mode, entry.step.buildingId, entry.step.targetUid]),
+        [['confirmed', 'chase', '2远征船', 71]]);
+      Object.assign(f.state.fleets[1], { state: 1, treasureLootUid: 0 });
+    }
+    assert.equal(usage.snapshot().counters.treasureDispatches, 3);
+    f.state.fleets[1].durability = 0;
+    assert.equal((await preview(f, s, options)).actions.length, 0);
+    f.state.fleets[1].durability = 1; f.state.fuel = 499;
+    assert.equal((await preview(f, s, options)).actions.length, 0);
+    f.state.fuel = 1000; f.state.fleets[1].state = 3;
+    assert.equal((await preview(f, s, options)).actions.length, 0);
+  });
+
+  await check('追杀按北京时间匹配多个时段、跨午夜和开闭边界，时段外沿用常规参战', async () => {
+    const f = treasureFixture(), s = treasureSettings();
+    const midnight = Math.floor((Date.now() / 1000 + 28800) / 86400) * 86400 - 28800;
+    const windows = ['22:00-02:00', '08:00-08:01'];
+    Object.assign(s.treasure, { chase: true, chaseNames: ['同行者甲'], fleetIds: ['1远征船'], chaseWindows: windows });
+    for (const [second, mode] of [[0, 'chase'], [7199, 'chase'], [7200, 'auto'], [28799, 'auto'],
+      [28800, 'chase'], [28860, 'auto'], [79199, 'auto'], [79200, 'chase']]) {
+      f.client.serverClockOffsetMs = (midnight + second) * 1000 - Date.now();
+      assert.equal((await preview(f, s)).actions[0]?.mode, mode, '北京时间零点后 ' + second + ' 秒');
+    }
+    assert.equal(nextDailyWindowStart(windows, midnight + 28799), midnight + 28800);
+    assert.equal(nextDailyWindowStart(windows, midnight + 80000), midnight + 86400 + 28800);
+    f.client.serverClockOffsetMs = (midnight + 28860) * 1000 - Date.now();
+    s.treasure.autoJoin = false;
+    const plan = await preview(f, s);
+    assert.deepEqual(plan.actions, []); assert.match(plan.notes.join(' '), /不在追杀时间范围/);
+    s.treasure.chaseWindows = ['12:00-12:00'];
+    assert.equal((await preview(f, s)).actions[0]?.mode, 'chase');
+  });
+
+  await check('派舰预约后到达追杀截止时间，撤销汽油与派遣次数的预留', async () => {
+    const f = treasureFixture(), s = treasureSettings(), usage = ledger();
+    Object.assign(s.treasure, { autoJoin: false, chase: true, chaseNames: ['同行者甲'], fleetIds: ['1远征船'], chaseWindows: ['08:00-09:00'] });
+    const todayUTC = Math.floor(Date.now() / 86400000) * 86400000;
+    f.client.serverClockOffsetMs = todayUTC - Date.now();
+    const reserve = usage.reserve;
+    usage.reserve = (...args) => {
+      const ticket = reserve(...args);
+      f.client.serverClockOffsetMs = todayUTC + 3600000 - Date.now();
+      return ticket;
+    };
+    const outcome = await run(f, s, usage);
+    assert.match(outcome.results[0].reason, /追杀时间范围/);
+    assert.deepEqual(f.client.writes, []);
+    assert.equal(usage.snapshot().counters.treasureDispatches ?? 0, 0);
+    assert.equal(usage.pendingCounters().treasurePetrol ?? 0, 0);
+  });
+
+  await check('追杀按名单优先级使用现场交战或有效去程，不追返航、NPC或历史排名', async () => {
+    const f = treasureFixture(), s = treasureSettings(), now = Math.floor(Date.now() / 1000);
+    Object.assign(s.treasure, { chase: true, chaseNames: ['对手乙', '同行者甲'], autoJoin: false, fleetIds: ['1远征船'] });
+    const other = { buildingId: '2远征船', state: 2, moveStartTs: now - 2, moveEndTs: now + 180, targetGridIdx: 500,
+      treasureLootUid: 72, owner: { playerId: '9007199254740997', nickname: '对手乙' } };
+    f.client.onRequest = name => name === 'WorldInfoRequest' ? { fleets: [other] } : undefined;
+    const chosen = async () => (await preview(f, s)).actions.map(a => [a.chaseName, a.targetUid]);
+    assert.deepEqual(await chosen(), [['对手乙', 72]]);
+    other.targetCityId = 1;
+    assert.deepEqual(await chosen(), [['同行者甲', 71]]);
+    Object.assign(f.state.targets[0], { ownerGuildIdx: 0, ownerFleetNum: 0 });
+    f.state.defenders[71] = [];
+    assert.deepEqual(await chosen(), []);
+    f.state.targets[1].battlePoint = { leftFighter: { name: '对手乙', guildIdx: 8, isNpc: true } };
+    assert.deepEqual(await chosen(), []);
+    f.state.targets[1].battlePoint.leftFighter.isNpc = false;
+    assert.deepEqual(await chosen(), [['对手乙', 72]]);
+    // 现场对手可以直接按完整昵称识别，正常策略仍要求奖励和进度可读。
+    delete f.state.targets[1].reward;
+    f.client.onRequest = name => { if (['TreasureLootStatsRequest', 'TreasureLootRankRequest'].includes(name)) throw Error('数据暂未同步'); };
+    assert.deepEqual(await chosen(), [['对手乙', 72]]);
+  });
+
+  await check('追杀优先于常规目标，复核发现离开时取消原计划，后续恢复常规策略', async () => {
+    const f = treasureFixture(), s = treasureSettings();
+    Object.assign(s.treasure, { chase: true, chaseNames: ['同行者甲'], fleetIds: ['1远征船'] });
+    assert.equal((await preview(f, s)).actions[0].mode, 'chase');
+    let reads = 0;
+    f.client.onRequest = name => {
+      if (name === 'TreasureLootListRequest' && ++reads === 2) {
+        f.state.defenders[71] = [];
+        f.state.targets[0].ownerFleetNum = 0;
+      }
+    };
+    const outcome = await run(f, s);
+    assert.equal(outcome.results[0].skipped, true);
+    assert.equal(f.client.writes.length, 0);
+    assert.equal((await preview(f, s)).actions[0].mode, 'auto');
+    s.treasure.autoJoin = false;
+    assert.deepEqual((await preview(f, s)).actions, []);
   });
 
   await check('真实客户端协议可精确编解码巨轮排名ID与派遣字段', () => {
@@ -499,6 +606,16 @@ try {
     s.treasure.petrolReserve = 0; s.treasure.dailyDispatchLimit = 2;
     assert.equal((await preview(f, s, { usage: { counters: { treasureDispatches: 1 } } })).actions.length, 1);
     f.state.stats.todayRewardTimes = 3; assert.equal((await preview(f, s)).actions.length, 0);
+  });
+
+  await check('完整挂机链路单开追杀只派往对手所在的货轮', async () => {
+    const f = treasureFixture(), s = treasureSettings(), usage = ledger();
+    Object.assign(s.treasure, { autoJoin: false, chase: true, chaseNames: ['同行者甲'], fleetIds: ['1远征船'], qualities: [] });
+    const flags = nativeTaskValues(s, {});
+    await runLoop(f.client, f.protocol, { config: f.config, player: f.player, rounds: 1, allowMutate: true,
+      getSettings: () => s, usageLedger: usage, isEnabled: key => flags[key] === true });
+    assert.deepEqual(f.client.writes.map(row => row.body), [{ uid: 71, fleetBuildingIds: ['1远征船'] }]);
+    assert.equal(usage.keyRecords()[treasureDispatchKey(f.player.worldId, 71, '1远征船')].details.chaseName, '同行者甲');
   });
 
   await check('完整挂机链路可独立运行巨轮，出征后以舰队目标确认', async () => {

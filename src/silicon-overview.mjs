@@ -1,6 +1,6 @@
 import { exactAutomationId } from './automation-policy.mjs';
 import { createGuildNameResolver } from './guild-name.mjs';
-import { siliconOpeningReason } from './silicon-mining.mjs';
+import { siliconOpeningReason, isIdleSiliconFleet } from './silicon-mining.mjs';
 
 const integer = (value, min = 0) => Number.isSafeInteger(value) && value >= min;
 const serverNow = client => Math.floor((Date.now() + (client.serverClockOffsetMs || 0)) / 1000);
@@ -18,9 +18,9 @@ function rewardInfo(value) {
 }
 
 // 独立只读视图：不依赖自动化开关、汽油余额或合服派遣条件，不生成或执行动作。
-export async function readSiliconOverview(client, protocol, config, player, { enabled = () => true } = {}) {
+export async function readSiliconOverview(client, protocol, config, player, { enabled = () => true, ledger } = {}) {
   const view = { checkedAt: serverNow(client), reason: '', notes: [], reward: null, fights: null,
-    fleetsSynced: false, fleets: [], mines: [] };
+    fleetsSynced: false, fleets: [], mines: [], dispatches: [] };
   view.reason = siliconOpeningReason(config, player, view.checkedAt);
   if (view.reason) return view;
   const owner = identity(player), ownGuild = Number(BigInt(exactAutomationId(player.guildId) ?? '0') % 1000n);
@@ -78,7 +78,7 @@ export async function readSiliconOverview(client, protocol, config, player, { en
           player: { nickname: p.nickname, power, guildIdx: p.guildIdx, guildName: p.guildIdx === 0 ? '无联盟' : guild.name,
             guildDefaultName: guild.defaultName,
             rewardTimes: p.rewardTimes, fleetId: p.fleetId || '',
-            relation: p.fleetId ? 'self' : ownGuild > 0 && p.guildIdx === ownGuild ? 'ally' : 'other' } };
+            relation: p.fleetId ? 'self' : p.guildIdx === ownGuild ? 'ally' : 'other' } };
       });
       const capacity = mine.personal ? 3 : detail.positionNum;
       if (positions.some(position => position.displayIndex >= capacity)
@@ -97,7 +97,21 @@ export async function readSiliconOverview(client, protocol, config, player, { en
   if (!view.mines.length) view.reason = Array.isArray(list?.chipMines) ? '当前没有可展示的硅矿' : '矿区列表未同步，请稍后刷新';
   view.mines.sort((a, b) => ['BLUE', 'PURPLE', 'ORANGE'].indexOf(a.tier) - ['BLUE', 'PURPLE', 'ORANGE'].indexOf(b.tier) || a.gridId - b.gridId);
   view.fleetsSynced = Array.isArray(own?.fleets);
-  view.fleets = (view.fleetsSynced ? own.fleets : []).filter(fleet => /^\d+远征船$/.test(fleet.buildingId)).map(fleet => {
+  const fleets = view.fleetsSynced ? own.fleets : [];
+  // 行军协议只有矿区编号。具体矿位从本账号的派遣记录读取，不能从空位或敌方占位猜测。
+  const worldId = exactAutomationId(player.worldId);
+  for (const record of Object.values(ledger?.keyRecords() ?? {})) {
+    const order = record.details;
+    if (order?.kind !== 'siliconDispatch' || order.worldId !== worldId || order.active === false || !integer(order.index)) continue;
+    const fleet = fleets.find(row => row.buildingId === order.buildingId);
+    if (record.confirmed && isIdleSiliconFleet(fleet)) continue;
+    const mine = view.mines.find(row => row.gridId === order.gridId && !row.reason);
+    if (!mine || order.index >= mine.positionCount) continue;
+    if (mine.positions.some(row => row.player.fleetId === order.buildingId && (mine.personal || row.displayIndex === order.index))) continue;
+    view.dispatches.push({ gridId: mine.gridId, index: order.index, fleetId: order.buildingId,
+      kind: order.opponent ? 'attack' : 'dispatch', pending: !record.confirmed });
+  }
+  view.fleets = fleets.filter(fleet => /^\d+远征船$/.test(fleet.buildingId)).map(fleet => {
     const slot = view.mines.filter(mine => !mine.reason).flatMap(mine => mine.positions.map(position => ({ mine, position })))
       .find(row => row.position.player.fleetId === fleet.buildingId);
     const target = view.mines.find(mine => mine.gridId === fleet.targetGridIdx);

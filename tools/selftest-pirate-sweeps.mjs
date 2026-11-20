@@ -32,6 +32,16 @@ await test('没有首杀记录或最高等级目标时等待，不降级或派�
 await test('未知回执持久防重，计数确认后从下一次继续',async()=>{const f=setup();f.state.fail='unknown';await runPirateSweeps(f.client,f.config,f.player,f.options);await runPirateSweeps(f.client,f.config,f.player,f.options);assert.equal(f.calls.filter(c=>c.n==='PirateSweepRequest').length,1);assert.equal(f.ledger.pendingCounters().pirateSweeps,1);f.state.fail=null;f.state.used=1;await runPirateSweeps(f.client,f.config,f.player,f.options);assert.equal(f.state.used,3);assert.equal(f.ledger.pendingCounters().pirateSweeps??0,0);});
 await test('明确拒绝释放次数但不跨轮立即重试',async()=>{const f=setup();f.state.fail='reject';await runPirateSweeps(f.client,f.config,f.player,f.options);await runPirateSweeps(f.client,f.config,f.player,f.options);assert.equal(f.calls.filter(c=>c.n==='PirateSweepRequest').length,1);assert.equal(f.ledger.pendingCounters().pirateSweeps??0,0);});
 await test('关闭开关不执行，预览不写次数记录',async()=>{const f=setup();await runPirateSweeps(f.client,f.config,f.player,{...f.options,enabled:()=>false});assert.equal(f.calls.length,0);await readPirateSweeps(f.client,f.config,f.player,f.settings);assert.deepEqual(f.ledger.keyRecords(),{});assert.equal(f.state.used,0);});
-await test('日常任务已达标仍能通过整轮入口用剩余免费次数',async()=>{const f=setup();f.settings.loop.world=false;f.settings.schedule.pirate=true;f.settings.loop.dailies=f.settings.dailies.enabled=true;await runLoop(f.client,p,{config:f.config,player:f.player,rounds:1,allowMutate:true,isEnabled:k=>k==='pirate',getSettings:()=>f.settings,usageLedger:f.ledger});assert.equal(f.state.used,3);});
+await test('海盗扫荡只按海盗开关和扫荡选择执行',async()=>{
+ for(const [master,sweep,dailies,expected] of [[true,true,false,3],[false,true,true,0],[true,false,true,0]]){
+  const f=setup();
+  f.settings.pirate.enabled=master;
+  f.settings.schedule.pirate=sweep;
+  f.settings.loop.dailies=f.settings.dailies.enabled=dailies;
+  await runLoop(f.client,p,{config:f.config,player:f.player,rounds:1,allowMutate:true,isEnabled:k=>k==='pirate',getSettings:()=>f.settings,usageLedger:f.ledger});
+  assert.equal(f.state.used,expected);
+  assert(!f.calls.some(c=>c.n==='DailyTaskInfoRequest'));
+ }
+});
 await test('旧配置只补默认先锋，不改变首杀设置及原扫荡开关',()=>{const s=defaultSettings();delete s.pirateSweep;s.schedule.pirate=false;s.pirateHunt.maxLevel=20;const next=importAutomationSettings({format:SETTINGS_FORMAT,version:1,settings:s});assert.deepEqual(next.pirateSweep,{type:'1'});assert.equal(next.schedule.pirate,false);assert.deepEqual(next.pirateHunt,s.pirateHunt);});
 console.log('海盗免费扫荡专项 '+count+'/'+count+' 通过');

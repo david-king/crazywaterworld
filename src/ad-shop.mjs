@@ -26,7 +26,9 @@ function versionAtLeast(version, minimum) {
 export function channelUnavailable(tables, player, clientInfo) {
   const channel = String(clientInfo?.channelId ?? '');
   const settings = tables?.AdvChannelCfg?.data?.find(r => String(r.key) === channel);
-  if (settings?.isOpen !== true || !versionAtLeast(clientInfo?.originVersion, settings.minAppVersion)) return '当前渠道或客户端版本未开放广告商店';
+  if (settings?.isOpen !== true) return '当前客户端渠道未开放广告功能';
+  if (!versionAtLeast(clientInfo?.originVersion, settings.minAppVersion))
+    return '广告功能要求应用版本 ' + settings.minAppVersion + ' 或更高，当前为 ' + (clientInfo?.originVersion || '未知');
   const level = tables?.ModuleOpenCfg?.data?.find(r => r.moduleId === '广告')?.playerLevel;
   if (!Number.isSafeInteger(level) || !Number.isSafeInteger(player?.level)) return '未能确认广告商店开放等级';
   if (player.level < level) return '角色达到 ' + level + ' 级开放';
@@ -37,7 +39,8 @@ export async function hasSkipPrivilege(client, tables, player) {
   const vip = tables?.VipLevelCfg?.data?.find(row => row.level === player?.vip?.vipLevel);
   if (vip?.effects?.some(([name, value]) => name === '免广告' && Number(value) > 0)) return true;
   const state = await client.request('FirstChargeRequest', {}, 'FirstChargeResponse');
-  return Array.isArray(state?.firstCharge?.record) && state.firstCharge.record.length > 0;
+  if (!Array.isArray(state?.firstCharge?.record)) return null;
+  return state.firstCharge.record.length > 0;
 }
 
 // 已开启的广告任务，无权益时统一申请并等待；旧 noPrivilege 值不再门控。
@@ -51,7 +54,9 @@ export function adWaitMs(settings) {
 export async function adAccess(client, tables, { player, clientInfo, language, settings }) {
   const reason = channelUnavailable(tables, player, clientInfo);
   if (reason) return { reason };
-  if (await hasSkipPrivilege(client, tables, player)) return { waitMs: 0 };
+  const privilege = await hasSkipPrivilege(client, tables, player);
+  if (privilege === null) return { reason: '尚未读取到首充记录，免广告权益未确认' };
+  if (privilege) return { waitMs: 0 };
   const channel = String(clientInfo?.channelId ?? '');
   const app = waitingApps.get(channel);
   if (!app || String(clientInfo?.appId) !== app || language !== 'zh_CN'

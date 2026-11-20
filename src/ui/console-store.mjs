@@ -17,7 +17,7 @@ export function createConsoleStore() {
     hosting: new Set(),
     gameByAccount: {},
     slices: {},
-    view: { page: 'overview', resource: 'guild', logAccount: 'all', logGroup: 'all', onlyIssues: false, loginSettingsAccountId: null },
+    view: { page: 'overview', resource: 'guild', logAccount: 'all', logGroup: 'all', logFeature: 'all', onlyIssues: false, loginSettingsAccountId: null },
     actions: {
       replaceAccounts(rows, activeId, { preserveStatus = false, select = false } = {}) {
         set(state => {

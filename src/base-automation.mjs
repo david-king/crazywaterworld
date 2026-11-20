@@ -1,5 +1,6 @@
 import { cleanupAfterClaim } from './claim-cleanup.mjs';
 import { collectAntiqueFloaters } from './antique-floaters.mjs';
+import { linkOperationResult } from './operation-log.mjs';
 import { normalize } from './worlds.mjs';
 import { displayMaterial, RESOURCE } from './config.mjs';
 import { budgetPreview, createActionGuard, resourceReserve, exactAutomationId, automationWireId, nativePreferenceEnabled, AutomationSkip } from './automation-policy.mjs';
@@ -193,7 +194,7 @@ export function baseDemands(snapshot, config, settings) {
 }
 
 export async function previewNativeAutomation(client, config, player, settings, flags, world, usage) {
-  const actions = [], notes = [];
+  const actions = [], notes = [], moduleNotes = { gather: [], cargo: [] };
   const enabled = key => flags[key] === true && nativePreferenceEnabled(settings, key);
   const reads = new Set(['FishEncyclopediaRequest','OnWaterRequest', 'AllItemRequest', 'AllResourceRequest', 'GameEffectRequest', 'CargoShipsRequest', 'WeekInfoRequest', 'WeekOrderInfoRequest']);
   // 除 dryRun 分支外再限定请求白名单，预览路径始终不能发送游戏写入。
@@ -210,21 +211,25 @@ export async function previewNativeAutomation(client, config, player, settings, 
     if (entry?.action) actions.push(entry.action);
     else if (entry?.reason || entry?.error) notes.push((entry.label || '采集') + '：' + (entry.reason || entry.error));
   };
-  const group = async (label, action) => { try { await action(); } catch (error) { notes.push(label + '：' + error.message); } };
+  const group = async (label, action, module = 'gather') => {
+    const from = notes.length;
+    try { await action(); } catch (error) { notes.push(label + '：' + error.message); }
+    moduleNotes[module].push(...notes.slice(from));
+  };
   if (enabled('autoFish')) await group('钓鱼', async () => record(await fishOnce(readonly, config, () => enabled('autoFish'), { dryRun: true, fishBook: settings.gather.fishBook })));
   if (enabled('fishEnhance')) await group('钓具养成', async () => record(await upgradeFishingOnce(readonly, config, { playerLevel: player?.level,
-    reserveGold: settings.gather.fishingGoldReserve, targetLevel: settings.gather.targetLevel, enabled: () => enabled('fishEnhance'), dryRun: true })));
+    targetLevel: settings.gather.targetLevel, enabled: () => enabled('fishEnhance'), dryRun: true })));
   if (['autoDive', 'autoSalvage', 'diveEnhance', 'salvageEnhance'].some(enabled)) await group('船只', () => serviceBoats(readonly, config, enabled, record, { settings, dryRun: true }));
   if (enabled('antiqueFloaters')) await group('藏品宝箱',()=>collectAntiqueFloaters(readonly,config,{enabled:()=>enabled('antiqueFloaters'),report:record,dryRun:true}));
   if (enabled('floaters')) await group('漂浮物', () => collectFloaters(readonly, config, world.floaters, enabled, record, { settings, dryRun: true }));
   if (enabled('cargo') && player?.level >= (rows(config, 'CargoUnlockCfg')[0]?.playerLevel ?? 9)) await group('贸易港', () => serviceCargo(readonly, config, {
     enabled: () => enabled('cargo'), getSettings: () => settings, ledger: { snapshot: () => usage }, dryRun: true,
     log(label, details) { if (details?.action) actions.push(details.action); else if (details?.skipped) notes.push(label); },
-  }));
+  }), 'cargo');
   if (settings.gather.keyOpen && actions.some(action => action.kind === 'autoDive') && world.have('保险箱钥匙') >= 1) {
     actions.push({ kind: 'diveKey', label: '潜水成功后使用 1 把现有保险箱钥匙', costs: [{ id: '保险箱钥匙', num: 1 }] });
   }
-  return { actions, notes };
+  return { actions, notes, moduleNotes };
 }
 
 export function planBaseAutomation(snapshot, config, settings, usage = {}, { diveCompleted = false, petQualityOrder = 'asc' } = {}) {
@@ -661,7 +666,7 @@ export async function runBaseAutomation(client, protocol, config, plan, { player
           if (!rooms.length || rooms.some(room => !petQueue(room, config))) throw new Error('无法完整确认真实培育室队列，等待下次检查');
           const mature = rooms.reduce((sum, b) => sum + (b.petBreed.maturePets?.length ?? 0), 0);
           const confirmed = step.kind === 'petClaim' ? mature < step.verify.matureBefore
-            : confirmPetSpend(petBefore, petSpendSnapshot(rooms), step.request, step.body);
+            : confirmPetSpend(petBefore, petSpendSnapshot(rooms), step.request, step.body, client);
           if (!confirmed) throw new Error('服务器尚未确认海兽操作结果');
           entry = { step, ok: true, body: { confirmed: true } };
         } else if (step.kind === 'petAdvance' || step.kind === 'petAdvanceFeed') {
@@ -687,7 +692,7 @@ export async function runBaseAutomation(client, protocol, config, plan, { player
         entry = { step, ok: false, ...(error.code === 'AUTOMATION_SKIP' ? { skipped: true } : {}), error: error.message };
       }
     }
-    results.push(entry); onStep?.(entry);
+    results.push(linkOperationResult(entry, ticket)); onStep?.(entry);
   }
   const pref = getSettings();
   const cleanup = await cleanupAfterClaim(client, config, pref, ledger, 'pet',

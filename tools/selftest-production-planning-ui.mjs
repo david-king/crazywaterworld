@@ -120,6 +120,10 @@ await test('无需求、读取不全和条件不足时给出对应提示', () =>
   env.render({ status: 'incomplete', missingReads: ['AllItemRequest'], orders: [] });
   assert.match(result.textContent, /生产数据还不完整/);
   assert.doesNotMatch(result.textContent, /AllItemRequest|没有需要/);
+  env.render({ status: 'incomplete', missingReads: ['订单或候选配方材料存在待确认扣款 · 喂养培育队列 1',
+    'OnWaterRequest · 生产队列未完整返回'], orders: [] });
+  assert.match(result.textContent, /待确认扣款 · 喂养培育队列 1/);
+  assert.match(result.textContent, /生产队列未完整返回/);
   env.render({ status: 'infeasible' });
   assert.match(result.textContent, /无法备齐所有需求/);
   env.render({});

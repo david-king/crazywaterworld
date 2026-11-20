@@ -145,8 +145,9 @@ export function retireManualForgeMaterialState(player, snapshot) {
 
 // Freeze the candidate handles BEFORE querying business state and then inventory.
 // Neither an unrelated debit nor an older read can settle a newer operation.
-export async function readOrderMaterialState(client, player, { enabled = () => true } = {}) {
-  const account = accountKey(player), candidates = pendingOrderMaterialSpends(player), handles = [];
+export async function readOrderMaterialState(client, player, { enabled = () => true, request } = {}) {
+  const account = accountKey(player), handles = [];
+  const candidates = pendingOrderMaterialSpends(player).filter(handle => !request || handle.operation.request === request);
   if (!candidates.length || !enabled()) return null;
   for (const handle of candidates) {
     try {
@@ -174,9 +175,9 @@ export function settleOrderMaterialState(player, snapshot, stock) {
   return true;
 }
 
-export async function refreshOrderMaterialSpends(client, player, { enabled = () => true } = {}) {
+export async function refreshOrderMaterialSpends(client, player, { enabled = () => true, request } = {}) {
   try {
-    const snapshot = await readOrderMaterialState(client, player, { enabled });
+    const snapshot = await readOrderMaterialState(client, player, { enabled, request });
     if (!snapshot?.handles.length) return null;
     const reply = await client.request('AllItemRequest', {}, 'AllItemResponse'), stock = new Map();
     for (const row of list(reply?.items, '消费后库存')) {

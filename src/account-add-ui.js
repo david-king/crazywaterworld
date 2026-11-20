@@ -103,7 +103,7 @@ for (const button of document.querySelectorAll('#account-add-channels [data-logi
     const target = { 'wechat-qr': 'wechat-start', alipay: 'alipay-start', phone: 'phone-account', wechat: 'cap-start', douyin: 'cap-douyin' };
     $(target[channel]).focus();
     if (channel === 'phone') void refreshPhoneDevice();
-    else if (channel === 'wechat' || channel === 'douyin') void pollCapture();
+    else if (channel === 'wechat' || channel === 'douyin') void beginCapture(channel);
   };
 }
 $('account-add-close').onclick = () => leaveAccountAdd(true);

@@ -2,6 +2,7 @@ import { recordsInWorld, settleFleetSnapshot } from './fleet-settlement.mjs';
 import { isFleetReserved, registerFleetReservations } from './fleet-reservations.mjs';
 
 const migrationOwner = 'dispatch-ledger';
+export const isMiningSilicon = fleet => fleet?.state === 5 && !!fleet.chipWar && fleet.curGridIdx > 0;
 export const fleetStateName = fleet => ({ 1: fleet.curGridIdx > 0 ? '驻守在外' : '空闲', 2: '行军中', 3: '战斗中', 4: '维修中', 5: '排队中' })[fleet.state] || '未知';
 // 两代调度器共享舰队占用证据；桥接谓词忽略自身，避免递归检查。
 export function bridgeFleetReservations(client, getSettings, ledger, worldId) {
@@ -20,6 +21,7 @@ export function fleetRecordReason(records,buildingId,worldId){
  for(const [key,r]of Object.entries(recordsInWorld(records??{},worldId))){
   if(r.expired||r.details?.buildingId!==buildingId)continue;
   if(r.details.kind==='worldBossLineup'&&r.details.active!==false)return '舰队的世界Boss临时阵容尚待恢复';
+  if(r.details.kind==='pirateLineup'&&r.details.active!==false)return '舰队的海盗挑战阵容尚待恢复';
   if(r.details.kind==='pirateFirst'&&r.details.active===false)continue;
   if(r.details.kind==='worldBoss'&&r.details.active===false)continue;
   if(!r.confirmed)return '舰队有结果待确认的任务';
@@ -36,7 +38,7 @@ export function fleetRecordReason(records,buildingId,worldId){
 
 // 同一连接共享城战时段预留和正在启动的手动首杀；不抢占在途任务。
 const dispatchStates = new WeakMap();
-export const dispatchLabels={maintenance:'战后维修',cityWar:'城战接续',pirateHunt:'海盗讨伐 / 首杀',worldBoss:'世界Boss首战',follow:'巨轮跟随',treasure:'巨轮普通参战',radar:'联盟情报',silicon:'硅矿采集',resourceFields:'资源田占领'};
+export const dispatchLabels={maintenance:'战后维修',cityWar:'城战接续',pirateHunt:'海盗首杀',worldBoss:'世界Boss首战',follow:'巨轮跟随',treasure:'巨轮普通参战',radar:'联盟情报',silicon:'硅矿采集',resourceFields:'资源田占领'};
 export function reconcileBossFleets(ledger,fleets,worldId){
  if(!Array.isArray(fleets))return;
  if(!worldId){

@@ -72,7 +72,7 @@ function fixture(route, mode) {
   };
   const run = async () => {
     if (route === 'fishing') return upgradeFishingOnce(client, config, {
-      playerLevel: 10, reserveGold: 0, enabled: () => true, ...callbacks,
+      playerLevel: 10, enabled: () => true, ...callbacks,
     });
     if (route === 'boats') return serviceBoats(client, config, key => key === 'diveEnhance', () => {}, callbacks);
     if (route === 'daily') return runDailies(client, protocol, {
@@ -173,7 +173,7 @@ try {
   await test('金币强化丢回包后跨连接核销补同一操作确认', async () => {
     const f = delayedFixture();
     const guard = createActionGuard(f.client, () => f.settings, null, { player: f.player });
-    await assert.rejects(upgradeFishingOnce(f.client, config, { playerLevel: 40, reserveGold: 0, enabled: () => true,
+    await assert.rejects(upgradeFishingOnce(f.client, config, { playerLevel: 40, enabled: () => true,
       beforeAction: guard.before, afterAction: guard.after, cancelAction: guard.cancel }), /丢回包/);
     assert(pendingGoldSpend(f.player));
     await refreshGoldSpend(f.next, f.player);

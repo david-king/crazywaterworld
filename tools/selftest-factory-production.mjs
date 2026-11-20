@@ -75,6 +75,10 @@ await test('runWorld真实入口连续六件只在批首批末查询，不再逐
   const f = fixture(), steps = Array.from({length:6}, () => f.step()), start = performance.now();
   const result = await runWorld(f.client, protocol, { actions: steps }, { ...f.options(), allowMutate: true });
   assert.equal(f.state.writes.length, 6); assert(result.results.every(row => row.status === 'confirmed'));
+  assert(result.results[0].operationId);
+  assert.equal(new Set(result.results.map(row => row.operationId)).size, 1);
+  assert.match(result.results[0].operationSummary, /×6/);
+  assert.equal(result.results.filter(row => row.operationMember).length, 5);
   assert.equal(f.state.reads.filter(name => name === 'OnWaterRequest').length, 2);
   assert.equal(f.state.reads.filter(name => name === 'AllItemRequest').length, 2);
   assert(performance.now() - start < 1200, '六件不应有逐件300毫秒固定等待');

@@ -24,7 +24,7 @@ const activityKeys = new Set([...merchantFields.map(field => field.key), ...guil
   'schedule.weekOrderSubmit', 'weekOrder.allowDiamonds', 'schedule.weekOrderFinal',
   'heroRaid.enabled', 'heroRaid.challenge', 'heroRaid.retryTimes', 'heroRaid.orders', 'heroRaid.lottery', 'heroRaid.rewards']);
 const renderStart = script.indexOf('function configRender()');
-const modelStart = script.indexOf('  const groups =', renderStart), modelEnd = script.indexOf('  const scopeSelect=', modelStart);
+const modelStart = script.indexOf('  const groups =', renderStart), modelEnd = script.indexOf('  for (const [category, label] of Object.entries(configCategories))', modelStart);
 assert(modelStart > renderStart && modelEnd > modelStart);
 const configGroups = newStateFunction('data', definitions + '\nconfigEditor.data=data;\n' + script.slice(modelStart, modelEnd) + '\nreturn groups;')({ tasks: automationTasks, rules: settingsUiRules() });
 const configFields = configGroups.flatMap(group => group.fields), configKeys = new Set(configFields.map(field => field.key));
@@ -37,10 +37,10 @@ let passed = 0;
 const check = async (name, run) => { await run(); passed++; console.log('通过：' + name); };
 
 try {
-  await check('28个模块启停集中在所属配置，全部字段有唯一编辑位置', () => {
+  await check('30个模块启停集中在所属配置，全部字段有唯一编辑位置', () => {
     const rendered = configFields.filter(field => field.moduleControl).map(field => field.key);
     const idleKeys = idleAutomationControls.map(control => control.key), movedFields = idleAutomationControls.flatMap(control => control.fields);
-    assert.equal(idleKeys.length, 28, '联盟募兵统一由联盟模块管理，不保留旧订单入口');
+    assert.equal(idleKeys.length, 30);
     assert.equal(rendered.length, new Set(rendered).size, '每个入口只显示一次');
     assert.deepEqual(new Set(rendered), new Set(idleKeys));
     assert.deepEqual(new Set(settingsUiRules().controlFields), new Set(movedFields));

@@ -3,12 +3,13 @@ import { spawn } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import { formatConsoleLog } from '../src/console-log.mjs';
 import { createLogAccountLabels } from '../src/log-accounts.mjs';
 import { describeLogError } from '../src/log-errors.mjs';
 import { LOG_CATEGORIES } from '../src/log-categories.mjs';
-import { formatLoopStep } from '../src/loop.mjs';
+import { formatLoopStep, formatLoopRound } from '../src/loop.mjs';
+import { summarizeUpgradeChecks, upgradeChanges } from '../src/building-upgrade-log.mjs';
 
 const time = new Date(2026, 10, 12, 13, 14, 15).getTime();
 const clock = new Intl.DateTimeFormat('zh-CN', {
@@ -20,6 +21,16 @@ let passed = 0;
 function test(name, fn) {
   fn(); passed++; console.log('通过：' + name);
 }
+
+test('同一条记录只计入一种轮次结果，已确认与已发送分别计数', () => {
+  const results = [
+    {ok:true, sent:true, status:'unknown'}, {ok:true, skipped:true, pending:true},
+    {ok:true, sent:true, status:'confirmed'}, {ok:true, sent:true},
+    {skipped:true, reason:'未到时间'}, {ok:false, error:'请求被拒绝'},
+  ];
+  assert.equal(formatLoopRound({round:1, tasks:{results}, dailies:{results:[]}, world:{results:[]}}),
+    '挂机第 1 轮结束 · 待确认 2 项，完成 1 项，已发送 1 项，跳过 1 项，失败 1 项');
+});
 
 test('扩展挂机日志显示功能名称，配置键只保留为内部任务标识', () => {
   for (const [key, label, category] of [
@@ -78,6 +89,27 @@ test('系统日志和中文等级', () => {
     assert.equal(formatConsoleLog({ ...entry, account: null, level }), prefix('系统', expected) + '自动挂机开始');
   }
   assert.equal(formatConsoleLog({ ...entry, account: '', level: 'unknown' }), prefix('系统') + '自动挂机开始');
+});
+
+test('93 栋建筑收成一条摘要，逐栋原因完整，乱序和材料数量变化可区分', () => {
+  const rows = [
+    ...Array.from({ length: 63 }, (_, i) => ({ id: 'L'+i, name: '建筑L-'+i, kind: 'level', required: i < 13 ? 28 : 29 })),
+    ...Array.from({ length: 20 }, (_, i) => ({ id: 'M'+i, name: '建筑M-'+i, kind: 'maximum', required: 1 })),
+    ...Array.from({ length: 7 }, (_, i) => ({ id: 'P'+i, name: '建筑P-'+i, kind: 'population', required: i < 4 ? 240 : 245, current: 235 })),
+    { id: 'C1', name: '海水提取厂-1', kind: 'construction' },
+    { id: 'A1', name: '家具作坊-1', kind: 'materials', items: [{ id: 'screw', name: '螺丝', missing: 4 }] },
+    { id: 'A2', name: '选种厂-1', kind: 'materials', items: [{ id: 'book', name: '植物百科', missing: 10 }] },
+  ];
+  const first = summarizeUpgradeChecks(rows);
+  assert.equal(first.count, 93);
+  assert.match(first.message, /螺丝 ×4.*植物百科 ×10.*235\/240.*4 栋.*28 级.*13 栋/);
+  assert(first.message.length < 100);
+  for (const row of rows) assert(first.detail.includes(row.name));
+  assert.match(first.detail, /已满级 20 栋/);
+  assert.equal(upgradeChanges(summarizeUpgradeChecks([...rows].reverse()), first), null);
+  const changed = structuredClone(rows);
+  changed.at(-2).items[0].missing = 3;
+  assert.equal(upgradeChanges(summarizeUpgradeChecks(changed), first), '家具作坊-1的螺丝缺口 4 → 3');
 });
 
 test('多行正文每一行都带时间、账号和等级', () => {
@@ -160,18 +192,26 @@ define('src/chunks/bundle.test.js', function () {
 `);
 fs.writeFileSync(path.join(dir, 'accounts.json'), JSON.stringify({ version: 1, activeId: null, accounts: [] }));
 const repo = fileURLToPath(new URL('../', import.meta.url));
+const ipFixture = path.join(dir, 'ip-fixture.mjs');
+fs.writeFileSync(ipFixture, `
+  const nativeFetch = globalThis.fetch;
+  globalThis.fetch = (url, options) => url === 'https://api64.ipify.org'
+    ? Promise.resolve(new Response('203.0.113.8'))
+    : nativeFetch(url, options);
+`);
 let child;
 let closed;
 try {
-  child = spawn(process.execPath, ['src/app.mjs', 'console'], {
+  child = spawn(process.execPath, ['--import', pathToFileURL(ipFixture).href, 'src/app.mjs', '--host=127.0.0.1'], {
     cwd: repo,
     windowsHide: true,
     stdio: ['ignore', 'pipe', 'pipe'],
     env: {
       ...process.env,
+      APPDATA: path.join(dir, 'empty-wechat-cache'),
       CW_DATA_DIR: dir, CW_CONFIG_PACK: configFile,
       CW_PROTO_BUNDLE: protocolFile,
-      CW_NO_BROWSER: '1', CW_QUIET_START: '1', CW_PORT: '0',
+      CW_NO_BROWSER: '1', CW_QUIET_START: '1', CW_SHOW_PUBLIC_IP: '1', CW_HOST: 'invalid://host', CW_PORT: '0',
     },
   });
   closed = new Promise(resolve => child.once('close', (code, signal) => resolve({ code, signal })));
@@ -181,6 +221,7 @@ try {
   child.stderr.on('data', text => { stderr += text; });
   const started = /\[\d{2}:\d{2}:\d{2}\] \[系统\] \[系统与连接\] \[信息\] 控制台已启动 (http:\/\/127\.0\.0\.1:([1-9]\d*))/;
   const guidance = '关闭网页后挂机会继续，运行日志显示在此窗口。请保持此窗口打开；Ctrl+C 或关闭此窗口会结束后台进程。';
+  const artFailure = '[艺术资源] 同步失败：没找到微信小游戏缓存目录';
   await new Promise((resolve, reject) => {
     const timer = setTimeout(() => finish(new Error('CLI 启动输出超时：' + stderr)), 10000);
     const finish = error => {
@@ -194,7 +235,7 @@ try {
     const onClose = (code, signal) => finish(new Error(`CLI 提前退出：code=${code} signal=${signal}\n${stderr}`));
     const onData = text => {
       stdout += text;
-      if (started.test(stdout) && stdout.includes(guidance)) finish();
+      if (started.test(stdout) && stdout.includes(guidance) && stdout.includes(artFailure) && stdout.includes('公网出口 IP  203.0.113.8')) finish();
     };
     child.once('error', onError);
     child.once('close', onClose);
@@ -211,7 +252,7 @@ try {
   assert.equal(response.status, 200);
   assert.deepEqual((await response.json()).accounts, [], '子进程只读取隔离目录的空账号库');
   passed++;
-  console.log('通过：真实 CLI 在无浏览器和空账号下保持运行，输出实际地址及启动窗口保留提示');
+  console.log('通过：真实 CLI 输出实际地址及启动提示，缺少艺术资源缓存时仍可访问账号接口');
 } finally {
   if (child && closed) {
     if (child.exitCode === null && child.signalCode === null) child.kill('SIGTERM');

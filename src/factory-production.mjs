@@ -1,4 +1,5 @@
 import { normalize } from './worlds.mjs';
+import { linkOperationResult } from './operation-log.mjs';
 import { AutomationSkip, createActionGuard, resourceReserve, worldActionAllowed } from './automation-policy.mjs';
 import { goldAccountKey } from './gold-reservations.mjs';
 import { farmInventory } from './farm-planting.mjs';
@@ -100,7 +101,25 @@ export async function runFactoryProductionBatch(client, protocol, steps, {
   if (!Array.isArray(steps) || !steps.length) return { results: [] };
   const results = [], attemptedEntries = new Set(), current = () => getSettings?.() ?? settings;
   let account, lock, batch, batchStep, ticket, prepared = false, acquired = false, actionGuard;
-  const publish = () => { for (const entry of results) onStep?.(entry); return { results }; };
+  const publish = () => {
+    const members = [...attemptedEntries];
+    const first = members[0];
+    if (!first && ticket) linkOperationResult(results.find(row => row.failureError) || results[0], ticket);
+    if (first && linkOperationResult(first, ticket).operationId) {
+      const products = new Map();
+      for (const member of members) {
+        const name = member.step.displayProduct || member.step.body.productId;
+        products.set(name, (products.get(name) ?? 0) + 1);
+        linkOperationResult(member, ticket);
+        if (member !== first) member.operationMember = true;
+      }
+      first.operationSummary = (first.step.displayFactory || first.step.body.buildingId) + '排产'
+        + [...products].map(([name, count]) => name + ' ×' + count).join('、');
+      first.operationDetail = members.map(member => member.step.label).join('\n');
+    }
+    for (const entry of results) onStep?.(entry);
+    return { results };
+  };
   try {
     account = goldAccountKey(player);
     const buildingId = steps[0].body?.buildingId;
@@ -150,7 +169,7 @@ export async function runFactoryProductionBatch(client, protocol, steps, {
     for (const step of selected) await check(step);
     batch = { attempted: [], sealed: false };
     batch.operation = factoryProductionOperation(water, buildingId, batch);
-    batchStep = { ...selected[0], costs: costsOf(selected), factoryBatch: batch, label: '工厂连续排产 ' + selected.length + ' 件' };
+    batchStep = { ...selected[0], costs: costsOf(selected), factoryBatch: batch, label: (selected[0].displayFactory || buildingId) + '连续排产' };
     actionGuard = beforeStep && afterStep && cancelStep ? { before: beforeStep, after: afterStep, cancel: cancelStep }
       : createActionGuard(client, current, null, { player, enabled: live });
     ticket = await actionGuard.before(batchStep, { waterSnapshot: water }); prepared = true;
@@ -204,7 +223,8 @@ export async function runFactoryProductionBatch(client, protocol, steps, {
     for (const step of steps.slice(selected.length)) results.push(skipped(step, '本次空闲生产格不足，等待下轮重新排产'));
     batch.sealed = true;
     if (!batch.attempted.length) {
-      await actionGuard.cancel(batchStep, ticket, { notSent: true }); prepared = false; pending.delete(lock);
+      await actionGuard.cancel(batchStep, ticket, { notSent: true, error: results.find(row => row.failureError)?.failureError });
+      prepared = false; pending.delete(lock);
     } else {
       try {
         ensureLive();

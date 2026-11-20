@@ -9,23 +9,19 @@ assert.ok(script, '页面包含实际账号卡片逻辑');
 const accountStart = script.indexOf('let snapshot =');
 const accountEnd = script.indexOf('// ---- 总览', accountStart);
 const cardsStart = script.indexOf('function accountChannel(');
-const cardsEnd = script.indexOf('async function renderWorlds()', cardsStart);
+const cardsEnd = script.indexOf('// ---- 添加账号', cardsStart);
 assert.ok(accountStart >= 0 && accountEnd > accountStart && cardsEnd > cardsStart);
 const accountScript = script.slice(accountStart, accountEnd);
 const cardsScript = script.slice(cardsStart, cardsEnd);
 const template = PAGE.match(/<template id="ui-account-card">([\s\S]*?)<\/template>/)?.[1];
 assert.ok(template, '构建后的页面提供账号卡片模板');
+assert.doesNotMatch(PAGE, /id="account-info-dialog"|data-account-action="details"/);
 const fields = [...template.matchAll(/data-account-field="([^"]+)"/g)].map(match => match[1]);
 const actions = [...template.matchAll(/data-account-action="([^"]+)"/g)].map(match => match[1]);
-const worldMarkup = template.match(/<dd\b[^>]*class="[^"]*\baccount-card-world\b[^"]*"[^>]*>([\s\S]*?)<\/dd>/)?.[1];
-assert.ok(worldMarkup, '区服资料行提供名称与状态标签的共同容器');
-assert.equal(fields.filter(name => name === 'status').length, 1, '每张卡片只保留一个连接状态标签');
-assert.ok(worldMarkup.indexOf('data-account-field="world"') >= 0
-  && worldMarkup.indexOf('data-account-field="world"') < worldMarkup.indexOf('data-account-field="status"'),
-  '连接状态标签跟在区服名称后面');
-const statusMarkup = worldMarkup.match(/<[^>]+data-account-field="status"[^>]*>/)?.[0];
-assert.match(statusMarkup || '', /class="[^"]*\bchip\b/, '状态标签保留chip样式');
-const statusClass = statusMarkup.match(/class="([^"]*)"/)[1];
+assert.match(template, /class="account-card-heading">.*?data-account-field="title"[^>]*><\/div><span[^>]*data-account-field="status"/s,
+  '连接状态紧跟卡片名称');
+assert.equal(fields.filter(name => name === 'status').length, 1);
+assert.match(template, /class="basis-full"><dt>闯关挂机收益<\/dt>/);
 let passed = 0;
 
 async function test(name, run) {
@@ -78,9 +74,16 @@ function makeNode(tag = 'div', className = '', text = '') {
       siblings.splice(siblings.indexOf(this), 1);
       this.parentNode = null;
     },
-    replaceChildren(...children) { this.options = children; },
+    replaceChildren(...children) {
+      if (children.some(child => 'text' in child)) this.options = children;
+      else { this.textContent = ''; this.append(...children); }
+    },
+    contains(node) { return this === node || this.children.some(child => child.contains(node)); },
+    get isConnected() { return this.tag === 'document' || !!this.parentNode?.isConnected; },
+    before(node) { this.parentNode.insertBefore(node, this); },
     querySelector(selector) {
       const match = node => selector.startsWith('.') ? node.classList.contains(selector.slice(1))
+        : selector === '[data-slot="card-content"]' ? node.dataset.slot === 'card-content'
         : selector.startsWith('[data-account-field=') ? node.dataset.accountField === selector.match(/"([^"]+)"/)[1]
           : selector.startsWith('[data-account-action=') ? node.dataset.accountAction === selector.match(/"([^"]+)"/)[1]
             : node.tag === selector;
@@ -110,7 +113,7 @@ function sampleAccounts() {
 
 function fixture(initial = sampleAccounts()) {
   const nodes = new Map();
-  const env = { calls: [], effects: [], exports: [], dialogs: [], details: [], allowed: true, dialogResult: null,
+  const env = { calls: [], cardReads: [], effects: [], exports: [], dialogs: [], allowed: true, dialogResult: null,
     serverRows: structuredClone(initial), selected: initial[0]?.id ?? null, errors: [] };
   env.node = id => {
     if (!nodes.has(id)) nodes.set(id, makeNode());
@@ -119,19 +122,13 @@ function fixture(initial = sampleAccounts()) {
   env.component = name => {
     assert.equal(name, 'ui-account-card');
     const card = makeNode('article', 'account-card');
+    const content = makeNode('div');
+    content.dataset.slot = 'card-content';
+    card.append(content);
     for (const name of fields) {
-      if (name === 'status') continue;
       const field = makeNode('span');
       field.dataset.accountField = name;
-      if (name === 'world') {
-        const row = makeNode('div');
-        const value = makeNode('dd', 'account-card-world');
-        const status = makeNode('span', statusClass);
-        status.dataset.accountField = 'status';
-        value.append(field, status);
-        row.append(value);
-        card.append(row);
-      } else if (['role', 'level', 'power'].includes(name)) {
+      if (['role', 'world', 'level', 'power', 'afk'].includes(name)) {
         const row = makeNode('div');
         row.append(field);
         card.append(row);
@@ -148,11 +145,15 @@ function fixture(initial = sampleAccounts()) {
     }
     return card;
   };
+  const page = makeNode('document');
+  page.append(env.node('accounts'), env.node('account-worlds-dialog'));
   env.guard = async () => env.allowed;
   env.flush = async () => true;
   env.saveInterval = async () => true;
   env.respond = async (route, payload) => {
     const url = new URL(route, 'http://fixture.invalid');
+    if (url.pathname === '/api/accounts/card') return null;
+    if (url.pathname === '/api/connect') env.serverRows.find(row => row.id === (url.searchParams.get('account') || env.api.current())).status = { connected: true };
     if (['/api/accounts/pause', '/api/loop/stop'].includes(url.pathname)) {
       const row = env.serverRows.find(row => row.id === url.searchParams.get('account'));
       assert.ok(row, '必须明确指定目标账号');
@@ -166,7 +167,8 @@ function fixture(initial = sampleAccounts()) {
   };
   env.call = async (route, options) => {
     const payload = options?.body ? JSON.parse(options.body) : null;
-    env.calls.push({ route, payload });
+    if (route.startsWith('/api/accounts/card?')) env.cardReads.push(route);
+    else env.calls.push({ route, payload });
     return env.respond(route, payload);
   };
   env.makeNode = makeNode;
@@ -189,13 +191,13 @@ function fixture(initial = sampleAccounts()) {
     const refreshActivities = () => {};
     const refreshStages = () => {};
     const refreshLoop = () => {loopAccount=current;renderHostingControl();};
+    let overviewPending = null;
     const refreshOverview = () => env.effects.push(['overview',current]);
-    const renderWho = data => {env.details.push(data);$('who').textContent=data.player?.nickname||'';};
+    const cell = (_icon, _size, name, amount) => el('span', 'cell', name + ' ' + amount);
     const subscribe = () => {};
     const configAccountChanged = () => {};
     const giftAccountChanged = () => {};
     const loginSettingsAccountChanged = () => {};
-    const appointmentsAccountChanged = () => {};
     const siliconAccountChanged = () => {};
     const resourceFieldsAccountChanged = () => {};
     const resetWorldMap = () => {};
@@ -208,6 +210,7 @@ function fixture(initial = sampleAccounts()) {
     accountDetailsOwner=current;
     renderAccountSelect();
     env.api={renderAccounts,refreshAccountStatuses,selectLoadedAccount,setAccountStatus,
+      overview(data) {stateActions.setGameData(current, 'overview', data);renderAccounts();},
       current:()=>current,rows:()=>accounts,snapshot:()=>snapshot,view:()=>consoleStore.getState().view,
       connectingAccounts: { has: id => connectingAccounts.has(id), add: id => stateActions.setFlag('connecting', id, true), delete: id => stateActions.setFlag('connecting', id, false) },
       replace(rows) {stateActions.replaceAccounts(structuredClone(rows), current);renderAccounts();}};
@@ -272,18 +275,12 @@ await test('账号公开描述保留原始备注字段', async () => {
   assert.equal(describeAccount({ ...account, label: undefined }).label, null);
 });
 
-await test('状态标签紧跟区服且按账号原位更新，不重复创建', async () => {
+await test('标题状态标签按账号原位更新，不重复创建', async () => {
   const env = fixture();
   const firstWorld = env.field('fixture-private-a', 'world');
   const firstStatus = env.field('fixture-private-a', 'status');
   const secondWorld = env.field('fixture-private-b', 'world');
   const secondStatus = env.field('fixture-private-b', 'status');
-  for (const [world, status] of [[firstWorld, firstStatus], [secondWorld, secondStatus]]) {
-    assert.equal(world.parentNode, status.parentNode);
-    assert.equal(world.parentNode.classList.contains('account-card-world'), true);
-    assert.deepEqual(world.parentNode.children, [world, status]);
-    assert.equal(status.classList.contains('chip'), true);
-  }
   assert.equal(firstStatus.textContent, '已连接 · 未挂机');
   assert.match(secondStatus.textContent, /已暂停/);
   env.api.setAccountStatus('fixture-private-a', { connected: false });
@@ -295,8 +292,6 @@ await test('状态标签紧跟区服且按账号原位更新，不重复创建',
   assert.equal(secondWorld.textContent, '海港2服');
   assert.equal(env.field('fixture-private-a', 'status'), firstStatus);
   assert.equal(env.field('fixture-private-b', 'status'), secondStatus);
-  assert.deepEqual(firstWorld.parentNode.children, [firstWorld, firstStatus]);
-  assert.deepEqual(secondWorld.parentNode.children, [secondWorld, secondStatus]);
 });
 
 await test('挂机标签与按钮一致，连接、重连和暂停中的颜色与页头共用规则', async () => {
@@ -325,6 +320,7 @@ await test('空态和历史缺省资料可显示，删除最后一个账号后�
   assert.equal(env.node('export-accounts').disabled, true);
   env.api.renderAccounts();
   assert.equal(env.node('accounts').children[0], empty);
+  assert.equal(env.node('account-worlds-dialog').open, false);
   env.api.replace([{id:'legacy',title:'旧账号'}]);
   assert.equal(env.field('legacy','title').textContent,'旧账号');
   assert.equal(env.field('legacy','channel').textContent,'已导入账号');
@@ -334,6 +330,9 @@ await test('空态和历史缺省资料可显示，删除最后一个账号后�
   env.api.replace([]);
   assert.equal(env.node('accounts').children.length,1);
   assert.ok(env.node('accounts').querySelector('.account-empty'));
+  assert.equal(env.node('account-worlds-dialog').open, false);
+  env.api.replace([{id:'again', title:'再次添加'}]);
+  assert.ok(env.button('again','worlds'));
 });
 
 await test('状态及角色资料轮询原位更新卡片并保留打开的菜单', async () => {
@@ -357,34 +356,78 @@ await test('状态及角色资料轮询原位更新卡片并保留打开的菜�
   assert.equal(env.field(second.accountId,'status').textContent,'已连接 · 未挂机');
   assert.deepEqual(env.calls.map(call=>call.route),['/api/accounts']);
   env.api.replace([...env.api.rows()].reverse());
-  assert.equal(env.node('accounts').children[0],second);
+  assert.equal(env.node('accounts').children[0],second, '卡片遵循账号列表顺序');
   assert.equal(menu.open,true);
 });
 
-await test('切换与详情受未保存配置保护，详情始终归属于选中账号', async () => {
+await test('当前卡片内联显示角色和资源，切换时隔离资料并保留配置保护', async () => {
   const env = fixture();
+  const [first, second] = sampleAccounts();
+  env.api.overview({ player: { level: 30, power: 56789, worldId: 200000010 }, afk: { level: 67, capped: true }, resources: [{name: '金币', amount: 4321}] });
+  assert.equal(env.field(first.id, 'power').textContent, '56,789');
+  assert.equal(env.field(first.id, 'world').textContent, '海港10服');
+  assert.match(env.field(first.id, 'afk').textContent, /等级 67 · 收益已满/);
+  assert.match(env.field(first.id, 'resources').textContent, /金币 4,321/);
   env.allowed = false;
-  await env.action('fixture-private-b','select');
-  await env.action('fixture-private-b','details');
-  assert.equal(env.api.current(),'fixture-private-a');
+  await env.action(second.id,'select');
+  assert.equal(env.api.current(),first.id);
   assert.equal(env.calls.length,0);
-  assert.equal(env.node('account-info-dialog').open,false);
   env.allowed = true;
-  await env.action('fixture-private-b','details');
-  assert.equal(env.api.current(),'fixture-private-b');
-  assert.equal(env.node('account-info-dialog').open,true);
-  assert.equal(env.node('account-info-title').textContent,'星海船长 · 账号详情');
-  assert.equal(env.details.at(-1).account.id,'fixture-private-b');
-  assert.equal(env.node('who').textContent,'星海船长');
+  await env.action(second.id,'select');
+  assert.equal(env.api.current(),second.id);
+  assert.equal(env.field(second.id, 'resources').textContent, '连接后读取资源');
+  assert.match(env.field(first.id, 'resources').textContent, /金币 4,321/);
+  assert.equal(env.node('accounts').children[0], env.card(first.id), '切换账号不移动卡片');
+  assert.equal(env.field(second.id, 'afk').textContent, '待连接读取');
   assert.deepEqual(env.calls[0],{route:'/api/accounts/active',payload:{confirm:true,id:'fixture-private-b'}});
-  env.node('who').textContent='乙的详情';
-  await env.action('fixture-private-a','select');
-  assert.equal(env.node('account-info-dialog').open,false);
-  assert.equal(env.node('who').textContent,'等待连接');
-  await env.action('fixture-private-a','details');
-  assert.equal(env.calls.filter(call=>call.route==='/api/accounts/active').length,2,'已选账号不重复写当前账号');
-  env.node('account-info-close').onclick();
-  assert.equal(env.node('account-info-dialog').open,false);
+  await env.action(first.id,'select');
+  assert.match(env.field(first.id, 'resources').textContent, /金币 4,321/);
+});
+
+await test('两张卡片刷新期间切号，乱序返回的余额仍各归原卡片', async () => {
+  const rows = sampleAccounts().map(row => ({ ...row, status: { connected: true } }));
+  const env = fixture(rows);
+  const reads = rows.map(() => deferred());
+  const respond = env.respond;
+  env.respond = (route, payload) => {
+    const index = rows.findIndex(row => route === '/api/accounts/card?account=' + row.id);
+    return index === -1 ? respond(route, payload) : reads[index].promise;
+  };
+  const pending = rows.map(row => env.action(row.id, 'refresh'));
+  await env.action(rows[1].id, 'select');
+  for (const index of [1, 0]) {
+    reads[index].resolve({ readAt: 123456, resources: [{ name: '金币', amount: index ? 0 : 2400 }] });
+    await pending[index];
+  }
+  assert.equal(env.field(rows[0].id, 'resources').textContent, '金币 2,400');
+  assert.equal(env.field(rows[1].id, 'resources').textContent, '金币 0');
+  assert.equal(env.api.current(), rows[1].id);
+});
+
+await test('非当前账号的区服管理独立寻址，关闭重开后忽略旧响应', async () => {
+  const env = fixture();
+  const [first, second] = sampleAccounts();
+  const gate = deferred();
+  const respond = env.respond;
+  env.respond = (route, payload) => route === '/api/worlds?account=' + second.id ? gate.promise : respond(route, payload);
+  await env.action(second.id, 'worlds');
+  assert.match(env.node('account-worlds-title').textContent, /星海船长/);
+  assert.equal(env.calls.length, 0);
+  const loading = env.node('load-worlds').onclick();
+  assert.equal(env.node('worlds-controls').disabled, true);
+  env.node('account-worlds-close').onclick();
+  await env.action(first.id, 'worlds');
+  gate.resolve({ recentWorlds: [] });
+  await loading;
+  assert.equal(env.node('worlds').textContent, '');
+  assert.equal(env.node('worlds-hint').textContent, '');
+  env.node('account-worlds-close').onclick();
+  await env.action(second.id, 'worlds');
+  env.node('world-input').value = '9002';
+  await env.node('enter-world').onclick();
+  assert.equal(env.api.current(), first.id);
+  assert.ok(env.calls.some(call => call.route === '/api/worlds/enter?account=' + second.id && call.payload.worldId === 9002));
+  assert.equal(env.errors.length, 0);
 });
 
 await test('备注输入使用原始label，导出和移除使用所属卡片ID', async () => {
@@ -413,30 +456,26 @@ await test('未连接详情展示缓存，明确点击读取后才连接', async
   const rows = sampleAccounts();
   rows[0].status = { connected: false };
   const env = fixture(rows);
-  await env.action('fixture-private-a', 'details');
-  assert.equal(env.node('who').textContent, rows[0].lastSeen.nickname);
-  assert.equal(env.node('res').textContent, '连接后读取资源');
+  assert.equal(env.field(rows[0].id, 'role').textContent, rows[0].lastSeen.nickname);
+  assert.equal(env.field(rows[0].id, 'resources').textContent, '连接后读取资源');
   assert.equal(env.calls.length, 0);
   assert.deepEqual(env.effects, []);
-  const operations = [];
-  env.node('connect').onclick = async () => {
-    operations.push('connect');
-    env.api.setAccountStatus('fixture-private-a', { connected: true });
-  };
-  await env.node('account-info-refresh').onclick();
-  assert.deepEqual(operations, ['connect']);
-  assert.deepEqual(env.effects, [['overview', 'fixture-private-a']]);
-  assert.equal(env.node('account-info-refresh').textContent, '刷新资料');
+  assert.equal(env.button(rows[1].id, 'refresh').disabled, true, '暂停托管保留资料但禁用连接');
+  await env.action(rows[0].id, 'refresh');
+  await settle();
+  assert.equal(env.calls.filter(call => call.route === '/api/connect').length, 1);
+  assert.ok(env.cardReads.includes('/api/accounts/card?account=' + rows[0].id));
+  assert.equal(env.button(rows[0].id, 'refresh').textContent, '刷新资料');
 });
 
-await test('旧卡片详情请求迟到不会覆盖后选卡片或下拉账号', async () => {
+await test('旧卡片切换请求迟到不会覆盖后选卡片或下拉账号', async () => {
   for (const selection of ['card', 'dropdown']) {
     const env = fixture([...sampleAccounts(), { id: 'fixture-private-c', title: '第三角色', status: {} }]);
     const older = deferred();
     const respond = env.respond;
     env.respond = (route, payload) => route === '/api/accounts/active' && payload.id === 'fixture-private-b'
       ? older.promise : respond(route, payload);
-    const details = env.action('fixture-private-b', 'details');
+    const switching = env.action('fixture-private-b', 'select');
     await settle();
     assert.equal(env.calls[0].payload.id, 'fixture-private-b');
     if (selection === 'card') await env.action('fixture-private-c', 'select');
@@ -446,11 +485,10 @@ await test('旧卡片详情请求迟到不会覆盖后选卡片或下拉账号',
     }
     assert.equal(env.api.current(), 'fixture-private-c');
     older.resolve({ ok: true });
-    await details;
+    await switching;
     assert.equal(env.api.current(), 'fixture-private-c');
     assert.equal(env.node('account').value, 'fixture-private-c');
-    assert.equal(env.node('account-info-dialog').open, false, '过期详情操作不会重新打开弹窗');
-    assert.equal(env.details.length, 0);
+    assert.equal(env.field('fixture-private-c','current').hidden, false);
   }
 });
 
@@ -460,7 +498,7 @@ await test('卡片或下拉的旧配置确认迟到不再发送切号请求', as
     const older = deferred();
     env.guard = id => id === 'fixture-private-b' ? older.promise : Promise.resolve(true);
     let first;
-    if (source === 'card') first = env.action('fixture-private-b', 'details');
+    if (source === 'card') first = env.action('fixture-private-b', 'select');
     else {
       env.node('account').value = 'fixture-private-b';
       first = env.node('account').onchange();
@@ -474,7 +512,7 @@ await test('卡片或下拉的旧配置确认迟到不再发送切号请求', as
       ['fixture-private-c']);
     assert.equal(env.api.current(), 'fixture-private-c');
     assert.equal(env.node('account').value, 'fixture-private-c');
-    assert.equal(env.node('account-info-dialog').open, false);
+    assert.equal(env.field('fixture-private-c','current').hidden, false);
   }
 });
 

@@ -12,9 +12,9 @@ const config = { tables: {
 const ordinary = { level: 1, enhance: 2 };
 const promote = { level: 1, enhance: 10 };
 const chairs = [{ buildingId: '1钓鱼椅', level: 3 }, { buildingId: '2钓鱼椅', level: 1 }];
-const run = (client, options = {}) => upgradeFishingOnce(client, config, { playerLevel: 9, reserveGold: 1000, enabled: () => true, ...options });
+const run = (client, options = {}) => upgradeFishingOnce(client, config, { playerLevel: 9, enabled: () => true, ...options });
 
-function mock({ info = ordinary, buildings = chairs, gold = 1050, after = { level: 1, enhance: 3 } } = {}) {
+function mock({ info = ordinary, buildings = chairs, gold = 50, after = { level: 1, enhance: 3 } } = {}) {
   const requests = [];
   return {
     requests,
@@ -35,12 +35,11 @@ export async function testFishingUpgrade() {
   for (const [data, settings, reason] of [
     [{}, { playerLevel: 6 }, /7 级/],
     [{}, { playerLevel: undefined }, /角色等级/],
-    [{}, { reserveGold: undefined }, /预留金币/],
     [{ buildings: [] }, {}, /钓鱼椅/],
     [{ info: null }, {}, /强化进度/],
     [{ info: { level: 1 } }, {}, /强化进度/],
     [{ info: { level: 2, enhance: 0 } }, {}, /最高等级/],
-    [{ gold: 1049 }, {}, /保留 1000/],
+    [{ gold: 49 }, {}, /需 50 金币，现有 49/],
     [{ gold: null }, {}, /金币余额/],
     [{ info: promote, buildings: [chairs[0], { buildingId: '2钓鱼椅', level: 0 }] }, {}, /已建成 1 把/],
   ]) {
@@ -55,7 +54,7 @@ export async function testFishingUpgrade() {
   assert(stoppedResult.skipped);
   assert(!stopped.requests.includes('FishingLevelUpRequest'));
 
-  // A balance equal to cost plus reserve permits a single paid enhancement.
+  // A balance equal to the cost permits a single paid enhancement.
   const normal = mock();
   const upgraded = await run(normal);
   assert(upgraded.ok);

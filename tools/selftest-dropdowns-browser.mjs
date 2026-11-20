@@ -178,10 +178,12 @@ try {
   }
   assert(inspected >= 10, '需要覆盖多个配置分组');
   console.log('通过：逐一检查 ' + inspected + ' 个可见配置多选下拉');
-  await page.locator('#config-preview-scope').click();
-  await page.locator('#config-preview-scope option').last().scrollIntoViewIfNeeded();
-  await assertPanel(page, '#config-preview-scope option:last-child');
+  await page.locator('#tabs [data-tab=overview]').click();
+  await page.locator('#overview-task-filter').click();
+  await page.locator('#overview-task-filter option').last().scrollIntoViewIfNeeded();
+  await assertPanel(page, '#overview-task-filter option:last-child');
   await page.keyboard.press('Escape');
+  await page.locator('#tabs [data-tab=settings]').click();
   console.log('通过：原生单选下拉的末尾选项完整可见，不受卡片边界裁切');
 
   // 复用真实渲染器，分别覆盖盟友异步刷新、活动详情、联盟互助的调用路径。

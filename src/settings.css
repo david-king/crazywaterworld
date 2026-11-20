@@ -100,6 +100,8 @@
 .config-order-tools .config-option:hover { background:transparent }
 .config-add { display:flex; gap:8px; align-items:center; padding:8px 0 4px }
 .config-add select { flex:1; min-width:0; width:auto }
+.config-fleet-lineup { display:grid; grid-template-columns:max-content minmax(0,300px) max-content; align-items:center; gap:8px; padding:2px 0 }
+.config-fleet-lineup select { min-width:0 }
 .config-crop-quantity { display:flex; align-items:center; gap:8px }
 .config-crop-quantity input { width:88px }
 .config-empty { padding:16px 24px; color:var(--muted-foreground) }
@@ -122,16 +124,19 @@
 .config-ranking-scroll tr.is-own { background:var(--muted) }
 .config-ranking-scroll td:nth-child(2) { max-width:320px; overflow:hidden; text-overflow:ellipsis }
 @media(max-width:600px) { .config-ranking-summary { grid-template-columns:repeat(2,minmax(0,1fr)) } }
-#config-usage { margin-top:12px; line-height:1.6; color:var(--muted-foreground); font-variant-numeric:tabular-nums }
+#config-usage:not(:empty) { margin-top:12px; line-height:1.6 }
+#config-usage .runtime-row { margin-top:6px }
+#config-preview-summary:not(:empty) { display:grid; gap:6px; margin-top:12px; font-size:14px }
+.preview-condition { margin:0; line-height:1.6; overflow-wrap:anywhere }
+.preview-notes { list-style:disc; padding-left:20px; max-height:20rem; overflow:auto; overflow-wrap:anywhere }
+.preview-history>summary,.preview-inspection>summary { width:fit-content; padding-block:4px }
+.preview-history[open]>summary,.preview-inspection[open]>summary { margin-bottom:8px }
 .config-preview-list { margin:8px 0 0; padding-left:20px }
 .config-preview-list li { padding:4px 0; overflow-wrap:anywhere }
 .config-preview-cost { display:block; color:var(--muted-foreground) }
 #config-preview-result details { margin-top:8px }
 #config-preview-result summary { width:fit-content }
 #config-preview-result details ul { padding-left:18px; max-height:360px; overflow:auto; scrollbar-width:thin }
-.config-preview-controls { display:flex; flex-wrap:wrap; align-items:center; gap:8px; min-width:0; max-width:100% }
-.config-preview-controls label { color:var(--muted-foreground); font-weight:400 }
-.config-preview-controls .config-select { width:auto; min-width:120px }
 
 @media (max-width:768px) {
   .config-tabs { display:grid; grid-template-columns:repeat(5,minmax(0,1fr)) max-content; width:100%; overflow:visible }
@@ -140,11 +145,11 @@
   .config-actions { max-width:100%; flex-wrap:wrap }
   .config-owner { flex:1 }
   .config-owner strong { font-size:14px }
-  .config-families { padding-inline:16px }
-  .config-sheet>.config-subtabs,#config-fields .config-subtabs { margin:12px 16px 0; max-width:calc(100% - 32px) }
-  .config-section { margin:0 16px; padding-block:12px }
+  .config-families { padding-inline:12px }
+  .config-sheet>.config-subtabs,#config-fields .config-subtabs { margin:10px 12px 0; max-width:calc(100% - 24px) }
+  .config-section { margin:0 12px; padding-block:10px }
   .config-row { grid-template-columns:minmax(100px,44%) minmax(0,1fr); gap:6px 8px }
-  .config-children { margin-left:2px; padding-inline:10px }
+  .config-children { margin-left:2px; padding-inline:8px }
   .config-children .config-children { margin-left:2px; padding-right:0 }
   .config-row.has-children { grid-template-columns:minmax(0,1fr) }
   .config-row.has-children[data-kind=switch] { grid-template-columns:minmax(0,1fr) auto }
@@ -160,7 +165,7 @@
   @supports (field-sizing:content) {
     .config-number input { field-sizing:content; width:auto }
   }
-  .config-preview { padding:16px }
+  .config-preview { padding:12px }
 }
 @media (max-width:480px) {
   .config-war-role { grid-template-columns:84px minmax(0,1fr) }
@@ -179,19 +184,22 @@
   .config-row { min-height:52px }
 }
 
-#config-history-dialog { width:min(660px,calc(100% - 24px)); max-height:85dvh; padding:20px; overflow:auto; border:1px solid var(--border); border-radius:14px; color:var(--foreground); background:var(--background) }
-#config-history-title { font-size:18px; font-weight:700 }
-#config-history-status { margin:6px 0 12px; color:var(--muted-foreground); overflow-wrap:anywhere }
-#config-history-body,.history-differences { display:grid; gap:8px }
+#config-history-dialog { width:min(480px,calc(100% - 24px)); max-height:85dvh; padding:14px; gap:10px; overflow:auto; border:1px solid var(--border); border-radius:14px; color:var(--foreground); background:var(--background) }
+#config-history-title { margin:0; font-size:18px; font-weight:700; overflow-wrap:anywhere }
+#config-history-status { margin:0; color:var(--muted-foreground); overflow-wrap:anywhere }
+#config-history-status:empty,#config-history-body:empty { display:none }
+#config-history-body,.history-differences { display:grid; gap:6px }
 .history-record,.history-change { padding:10px; border:1px solid var(--border); border-radius:8px; overflow-wrap:anywhere }
-.history-record { display:flex; align-items:center; justify-content:space-between; gap:8px }
+.history-record { display:flex; align-items:center; flex-wrap:wrap; gap:6px 10px; padding:8px 10px }
+.history-record-info { flex:1 1 140px; min-width:0 }
+.history-record-actions { display:flex; gap:6px; margin-left:auto }
 .history-record small,.history-change p { display:block; margin-top:4px; color:var(--muted-foreground) }
 .history-name { display:grid; gap:6px }
 .history-name input { padding:8px; border:1px solid var(--border); border-radius:6px }
-#config-history-actions { display:flex; justify-content:flex-end; flex-wrap:wrap; gap:8px; margin-top:14px }
-.history-action { min-height:36px; padding:6px 10px; border:1px solid var(--border); border-radius:7px }
+#config-history-actions { display:flex; justify-content:flex-end; flex-wrap:wrap; gap:6px }
+.history-action { min-height:32px; padding:4px 8px; border:1px solid var(--border); border-radius:7px }
 .history-action.primary { background:var(--primary); color:var(--primary-foreground) }
-.history-record .history-action { flex:none }
+.history-delete { color:var(--destructive) }
 #config-history-dialog[aria-busy=true] .history-action { opacity:.55; cursor:wait }
 @media (max-width:768px) { .history-action { min-height:44px } }
 .history-full { padding:8px 10px; border:1px solid var(--border); border-radius:8px }

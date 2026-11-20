@@ -2,6 +2,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { execFileSync } from 'node:child_process';
 import { atomicJson } from '../json-store.mjs';
+import { DEFAULT_PROXY_PORT, validateProxyPort } from './proxy-port.mjs';
 
 export const KEY = process.env.CW_REG_KEY
   ?? 'HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Internet Settings';
@@ -108,9 +109,11 @@ export function removeBackup() {
 }
 
 export function setProxy(host, port, { backedUp = false } = {}) {
+  const portNumber = Number(port);
+  validateProxyPort(portNumber);
   if (!backedUp) backup();
   reg(['add', KEY, '/v', 'ProxyEnable', '/t', 'REG_DWORD', '/d', '1', '/f']);
-  reg(['add', KEY, '/v', 'ProxyServer', '/t', 'REG_SZ', '/d', `${host}:${port}`, '/f']);
+  reg(['add', KEY, '/v', 'ProxyServer', '/t', 'REG_SZ', '/d', `${host}:${portNumber}`, '/f']);
   reg(['add', KEY, '/v', 'ProxyOverride', '/t', 'REG_SZ', '/d', '<local>', '/f']);
   return readCurrent();
 }
@@ -140,7 +143,7 @@ export function isProxyOn() {
 }
 
 export function proxyCommand(args = process.argv.slice(2)) {
-  const [cmd, host = '127.0.0.1', port = '17321'] = args;
+  const [cmd, host = '127.0.0.1', port = DEFAULT_PROXY_PORT] = args;
   if (cmd === 'show') {
     console.log(readCurrent());
   } else if (cmd === 'backup') {

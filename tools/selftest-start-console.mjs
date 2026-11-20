@@ -169,9 +169,10 @@ try {
     const dependencies = { env: {}, print: value => printed.push(value), hold: async () => { held++; },
       prepare: noLaunch, runNpm: noLaunch, launch: noLaunch };
     await freshStart(['url'], dependencies);
-    dependencies.env.CW_HOST = '::'; dependencies.env.CW_PORT = '18000';
+    dependencies.env.CW_HOST = '::1'; dependencies.env.CW_PORT = '18000';
+    dependencies.fetchImpl = async () => new Response('203.0.113.8');
     await freshStart(['address'], dependencies);
-    assert.deepEqual(printed, ['http://127.0.0.1:17323/', 'http://[::1]:18000/']);
+    assert.deepEqual(printed, ['http://127.0.0.1:17323/', 'http://[::1]:18000/', '监听范围  仅本机可直接访问', '公网出口 IP  203.0.113.8']);
     assert.equal(held, 2);
     assert.equal(fs.existsSync(path.join(f.root, 'node_modules')), false);
   });

@@ -3,6 +3,7 @@ import { renderToStaticMarkup } from "react-dom/server"
 import { Button } from "./button"
 import { Card, CardAction, CardContent, CardHeader, CardTitle } from "./card"
 import { Input } from "./input"
+import { NativeSelect } from "./native-select"
 import { HelpTip } from "./help-tip"
 
 export function action(id: string, label: string, variant: React.ComponentProps<typeof Button>["variant"] = "outline", disabled = false) {
@@ -33,10 +34,20 @@ export function stagePanel() {
         <div id="trial-view" className="progression-view" aria-live="polite" />
       </CardContent>
     </Card>
-    <Card><CardHeader><CardTitle>海盗首杀手动推进</CardTitle></CardHeader><CardContent>
-      <p className="dim">手动开始本次连续推进，达到失败停止次数或条件不足时停止；不会开启挂机自动讨伐。舰队和目标沿用海盗配置，汽油按实际库存检查。</p>
-      <div className="bar"><a href="#config-group-pirate-hunt">设置舰队与目标</a><label htmlFor="pirate-manual-failures">失败停止次数</label><Input id="pirate-manual-failures" aria-label="海盗手动推进失败停止次数" className="w-20" type="number" min="1" max="100" defaultValue="1" /><Button id="pirate-advance-start" disabled>开始首杀推进</Button><Button id="pirate-advance-stop" variant="outline" disabled>停止首杀推进</Button></div>
-      <p id="pirate-advance-state" role="status">尚未开启</p>
+    <Card><CardHeader><CardTitle>海盗首杀</CardTitle><CardAction><Button id="pirate-manual-refresh" variant="outline" size="sm">刷新目标与舰队</Button></CardAction></CardHeader><CardContent>
+      <div className="bar pirate-manual-choices">
+        <label className="choice-field"><span>海盗目标</span><NativeSelect id="pirate-manual-target" size="sm" disabled required><option value="">请选择海盗目标</option></NativeSelect></label>
+        <label className="choice-field"><span>出征舰队</span><NativeSelect id="pirate-manual-fleet" size="sm" disabled required><option value="">请选择出征舰队</option></NativeSelect></label>
+        <label className="choice-field"><span>出战阵容</span><NativeSelect id="pirate-manual-lineup" size="sm"><option value="">使用舰队当前阵容</option></NativeSelect></label>
+        <Button id="pirate-manual-lineup-view" variant="outline" size="sm" disabled>查看阵容</Button>
+      </div>
+      <div id="pirate-manual-view" className="dim" role="status" />
+      <div className="bar pirate-manual-actions">
+        <label>连续战败上限<Input id="pirate-manual-failures" className="w-20" type="number" min="1" max="100" defaultValue="1" required /></label>
+        <label>检查间隔（秒）<Input id="pirate-manual-interval" className="w-20" type="number" min="5" max="60" defaultValue="15" required /></label>
+        <Button id="pirate-manual-once" disabled>挑战一次</Button><Button id="pirate-advance-start" variant="outline" disabled>开始连续挑战</Button><Button id="pirate-advance-stop" variant="outline" disabled>停止挑战</Button>
+      </div>
+      <p id="pirate-advance-state" role="status" hidden />
     </CardContent></Card>
     </div>
   )

@@ -11,6 +11,7 @@ const progressionScript = readFileSync(new URL('./ui/progression.js', import.met
 const lineupScript = readFileSync(new URL('./lineup-editor.js', import.meta.url), 'utf8');
 const lineupCss = readFileSync(new URL('./lineup-editor.css', import.meta.url), 'utf8');
 const settingsScript = readFileSync(new URL('./settings-ui.js', import.meta.url), 'utf8');
+const runtimeOverviewScript = readFileSync(new URL('./runtime-overview-ui.js', import.meta.url), 'utf8');
 const activitiesScript = readFileSync(new URL('./ui/activities.js', import.meta.url), 'utf8');
 const settingsCss = readFileSync(new URL('./settings.css', import.meta.url), 'utf8');
 const giftCodeScript=readFileSync(new URL('./gift-codes-ui.js',import.meta.url),'utf8');
@@ -29,9 +30,8 @@ const accountAddScript = readFileSync(new URL('./account-add-ui.js', import.meta
 const accountBackupScript = readFileSync(new URL('./account-backup-ui.js', import.meta.url), 'utf8');
 const accountPickerScript = readFileSync(new URL('./account-picker-ui.js', import.meta.url), 'utf8');
 const helpTipsScript = readFileSync(new URL('./help-tips.js', import.meta.url), 'utf8');
-const appointmentsScript = readFileSync(new URL('./appointments-ui.js', import.meta.url), 'utf8');
-const appointmentsCss = readFileSync(new URL('./appointments.css', import.meta.url), 'utf8');
 const themeScript = readFileSync(new URL('./theme-ui.js', import.meta.url), 'utf8');
+const consoleQuickScript = readFileSync(new URL('./console-quick-nav.js', import.meta.url), 'utf8');
 const consoleStoreScript = readFileSync(new URL('./ui/dist/console-store.js', import.meta.url), 'utf8');
 
 export const PAGE = `<!doctype html>
@@ -44,13 +44,14 @@ export const PAGE = `<!doctype html>
 <meta name="theme-color" content="#ffffff">
 <meta name="format-detection" content="telephone=no">
 <script id="theme-init">${themeScript}</script>
-<style>@layer properties, theme, base, components, page, utilities; @layer page { ${consoleCss} ${settingsCss} ${appointmentsCss} ${lineupCss} ${siliconOverviewCss} ${resourceFieldsCss} } ${componentCss}</style>
+<style>@layer properties, theme, base, components, page, utilities; @layer page { ${consoleCss} ${settingsCss} ${lineupCss} ${siliconOverviewCss} ${resourceFieldsCss} } ${componentCss}</style>
 </head>
 <body>
 ${chrome()}
 <div class="deck"><main>
   <nav id="resource-tabs" class="resource-tabs" aria-label="杂项分类" hidden>
     <button type="button" data-resource-tab="guild">联盟</button><button type="button" data-resource-tab="inventory">仓库</button><button type="button" data-resource-tab="heroes">英雄与装备</button><button type="button" data-resource-tab="giftcodes">礼包兑换</button>
+    <button type="button" data-resource-tab="dailies">日常任务</button>
   </nav>
   <section id="tab-overview">
     ${overviewPage()}
@@ -85,6 +86,7 @@ ${chrome()}
   </section>
 
   <section id="tab-guild" class="hidden">${guildPage()}</section>
+  <section id="tab-dailies" class="hidden" aria-label="日常任务"><div id="daily-tasks-root"></div></section>
 
   <section id="tab-giftcodes" class="hidden">
     ${giftCodesPage()}
@@ -109,6 +111,7 @@ const operationNames = ${JSON.stringify(operationLabels)};
 let current = null;
 let accounts = [];
 let stream = null;
+let compactLogs = true;
 const consoleDraftFormat = ${JSON.stringify({ format: SETTINGS_FORMAT, version: SETTINGS_SCHEMA_VERSION })};
 
 function createConsoleVersionGuard() {
@@ -357,14 +360,17 @@ const logTime = new Intl.DateTimeFormat('zh-CN', {
 const logCategories = ${JSON.stringify(LOG_CATEGORIES)};
 const logGroups = ${JSON.stringify(LOG_GROUPS)};
 const logGroupTones = ${JSON.stringify(LOG_GROUP_TONES)};
+const groupByLogCategory = new Map(Object.entries(logGroups).flatMap(([group, keys]) => keys.map(key => [key, group])));
 const createLogAccountLabels = ${createLogAccountLabels.toString()};
 let logAccount = 'all';
 let logGroup = 'all';
+let logFeature = 'all';
 let onlyIssues = false;
 consoleStore.subscribe((state, previous) => {
   if (state.view === previous.view) return;
   logAccount = state.view.logAccount;
   logGroup = state.view.logGroup;
+  logFeature = state.view.logFeature;
   onlyIssues = state.view.onlyIssues;
 });
 let logReturnFocus;
@@ -375,27 +381,31 @@ function openJournal() {
   document.body.classList.add('has-log-dialog'); $('journal-dialog').showModal();
   const selectedAccount = $('log-account-tabs').querySelector('[aria-pressed=true]');
   selectedAccount.focus({ preventScroll: true });
-  revealLogFilter(selectedAccount); revealLogFilter($('log-tabs').querySelector('[aria-selected=true]'));
+  revealHorizontalTab(selectedAccount); revealHorizontalTab($('log-tabs').querySelector('[aria-selected=true]'));
 }
 $('logs-open').onclick = openJournal;
 $('logs-close').onclick = () => $('journal-dialog').close();
 $('journal-dialog').addEventListener('close', () => { document.body.classList.remove('has-log-dialog'); (logReturnFocus?.isConnected ? logReturnFocus : $('logs-open')).focus(); });
-const logTabs = [...$('log-tabs').querySelectorAll('[role=tab]')];
-function revealLogFilter(button) {
+const featureBar = $('log-tabs');
+function revealHorizontalTab(button) {
   // 使用布局坐标，避免弹窗开场缩放影响横向定位。
   const container = button.parentElement, left = button.offsetLeft - 3, right = button.offsetLeft + button.offsetWidth + 3;
   if (left < container.scrollLeft) container.scrollLeft = left;
   else if (right > container.scrollLeft + container.clientWidth) container.scrollLeft = right - container.clientWidth;
 }
-function selectLogGroup(tab) {
-  stateActions.setView({ logGroup: tab.dataset.logGroup });
-  updateLogSummary();
-  revealLogFilter(tab);
+function selectLogFeature(key) {
+  stateActions.setView({ logFeature: key });
+  const selected = featureBar.querySelector('[aria-selected=true]');
+  if (selected) revealHorizontalTab(selected);
 }
+$('log-group').onchange = event => {
+  stateActions.setView({ logGroup: event.target.value, logFeature: 'all' });
+  featureBar.scrollLeft = 0;
+};
 function selectLogAccount(id) {
   stateActions.setView({ logAccount: id });
   updateLogSummary();
-  revealLogFilter($('log-account-tabs').querySelector('[aria-pressed=true]'));
+  revealHorizontalTab($('log-account-tabs').querySelector('[aria-pressed=true]'));
 }
 $('log-account-tabs').onkeydown = event => {
   const buttons = [...$('log-account-tabs').querySelectorAll('[data-log-account]')];
@@ -405,14 +415,18 @@ $('log-account-tabs').onkeydown = event => {
   if (next === undefined) return;
   event.preventDefault(); selectLogAccount(buttons[next].dataset.logAccount); buttons[next].focus({ preventScroll: true });
 };
-for (const [index, tab] of logTabs.entries()) {
-  tab.onclick = () => selectLogGroup(tab);
-  tab.onkeydown = event => {
-    const next = { ArrowRight: (index + 1) % logTabs.length, ArrowLeft: (index + logTabs.length - 1) % logTabs.length, Home: 0, End: logTabs.length - 1 }[event.key];
-    if (next === undefined) return;
-    event.preventDefault(); selectLogGroup(logTabs[next]); logTabs[next].focus({ preventScroll: true });
-  };
-}
+featureBar.onclick = event => {
+  const tab = event.target.closest('[role=tab]');
+  if (tab) selectLogFeature(tab.dataset.logFeature);
+};
+featureBar.onkeydown = event => {
+  const tabs = [...featureBar.children];
+  const index = tabs.indexOf(event.target.closest('[role=tab]'));
+  if (index < 0) return;
+  const next = { ArrowRight: (index + 1) % tabs.length, ArrowLeft: (index + tabs.length - 1) % tabs.length, Home: 0, End: tabs.length - 1 }[event.key];
+  if (next === undefined) return;
+  event.preventDefault(); selectLogFeature(tabs[next].dataset.logFeature); tabs[next].focus({ preventScroll: true });
+};
 const logClearWatermarks = new Map();
 const logAccountNames = new Map();
 let logClearing = false;
@@ -458,22 +472,58 @@ function clearedLog(entry) {
   return watermark && (entry.id ? entry.id <= watermark.before : entry.t <= watermark.at);
 }
 let guildRefreshTimer;
+const featureOrder = new Intl.Collator('zh-CN', { numeric: true });
+function updateFeatureTabs(features, counts) {
+  const existing = new Map([...featureBar.children].map(tab => [tab.dataset.logFeature, tab]));
+  if (logFeature !== 'all' && !features.has(logFeature) && existing.has(logFeature)) {
+    const tab = existing.get(logFeature);
+    features.set(logFeature, { key: logFeature, label: tab.firstElementChild.textContent, tone: tab.dataset.tone });
+  }
+  const sorted = [...features.values()].sort((a,b) => featureOrder.compare(a.label, b.label) || a.key.localeCompare(b.key));
+  const options = [{ key: 'all', label: '全部', tone: 'neutral' }, ...sorted];
+  for (const [index, { key, label, tone }] of options.entries()) {
+    const tab = existing.get(key) || featureBar.firstElementChild.cloneNode(true);
+    existing.delete(key);
+    tab.id = 'log-tab-' + key;
+    tab.dataset.logFeature = key;
+    tab.dataset.tone = tone;
+    if (tab.firstElementChild.textContent !== label) tab.firstElementChild.textContent = label;
+    const value = String(counts.get(key) || 0);
+    if (tab.lastElementChild.textContent !== value) tab.lastElementChild.textContent = value;
+    const selected = key === logFeature;
+    tab.setAttribute('aria-selected', String(selected)); tab.tabIndex = selected ? 0 : -1;
+    if (selected) $('log-panel').setAttribute('aria-labelledby', tab.id);
+    if (featureBar.children[index] !== tab) featureBar.insertBefore(tab, featureBar.children[index] || null);
+  }
+  for (const tab of existing.values()) tab.remove();
+}
 function updateLogSummary() {
   updateLogAccounts();
   let count = 0;
   const groupCounts = { all: 0 };
+  const featureCounts = new Map();
+  const availableFeatures = new Map();
   const accountCounts = new Map([['all', 0]]);
   for (const row of logEl.children) {
     const accountMatches = logAccount === 'all' || row.dataset.account === logAccount;
     const levelMatches = !onlyIssues || row.classList.contains('error') || row.classList.contains('warn');
-    const group = Object.keys(logGroups).find(key => logGroups[key].includes(row.dataset.category));
+    const group = groupByLogCategory.get(row.dataset.category);
     const groupMatches = logGroup === 'all' || group === logGroup;
+    const feature = row.dataset.feature;
+    const featureMatches = logFeature === 'all' || logFeature === feature;
+    if (groupMatches && (accountMatches || logFeature === feature)) {
+      availableFeatures.set(feature, { key: feature, label: row.dataset.featureLabel, tone: logGroupTones[group] || 'neutral' });
+    }
     if (accountMatches && levelMatches) { groupCounts.all++; if (group) groupCounts[group] = (groupCounts[group] || 0) + 1; }
-    if (groupMatches && levelMatches) {
+    if (groupMatches && levelMatches && accountMatches) {
+      featureCounts.set('all', (featureCounts.get('all') || 0) + 1);
+      featureCounts.set(feature, (featureCounts.get(feature) || 0) + 1);
+    }
+    if (groupMatches && levelMatches && featureMatches) {
       accountCounts.set('all', accountCounts.get('all') + 1);
       if (row.dataset.account) accountCounts.set(row.dataset.account, (accountCounts.get(row.dataset.account) || 0) + 1);
     }
-    row.hidden = !accountMatches || !levelMatches || !groupMatches;
+    row.hidden = !accountMatches || !levelMatches || !groupMatches || !featureMatches;
     if (!row.hidden) count++;
   }
   for (const button of $('log-account-tabs').children) {
@@ -483,105 +533,110 @@ function updateLogSummary() {
     const value = String(accountCounts.get(button.dataset.logAccount) || 0);
     if (counter.textContent !== value) counter.textContent = value;
   }
-  for (const tab of logTabs) {
-    const selected = tab.dataset.logGroup === logGroup;
-    tab.setAttribute('aria-selected', String(selected)); tab.tabIndex = selected ? 0 : -1;
-    tab.querySelector('[data-log-group-count]').textContent = groupCounts[tab.dataset.logGroup] || 0;
-    if (selected) $('log-panel').setAttribute('aria-labelledby', tab.id);
+  updateFeatureTabs(availableFeatures, featureCounts);
+  const groupSelect = $('log-group');
+  if (groupSelect.value !== logGroup) groupSelect.value = logGroup;
+  for (const option of groupSelect.options) {
+    const label = (option.value === 'all' ? '全部分类' : option.value) + ' · ' + (groupCounts[option.value] || 0);
+    if (option.textContent !== label) option.textContent = label;
   }
   const account = accounts.find(item => item.id === logAccount);
   $('log-clear').disabled = logClearing || !account;
   $('log-clear').title = account ? '清空“' + logAccountLabel(logAccount) + '”的全部运行日志（不限当前分类）' : '选择一个账号后可清空该账号的全部运行日志';
   $('log-top-count').textContent = logEl.children.length;
   $('log-count').textContent = String(count);
-  $('log-empty').hidden = count > 0;
-  $('log-empty').textContent = logGroup !== 'all' || logAccount !== 'all' || onlyIssues ? '没有符合当前账号、分类和等级筛选的记录' : '还没有运行记录';
+  $('log-empty').hidden = logEl.childElementCount > 0 || logAccount !== 'all' || logGroup !== 'all' || logFeature !== 'all' || onlyIssues;
+}
+function createLogRow(entry) {
+  const row = el('div', 'row ' + entry.level);
+  row.dataset.category = entry.category || 'system';
+  row.dataset.feature = entry.feature ? 'task-' + entry.feature.key : row.dataset.category;
+  row.dataset.featureLabel = entry.feature?.label || logCategories[row.dataset.category] || logCategories.system;
+  row.dataset.account = entry.account || '';
+  if (entry.rowId) row.dataset.rowId = String(entry.rowId);
+  if (entry.extra?.batch) row.dataset.batch = entry.extra.batch;
+  if (entry.extra?.waitKey) row.dataset.waitKey = entry.extra.waitKey;
+  const body = el('div', 'log-body');
+  const meta = el('div', 'log-meta');
+  const accountBadge = component(entry.account ? 'ui-log-account' : 'ui-log-badge');
+  if (entry.account) {
+    paintLogAccount(accountBadge, entry.account);
+    accountBadge.onclick = () => selectLogAccount(entry.account);
+  } else {
+    accountBadge.textContent = '系统'; accountBadge.dataset.tone = 'neutral'; accountBadge.classList.add('log-system-tag');
+    accountBadge.title = '控制台系统日志';
+  }
+  const categoryBadge = el('button', 'log-tag log-category-tag', row.dataset.featureLabel);
+  categoryBadge.type = 'button';
+  categoryBadge.title = '筛选功能：' + row.dataset.featureLabel;
+  categoryBadge.setAttribute('aria-label', categoryBadge.title);
+  categoryBadge.onclick = () => selectLogFeature(row.dataset.feature);
+  const group = groupByLogCategory.get(row.dataset.category);
+  categoryBadge.dataset.tone = logGroupTones[group] || 'neutral';
+  meta.append(el('time', 'ts'), accountBadge, categoryBadge);
+  const levelName = { error: '错误', warn: '警告' }[entry.level];
+  if (levelName) {
+    const badge = component('ui-log-badge'); badge.classList.add('log-level-tag');
+    badge.dataset.tone = entry.level === 'error' ? 'error' : 'warning'; badge.textContent = levelName;
+    meta.appendChild(badge);
+  }
+  body.append(meta, el('span', 'log-message'));
+  row.appendChild(body);
+  return row;
 }
 function appendLog(entry) {
-  if (clearedLog(entry)) return;
-  if (entry.id && seen.has(entry.id)) return;
+  if (clearedLog(entry) || entry.id && seen.has(entry.id)) return;
+  const previous = entry.rowId && [...logEl.children].find(row => row.dataset.rowId === String(entry.rowId));
+  if (previous && previous.logEntry.id >= entry.id) return;
+  if (entry.reuseDetail) {
+    if (!previous) {
+      // A busy all-account view may have evicted this row. Replay the bounded snapshots once.
+      compactLogs = false;
+      stream?.close(); stream = null; subscribe(); return;
+    }
+    entry.detail = previous.logEntry.detail;
+  }
   if (entry.id) seen.add(entry.id);
   if (entry.account && entry.accountName) logAccountNames.set(entry.account, entry.accountName);
   const atTop = logEl.scrollTop < 30;
   const anchor = [...logEl.children].find(row => !row.hidden && row.getBoundingClientRect().bottom > logEl.getBoundingClientRect().top);
   const anchorTop = anchor?.getBoundingClientRect().top;
-  const waitKey=entry.extra?.waitKey;
-  const sameScope = row => row?.dataset.account === (entry.account || '') && row.dataset.category === (entry.category || 'system') && row.classList.contains(entry.level);
-  const newer = (a, b) => a.t > b.t || (a.t === b.t && (a.id || Infinity) > (b.id || 0));
-  const repeated=waitKey && [...logEl.children].find(row=>sameScope(row) && row.dataset.waitKey===waitKey);
-  if(repeated){
-    repeated.logEntries.push(entry); repeated.logEntries.sort((a,b) => newer(a,b) ? -1 : 1);
-    if(repeated.logEntries.length>400){const dropped=repeated.logEntries.pop();seen.delete(dropped.id);}
-    repeated.dataset.waitCount=String(Number(repeated.dataset.waitCount||1)+1);updateLogRow(repeated);
-    const next=[...logEl.children].find(row=>row!==repeated && newer(repeated.logEntries[0],row.logEntries[0]));
-    logEl.insertBefore(repeated,next||null);updateLogSummary();
-    if(atTop)logEl.scrollTop=0;else if(anchor?.isConnected)logEl.scrollTop+=anchor.getBoundingClientRect().top-anchorTop;
-    return;
+  const reuse = previous && previous.logEntry.level === entry.level && previous.logEntry.category === entry.category
+    && previous.logEntry.feature?.key === entry.feature?.key;
+  const row = reuse ? previous : createLogRow(entry);
+  const wasOpen = previous && previous.querySelector('details')?.open;
+  if (previous) {
+    seen.delete(previous.logEntry.id);
+    if (!reuse) previous.remove();
   }
-  const batch = entry.extra?.batch;
-  const first = logEl.firstElementChild;
-  if (batch && sameScope(first) && first.dataset.batch === batch && first.logEntries.length < 32 && newer(entry, first.logEntries[0])) {
-    first.logEntries.unshift(entry);
-    updateLogRow(first);
-  } else {
-    const row = el('div', 'row ' + entry.level);
-    row.dataset.category = entry.category || 'system';
-    row.dataset.account = entry.account || '';
-    if(waitKey){row.dataset.waitKey=waitKey;row.dataset.waitCount='1';}
-    row.logEntries = [entry];
-    if (batch) row.dataset.batch = batch;
-    const timestamp = logTime.format(entry.t);
-    const body = el('div', 'log-body');
-    const meta = el('div', 'log-meta');
-    const accountBadge = component(entry.account ? 'ui-log-account' : 'ui-log-badge');
-    if (entry.account) {
-      paintLogAccount(accountBadge, entry.account);
-      accountBadge.onclick = () => selectLogAccount(entry.account);
-    } else {
-      accountBadge.textContent = '系统'; accountBadge.dataset.tone = 'neutral'; accountBadge.classList.add('log-system-tag');
-      accountBadge.title = '控制台系统日志';
+  row.logEntry = entry;
+  row.querySelector('time').textContent = logTime.format(entry.t);
+  const repeats = entry.extra?.waitKey && entry.count > 1 ? '（累计 '+entry.count+' 次，时间为最后检查）' : '';
+  row.querySelector('.log-message').textContent = entry.message + repeats;
+  let details = row.querySelector('details');
+  if (entry.detail) {
+    if (!details) {
+      details = el('details', 'log-details');
+      details.open = !!wasOpen;
+      details.append(el('summary'), el('div', 'log-detail-text'));
+      row.querySelector('.log-body').appendChild(details);
     }
-    const categoryBadge = component('ui-log-badge'); categoryBadge.classList.add('log-category-tag');
-    categoryBadge.textContent = logCategories[row.dataset.category] || logCategories.system;
-    const group = Object.keys(logGroups).find(key => logGroups[key].includes(row.dataset.category));
-    categoryBadge.dataset.tone = logGroupTones[group] || 'neutral';
-    meta.append(el('time', 'ts', timestamp), accountBadge, categoryBadge);
-    const levelName = { error: '错误', warn: '警告' }[entry.level];
-    if (levelName) {
-      const levelBadge = component('ui-log-badge'); levelBadge.classList.add('log-level-tag');
-      levelBadge.dataset.tone = entry.level === 'error' ? 'error' : 'warning'; levelBadge.textContent = levelName;
-      meta.appendChild(levelBadge);
-    }
-    body.appendChild(meta);
-    body.appendChild(el('span', 'log-message', entry.message));
-    if (entry.detail || batch) {
-      const details = el('details', 'log-details');
-      details.hidden = !entry.detail;
-      details.append(el('summary', null, batch ? '查看逐次排产' : '查看详情'),
-        el('div', 'log-detail-text', entry.detail || timestamp + ' ' + entry.message));
-      body.appendChild(details);
-    }
-    row.appendChild(body);
-    const next = [...logEl.children].find(item => newer(entry, item.logEntries[0]));
-    logEl.insertBefore(row, next || null);
-  }
+    details.querySelector('summary').textContent = entry.extra?.detailLabel || (entry.extra?.batch ? '查看逐次排产' : '查看详情');
+    const detailText = details.querySelector('.log-detail-text');
+    if (detailText.textContent !== entry.detail) detailText.textContent = entry.detail;
+  } else details?.remove();
+  const next = [...logEl.children].find(item => item !== row && (entry.t > item.logEntry.t ||
+    entry.t === item.logEntry.t && (entry.id || Infinity) > (item.logEntry.id || 0)));
+  if (!row.isConnected || row.nextElementSibling !== (next || null)) logEl.insertBefore(row, next || null);
   while (logEl.childElementCount > 400) {
-    for (const item of logEl.lastChild.logEntries) seen.delete(item.id);
+    seen.delete(logEl.lastChild.logEntry.id);
     logEl.lastChild.remove();
   }
   updateLogSummary();
   if (atTop) logEl.scrollTop = 0;
-  else if (anchor?.isConnected) logEl.scrollTop += anchor.getBoundingClientRect().top - anchorTop;
-}
-function updateLogRow(row) {
-  const entry = row.logEntries[0];
-  row.querySelector('time').textContent = logTime.format(entry.t);
-  row.querySelector('.log-message').textContent = row.dataset.waitKey ? entry.message+'（累计 '+row.dataset.waitCount+' 次，时间为最后检查）' : row.logEntries.length > 1
-    ? entry.extra.factory + '：连续安排生产' + entry.extra.product + '，共 ' + row.logEntries.length + ' 次' : entry.message;
-  const details = row.querySelector('.log-details');
-  if (details) {
-    details.hidden = row.logEntries.length < 2 && !entry.detail;
-    row.querySelector('.log-detail-text').textContent = entry.detail || row.logEntries.map(item => logTime.format(item.t) + ' ' + item.message).join(String.fromCharCode(10));
+  else if (anchor) {
+    const visibleAnchor = anchor === previous ? row : anchor;
+    if (visibleAnchor.isConnected) logEl.scrollTop += visibleAnchor.getBoundingClientRect().top - anchorTop;
   }
 }
 function clearLogBefore(data) {
@@ -590,12 +645,10 @@ function clearLogBefore(data) {
   logClearWatermarks.set(data.account, { before: Math.max(previous?.before || 0, data.before || 0), at: Math.max(previous?.at || 0, data.at || 0) });
   for (const row of [...logEl.children]) {
     if (row.dataset.account !== data.account) continue;
-    row.logEntries = row.logEntries.filter(entry => !clearedLog(entry));
-    if (row.dataset.waitKey) row.dataset.waitCount = String(row.logEntries.length);
-    if (row.logEntries.length) updateLogRow(row); else row.remove();
+    if (clearedLog(row.logEntry)) row.remove();
   }
   seen.clear();
-  for (const row of logEl.children) for (const entry of row.logEntries) if (entry.id) seen.add(entry.id);
+  for (const row of logEl.children) if (row.logEntry.id) seen.add(row.logEntry.id);
   updateLogSummary();
 }
 $('log-clear').onclick = async () => {
@@ -631,7 +684,7 @@ for (const [id, filtered] of [['log-all', false], ['log-issues', true]]) {
 function subscribe() {
   updateLogSummary();
   if (stream) return;
-  stream = new EventSource('/api/events?scope=all');
+  stream = new EventSource('/api/events?scope=all' + (compactLogs ? '&compact=1' : ''));
   stream.addEventListener('logs-cleared', event => clearLogBefore(JSON.parse(event.data)));
   stream.addEventListener('lineup-changed', event => {
     const { account } = JSON.parse(event.data);
@@ -759,6 +812,7 @@ function refreshAccountStatuses() {
       accountStatusRevision++;
       stateActions.mergeStatuses(data.accounts);
       renderAccountSelect();
+      if (!$('tab-account').classList.contains('hidden')) refreshAccountCards();
     } catch {
       /* call 已记录错误，下次刷新继续读取。 */
     } finally {
@@ -784,13 +838,9 @@ function renderHostingControl() {
   if (switchRole) $('account-pause').title = '先暂停同一账号的其他角色，再按本角色的配置开始托管';
 }
 function renderAccountSelect() {
-  appointmentsAccountChanged();
   if(accountDetailsOwner!==current){
     accountSelectionVersion++;
     accountDetailsOwner=current;
-    clear($('worlds'));$('worlds-hint').textContent='';$('world-input').value='';
-    $('who').textContent=current?'等待连接':'未选择账号';$('res').textContent='';
-    if ($('account-info-dialog').open) $('account-info-dialog').close();
   }
   if(worldMapOwner!==null&&worldMapOwner!==current)resetWorldMap();
   siliconAccountChanged();
@@ -802,12 +852,10 @@ function renderAccountSelect() {
   paintConnection();
   $('connect').disabled = snapshot.paused || snapshot.reconnecting || snapshot.connected || connectingAccounts.has(current) || !accounts.length;
   $('connect').hidden = !current || snapshot.connected || snapshot.paused || snapshot.reconnecting || snapshot.loginBlocked;
-  $('account-info-refresh').disabled = !current || snapshot.paused || snapshot.reconnecting || connectingAccounts.has(current);
-  $('account-info-refresh').textContent = snapshot.connected ? '刷新资料' : '连接并读取';
   if (!$('tab-account').classList.contains('hidden')) renderAccounts();
 }
 
-async function loadAccounts(reload) {
+async function loadAccounts(reload, readOverview = true) {
   const version = ++accountLoadVersion;
   const revision = ++accountStatusRevision;
   accountsLoading++;
@@ -822,6 +870,7 @@ async function loadAccounts(reload) {
   accountStatusRevision++;
   const previous = current;
   stateActions.replaceAccounts(data.accounts, data.activeId, { preserveStatus });
+  if ($('journal-dialog').open) updateLogSummary();
   renderAccountSelect();
   if (previous !== current || reload) refreshProgression();
   if (previous !== current || reload) void refreshSavedLineups();
@@ -829,7 +878,7 @@ async function loadAccounts(reload) {
   if (previous !== current) {configAccountChanged();giftAccountChanged();}
   if (reload) {
     subscribe();
-    refreshOverview();
+    if (readOverview) refreshOverview();
   }
 }
 
@@ -932,14 +981,14 @@ $('loop-toggle').onclick = async () => {
   }
 };
 
-$('connect').onclick = async () => {
-  const account = current;
+$('connect').onclick = () => connectAccount(current);
+async function connectAccount(account) {
   if (!account || connectingAccounts.has(account)) return;
   accountStatusRevision++;
   stateActions.setFlag('connecting', account, true);
   renderAccountSelect();
   try {
-    await call('/api/connect', { method: 'POST' });
+    await call(account === current ? '/api/connect' : '/api/connect?account=' + encodeURIComponent(account), { method: 'POST' });
     stateActions.setFlag('disconnected', account, false);
     const status = accounts.find(row => row.id === account)?.status ?? {};
     setAccountStatus(account, { ...status, connected: true, state: 'READY', loginBlocked: false, reconnecting: false });
@@ -955,61 +1004,25 @@ $('connect').onclick = async () => {
     renderAccountSelect();
     void refreshAccountStatuses();
   }
-};
+}
 // ---- 总览 ------------------------------------------------------------------
-function renderWho(view) {
-  const box = clear($('who'));
-  const role = view.player || {};
-  const account = view.account || {};
-  const status = view.status || {};
-  const items = [
-    ['账号', account.title || '-'],
-    ['角色', role.nickname || '-'],
-    ['等级', role.level == null ? '-' : String(role.level)],
-    ['战力', fmt(role.power)],
-    ['区服', role.worldId == null ? '-' : (role.worldName ? role.worldName + '（' + role.worldId + '）' : String(role.worldId))],
-    ['状态', connectionStatus(status)],
-  ];
-  for (const [k, v] of items) {
-    const cellBox = el('div', 'item');
-    cellBox.appendChild(el('span', 'k', k));
-    cellBox.appendChild(el('span', 'v', v));
-    box.appendChild(cellBox);
-  }
-  if (view.afk) {
-    const afk = el('div', 'item');
-    afk.appendChild(el('span', 'k', '闯关挂机收益'));
-    const finish = view.afk.finishTime;
-    const status = view.afk.capped ? '收益已满' : finish > 0 ? new Date(finish * 1000).toLocaleTimeString() + ' 满额' : '暂无计时';
-    afk.appendChild(el('span', 'v', '等级 ' + (view.afk.level ?? '-') + ' · ' + status));
-    box.appendChild(afk);
-  }
-}
-
-function renderOverview(data) {
-  stateActions.setGameData(current, 'overview', data);
-  renderWho(data);
-
-  const res = clear($('res'));
-  for (const entry of data.resources || []) res.appendChild(cell(entry.icon, 18, entry.name, entry.amount == null ? '未取得' : fmt(entry.amount), false));
-  if (!res.childElementCount) res.appendChild(el('span', 'dim', '暂无数据'));
-
-}
-
-let overviewPending = false;
+let overviewPending = null;
 async function refreshOverview() {
-  if (overviewPending===current || !current || snapshot.paused || snapshot.loginBlocked || disconnected.has(current) || document.hidden || ($('tab-overview').classList.contains('hidden')&&$('tab-heroes').classList.contains('hidden')&&(!$('account-info-dialog').open||!snapshot.connected))) return;
+  if (!$('tab-account').classList.contains('hidden')) return refreshAccountCards();
+  if (!current || overviewPending?.account === current || snapshot.paused || snapshot.loginBlocked || disconnected.has(current) || document.hidden) return;
+  if ($('tab-overview').classList.contains('hidden') && $('tab-heroes').classList.contains('hidden')) return;
   const account = current;
   const statusRevision = accountStatusRevision;
-  overviewPending = account;
+  const request = { account };
+  overviewPending = request;
   if (!snapshot.connected) setBusy('连接中…');
   try {
     const data = await call('/api/overview');
-    if (account !== current || snapshot.paused || disconnected.has(account)) return;
+    if (overviewPending !== request || account !== current || snapshot.paused || disconnected.has(account)) return;
     if (statusRevision === accountStatusRevision) setAccountStatus(account, data.status);
     else data.status = snapshot;
+    stateActions.setGameData(account, 'overview', data);
     renderAccountSelect();
-    renderOverview(data);
     if(!$('tab-overview').classList.contains('hidden'))maybeRefreshWorldMap();
     maybeRefreshSilicon();
     $('hint').textContent = '';
@@ -1017,7 +1030,7 @@ async function refreshOverview() {
   } catch (error) {
     reportError(error, '刷新总览');
     paintConnection();
-  } finally { if(overviewPending===account)overviewPending=false; }
+  } finally { if (overviewPending === request) overviewPending = null; }
 }
 
 
@@ -1113,73 +1126,122 @@ function setTaskSwitch(input, enabled) {
   input.dataset.state = enabled ? 'checked' : 'unchecked';
   input.querySelector('[data-slot=switch-thumb]').dataset.state = input.dataset.state;
 }
-const pirateAdvanceErrors=new Map();
+const pirateManualMessage=new Map();
+const pirateManualPending=new Set();
+let pirateManualStatus=null;
 const pirateFailureOptions=new Map();
+let pirateManualChoices=null;
+function setManualPirateChoices(data) {
+  pirateManualChoices=data;
+  function fill(id, label, rows, key, describe) {
+    const select=$(id), previous=select.value;
+    select.replaceChildren(new Option('请选择'+label,''));
+    for(const row of rows){
+      const option=new Option(describe(row)+(row.reason?' · '+row.reason:''),row[key]);
+      option.disabled=Boolean(row.reason);
+      select.add(option);
+      if(!option.disabled && option.value===previous)select.value=previous;
+    }
+  }
+  fill('pirate-manual-target','海盗目标',data?.targets??[],'targetKey',t=>t.name+' '+t.level+' 级 · '+t.location);
+  fill('pirate-manual-fleet','出征舰队',data?.fleets??[],'key',f=>f.name+' · 耐久 '+fmt(f.durability)+(f.needsPreset?' · 需选择阵容':' · 战力 '+fmt(f.power)));
+  paintManualPirateButtons();
+}
+function manualPirateSelection() {
+  const target=pirateManualChoices?.targets.find(t=>!t.reason && t.targetKey===$('pirate-manual-target').value);
+  const fleet=pirateManualChoices?.fleets.find(f=>!f.reason && f.key===$('pirate-manual-fleet').value);
+  return {target,fleet};
+}
+function paintManualPirateButtons() {
+  const status=pirateManualStatus?.account===current ? pirateManualStatus.data : null;
+  const pending=pirateManualPending.has(current);
+  const choices=$('pirate-manual-view');
+  const data=pirateManualChoices;
+  const ready=current && !snapshot.paused && !disconnected.has(current) && choices.dataset.owner===current && data;
+  const locked=!ready || choices.hasAttribute('aria-busy') || pending || status?.running;
+  $('pirate-manual-target').disabled=locked || !data.targets.some(t=>!t.reason);
+  $('pirate-manual-fleet').disabled=locked || !data.fleets.some(f=>!f.reason);
+  const {target,fleet}=manualPirateSelection();
+  const lineup=$('pirate-manual-lineup');
+  if(lineup.dataset.owner!==current || lineup.lineups!==savedLineupState(current).saved) {
+    const previous=lineup.dataset.owner===current ? lineup.value : '';
+    lineup.dataset.owner=current || '';
+    lineup.lineups=savedLineupState(current).saved;
+    fillLineupSelect(lineup,lineup.lineups?.presets || [],previous);
+    lineup.options[0].textContent='使用舰队当前阵容';
+  }
+  const preset=lineup.lineups?.presets?.find(p=>p.id===lineup.value);
+  lineup.disabled=locked;
+  $('pirate-manual-lineup-view').disabled=!ready || !(lineup.value?preset:fleet);
+  $('pirate-manual-once').disabled=$('pirate-advance-start').disabled=locked || !status || !!data.reason || !target || !fleet || ((lineup.value || fleet.needsPreset) && !preset);
+  $('pirate-advance-stop').disabled=!status?.running || status.stopping || pending;
+}
+$('pirate-manual-target').onchange=$('pirate-manual-fleet').onchange=$('pirate-manual-lineup').onchange=paintManualPirateButtons;
+$('pirate-manual-lineup-view').onclick=()=>{
+  const presetId=$('pirate-manual-lineup').value, {fleet}=manualPirateSelection();
+  if(presetId || fleet)void openLineupViewer(current,presetId?{presetId,fleetPreview:true}:{buildingId:fleet.buildingId,fleetName:fleet.name});
+};
 function renderPirateAdvance(data) {
   if(!data)return;
-  $('pirate-advance-start').disabled=data.running || !current;
-  $('pirate-advance-stop').disabled=!data.running || data.stopping;
+  pirateManualStatus={account:current,data};
+  paintManualPirateButtons();
   $('pirate-manual-failures').disabled=!!data.running;
+  $('pirate-manual-interval').disabled=!!data.running;
   if(data.running)$('pirate-manual-failures').value=data.maxFailures;
-  $('pirate-advance-state').textContent=[data.stopping?'正在停止':data.running?'推进中':'未运行',data.target,'本次已首杀 '+data.wins+' 级 · 已用汽油 '+data.spent,pirateAdvanceErrors.get(current)||data.reason].filter(Boolean).join(' · ');
+  if(data.running && data.checkEverySeconds)$('pirate-manual-interval').value=data.checkEverySeconds;
+  const state=$('pirate-advance-state');
+  state.textContent=pirateManualMessage.get(current) || [data.stopping?'正在停止':data.running?'连续挑战中':'', data.target, data.spent?'首杀 '+data.wins+' 次 · 已用汽油 '+data.spent:'', data.reason].filter(Boolean).join(' · ');
+  state.hidden=!state.textContent;
 }
-async function pirateAdvanceCommand(start) {
+async function pirateAdvanceCommand(action) {
   const account=current;
-  const maxFailures=Number($('pirate-manual-failures').value);
-  if(start&&(!$('pirate-manual-failures').reportValidity()||!Number.isSafeInteger(maxFailures)))return;
-  if(start)pirateFailureOptions.set(account,maxFailures);
-  pirateAdvanceErrors.delete(account);
-  if(start && !await configFlush()){reportError(new Error('海盗参数尚未保存，请先处理配置页的提示'));return;}
-  if(account!==current)return;
-  $('pirate-advance-start').disabled=$('pirate-advance-stop').disabled=true;
-  try{const data=await call('/api/pirates/advance/'+(start?'start':'stop'),{method:'POST',body:JSON.stringify({confirm:true,...(start?{maxFailures}:{})})});if(account===current)renderPirateAdvance(data);}
-  catch(error){if(account===current){pirateAdvanceErrors.set(account,error.message);$('pirate-advance-state').textContent='未启动：'+error.message;reportError(error);}}
-  finally{if(account===current)refreshLoop();}
+  if(!account || pirateManualPending.has(account))return;
+  const payload={confirm:true};
+  if(action!=='stop'){
+    const {target,fleet}=manualPirateSelection();
+    if(!fleet || !target || $('pirate-manual-once').disabled || $('pirate-manual-view').dataset.owner!==account)return;
+    payload.targetKey=target.targetKey;
+    payload.fleetKey=fleet.key;
+    payload.lineupId=$('pirate-manual-lineup').value;
+    if(action==='start'){
+      if(!$('pirate-manual-failures').reportValidity() || !$('pirate-manual-interval').reportValidity())return;
+      payload.type=target.type;
+      payload.fleetId=fleet.buildingId;
+      payload.maxFailures=Number($('pirate-manual-failures').value);
+      payload.checkEverySeconds=Number($('pirate-manual-interval').value);
+      pirateFailureOptions.set(account,{failures:payload.maxFailures,interval:payload.checkEverySeconds});
+    }
+  }
+  pirateManualMessage.delete(account);
+  pirateManualPending.add(account);
+  paintManualPirateButtons();
+  try{
+    const path=action==='once'?'/api/pirates/hunt':'/api/pirates/advance/'+action;
+    const data=await call(path,{method:'POST',body:JSON.stringify(payload)});
+    if(action==='once')pirateManualMessage.set(account,data.label);
+    else if(account===current)renderPirateAdvance(data);
+  } catch(error){
+    pirateManualMessage.set(account,error.message);
+    if(account===current)reportError(error);
+  } finally{
+    try {
+      if(account===current)await Promise.all([refreshLoop(),refreshProgression('pirate-manual')]);
+    } finally {
+      pirateManualPending.delete(account);
+      paintManualPirateButtons();
+    }
+  }
 }
-$('pirate-advance-start').onclick=()=>pirateAdvanceCommand(true);
-$('pirate-advance-stop').onclick=()=>pirateAdvanceCommand(false);
-let overviewLoopData=null,overviewLoopOwner=null,overviewRenderKey="";
-function compactOverviewText(text){
- return String(text||'—').replaceAll('本次连接尚无检查结果','待检查').replaceAll('尚未同步当前条件','待同步')
-   .replaceAll('当前没有可读取的万吨货轮','暂无万吨货轮').replaceAll('当前不在服务器','未到')
-   .replaceAll('受总控限制：','受限：').replaceAll('当前没有新的联盟福利礼包','暂无联盟福利礼包');
-}
-function renderAutomationOverview(data){
- overviewLoopData=data;overviewLoopOwner=current;
- const root=$('overview-task-groups'),opened=new Set([...root.querySelectorAll('details[open]')].map(d=>d.dataset.group));
- const query=$('overview-task-search').value.trim().toLowerCase(),mode=$('overview-task-filter').value;
- const issue=t=>t.enabled&&(t.blockedBy?.length||['error','pending'].includes(t.observation?.state));
- const controls=(data.controls??[]).map(t=>({...t,group:t.group==='总控制'?'运行范围与权限':t.group}));
- const renderKey=JSON.stringify([current,data.running,query,mode,controls,data.fleetMaintenance]);if(renderKey===overviewRenderKey)return;overviewRenderKey=renderKey;
- const filterKey=JSON.stringify([current,query,mode]);
- const previousGroups=root.filterKey===filterKey?new Set([...root.children].map(s=>s.dataset.group)):new Set();
- root.filterKey=filterKey;
- const expanded=key=>previousGroups.has(key)?opened.has(key):!!query||mode==='issues'||opened.has(key);
- const focusedGroup=document.activeElement?.closest('.overview-task-group')?.dataset.group;clear(root);
- if(!Array.isArray(data.controls)){clear(root);$('overview-task-summary').textContent='未同步';return;}
- const selected=controls.filter(t=>(mode==='all'||mode==='enabled'&&t.enabled||mode==='issues'&&issue(t))&&(!query||(t.label+' '+(t.observation?.text??'')).toLowerCase().includes(query)));
- $('overview-task-summary').textContent=(data.running?'运行中':'已停止')+' · 已开 '+controls.filter(t=>t.enabled).length+' · 异常/受限 '+controls.filter(issue).length+((query||mode!=='enabled')?' · 筛出 '+selected.length:'');
- for(const group of [...new Set(selected.map(t=>t.group))]){
-  const items=selected.filter(t=>t.group===group),section=el('details','overview-task-group');section.dataset.group=group;section.open=expanded(group);
-  section.append(el('summary','',group+' · '+items.length+' 项'));
-  section.append(table(['功能','当前进度','当前条件'],items.map(t=>[t.label,compactOverviewText(t.progress),compactOverviewText(t.condition||t.observation?.text||'待同步')])));
-  root.append(section);if(group===focusedGroup)section.querySelector('summary').focus({preventScroll:true});
- }
- const maintenance=data.fleetMaintenance,repairRows=(maintenance?.rows??[]).filter(r=>(!query||('战后维修 '+r.name+' '+r.source+' '+r.condition).toLowerCase().includes(query))&&(mode!=='issues'||['waiting','unknown'].includes(r.state)));
- const maintenanceShown=maintenance&&(mode==='all'||maintenance.enabled)&&(repairRows.length||(!query||'战后维修'.includes(query))&&maintenance.reason);
- if(maintenanceShown){
-  const section=el('details','overview-task-group');section.dataset.group='fleet-maintenance';section.open=expanded('fleet-maintenance');section.append(el('summary','','战后维修 · '+repairRows.length+' 队'));
-  section.append(el('p','dim','沿用城战/巨轮所选舰队和自动维修参数；重复选择按调度优先级取参数。'));
-  if(maintenance.reason)section.append(el('p','dim',maintenance.reason));
-  if(repairRows.length)section.append(table(['舰队','当前进度','当前条件'],repairRows.map(r=>[r.name+' · '+r.source,(r.durability??'未同步')+'/'+(r.maxDura??'未同步'),maintenance.enabled?r.condition:'监控未运行；'+r.condition])));
-  root.append(section);
- }
- if(!selected.length&&!maintenanceShown)root.append(el('p','dim','没有符合当前筛选的项目。'));
-}
-$('overview-task-search').oninput=()=>{if(overviewLoopData&&overviewLoopOwner===current)renderAutomationOverview(overviewLoopData);};
-$('overview-task-filter').onchange=$('overview-task-search').oninput;
+$('pirate-manual-once').onclick=()=>pirateAdvanceCommand('once');
+$('pirate-advance-start').onclick=()=>pirateAdvanceCommand('start');
+$('pirate-advance-stop').onclick=()=>pirateAdvanceCommand('stop');
+${runtimeOverviewScript}
 function renderLoop(data) {
   renderAutomationOverview(data);
+  if (configEditor.owner === current && configVisible()) {
+    configEditor.runtime = data;
+    configRenderUsage();
+  }
   renderPirateAdvance(data.pirateAdvance);
   loopSettingsRevision = data.settingsRevision;
   if (snapshot.looping !== data.running || snapshot.loopStopping !== data.stopping) accountStatusRevision++;
@@ -1204,17 +1266,18 @@ let loopReads = 0;
 async function refreshLoop() {
   if(document.hidden)return;
   const account = current, version = ++loopVersion;
+  if (overviewLoopOwner !== account || !account) resetAutomationOverview(account ? '正在读取运行状态' : '请先选择账号');
   if (loopAccount !== account || !account) {
     $('loop-hint').textContent = account ? '正在读取设置' : '请选择账号';
-    if(overviewLoopOwner!==account){overviewLoopData=null;overviewLoopOwner=account;overviewRenderKey='';clear($('overview-task-groups'));$('overview-task-summary').textContent=account?'正在读取运行状态':'请先选择账号';}
     loopSettingsRevision = null;
     $('loop-every').disabled = true;
     $('loop-every').value = '';
     $('loop-every').removeAttribute('aria-invalid');
     $('loop-interval-status').textContent = '';
-    $('pirate-advance-start').disabled=$('pirate-advance-stop').disabled=true;
+    $('pirate-manual-once').disabled=$('pirate-advance-start').disabled=$('pirate-advance-stop').disabled=true;
     $('pirate-advance-state').textContent=account?'正在读取首杀状态':'请选择账号';
-    $('pirate-manual-failures').value=pirateFailureOptions.get(account)??1;
+    $('pirate-manual-failures').value=pirateFailureOptions.get(account)?.failures??1;
+    $('pirate-manual-interval').value=pirateFailureOptions.get(account)?.interval??15;
   }
   if (!account) return;
   loopReads++;
@@ -1222,7 +1285,10 @@ async function refreshLoop() {
     const data = await call('/api/loop');
     if (account === current && version === loopVersion) renderLoop(data);
   } catch {
-    /* call 已记录错误 */
+    if (account === current && version === loopVersion) {
+      resetAutomationOverview('运行状态读取失败，正在等待刷新', false);
+      if (configEditor.owner === account && configVisible()) { configEditor.runtime = null; configRenderUsage(); }
+    }
   } finally {
     loopReads--;
   }
@@ -1429,12 +1495,58 @@ function worldProductionTimer(finishTime, readyText, activeText = '剩余 ') {
   return timer;
 }
 
+const pendingProductionSpeeds = new Set();
+function updateProductionSpeedButton(button, now) {
+  const { productionSpeedUntil, speedStock, speedKey } = button.dataset;
+  const minutes = Math.max(0, Math.ceil((Number(productionSpeedUntil) - now) / 60));
+  const cost = Math.min(minutes, Number(speedStock));
+  const pending = pendingProductionSpeeds.has(speedKey);
+  button.hidden = !minutes;
+  button.disabled = !cost || pending || snapshot.paused || disconnected.has(current);
+  button.textContent = pending ? '加速中…' : cost > 0 ? '加速 ×' + cost
+    : speedStock === '' ? '库存未同步' : '加速器不足';
+  button.setAttribute('aria-label', button.title + '，' + button.textContent);
+  button.dataset.speedCost = String(cost);
+}
+
+function productionSpeedButton(target, stock, label) {
+  const button = component('ui-button');
+  const account = current, key = JSON.stringify([account, target.kind, target.buildingId, target.index]);
+  button.type = 'button';
+  button.title = '使用加速器加速' + label + '，每个缩短 1 分钟';
+  button.dataset.productionSpeedUntil = String(target.finishTime);
+  button.dataset.speedStock = Number.isSafeInteger(stock) && stock >= 0 ? String(stock) : '';
+  button.dataset.speedKey = key;
+  const now = () => (Date.now() + orderClockOffset) / 1000;
+  updateProductionSpeedButton(button, now());
+  button.onclick = async () => {
+    if (current !== account || !account) return;
+    updateProductionSpeedButton(button, now());
+    if (button.disabled) return;
+    const maxUse = Number(button.dataset.speedCost);
+    pendingProductionSpeeds.add(key);
+    updateProductionSpeedButton(button, now());
+    try {
+      const result = await call('/api/world/production-speed', { method: 'POST',
+        body: JSON.stringify({ ...target, maxUse, confirm: true }) });
+      if (current === account) $('hint').textContent = result.label;
+    } catch (error) {
+      if (current === account) reportError(error, '手动生产加速');
+    } finally {
+      try { if (current === account) await refreshManualWorld(true); }
+      finally { pendingProductionSpeeds.delete(key); updateWorldProductionTimers(); }
+    }
+  };
+  return button;
+}
+
 function updateWorldProductionTimers() {
   for (const node of document.querySelectorAll('[data-production-finish-at]')) {
     node.textContent = worldProductionTime(Number(node.dataset.productionFinishAt),
       node.dataset.productionReadyText, node.dataset.productionActiveText);
   }
   const now = (Date.now() + orderClockOffset) / 1000;
+  for (const button of document.querySelectorAll('[data-production-speed-until]')) updateProductionSpeedButton(button, now);
   for (const badge of document.querySelectorAll('[data-factory-active-until]')) {
     if (Number(badge.dataset.factoryActiveUntil) <= now) {
       badge.textContent = '待收取';
@@ -1453,7 +1565,7 @@ function factoryProduct(job, recipes, num = 1) {
   return planMaterialList([{ id: job.productId, name: job.name, icon: job.icon, num }], recipes);
 }
 
-function factoryProductionQueue(factory, recipes) {
+function factoryProductionQueue(factory, recipes, accelerators) {
   const section = el('section', 'factory-game-section');
   section.appendChild(el('h3', null, '游戏生产格'));
   const known = Array.isArray(factory.jobs) && factory.queueKnown !== false;
@@ -1486,6 +1598,10 @@ function factoryProductionQueue(factory, recipes) {
         const time = el('div', 'factory-finish');
         time.append(el('span', 'dim', '完成时间'), el('span', null, factoryFinishClock.format(job.finishTime * 1000)));
         slot.appendChild(time);
+        if (badge.dataset.factoryActiveUntil && job.productId && Number.isSafeInteger(job.index)) {
+          slot.appendChild(productionSpeedButton({ kind: 'factory', buildingId: factory.buildingId, index: job.index,
+            productId: job.productId, finishTime: job.finishTime }, accelerators, job.name || job.productId));
+        }
       }
     } else {
       slot.classList.add('factory-empty');
@@ -1556,7 +1672,7 @@ function factoryCurrentProduction(factory, recipes) {
   return current;
 }
 
-function factoryProductionSection(factories, expanded, recipes) {
+function factoryProductionSection(factories, expanded, recipes, accelerators) {
   const headers = ['建筑', '类型', '等级', '当前产物', '自动生产', '游戏排队'];
   const result = table(headers, factories.map(b => {
     const button = component('ui-factory-toggle');
@@ -1591,7 +1707,7 @@ function factoryProductionSection(factories, expanded, recipes) {
       clear(cell);
       if (open) {
         const sections = el('div', 'factory-detail-sections');
-        sections.append(factoryProductionQueue(factory, recipes), factoryPlannedProduction(factory, recipes));
+        sections.append(factoryProductionQueue(factory, recipes, accelerators), factoryPlannedProduction(factory, recipes));
         cell.appendChild(sections);
       }
     };
@@ -1662,7 +1778,7 @@ function renderWorld(data) {
   clear(fbox);
   if (data.factories?.length) {
     const factories = [...data.factories].sort((a, b) => a.buildingId.localeCompare(b.buildingId, 'zh-CN', { numeric: true }));
-    fbox.appendChild(factoryProductionSection(factories, expanded, recipes));
+    fbox.appendChild(factoryProductionSection(factories, expanded, recipes, data.accelerators));
   }
   if (data.farms?.length) {
     const plots = [...data.farms].sort((a, b) => a.plot.localeCompare(b.plot, 'zh-CN', { numeric: true }));
@@ -1670,6 +1786,12 @@ function renderWorld(data) {
       let status = plot.status || '未同步';
       if (plot.productId && plot.ripeTime > 0) {
         status = worldProductionTimer(plot.ripeTime, '已成熟', '生长中 · 剩余 ');
+        if (plot.state === 'growing' && plot.ripeTime > (Date.now() + orderClockOffset) / 1000) {
+          const controls = el('div', 'production-speed-controls');
+          controls.append(status, productionSpeedButton({ kind: 'farm', buildingId: plot.plot,
+            productId: plot.productId, finishTime: plot.ripeTime }, data.accelerators, plot.productName || plot.productId));
+          status = controls;
+        }
       } else if (plot.state === 'building' && plot.finishTime > 0) {
         status = worldProductionTimer(plot.finishTime, '待竣工', '建造中 · 剩余 ');
       } else if (plot.productId) {
@@ -1720,7 +1842,8 @@ function refreshManualWorld(force = false) {
   const account = current;
   const available = account && !snapshot.paused && !disconnected.has(account);
   if (displayedWorldAccount !== account || !available) {
-    $('inventory-status').textContent='正在读取库存';
+    $('inventory-status').textContent = available ? '正在读取库存' : !account ? '请先选择账号'
+      : snapshot.paused ? '账号已暂停' : '账号已断开连接';
     displayedWorldAccount = account;
     resetInventory();
     worldVersion++;
@@ -1732,7 +1855,7 @@ function refreshManualWorld(force = false) {
   const version = ++worldVersion;
   worldRead = { account, version };
   $('world-view').textContent = '正在读取海面数据…';
-  call('/api/world').then(data => {
+  return call('/api/world').then(data => {
     if (version === worldVersion && current === account) renderWorld(data);
   }).catch(error => {
     if (version === worldVersion && current === account) {
@@ -1769,15 +1892,16 @@ function putCell(td, spec) {
   }
   if ('cell' in spec || spec.cells) {
     const list = spec.cells ?? [{ name: spec.text, icon: spec.cell }];
-    if (spec.prefix) td.appendChild(el('span', 'dim', spec.prefix));
+    const value = el('div');
+    if (spec.prefix) value.appendChild(el('span', 'dim', spec.prefix));
     for (const entry of list) {
       const who = el('span', 'who-cell');
       if (entry?.icon) who.appendChild(iconEl(entry.icon, 26, entry.name));
       who.appendChild(el('span', null, entry ? entry.name + (entry.num != null ? ' x' + fmt(entry.num) : '') : spec.text));
-      td.appendChild(who);
-      td.appendChild(document.createTextNode(' '));
+      value.append(who, ' ');
     }
-    if (!list.length) td.appendChild(el('span', 'dim', '齐'));
+    if (!list.length) value.appendChild(el('span', 'dim', '齐'));
+    td.appendChild(value);
     return;
   }
   td.textContent = spec.text || '';
@@ -1817,6 +1941,20 @@ function table(headers, rows, mobileLayout = headers.length >= 4 ? 'table-stack'
 
 // ---- 账号页 ----------------------------------------------------------------
 ${accountBackupScript}
+document.addEventListener('click', event => {
+  for (const menu of document.querySelectorAll('.account-card-menu[open]')) {
+    if (!menu.contains(event.target)) menu.open = false;
+  }
+}, true);
+$('accounts').addEventListener('keydown', event => {
+  if (event.key !== 'Escape') return;
+  const menu = event.target.closest('.account-card-menu[open]');
+  if (!menu) return;
+  event.preventDefault();
+  menu.open = false;
+  menu.querySelector('summary').focus();
+});
+
 function accountChannel(source) {
   return { alipay: '支付宝', phone: '益世界 APP', douyin: '抖音小游戏', 'douyin-mitm': '抖音小游戏', mitm: '微信小游戏', wechat: '微信小游戏' }[source] || '已导入账号';
 }
@@ -1872,21 +2010,18 @@ function createAccountCard(id) {
   const card = component('ui-account-card');
   card.accountId = id;
   const action = name => card.querySelector('[data-account-action="' + name + '"]');
-  action('select').onclick = () => useAccountCard(id);
+  action('select').onclick = async () => {
+    if (await useAccountCard(id)) card.querySelector('[data-account-field="title"]').focus();
+  };
   action('loop').onclick = () => toggleAccountCardLoop(id);
+  action('worlds').onclick = () => openWorldManager(card);
+  action('refresh').onclick = () => {
+    if (action('refresh').disabled) return;
+    const status = accounts.find(row => row.id === id)?.status;
+    return status?.connected ? readAccountCard(card) : connectAccount(id);
+  };
   action('login-settings').onclick = () => {
     if (accounts.some(account => account.id === id)) stateActions.setView({ loginSettingsAccountId: id });
-  };
-  action('details').onclick = async () => {
-    if (!await useAccountCard(id)) return;
-    const account = accounts.find(row => row.id === id);
-    if (!account || current !== id) return;
-    $('account-info-title').textContent = (account.label || account.lastSeen?.nickname || account.title) + ' · 账号详情';
-    renderWho({ account, player: account.lastSeen, status: snapshot });
-    if (!snapshot.connected) $('res').textContent = '连接后读取资源';
-    $('account-info-dialog').showModal();
-    $('account-info-close').focus();
-    if (snapshot.connected) void refreshOverview();
   };
   action('rename').onclick = async () => {
     card.querySelector('details').open = false;
@@ -1913,10 +2048,65 @@ function createAccountCard(id) {
   return card;
 }
 
+function formatAccountAfk(afk) {
+  if (!afk) return '';
+  const finish = afk.capped ? '收益已满' : afk.finishTime > 0 ? new Date(afk.finishTime * 1000).toLocaleTimeString() + ' 满额' : '暂无计时';
+  return '等级 ' + (afk.level ?? '—') + ' · ' + finish;
+}
+
+async function readAccountCard(card) {
+  if (card.readingProfile) return;
+  const request = {};
+  card.readingProfile = request;
+  card.nextProfileRead = Date.now() + 20000;
+  card.querySelector('[data-account-action="refresh"]').disabled = true;
+  try {
+    const data = await call('/api/accounts/card?account=' + encodeURIComponent(card.accountId));
+    if (card.isConnected && card.readingProfile === request && data) stateActions.setGameData(card.accountId, 'card', data);
+  } catch (error) {
+    reportError(error, '读取账号资料');
+  } finally {
+    if (card.readingProfile === request) {
+      card.readingProfile = null;
+      if (card.isConnected && !$('tab-account').classList.contains('hidden')) renderAccounts();
+    }
+  }
+}
+
+function refreshAccountCards() {
+  if (document.hidden) return;
+  for (const card of $('accounts').children) {
+    const status = consoleStore.getState().accountsById[card.accountId]?.status;
+    if (!status || card.readingProfile) continue;
+    const online = !!status.connected && !status.paused && !status.loginBlocked;
+    if (card.profileOnline === online && (!online || Date.now() < card.nextProfileRead)) continue;
+    card.profileOnline = online;
+    void readAccountCard(card);
+  }
+}
+
+function renderAccountResources(card, view, status) {
+  const res = card.querySelector('[data-account-field="resources"]');
+  const online = !!status.connected && !status.paused && !status.loginBlocked;
+  const refresh = card.querySelector('[data-account-action="refresh"]');
+  refresh.disabled = !!(card.readingProfile || status.paused || status.reconnecting || connectingAccounts.has(card.accountId));
+  refresh.textContent = status.connected ? '刷新资料' : '连接并读取';
+  const entries = view?.resources?.length ? view.resources
+    : !online ? '连接后读取资源' : view ? '暂无数据' : card.readingProfile ? '正在读取资源…' : '暂未读取资源';
+  if (res.renderedResources === entries) return;
+  res.renderedResources = entries;
+  if (typeof entries === 'string') {
+    res.replaceChildren(el('span', 'dim', entries));
+    return;
+  }
+  res.replaceChildren(...entries.map(entry => cell(entry.icon, 15, entry.name, entry.amount == null ? '未取得' : fmt(entry.amount), false)));
+}
+
 function renderAccounts() {
   $('export-accounts').disabled = !accounts.length;
   $('account-count').textContent = accounts.length + ' 个账号';
   const box = $('accounts');
+  if ($('account-worlds-dialog').open && !accounts.some(row => row.id === worldManager?.id)) $('account-worlds-dialog').close();
   if (!accounts.length) {
     if (!box.querySelector('.account-empty')) {
       clear(box);
@@ -1927,37 +2117,39 @@ function renderAccounts() {
     return;
   }
   const cards = new Map(Array.from(box.children).map(card => [card.accountId, card]));
-  for (const card of Array.from(box.children)) {
-    if (!accounts.some(account => account.id === card.accountId)) card.remove();
-  }
   accounts.forEach((account, index) => {
     const card = cards.get(account.id) || createAccountCard(account.id);
-    const status = account.id === current ? snapshot : account.status ?? {};
-    const seen = account.lastSeen;
+    const selected = account.id === current;
+    const status = selected ? snapshot : account.status ?? {};
+    const { card: profile, overview } = consoleStore.getState().gameByAccount[account.id] ?? {};
+    const view = profile && (!overview || profile.readAt >= overview.readAt) ? profile : overview;
+    const seen = { ...account.lastSeen, ...view?.player };
+    const updated = when(view?.readAt || seen.at);
+    const world = account.hasSiblingRoles && account.loginWorldName && seen.worldName && seen.worldName !== account.loginWorldName
+      ? account.loginWorldName + '（现 ' + seen.worldName + '）' : seen.worldName || account.loginWorldName;
     const fields = {
-      title: account.label || seen?.nickname || account.title,
+      title: account.label || seen.nickname || account.title,
       channel: accountChannel(account.source),
       status: connectingAccounts.has(account.id) ? '连接中…' : connectionStatus(status),
-      role: seen?.nickname || '待连接读取',
-      world: account.hasSiblingRoles && account.loginWorldName && seen?.worldName && seen.worldName !== account.loginWorldName
-        ? account.loginWorldName + '（现 ' + seen.worldName + '）' : seen?.worldName || account.loginWorldName || '待连接读取',
-      level: seen?.level == null ? '—' : String(seen.level),
-      power: seen?.power == null ? '—' : fmt(seen.power),
-      seen: seen?.at ? '更新于 ' + when(seen.at) : '连接后更新角色资料',
+      role: seen.nickname || '待连接读取',
+      world: world || '待连接读取',
+      level: seen.level == null ? '—' : String(seen.level),
+      power: seen.power == null ? '—' : fmt(seen.power),
+      afk: formatAccountAfk(view?.afk) || (view ? '暂无数据' : '待连接读取'),
+      seen: updated ? (view && !status.connected ? '上次读取 ' : '更新于 ') + updated : '连接后更新角色资料',
     };
     for (const [name, value] of Object.entries(fields)) {
       const field = card.querySelector('[data-account-field="' + name + '"]');
       if (field.textContent !== value) field.textContent = value;
     }
     card.querySelector('[data-account-field="role"]').parentNode.hidden = fields.title === fields.role;
-    card.classList.toggle('on', account.id === current);
-    card.querySelector('[data-account-field="current"]').hidden = account.id !== current;
+    card.classList.toggle('on', selected);
+    card.querySelector('[data-account-field="current"]').hidden = !selected;
     const badge = card.querySelector('[data-account-field="status"]');
     badge.classList.remove('done', 'waiting', 'blocked');
     badge.classList.add(connectionStatusKind(status, connectingAccounts.has(account.id)));
     const select = card.querySelector('[data-account-action="select"]');
-    select.disabled = account.id === current;
-    select.textContent = account.id === current ? '当前账号' : '切换账号';
+    select.hidden = selected;
     const loop = card.querySelector('[data-account-action="loop"]');
     const running = status.looping || status.reconnecting;
     loop.disabled = hostingActions.has(account.id) || !!status.loopStopping || (!running && account.id === current && loopAccount !== current);
@@ -1968,26 +2160,48 @@ function renderAccounts() {
       loop.title = '先暂停同一账号的其他角色，再按本角色的配置开始托管';
     }
     if (box.children[index] !== card) box.insertBefore(card, box.children[index] || null);
+    renderAccountResources(card, view, status);
   });
+  for (const [id, card] of cards) {
+    if (!accounts.some(account => account.id === id)) card.remove();
+  }
 }
 
-$('account-info-close').onclick = () => $('account-info-dialog').close();
-$('account-info-refresh').onclick = async () => {
-  if ($('account-info-refresh').disabled) return;
-  const owner = current;
-  $('account-info-refresh').disabled = true;
-  try {
-    if (!snapshot.connected) await $('connect').onclick();
-    if (owner === current && snapshot.connected) await refreshOverview();
-  } finally {
-    renderAccountSelect();
-  }
-};
+let worldManager = null;
+function openWorldManager(card) {
+  worldManager = { id: card.accountId };
+  $('account-worlds-title').textContent = card.querySelector('[data-account-field="title"]').textContent + ' · 区服管理';
+  clear($('worlds'));
+  $('worlds-hint').textContent = '';
+  $('world-input').value = '';
+  $('worlds-controls').disabled = false;
+  $('account-worlds-dialog').showModal();
+  $('load-worlds').focus();
+}
 
-async function renderWorlds() {
-  const owner=current;
-  const data = await call('/api/worlds');
-  if(owner!==current)return;
+function worldManagerOpen(context) {
+  return context === worldManager && $('account-worlds-dialog').open;
+}
+
+async function runWorldAction(context, message, work) {
+  const controls = $('worlds-controls');
+  if (!worldManagerOpen(context) || controls.disabled) return;
+  controls.disabled = true;
+  $('worlds-hint').textContent = message;
+  try {
+    const result = await work(context);
+    if (worldManagerOpen(context)) $('worlds-hint').textContent = result || '';
+  } catch (error) {
+    if (worldManagerOpen(context)) $('worlds-hint').textContent = error.message;
+    reportError(error, '区服管理', context.id);
+  } finally {
+    if (worldManagerOpen(context)) controls.disabled = false;
+  }
+}
+
+async function renderWorlds(context) {
+  const data = await call('/api/worlds?account=' + encodeURIComponent(context.id));
+  if (!worldManagerOpen(context)) return;
   const box = clear($('worlds'));
   for (const world of data.recentWorlds) {
     const role = world.role || {};
@@ -1997,23 +2211,21 @@ async function renderWorlds() {
     if (role.worldId && role.worldId !== world.worldId) top.appendChild(el('span', 'id', '合服后 -> ' + (role.worldName ? role.worldName + '（' + role.worldId + '）' : role.worldId)));
     top.appendChild(el('span', 'id', (role.nickname || '') + ' lv' + (role.level ?? '') + ' 战力' + fmt(role.power) + ' 上次登录 ' + (when(role.lastLoginTime) || '未知')));
     const enter = smallButton('进入');
-    enter.onclick = () => enterWorld(world.worldId);
+    enter.onclick = () => enterWorld(context, world.worldId);
     top.appendChild(enter);
     if (role.id) {
       const save = smallButton(world.saved ? '已添加' : '添加角色');
       save.disabled = world.saved;
-      save.onclick = async () => {
-        save.disabled = true;
-        try {
-          await call('/api/worlds/save-role?account=' + encodeURIComponent(owner), {
-            method: 'POST', body: JSON.stringify({ confirm: true, worldId: world.worldId }),
-          });
-          if (current !== owner) return;
+      save.onclick = () => runWorldAction(context, '正在添加角色…', async () => {
+        await call('/api/worlds/save-role?account=' + encodeURIComponent(context.id), {
+          method: 'POST', body: JSON.stringify({ confirm: true, worldId: world.worldId }),
+        });
+        if (worldManagerOpen(context)) {
           save.textContent = '已添加';
-          await loadAccounts(false);
-          renderAccounts();
-        } catch (error) { save.disabled = false; reportError(error); }
-      };
+          save.disabled = true;
+        }
+        await loadAccounts(false);
+      });
       top.appendChild(save);
     }
     row.appendChild(top);
@@ -2023,40 +2235,30 @@ async function renderWorlds() {
   else box.appendChild(el('div', 'dim', '共 ' + data.recentWorlds.length + ' 个区服，分组 ' + data.latestGroupId));
 }
 
-async function enterWorld(worldId) {
-  const owner=current;
-  $('worlds-hint').textContent = '进入 ' + worldId + ' ...';
-  try {
-    const data = await call('/api/worlds/enter', { method: 'POST', body: JSON.stringify({ confirm: true, worldId, fromWorldId: 0 }) });
-    if(owner!==current)return;
+function enterWorld(context, worldId) {
+  return runWorldAction(context, '正在进入 ' + worldId + '…', async ({ id: owner }) => {
+    const data = await call('/api/worlds/enter?account=' + encodeURIComponent(owner), { method: 'POST', body: JSON.stringify({ confirm: true, worldId, fromWorldId: 0 }) });
+    if (overviewPending?.account === owner) overviewPending = null;
+    stateActions.setGameData(owner, 'card', null);
+    stateActions.setGameData(owner, 'overview', null);
+    const card = Array.from($('accounts').children).find(row => row.accountId === owner);
+    if (card) { card.readingProfile = null; card.nextProfileRead = 0; }
     const role = data.player || {};
-    $('worlds-hint').textContent = '已在 ' + (role.worldName ? role.worldName + '（' + worldId + '）' : worldId) + '：' + (role.nickname || '') + ' lv' + (role.level ?? '') + ' 战力' + fmt(role.power);
     await loadAccounts(false);
-    renderAccounts();
-    refreshOverview();
-  } catch (error) {
-    $('worlds-hint').textContent = '';
-    reportError(error);
-  }
+    if (!$('tab-account').classList.contains('hidden')) refreshAccountCards();
+    return '已在 ' + (role.worldName || worldId) + '：' + (role.nickname || '') + ' lv' + (role.level ?? '') + ' 战力' + fmt(role.power);
+  });
 }
 
-$('load-worlds').onclick = async () => {
-  $('worlds-hint').textContent = '加载中 ...';
-  try {
-    await renderWorlds();
-    $('worlds-hint').textContent = '';
-  } catch (error) {
-    $('worlds-hint').textContent = '';
-    reportError(error);
-  }
-};
+$('account-worlds-close').onclick = () => $('account-worlds-dialog').close();
+$('load-worlds').onclick = () => runWorldAction(worldManager, '正在加载区服…', renderWorlds);
 $('enter-world').onclick = () => {
   const worldId = Number($('world-input').value.trim());
-  if (!worldId) {
-    $('worlds-hint').textContent = '先填 worldId';
+  if (!Number.isSafeInteger(worldId) || worldId <= 0) {
+    $('worlds-hint').textContent = '请输入有效的区服 ID';
     return;
   }
-  enterWorld(worldId);
+  return enterWorld(worldManager, worldId);
 };
 
 // ---- 添加账号：从电脑微信采集登录 -----------------------------------------
@@ -2074,19 +2276,24 @@ function renderCapture(state) {
   const box = clear($('cap-box'));
   const recovery = state.recovery;
   const cleanupPending = state.phase === 'error' || recovery?.pending;
+  const selectedChannel = accountAddChannel();
+  const otherChannelRunning = state.running && ['wechat', 'douyin'].includes(selectedChannel) && state.platform !== selectedChannel;
   $('cap-start').disabled = captureActionBusy || state.running || cleanupPending;
   $('cap-douyin').disabled = captureActionBusy || state.running || cleanupPending;
-  $('cap-stop').disabled = captureActionBusy || (!state.running && state.phase !== 'error');
-  $('cap-stop').hidden = !state.running && state.phase !== 'error';
+  $('cap-stop').hidden = otherChannelRunning || (!state.running && state.phase !== 'error');
+  $('cap-stop').disabled = captureActionBusy || $('cap-stop').hidden;
   $('cap-recover').hidden = !recovery?.pending;
   $('cap-recover').disabled = captureActionBusy || state.running || !recovery?.recoverable;
   const ownResult = captureOwner?.startedAt && captureOwner.startedAt === state.startedAt;
   const phase = cleanupPending || state.error ? 'error' : state.running ? state.phase : ownResult && state.accountId ? 'saved' : 'entry';
-  const messages = { starting: '正在准备登录采集…', ca: '请完成 Windows 证书安装提示。', listening: '正在准备本机登录通道…', proxy: '正在准备本机登录通道…', waiting: '请在电脑客户端中重新打开游戏。', captured: '已读取账号，正在完成验证和清理…', stopping: '正在恢复本机代理和证书设置…', saved: '账号已添加。可关闭此窗口，在账号卡片中查看角色和运行状态。', entry: '' };
-  hint.textContent = state.error ? cleanupPending ? '采集清理未完成，请点击「停止读取」重试。' : '本次读取失败，请重新开始或查看运行日志。' : messages[phase] || '';
+  const messages = { starting: '正在准备登录采集…', ca: '请完成 Windows 证书安装提示。', listening: '正在准备本机登录通道…', proxy: '正在准备本机登录通道…', waiting: '采集已就绪，请在电脑客户端中重新打开游戏。', captured: '已读取账号，正在完成验证和清理…', stopping: '正在恢复本机代理和证书设置…', saved: '账号已添加。可关闭此窗口，在账号卡片中查看角色和运行状态。', entry: '' };
+  hint.textContent = state.error ? cleanupPending ? '采集清理未完成，请点击「停止读取」重试。' : state.failureHint || '本次读取失败，请重新开始或查看运行日志。' : messages[phase] || '';
   hint.className = state.error ? 'bad' : 'warn';
-  if (recovery?.pending) {
-    hint.textContent = recovery.error ? '本机设置尚未恢复，请重试恢复上次采集残留。' : '检测到上次采集残留，请先恢复原代理和本次安装的证书。';
+  if (otherChannelRunning) {
+    const channelName = state.platform === 'douyin' ? '电脑抖音采集' : '微信小游戏';
+    hint.textContent = '「' + channelName + '」正在采集，请返回该渠道查看进度。';
+  } else if (recovery?.pending) {
+    hint.textContent = !recovery.recoverable ? '无法自动恢复上次采集。请在控制台所在电脑运行 start-console.cmd status 查看原因。' : '请点击「恢复上次采集残留」还原本机设置。';
     hint.className = recovery.error ? 'bad' : 'warn';
   }
   const notice = $('account-add-notice');
@@ -2098,13 +2305,13 @@ function renderCapture(state) {
   if (!state.running && !cleanupPending && phase !== 'saved') {
     const clientName = accountAddChannel() === 'douyin' ? '抖音' : '微信';
     const steps = el('ol', 'steps');
-    for (const text of ['先登录电脑版' + clientName + '。', '点击「开始读取」，按提示完成本机登录通道的准备。', '从电脑' + clientName + '重新打开《疯狂水世界》，等待读取角色并自动保存。']) {
+    for (const text of ['先登录电脑版' + clientName + '。', '点击「开始读取」可再次查看并确认本次采集。', '等页面显示「采集已就绪」后，再按提示操作。']) {
       steps.appendChild(el('li', null, text));
     }
     box.appendChild(steps);
   }
 
-  if (state.running) {
+  if (state.running && state.phase === 'waiting' && !otherChannelRunning) {
     const steps = el('ol', 'steps');
     const lines = [
       '先登录电脑版' + (state.platform === 'douyin' ? '抖音' : '微信') + '，再从该客户端打开《疯狂水世界》',
@@ -2128,7 +2335,6 @@ function renderCapture(state) {
 
   }
   if (typeof accountAddChanged === 'function') {
-    const selectedChannel = accountAddChannel();
     const channel = ['wechat', 'douyin'].includes(selectedChannel) ? selectedChannel : state.platform === 'douyin' ? 'douyin' : 'wechat';
     accountAddChanged(channel, phase, { busy: captureActionBusy });
   }
@@ -2140,7 +2346,7 @@ async function pollCapture() {
     const state = await call('/api/capture');
     if (version !== captureFlowVersion) return;
     renderCapture(state);
-    if (state.running && !capturePoll && accountAddChannel() === state.platform) {
+    if (state.running && !capturePoll && ['wechat', 'douyin'].includes(accountAddChannel())) {
       capturePoll = setInterval(pollCapture, 1500);
     }
     if (!state.running && capturePoll) {
@@ -2149,6 +2355,7 @@ async function pollCapture() {
       await loadAccounts(false);
       renderAccounts();
     }
+    return state;
   } catch (error) {
     if (version !== captureFlowVersion) return;
     $('cap-hint').textContent = '';
@@ -2175,39 +2382,41 @@ $('cap-recover').onclick = async () => {
 };
 async function beginCapture(platform) {
   if (captureActionBusy || accountAddChannel() !== platform) return;
-  const version = captureFlowVersion;
+  const version = ++captureFlowVersion;
   captureActionBusy = true;
-  accountAddChanged(platform, 'starting', { busy: true });
+  accountAddChanged(platform, 'checking', { busy: true });
+  $('cap-hint').className = 'dim';
+  $('cap-hint').textContent = '正在检查本机采集状态…';
   let state;
   try {
-    state = await call('/api/capture');
-    if (version !== captureFlowVersion || accountAddChannel() !== platform) return;
-    renderCapture(state);
-  } catch (error) {
-    $('cap-hint').textContent = '';
-    reportError(error);
-    return;
+    state = await pollCapture();
   } finally {
     captureActionBusy = false;
     if (captureView) renderCapture(captureView);
-    accountAddChanged(platform, 'entry', { busy: false });
+    else accountAddChanged(platform, 'entry', { busy: false });
+  }
+  if (version !== captureFlowVersion || accountAddChannel() !== platform) return;
+  if (!state) {
+    $('cap-hint').className = 'bad';
+    $('cap-hint').textContent = '暂时无法读取本机采集状态。请检查控制台连接后重新选择渠道。';
+    return;
   }
   if (state.running || state.phase === 'error' || state.recovery?.pending) return;
   const body = [
-    el('div', null, '抓包只做两处「仅当前用户」的改动，抓到账号后立刻自动还原：'),
-    el('div', null, '1. 若缺少证书，Windows 会打开导入向导，目标已选定为当前用户的“受信任的根证书颁发机构”。点击“完成”；若出现安全警告，核对 CrazyWaterWorld Local Test CA 后选择“是”。'),
-    el('div', null, '2. 临时使用本机代理读取本游戏的登录信息，结束后恢复原代理设置。'),
-    el('div', null, '使用系统代理的其他程序也会临时经过本机代理，工具仅解密本游戏网关，结束后恢复原设置。随时可点「停止读取」。'),
-    el('div', null, '采集就绪后，请只在电脑' + (platform === 'douyin' ? '抖音' : '微信') + '里重新打开《疯狂水世界》。'),
-    el('div', null, '捕获后会尝试连接游戏验证角色，可能让正在运行的游戏掉线一次。'),
+    el('p', null, '控制台会读取并保存《疯狂水世界》的游戏登录凭据。验证角色时，正在玩的账号可能会下线。'),
+    el('p', null, '采集期间会临时更改当前 Windows 用户的系统代理。使用系统代理的其他程序也会经过本机代理，工具仅解密本游戏网关的连接。'),
+    el('p', null, '如需安装临时根证书，请在 Windows 安装提示中核对 CrazyWaterWorld Local Test CA。启动失败或采集结束时，工具会还原代理，并移除本次安装的证书。'),
   ];
   captureConfirmation = true;
-  openConfirm('开始抓包（将修改当前用户的系统设置）', body, async () => {
+  openConfirm(platform === 'douyin' ? '确认开始电脑抖音采集' : '确认开始电脑微信采集', body, async () => {
     captureConfirmation = false;
     if (version !== captureFlowVersion || accountAddChannel() !== platform || captureActionBusy) return;
     captureActionBusy = true;
     captureOwner = { platform, startedAt: null, previousStartedAt: state.startedAt };
     accountAddChanged(platform, 'starting', { busy: true });
+    clear($('cap-box'));
+    $('cap-hint').className = 'warn';
+    $('cap-hint').textContent = '正在准备采集。若 Windows 弹出证书窗口，请核对是安装还是删除，以及证书名称。';
     try {
       const next = await call('/api/capture/start', { method: 'POST', body: JSON.stringify({ confirm: true, platform }) });
       captureOwner.startedAt = next.startedAt;
@@ -2224,7 +2433,7 @@ async function beginCapture(platform) {
       if (captureView) renderCapture(captureView);
       else accountAddChanged(platform, 'error', { busy: false });
     }
-  });
+  }, '同意并开始采集');
 }
 
 async function stopAccountCapture() {
@@ -2299,14 +2508,13 @@ ${inventoryScript}
 ${productionPlanningScript}
 ${settingsScript}
 ${settingsHistoryScript}
-${appointmentsScript}
 ${giftCodeScript}
 window.addEventListener('beforeunload', event => {
   if (stalePageReloadRequested) {
     stalePageReloadRequested = false;
     return;
   }
-  if (configIsDirty() || configEditor.saving || [...appointmentsEditors.values()].some(editor => editor.saving || appointmentsDirty(editor))) {
+  if (configIsDirty() || configEditor.saving) {
     event.preventDefault();
     event.returnValue = '';
   }
@@ -2340,10 +2548,10 @@ function activateConsolePage(button, resource = selectedResource) {
     refreshProgression();
     if (button.dataset.tab === 'overview') {refreshOverview();refreshLoop();}
     if(isResource&&resource==='inventory')refreshManualWorld();
-    if (target === 'heroes') void appointmentsLoad(true);
     if (target === 'lineups') void refreshSavedLineups();
     if (button.dataset.tab === 'account') {
       renderAccounts();
+      refreshAccountCards();
       pollCapture();
     }
     if (button.dataset.tab === 'manual') refreshManualWorld();
@@ -2358,6 +2566,7 @@ function activateConsolePage(button, resource = selectedResource) {
 document.querySelectorAll('#tabs button').forEach(button => { button.onclick = () => activateConsolePage(button); });
 for(const link of document.querySelectorAll('a[href^="#config-group-"]'))link.onclick=event=>{if(location.hash===link.getAttribute('href')){event.preventDefault();activateConsolePage(document.querySelector('#tabs [data-tab="settings"]'));configApplyHash();}};
 document.querySelectorAll('[data-resource-tab]').forEach(button => { button.onclick = () => activateConsolePage(document.querySelector('#tabs [data-tab="resources"]'), button.dataset.resourceTab); });
+${consoleQuickScript}
 
 // 配置页工具栏吸在页头下方；页头高度随触屏尺寸和提示文字变化，手机上页头不吸顶。
 new ResizeObserver(() => {
@@ -2366,19 +2575,20 @@ new ResizeObserver(() => {
 }).observe(document.querySelector('header'));
 
 async function boot() {
-  try {
-    await loadAccounts(true);
-  } catch (error) {
-    $('hint').textContent = '';
-    reportError(error);
-    return;
-  }
   // 显式链接优先，否则恢复当前历史记录的页面；配置分组由 configApplyHash 恢复。
   const savedView = history.state?.consoleView;
   const initialTab = location.hash.startsWith('#config-group-') ? 'settings'
     : location.hash === '#pirate-first-kill' ? 'stages' : location.hash === '#journal' ? 'overview'
     : savedView?.tab === 'login-settings' ? 'account'
     : savedView?.tab === 'resources' && savedView.resource === 'activities' ? 'activities' : savedView?.tab;
+  try {
+    // 恢复账号页时先显示保存的角色资料，由该页按连接状态决定是否读取资源。
+    await loadAccounts(true, initialTab !== 'account');
+  } catch (error) {
+    $('hint').textContent = '';
+    reportError(error);
+    return;
+  }
   const button = [...document.querySelectorAll('#tabs button')].find(tab => tab.dataset.tab === initialTab)
     || document.querySelector('#tabs [data-tab="overview"]');
   const resource = [...document.querySelectorAll('[data-resource-tab]')].some(tab => tab.dataset.resourceTab === savedView?.resource)
@@ -2400,7 +2610,7 @@ consoleStore.subscribe((state, previous) => {
   }
   if (state.view !== previous.view) {
     if (state.view.logAccount !== previous.view.logAccount || state.view.logGroup !== previous.view.logGroup
-        || state.view.onlyIssues !== previous.view.onlyIssues) {
+        || state.view.logFeature !== previous.view.logFeature || state.view.onlyIssues !== previous.view.onlyIssues) {
       $('journal').classList.toggle('issues', state.view.onlyIssues);
       $('log-all').setAttribute('aria-pressed', String(!state.view.onlyIssues));
       $('log-issues').setAttribute('aria-pressed', String(state.view.onlyIssues));

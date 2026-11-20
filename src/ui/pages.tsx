@@ -7,7 +7,7 @@ import { Switch } from "./switch"
 import { HelpTip } from "./help-tip"
 import { Badge } from "./badge"
 import { DialogFooter, DialogHeader, DialogTitle } from "./dialog"
-import { MessageCircle, Music2, Plus, QrCode, Smartphone, X } from "lucide-react"
+import { Backpack, Gem, Gift, LayoutGrid, MessageCircle, Music2, Plus, QrCode, Search, Shirt, Smartphone, Sprout, X } from "lucide-react"
 
 function Panel({title, help, titleAfter, children}: {title: string; help?: string; titleAfter?: React.ReactNode; children: React.ReactNode}) {
   return <Card><CardHeader><CardTitle className="title-with-help">{title}{help && <HelpTip title={title}>{help}</HelpTip>}</CardTitle>{titleAfter && <CardAction className="row-span-1 self-center max-md:col-span-2 max-md:col-start-1 max-md:row-start-2 max-md:justify-self-start">{titleAfter}</CardAction>}</CardHeader><CardContent>{children}</CardContent></Card>
@@ -89,10 +89,17 @@ export function giftCodesPage() {
 
 export function overviewPage() {
   return renderToStaticMarkup(<div className="grid gap-3">
-    <Panel title="运行概览" help="按功能分别查看当前进度与当前条件。这里只读展示；开关与参数在对应挂机配置中设置。">
-      <div className="bar overview-task-filter"><Input id="overview-task-search" type="search" aria-label="查找运行状态" placeholder="功能名称或状态" /><label htmlFor="overview-task-filter">显示</label><select id="overview-task-filter" defaultValue="enabled"><option value="enabled">已开启</option><option value="issues">异常 / 受总控限制</option><option value="all">全部项目</option></select></div>
-      <p id="overview-task-summary" className="dim" role="status">等待读取运行状态</p>
-      <div id="overview-task-groups" />
+    <Panel title="运行概览" titleAfter={<span id="overview-task-summary" role="status">正在读取运行状态</span>}>
+      <p id="overview-loop-reason" className="runtime-message" hidden />
+      <div id="overview-browser" hidden>
+        <div className="overview-tools">
+          <label className="overview-search"><Search size={16} aria-hidden="true" /><Input id="overview-task-search" type="search" aria-label="搜索功能或原因" placeholder="搜索功能或原因" /></label>
+          <select id="overview-task-filter" aria-label="按运行状态筛选" defaultValue="all"><option value="all">全部功能</option><option value="enabled">已开启</option><option value="issues">需关注</option></select>
+        </div>
+        <div className="overview-columns" aria-hidden="true"><span>功能</span><span>状态</span><span>结果或原因</span></div>
+        <div id="overview-task-groups" role="region" aria-label="功能运行状态" tabIndex={0} />
+        <div id="overview-matches" className="overview-footer" role="status" />
+      </div>
     </Panel>
     <Panel title="世界概览" help="点击城池可查看攻守队列、驻防和可用操作。地图刷新间隔可设为 5–300 秒。" titleAfter={<div className="world-refresh-controls"><Button id="world-map-auto-refresh" size="sm" variant="outline" aria-pressed="true">自动刷新：开</Button><label className="world-refresh-setting">每<input id="world-map-refresh-seconds" aria-label="世界概览刷新秒数" type="number" min="5" max="300" step="1" defaultValue="10" />秒</label></div>}>
       <div id="world-map-fleets" className="fleet-summary" aria-label="我的舰队" />
@@ -139,21 +146,21 @@ export function overviewPage() {
         <DialogFooter><Button id="resource-fields-action-back" variant="outline" hidden>返回选田</Button><Button id="resource-fields-action-confirm" disabled hidden>确认派遣</Button></DialogFooter>
       </dialog>
     </Panel>
-    <Panel title="硅矿概览" help="空矿位的详情浮层可选择舰队采集；自己的采矿舰队首奖后可撤回。单次派遣与撤回不会改变自动配置。自动刷新仅影响此概览；鼠标悬停、键盘聚焦或手机轻触矿位查看详情。奖励由服务器自动发放，倒计时结束后需同步确认。" titleAfter={<div className="bar"><a className="inline-link" href="#config-group-silicon">硅矿配置</a><Button id="silicon-refresh" variant="outline" size="sm" disabled>刷新硅矿</Button></div>}>
+    <Panel title="硅矿概览" help="选择矿位，在该矿区底部查看详情、选择舰队并确认操作。空位可派遣采集，其他玩家的公共矿位可抢占，自己的舰队在首奖后可撤回。每日抢占次数由所有舰队共享。" titleAfter={
+      <div className="silicon-controls">
+        <a className="inline-link" href="#config-group-silicon" aria-label="硅矿配置"><span className="silicon-control-context">硅矿</span>配置</a>
+        <Button id="silicon-refresh" variant="outline" size="sm" aria-label="刷新硅矿" disabled><span>刷新<span className="silicon-control-context">硅矿</span></span></Button>
+        <Button id="silicon-auto-refresh" size="sm" variant="outline" aria-pressed="true">自动刷新：开</Button>
+        <label className="world-refresh-setting">每<input id="silicon-refresh-seconds" aria-label="硅矿自动刷新秒数" type="number" min="5" max="300" step="1" defaultValue="30" />秒</label>
+      </div>
+    }>
       <section id="silicon-overview" aria-label="硅矿概览">
-        <div className="silicon-toolbar"><span id="silicon-status" className="dim" role="status">连接账号后读取硅矿</span><div className="world-refresh-controls"><Button id="silicon-auto-refresh" size="sm" variant="outline" aria-pressed="true">自动刷新：开</Button><label className="world-refresh-setting">每<input id="silicon-refresh-seconds" aria-label="硅矿自动刷新秒数" type="number" min="5" max="300" step="1" defaultValue="30" />秒</label></div></div>
-        <p id="silicon-feedback" className="silicon-feedback" role="status" hidden />
+        <p id="silicon-status" className="dim" role="status">连接账号后读取硅矿</p>
         <div id="silicon-summary" className="silicon-summary" />
         <div id="silicon-fleets" className="silicon-fleets" aria-label="硅矿舰队状态" />
         <div id="silicon-mines" className="silicon-mines" />
         <p id="silicon-notes" className="dim" />
       </section>
-      <aside id="silicon-slot-popover" role="dialog" aria-label="矿位详情" hidden />
-      <dialog id="silicon-action-dialog" aria-labelledby="silicon-action-title">
-        <DialogHeader><DialogTitle id="silicon-action-title">硅矿快捷操作</DialogTitle></DialogHeader>
-        <div id="silicon-action-body" />
-        <DialogFooter><Button id="silicon-action-confirm" disabled>确认操作</Button><Button id="silicon-action-cancel" variant="outline">取消</Button></DialogFooter>
-      </dialog>
     </Panel>
   </div>)
 }
@@ -192,25 +199,37 @@ export function manualPage() {
 }
 
 export function inventoryPage() {
-  return renderToStaticMarkup(<div className="grid gap-3"><Panel title="仓库">
-    <div className="bar"><Button id="inventory-refresh" variant="outline">刷新库存</Button><span id="inventory-status" className="dim" role="status">尚未读取</span></div>
-    <div className="bar inventory-search"><label htmlFor="inventory-query">资源名称</label><Input id="inventory-query" type="search" placeholder="搜索资源名称" /><span id="inventory-match-count" className="dim" /></div>
-    <details id="world-stock-panel"><summary>展开分类库存</summary><div id="world-stock" /></details>
-  </Panel></div>)
+  const families = [
+    ["production", "生产物资", Sprout], ["growth", "养成材料", Gem], ["supplies", "礼包补给", Gift],
+    ["appearance", "外观装扮", Shirt], ["general", "通用道具", Backpack], ["all", "全部物品", LayoutGrid],
+  ] as const
+  return renderToStaticMarkup(<Card className="gap-3 py-4 max-md:gap-3">
+    <CardHeader><CardTitle>仓库</CardTitle><CardAction><Button id="inventory-refresh" variant="outline" size="sm">刷新库存</Button></CardAction>
+      <span id="inventory-status" className="dim" role="status">尚未读取</span>
+    </CardHeader>
+    <CardContent className="inventory-browser">
+      <div id="inventory-tabs" role="tablist" aria-label="仓库分类">
+        {families.map(([key, label, Icon]) => <button key={key} id={'inventory-tab-' + key} type="button" role="tab"
+          data-family={key} aria-selected={key === 'production'} aria-controls="inventory-panel" tabIndex={key === 'production' ? 0 : -1}>
+          <Icon aria-hidden="true" /><span>{label}</span><small data-stock-count="" /></button>)}
+      </div>
+      <section id="inventory-panel" role="tabpanel" aria-labelledby="inventory-tab-production">
+        <div className="inventory-toolbar">
+          <Input id="inventory-query" type="search" aria-label="搜索生产物资" placeholder="搜索生产物资" />
+          <select id="inventory-category" aria-label="物品细类" hidden><option value="">全部细类</option></select>
+          <select id="inventory-sort" aria-label="库存排序">
+            <option value="scarcity">紧缺优先</option><option value="quantity">数量从多到少</option><option value="name">名称拼音</option>
+          </select>
+        </div>
+        <div id="inventory-match-count" className="dim" role="status" />
+        <div id="world-stock" role="region" aria-label="库存物品" tabIndex={0} />
+      </section>
+    </CardContent>
+  </Card>)
 }
 
 export function heroesPage() {
   return renderToStaticMarkup(<div className="grid gap-3">
-    <Panel title="英雄任命" help="开启后随自动挂机，使用游戏一键委任分配英雄，已有任命可能调整。" titleAfter={<div className="bar"><label htmlFor="appointments-enabled">自动委任</label><Switch id="appointments-enabled" className="p-0" disabled /></div>}>
-      <div className="appointments-heading"><h4 id="appointments-priority-title">委任优先级</h4><span id="appointments-state" className="dim" role="status">请选择账号</span></div>
-      <p id="appointments-help" className="dim">上方项目优先委任。拖动手柄或使用上移、下移调整，修改后自动保存。</p>
-      <ol id="appointments-priorities" className="appointments-priorities" aria-labelledby="appointments-priority-title" aria-describedby="appointments-help" />
-      <div className="bar"><Button id="appointments-retry" variant="outline" size="sm" hidden>重试保存</Button><Button id="appointments-reload" variant="outline" size="sm" hidden>重新载入</Button><span id="appointments-feedback" className="sr-only" aria-live="polite" /></div>
-    </Panel>
-    <Panel title="英雄装备">
-      <div className="bar"><Button id="equipment-refresh" variant="outline">刷新装备</Button></div>
-      <div id="equipment-view" className="progression-view" aria-live="polite" />
-    </Panel>
     <Panel title="装备制造"><div className="bar"><Button id="crafting-refresh" variant="outline">刷新装备厂</Button></div><div id="crafting-view" className="progression-view" aria-live="polite" /></Panel>
   </div>)
 }
@@ -228,16 +247,25 @@ export function accountPage() {
     <div className="account-page-heading">
       <div className="account-page-title"><h2 className="text-xl font-semibold">账号</h2><span id="account-count" className="dim" aria-live="polite">正在读取</span></div>
       <div className="account-page-actions">
-        <Button id="import-accounts" type="button" variant="outline">导入账号</Button>
+        <Button id="import-accounts" type="button" variant="outline" aria-label="导入账号"><span>导入<span className="max-sm:hidden">账号</span></span></Button>
         <input id="import-accounts-file" type="file" accept=".json,application/json" aria-label="选择账号备份文件" hidden />
-        <Button id="export-accounts" type="button" variant="outline" aria-haspopup="dialog" aria-controls="account-export-dialog">导出账号</Button>
-        <Button id="account-add" type="button" aria-haspopup="dialog" aria-controls="account-add-dialog"><Plus aria-hidden="true" />添加账号</Button>
+        <Button id="export-accounts" type="button" variant="outline" aria-label="导出账号" aria-haspopup="dialog" aria-controls="account-export-dialog"><span>导出<span className="max-sm:hidden">账号</span></span></Button>
+        <Button id="account-add" type="button" aria-label="添加账号" aria-haspopup="dialog" aria-controls="account-add-dialog"><Plus aria-hidden="true" /><span>添加<span className="max-sm:hidden">账号</span></span></Button>
       </div>
     </div>
     <p className="dim">新账号默认不挂机，点击「开始挂机」后才会持续运行；每个账号可通过「登录设置」单独配置自动重连策略。</p>
     <p id="account-add-notice" className="dim" role="status" hidden />
     <p id="account-transfer-notice" className="dim" role="status" aria-live="polite" hidden />
     <div id="accounts" className="account-grid" />
+
+    <dialog id="account-worlds-dialog" aria-labelledby="account-worlds-title">
+      <div className="account-dialog-heading"><DialogHeader><DialogTitle id="account-worlds-title">区服管理</DialogTitle></DialogHeader><Button id="account-worlds-close" type="button" size="icon-sm" variant="ghost" aria-label="关闭区服管理"><X aria-hidden="true" /></Button></div>
+      <fieldset id="worlds-controls" aria-label="区服操作">
+        <div className="bar"><Button id="load-worlds" type="button" variant="outline" size="sm">加载区服</Button><Input id="world-input" inputMode="numeric" aria-label="区服 ID" placeholder="区服 ID" className="w-28 max-sm:w-20" /><Button id="enter-world" type="button" variant="outline" size="sm">进入该区服</Button></div>
+        <p id="worlds-hint" className="warn" role="status" />
+        <div id="worlds" />
+      </fieldset>
+    </dialog>
 
     <dialog id="account-login-dialog" aria-labelledby="account-login-title">
       <div className="account-dialog-heading"><DialogHeader><DialogTitle id="account-login-title" className="leading-snug">登录设置</DialogTitle></DialogHeader><Button id="account-login-close" type="button" size="icon-sm" variant="ghost" aria-label="关闭登录设置"><X aria-hidden="true" /></Button></div>
@@ -260,18 +288,6 @@ export function accountPage() {
       </div>
       <p className="dim">文件含登录凭据，请妥善保管。配置不包含用量账本和运行状态。</p>
       <p id="account-export-error" className="warn" role="alert" hidden />
-    </dialog>
-
-    <dialog id="account-info-dialog" aria-labelledby="account-info-title">
-      <div className="account-dialog-heading"><DialogHeader><DialogTitle id="account-info-title" className="leading-snug">账号详情</DialogTitle></DialogHeader><Button id="account-info-close" type="button" size="icon-sm" variant="ghost" aria-label="关闭账号详情"><X aria-hidden="true" /></Button></div>
-      <div className="bar"><Button id="account-info-refresh" type="button" variant="outline">连接并读取</Button></div>
-      <div id="account-details">
-        <h4>角色概况</h4><div className="who" id="who">等待连接</div>
-        <h4>资源</h4><div className="resource-strip" id="res">连接后显示</div>
-        <h4>区服</h4>
-        <div className="bar"><Button id="load-worlds" variant="outline">加载区服</Button><Input id="world-input" aria-label="区服 ID" placeholder="区服 ID" className="w-32" /><Button id="enter-world" variant="outline">进入该区服</Button><span id="worlds-hint" className="warn" /></div>
-        <div id="worlds" />
-      </div>
     </dialog>
 
     <dialog id="account-add-dialog" aria-labelledby="account-add-title" aria-describedby="account-add-step">

@@ -24,7 +24,6 @@ export function formatConsoleLog(entry) {
     ? plainText(entry.accountName).replace(/\n/g, '') || plainText(entry.account).replace(/\n/g, '').slice(0, 8) || '未命名账号'
     : '系统';
   const category = Object.hasOwn(LOG_CATEGORIES, entry?.category) ? entry.category : classifyLog(entry?.message);
-  const operation = entry?.operationId ? ` [操作 ${plainText(entry.operationId).replace(/\n/g, '')}]` : '';
-  const prefix = `[${time}] [${account}] [${LOG_CATEGORIES[category]}] [${levels.get(entry?.level) ?? '信息'}]${operation} `;
+  const prefix = `[${time}] [${account}] [${LOG_CATEGORIES[category]}] [${levels.get(entry?.level) ?? '信息'}] `;
   return plainText(entry?.message).split('\n').map(line => prefix + line).join('\n');
 }

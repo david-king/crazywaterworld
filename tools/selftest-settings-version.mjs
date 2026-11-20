@@ -141,8 +141,8 @@ try {
     Object.assign(expected.cityWar, { enabled: true, fleetIds: ['1远征船'], autoRepair: true, nativeCommissionLimit: 2, repairBelowPercent: 65 });
     Object.assign(expected.treasure, { autoRepair: true, dailyDispatchLimit: 12, dailyDiamondLimit: 321 });
     Object.assign(expected.pirateHunt, { enabled: true, fleetIds: ['1远征船'], maxFailures: 4 });
-    Object.assign(expected.silicon, { dailyRewardLimit: 5, dailyDiamondLimit: 200 });
-    Object.assign(expected.silicon.fleets[0], { autoRepair: true, dailyAttackLimit: 11 });
+    Object.assign(expected.silicon, { dailyRewardLimit: 5 });
+    Object.assign(expected.silicon.fleets[0], { autoRepair: true, dailyAttackLimit: 11, marchDailyDiamonds: 200 });
     const legacy = structuredClone(expected);
     const retired = {
       worldBoss: { petrolReserve: 999999 },
@@ -448,8 +448,139 @@ try {
     const unknown = document(); unknown.settings.factory.removedField = true;
     assert.throws(() => importAutomationSettings(unknown), /不支持/);
   });
+  test('版本24保留巨轮去程开关、阈值和预算，回城需主动启用', () => {
+    for (const enabled of [true, false]) {
+      const old = defaultSettings();
+      Object.assign(old.treasure, { marchSpeedUp: enabled, marchTargetSeconds: 95, dailyDiamondLimit: 120 });
+      for (const field of ['outboundSpeedUp', 'returnSpeedUp', 'returnTargetSeconds']) delete old.treasure[field];
+      const { treasure } = importAutomationSettings({ format: SETTINGS_FORMAT, version: 24, settings: old });
+      assert.deepEqual(treasure, { ...old.treasure, outboundSpeedUp: true, returnSpeedUp: false, returnTargetSeconds: 60 });
+      Object.assign(treasure, { outboundSpeedUp: false, returnSpeedUp: true, returnTargetSeconds: 11 });
+      assert.deepEqual(importAutomationSettings(exportAutomationSettings({ ...old, treasure })).treasure, treasure);
+    }
+  });
+  test('版本25共享预算按原启用项分配，往返导入保留新额度', () => {
+    const old = defaultSettings();
+    delete old.treasure.returnDailyDiamondLimit;
+    Object.assign(old.treasure, { returnSpeedUp: true, dailyDiamondLimit: 91 });
+    old.silicon.dailyDiamondLimit = 101;
+    for (const fleet of old.silicon.fleets) {
+      for (const key of ['repairDailyDiamonds','marchDailyDiamonds','returnSpeedUp','returnTargetSeconds','returnDailyDiamonds','repairTargetSeconds']) delete fleet[key];
+    }
+    Object.assign(old.silicon.fleets[0], { enabled: true, repairSpeedUp: true, marchSpeedUp: true });
+    Object.assign(old.silicon.fleets[1], { enabled: true, marchSpeedUp: true });
+    const migrated = importAutomationSettings({ format: SETTINGS_FORMAT, version: 25, settings: old });
+    assert.equal(migrated.treasure.dailyDiamondLimit, 46); assert.equal(migrated.treasure.returnDailyDiamondLimit, 45);
+    assert.deepEqual(migrated.silicon.fleets.map(f => [f.repairDailyDiamonds, f.marchDailyDiamonds, f.returnDailyDiamonds]),
+      [[undefined,34,0],[undefined,33,0],[undefined,0,0]]);
+    assert.equal(migrated.silicon.fleets[0].returnSpeedUp, false);
+    assert.equal(migrated.silicon.dailyDiamondLimit, undefined);
+    assert.deepEqual(importAutomationSettings(exportAutomationSettings(migrated)), migrated);
+    old.treasure.outboundSpeedUp = false;
+    assert.equal(importAutomationSettings({ format: SETTINGS_FORMAT, version: 25, settings: old }).treasure.returnDailyDiamondLimit, 91);
+  });
+  test('版本26已存设置、导入及旧页面保存均移除硅矿维修加速，保留去回程与普通维修', () => {
+    const expected = defaultSettings();
+    Object.assign(expected.silicon.fleets[0], { enabled: true, autoRepair: true, marchSpeedUp: true,
+      marchTargetSeconds: 80, marchDailyDiamonds: 70, returnSpeedUp: true, returnTargetSeconds: 45, returnDailyDiamonds: 120 });
+    const old = structuredClone(expected);
+    Object.assign(old.silicon.fleets[0], { repairSpeedUp: true, repairTargetSeconds: 40, repairDailyDiamonds: 300 });
+    Object.assign(old.silicon.fleets[1], { repairSpeedUp: true, repairTargetSeconds: 10, repairDailyDiamonds: 1000 });
+    fs.writeFileSync(file, JSON.stringify({ version: 26, accounts: { old: { settingsVersion: 26, revision: 1, settings: old } } }));
+    assert.deepEqual(loadAutomationSettings('old', { file }).settings, expected);
+    assert.deepEqual(importAutomationSettings({ format: SETTINGS_FORMAT, version: 26, settings: old }), expected);
+    assert.deepEqual(saveAutomationSettings('old', old, { file, revision: 1 }).settings, expected);
+  });
+  test('旧账号默认关闭两项提前召回，两项分钟数可独立往返保存', () => {
+    const old = defaultSettings();
+    for (const group of ['cityWar','treasure']) { delete old[group].recallSilicon; delete old[group].recallLeadMinutes; }
+    const migrated = importAutomationSettings({ format: SETTINGS_FORMAT, version: 27, settings: old });
+    for (const group of ['cityWar','treasure']) {
+      assert.equal(migrated[group].recallSilicon, false);
+      assert.equal(migrated[group].recallLeadMinutes, 5);
+      for (const value of [0, 1441, 0.5, '10']) {
+        assert.throws(() => validateSettings({ ...migrated, [group]: { ...migrated[group], recallLeadMinutes: value } }));
+      }
+    }
+    Object.assign(migrated.cityWar, { recallSilicon: true, recallLeadMinutes: 8 });
+    migrated.treasure.recallLeadMinutes = 3;
+    assert.deepEqual(importAutomationSettings(exportAutomationSettings(migrated)), migrated);
+  });
+  test('版本28旧配置加载、导入和保存时移除钓具预留金币', () => {
+    const expected = defaultSettings();
+    Object.assign(expected.gather, { enabled: true, upgradeFishing: true, targetLevel: 7 });
+    expected.schedule.fishEnhance = true;
+    const old = structuredClone(expected);
+    old.gather.fishingGoldReserve = 10000;
+    fs.writeFileSync(file, JSON.stringify({ version: 28, accounts: { old: { settingsVersion: 28, revision: 1, settings: old } } }));
+    assert.deepEqual(loadAutomationSettings('old', { file }).settings, expected);
+    assert.deepEqual(importAutomationSettings({ format: SETTINGS_FORMAT, version: 28, settings: old }), expected);
+    assert.deepEqual(saveAutomationSettings('old', old, { file, revision: 1 }).settings, expected);
+  });
+  test('版本30工事捐赠配置保留捐赠选择并补齐排除名单', () => {
+    for (const materials of [[], ['耐火砖']]) {
+      const expected = defaultSettings();
+      Object.assign(expected.guildFort, { enabled: true, materials, reserve: 3, dailyLimit: 15 });
+      expected.alliance.allowedMaterials = ['木板'];
+      const old = structuredClone(expected);
+      delete old.guildFort.blockedMaterials;
+      fs.writeFileSync(file, JSON.stringify({ version: 30, accounts: { old: { settingsVersion: 30, revision: 1, settings: old } } }));
+      assert.deepEqual(loadAutomationSettings('old', { file }).settings, expected);
+      assert.deepEqual(importAutomationSettings({ format: SETTINGS_FORMAT, version: 30, settings: old }), expected);
+    }
+  });
+  test('海盗独立开关迁移保留原来实际运行的动作', () => {
+    for (const hunt of [false, true]) for (const sweep of [false, true]) for (const daily of [false, true]) {
+      const old = defaultSettings();
+      delete old.pirate;
+      old.loop.dailies = old.dailies.enabled = daily;
+      old.schedule.pirate = sweep;
+      Object.assign(old.pirateHunt, { enabled: hunt, fleetIds: ['1远征船'] });
+      const settings = importAutomationSettings({ format: SETTINGS_FORMAT, version: 31, settings: old });
+      assert.equal(settings.pirate.enabled && settings.pirateHunt.enabled, hunt);
+      assert.equal(settings.pirate.enabled && settings.schedule.pirate, sweep && daily);
+      assert.deepEqual(settings.loop, old.loop);
+      assert.deepEqual(settings.dailies, old.dailies);
+      assert.deepEqual(importAutomationSettings(exportAutomationSettings(settings)), settings);
+    }
+  });
+  test('版本32的巨轮配置默认关闭追杀及其加速，并能单独启用追杀', () => {
+    const expected = defaultSettings(), old = structuredClone(expected);
+    for (const key of ['chase', 'chaseNames', 'chaseSpeedUp', 'chaseTargetSeconds', 'chaseDailyDiamondLimit']) delete old.treasure[key];
+    assert.deepEqual(importAutomationSettings({ format: SETTINGS_FORMAT, version: 32, settings: old }), expected);
+    assert.equal(expected.treasure.chase, false);
+    assert.equal(expected.treasure.chaseSpeedUp, false);
+    Object.assign(expected.treasure, { enabled: true, chase: true, fleetIds: ['1远征船'] });
+    assert.throws(() => exportAutomationSettings(expected), /完整昵称/);
+    Object.assign(expected.treasure, { chaseNames: ['对手甲'], chaseSpeedUp: true, chaseDailyDiamondLimit: 75 });
+    assert.deepEqual(importAutomationSettings(exportAutomationSettings(expected)), expected);
+  });
+  test('版本33的追杀默认全天，多时段导出再导入保留并校验时间', () => {
+    const old = defaultSettings();
+    Object.assign(old.treasure, { enabled: true, chase: true, chaseNames: ['对手甲'], fleetIds: ['1远征船'] });
+    delete old.treasure.chaseWindows;
+    const settings = importAutomationSettings({ format: SETTINGS_FORMAT, version: 33, settings: old });
+    assert.deepEqual(settings.treasure, { ...old.treasure, chaseWindows: [] });
+    settings.treasure.chaseWindows = ['22:00-02:00', '08:00-09:00'];
+    assert.deepEqual(importAutomationSettings(exportAutomationSettings(settings)), settings);
+    for (const bad of ['24:00-02:00', '08:00-08:60', '8:00', '08:00-']) {
+      settings.treasure.chaseWindows = [bad];
+      assert.throws(() => exportAutomationSettings(settings), error => !!error.fields['treasure.chaseWindows']);
+    }
+  });
+  test('版本34的用券单抽在读取、导入和旧页面保存时移除，保留免费招募选择', () => {
+    const expected = defaultSettings();
+    expected.schedule.freeRecruit = true;
+    const old = structuredClone(expected);
+    old.schedule.ticketRecruit = true;
+    fs.writeFileSync(file, JSON.stringify({ version: 34, accounts: { old: { settingsVersion: 34, revision: 1, settings: old } } }));
+    assert.deepEqual(loadAutomationSettings('old', { file }).settings, expected);
+    assert.deepEqual(importAutomationSettings({ format: SETTINGS_FORMAT, version: 34, settings: old }), expected);
+    assert.deepEqual(saveAutomationSettings('old', old, { file, revision: 1 }).settings, expected);
+    assert(!Object.hasOwn(nativeTaskValues(expected, old.schedule), 'ticketRecruit'));
+  });
   test('版本1升级后重复迁移保持一致，保留有效的用户值', () => {
-    assert.equal(SETTINGS_SCHEMA_VERSION, 23);
+    assert.equal(SETTINGS_SCHEMA_VERSION, 35);
     const settings = legacySettings();
     settings.factory.checkEverySeconds = 270;
     settings.resources.diamondDailyLimit = 1234;

@@ -82,7 +82,8 @@ export function factoryProductionOperation(water, buildingId, batch) {
 export const petSpendSnapshot = buildings => {
   const rooms = buildings.filter(row => row.petBreed);
   if (!rooms.length || rooms.some(row => !Array.isArray(row.petBreed.breedQ) || !Array.isArray(row.petBreed.maturePets))) return null;
-  const jobs = rooms.flatMap(row => row.petBreed.breedQ), mature = rooms.flatMap(row => row.petBreed.maturePets);
+  const jobs = rooms.flatMap(room => room.petBreed.breedQ.map(job => ({ ...job, buildingId: room.buildingId })));
+  const mature = rooms.flatMap(room => room.petBreed.maturePets.map(pet => ({ ...pet, buildingId: room.buildingId })));
   if (!unique(jobs, row => integer(row.idx) ? row.idx : null)
     || jobs.some(row => typeof row.petId !== 'string' || !row.petId || !integer(row.startTime)
       || !integer(row.finishTime) || row.finishTime < row.startTime)
@@ -90,11 +91,25 @@ export const petSpendSnapshot = buildings => {
   return { jobs, mature };
 };
 
-export function confirmPetSpend(before, after, request, body) {
+export function confirmPetSpend(before, after, request, body, client) {
   if (!before || !after) return false;
   if (request === 'PetFeedRequest') {
     const prior = before.jobs.find(row => row.idx === body.jobIdx), job = after.jobs.find(row => row.idx === body.jobIdx);
-    return !!prior && prior.petId === job?.petId && prior.startTime === job.startTime && job.finishTime < prior.finishTime;
+    if (!prior) return false;
+    if (job) return prior.buildingId === job.buildingId && prior.petId === job.petId
+      && prior.startTime === job.startTime && job.finishTime < prior.finishTime;
+
+    // A feed can finish the job outright. Rule out natural maturity, a reused
+    // slot and a matching pet from another job before accepting that result.
+    if (!prior.buildingId || !integer(prior.star ?? 0) || !(client?.latencyMs > 0)
+      || !Number.isFinite(client.serverClockOffsetMs)) return false;
+    const observedBy = Math.ceil((Date.now() + client.serverClockOffsetMs + client.latencyMs) / 1000);
+    if (observedBy >= prior.finishTime) return false;
+    const samePet = pet => pet.buildingId === prior.buildingId && pet.petId === prior.petId
+      && (pet.star ?? 0) === (prior.star ?? 0);
+    const otherJobs = before.jobs.filter(other => other.idx !== prior.idx && samePet(other));
+    return otherJobs.every(other => after.jobs.some(active => samePet(active) && jobKey(active) === jobKey(other)))
+      && after.mature.filter(samePet).length === before.mature.filter(samePet).length + 1;
   }
   return request === 'PetBreedRequest' && (after.jobs.some(job => job.petId === body.petId
     && !before.jobs.some(prior => jobKey(prior) === jobKey(job)))
@@ -122,7 +137,7 @@ export async function captureSpendOperation(client, step, { waterSnapshot } = {}
   if (step.request === 'StartFactoryProduceRequest' && step.factoryBatch?.operation) return step.factoryBatch.operation;
   const body = structuredClone(step.body ?? {}), verify = structuredClone(step.verify ?? {});
   const request = step.request;
-  const operation = { confirmed: false };
+  const operation = { confirmed: false, request };
   const probe = test => { operation.verify = test; return operation; };
 
   if (request === 'PetUpgradeFeedRequest' && verify.petUid && integer(verify.fed) && integer(verify.grade)) {
@@ -241,7 +256,7 @@ export async function captureSpendOperation(client, step, { waterSnapshot } = {}
     if (request === 'FarmSpeedUpRequest') return !!old?.farm?.productId && current?.farm?.productId === old.farm.productId
       && current.farm.plantTime === old.farm.plantTime && integer(current.farm.ripeTime) && current.farm.ripeTime < old.farm.ripeTime;
     if (request === 'PetBreedRequest' || request === 'PetFeedRequest') {
-      return confirmPetSpend(oldPets, petSpendSnapshot(currentBuildings), request, body);
+      return confirmPetSpend(oldPets, petSpendSnapshot(currentBuildings), request, body, next);
     }
     const field = { FishingLevelUpRequest: 'fishingLevel', DivingLevelUpRequest: 'divingLevel', SalvageLevelUpRequest: 'salvageLevel' }[request];
     return !!field && integer(before[field]?.level) && integer(after[field]?.level) && (after[field].level > before[field].level

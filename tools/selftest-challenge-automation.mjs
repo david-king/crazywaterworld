@@ -9,7 +9,9 @@ import { createChallengeRun, runChallengeRound } from '../src/challenge-automati
 import { runLoop } from '../src/loop.mjs';
 import { loadProtocol } from '../src/proto.mjs';
 import { pirateAdvanceFixture } from './fixtures/pirate-advance.mjs';
-import { createPirateAdvanceTask } from '../src/pirate-advance.mjs';
+import { createPirateAdvanceTask, runSinglePirateHunt, runPirateAdvance } from '../src/pirate-advance.mjs';
+import { recoverFleetLineups } from '../src/fleet-lineups.mjs';
+import { pirateHuntOptions } from '../src/pirates.mjs';
 import { waitForChallenge, CHALLENGE_INTERVAL_MS } from '../src/battle-pacing.mjs';
 
 const root = fs.mkdtempSync(path.join(os.tmpdir(), 'cw-challenge-auto-'));
@@ -147,9 +149,26 @@ try {
     await g.once(); assert.equal(g.writes.length, 0);
     f.settings.progression.trials = true; await f.once({ isStageBusy: () => true, isTrialBusy: () => true }); assert.equal(f.writes.length, 0);
   });
+  await test('海盗挂机关闭后保留挑战选择，发送前关闭也不出征', async () => {
+    const f = pirateAdvanceFixture(), state = createChallengeRun(), l = ledger();
+    f.settings.pirateHunt.enabled = true;
+    const round = (prepareDispatch) => runChallengeRound(f.client, f.config, {
+      player: f.player, getSettings: () => f.settings, state, ledger: l, prepareDispatch, mode: 'pirate',
+    });
+    await round();
+    assert.equal(f.client.writes.length, 0);
+    f.settings.pirate.enabled = true;
+    await round(async () => { f.settings.pirate.enabled = false; });
+    assert.equal(f.client.writes.length, 0);
+    assert.equal(f.settings.pirateHunt.enabled, true);
+    f.settings.pirate.enabled = true;
+    await round();
+    assert.equal(f.client.writes.length, 1);
+  });
   await test('海盗跨轮确认首杀和三次战败上限，旧汽油预算不阻止推进', async () => {
     for (const mode of ['lose', 'win']) {
       const f = pirateAdvanceFixture({ mode }), state = createChallengeRun(), l = ledger();
+      f.settings.pirate.enabled = true;
       Object.assign(f.settings.pirateHunt, { enabled: true, maxFailures: 3, fuelBudget: mode === 'win' ? 600 : 3000 });
       for (let i = 0; i < 7; i++) await runChallengeRound(f.client, f.config, { player: f.player, getSettings: () => f.settings, state, ledger: l });
       assert.equal(f.client.writes.length, 3);
@@ -160,6 +179,7 @@ try {
   await test('海盗在途与未知结果跨轮不重派，停止不会强制召回', async () => {
     for (const mode of ['wait', 'unknown']) {
       const f = pirateAdvanceFixture({ mode }), state = createChallengeRun(), l = ledger();
+      f.settings.pirate.enabled = true;
       Object.assign(f.settings.pirateHunt, { enabled: true, maxFailures: 3 });
       for (let i = 0; i < 4; i++) await runChallengeRound(f.client, f.config, { player: f.player, getSettings: () => f.settings, state, ledger: l });
       assert.equal(f.client.writes.length, 1); assert.equal(state.pirate.state.failures, 0);
@@ -167,6 +187,7 @@ try {
   });
   await test('调低海盗失败上限后立即停止，不因旧汽油字段变化继续派遣', async () => {
     const f = pirateAdvanceFixture({ mode: 'lose' }), state = createChallengeRun(), l = ledger();
+    f.settings.pirate.enabled = true;
     Object.assign(f.settings.pirateHunt, { enabled: true, maxFailures: 3, fuelBudget: 300 });
     const round = () => runChallengeRound(f.client, f.config, { player: f.player, getSettings: () => f.settings, state, ledger: l });
     await round();
@@ -176,6 +197,7 @@ try {
   });
   await test('海盗自动派遣进入挂机串行队列，每轮最多一次，不需手动启动', async () => {
     const f = pirateAdvanceFixture(), state = createChallengeRun(), l = ledger(), perRound = [];
+    f.settings.pirate.enabled = true;
     Object.assign(f.settings.pirateHunt, { enabled: true, maxFailures: 3 });
     f.settings.loop.world = f.settings.loop.dailies = f.settings.loop.tasks = f.settings.loop.heroes = false;
     let queued = false;
@@ -254,14 +276,70 @@ try {
   await test('手动海盗失败上限独立，默认一次战败停止，显式参数可覆盖', async () => {
     for (const limit of [undefined, 2]) {
       const f = pirateAdvanceFixture({ mode: 'lose' }), task = createPirateAdvanceTask();
-      f.settings.pirateHunt.maxFailures = 7;
+      Object.assign(f.settings.pirateHunt, { maxFailures: 7, fleetIds: [], types: ['2'], minDurabilityPercent: 90, maxLevel: 1 });
+      f.fleet.durability = 20;
+      const manual = { fleetIds: [f.fleet.buildingId], types: ['1'], checkEverySeconds: 15 };
       let finish;
       const done = new Promise(resolve => { finish = resolve; });
-      const state = task.start(f.settings.pirateHunt, async () => ({ client: f.client, config: f.config, player: f.player,
-        ledger: ledger(), getSettings: () => f.settings, enabled: () => true, sleep: async () => {} }), s => { if (!s.running) finish(s); }, limit);
+      const state = task.start(manual, async () => ({ client: f.client, config: f.config, player: f.player,
+        ledger: ledger(), getSettings: () => f.settings, enabled: () => true, sleep: async () => { f.settings.pirateHunt.enabled = !f.settings.pirateHunt.enabled; } }), s => { if (!s.running) finish(s); }, limit);
       assert.equal(state.maxFailures, limit ?? 1);
       const result = await done; assert.equal(result.failures, limit ?? 1); assert.equal(f.client.writes.length, limit ?? 1);
       assert.equal(f.settings.pirateHunt.maxFailures, 7);
+    }
+  });
+  await test('海盗手动预设只改所选舰队，连续逐级出征、取消和返航恢复', async () => {
+    for (const mode of ['single', 'continuous', 'moved', 'refused', 'unknown', 'empty']) {
+      const f = pirateAdvanceFixture({ mode: mode === 'unknown' ? 'unknown' : 'win' }), l = ledger();
+      f.fleet.autoFight.isOn = false;
+      if (mode === 'empty') f.building.fleet.formation.heroPositions = [];
+      const original = structuredClone(f.building.fleet.formation);
+      const formation = { presetId: 1, heroPositions: [{ heroId: '瑞文', pos: { x: 2, y: 1 } }] };
+      const preset = { id: 'manual', name: '海盗编队', formation: { ...formation, petUid: '123' } };
+      const choices = await pirateHuntOptions(f.client, f.config, f.player, true);
+      const firstSelection = { targetKey: choices.targets[0].targetKey, fleetKey: choices.fleets[0].key };
+      const send = f.client.sendWatch, dispatches = [];
+      f.client.sendWatch = async (name, body, opts) => {
+        if (name === 'ChallengePirateRequest') {
+          assert.deepEqual(body.fleetBuildingIds, [f.fleet.buildingId]);
+          assert.deepEqual(f.building.fleet.formation, formation);
+          const record = Object.values(l.keyRecords()).find(row => row.details?.kind === 'pirateLineup');
+          assert.equal(record.details.phase, 'dispatched');
+          assert.equal(record.details.dispatchId, l.keyRecords()[record.details.dispatchKey].id);
+          dispatches.push(body.uid);
+          if (mode === 'refused') throw Object.assign(Error('派遣被拒绝'), { prompt: true, request: name });
+        }
+        await send(name, body, opts);
+        if (name === 'FleetSaveFormationRequest' && mode === 'moved') f.state.level = 1;
+      };
+      const context = { ...f, ledger: l, getSettings: () => f.settings, enabled: () => true, preset };
+      if (mode === 'continuous') {
+        const result = await runPirateAdvance({ ...context, options: { fleetIds: [f.fleet.buildingId], types: ['1'], checkEverySeconds: 5 },
+          optionsCurrent: () => true, firstSelection, sleep: async () => {} });
+        assert.equal(result.wins, 3);
+        assert.deepEqual(dispatches, [201, 202, 203]);
+      } else {
+        const single = () => runSinglePirateHunt(f.client, f.config, f.player, { ...context, ...firstSelection });
+        if (mode === 'moved' || mode === 'refused') {
+          await assert.rejects(single(), mode === 'moved' ? /已变化/ : /被拒绝/);
+          assert.equal(f.state.fuel, 3000);
+          assert.equal(dispatches.length, mode === 'refused' ? 1 : 0);
+          assert.deepEqual(l.keyRecords(), {});
+        } else {
+          assert.equal((await single()).status, mode === 'unknown' ? 'unknown' : 'won');
+          assert.deepEqual(dispatches, [201]);
+          if (mode === 'unknown') {
+            assert.equal((await recoverFleetLineups(f.client, f.player, l)).pending.length, 1);
+            assert.deepEqual(f.building.fleet.formation, formation);
+            continue;
+          }
+          f.fleet.state = 4;
+          assert.equal((await recoverFleetLineups(f.client, f.player, l)).pending.length, 1);
+          f.fleet.state = 1;
+          assert.equal((await recoverFleetLineups(f.client, f.player, l)).restored.length, 1);
+        }
+      }
+      assert.deepEqual(f.building.fleet.formation, original, mode);
     }
   });
   await test('海盗预览忽略累计汽油用量，沿用自动挂机停止状态且不发送派遣', async () => {
@@ -280,6 +358,10 @@ try {
         const response = await fetch(url + '/api/settings/preview?account=b', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ settings: f.settings, category: 'pirateHunt' }) });
         const result = await response.json(); assert.equal(response.status, 200, result.error); return result;
       };
+      const off = await preview(); assert.equal(off.actions.length, 0); assert.match(off.notes.join(' '), /海盗挂机已关闭/);
+      f.settings.pirate.enabled = true;
+      const huntOff = await preview(); assert.equal(huntOff.actions.length, 0); assert.match(huntOff.notes.join(' '), /自动挑战下一级/);
+      f.settings.pirateHunt.enabled = true;
       assert.equal((await preview()).actions.length, 1);
       progress.spent = 1000000;
       assert.equal((await preview()).actions.length, 1);

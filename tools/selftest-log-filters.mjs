@@ -124,6 +124,43 @@ try {
   assert.deepEqual(ids, [...ids].sort((left, right) => left - right));
   console.log('通过：重连先同步每个账号的清空水位，再按全局编号回放新增日志');
 
+  const baseline = terminal.length;
+  const compact = await subscribe('?account=logs-a&compact=1');
+  const wait = { waitScope: 'test-building', waitKey: 'level-28', category: 'building', diagnostic: '逐栋检查详情' };
+  const firstWait = app.emit(a, 'info', '等待角色 28 级', wait);
+  for (let index = 0; index < 410; index++) app.emit(a, 'info', '等待角色 28 级', wait);
+  assert.equal(terminal.length, baseline + 1);
+  const repeated = a.log.filter(row => row.rowId === firstWait.id);
+  assert.equal(repeated.length, 1);
+  assert.equal(repeated[0].count, 411);
+  await waitFor(() => compact.events.some(event => event.data.count === 411), '增量次数更新');
+  const revisions = compact.events.filter(event => event.data.rowId === firstWait.id);
+  assert.equal(revisions[0].data.detail, '逐栋检查详情');
+  assert(revisions.slice(1).every(event => event.data.reuseDetail && !event.data.detail));
+  const latest = await subscribe('?account=logs-a', { 'Last-Event-ID': String(firstWait.id) });
+  await waitFor(() => messages(latest).includes('等待角色 28 级'), '去重后重连');
+  assert.deepEqual(latest.events.filter(event => event.type === 'log').map(event => event.data.count), [411]);
+  assert.equal(latest.events.at(-1).data.detail, '逐栋检查详情');
+  app.emit(a, 'info', '工厂已开工', { waitScope: wait.waitScope });
+  const again = app.emit(a, 'info', '等待角色 28 级', wait);
+  assert.notEqual(again.rowId, firstWait.rowId);
+  assert.equal(again.count, 1);
+
+  const check = key => app.emit(a, 'info', '等待建材', { taskKey: key, waitKey: 'materials' });
+  const upgrade = check('upgrade'), finish = check('finishUpgrade'), retry = check('upgrade');
+  assert.equal(upgrade.category, finish.category);
+  assert.notEqual(upgrade.feature.key, finish.feature.key);
+  assert.notEqual(upgrade.rowId, finish.rowId);
+  assert.equal(retry.rowId, upgrade.rowId);
+  assert.equal(retry.count, 2);
+
+  const batch = key => app.emit(a, 'info', '木板生产记录', { taskKey: key, batch: 'boards', factory: '木材厂', product: '木板' });
+  const planned = batch('startProduce'), accelerated = batch('adSpeedUpProduce');
+  assert.equal(planned.category, accelerated.category);
+  assert.notEqual(planned.rowId, accelerated.rowId);
+  assert.equal(batch('adSpeedUpProduce').count, 2);
+  console.log('通过：同分类下的不同功能分别累计等待和批次记录');
+
   for (let index = 0; index < 450; index++) app.emit(index % 2 ? a : b, 'info', '容量测试' + index);
   const bounded = await subscribe('?scope=all');
   await waitFor(() => messages(bounded).includes('容量测试449'), '容量回放');

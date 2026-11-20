@@ -14,9 +14,9 @@ import { leafFor, isInstalled } from './mitm-ca.mjs';
 import { loadProtocol } from '../src/proto.mjs';
 import { createCodec } from '../src/codec.mjs';
 import { inspectGameFrame } from '../src/frame-header.mjs';
+import { DEFAULT_PROXY_PORT } from '../src/platform/proxy-port.mjs';
 
-// 与控制台默认端口分开：控制台 17321，代理 17322。
-export const DEFAULT_PROXY_PORT = Number(process.env.CW_PROXY_PORT ?? 17322);
+export { DEFAULT_PROXY_PORT };
 let codec;
 function defaultCodec() {
   return codec ??= createCodec(loadProtocol());

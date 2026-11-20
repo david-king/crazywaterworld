@@ -2,6 +2,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { spawn } from 'node:child_process';
 import { pathToFileURL, fileURLToPath } from 'node:url';
+import { consoleAccessHints, consoleHost, consoleUrl, isConsoleHostOption, reportPublicIp } from '../src/console-address.mjs';
 
 const ROOT = fileURLToPath(new URL('../', import.meta.url));
 const NODE_REQUIREMENT = '^20.19.0 || >=22.12.0';
@@ -142,7 +143,8 @@ export async function startConsole(args = process.argv.slice(2), dependencies = 
   const root = dependencies.root ?? ROOT;
   const nodeVersion = dependencies.nodeVersion ?? process.versions.node;
   checkNode(nodeVersion);
-  const command = String(args[0] ?? '').toLowerCase();
+  const command = isConsoleHostOption(args[0]) ? '' : String(args[0] ?? '').toLowerCase();
+  const options = command ? args.slice(1) : args;
   if (!['', 'start', 'console', 'url', 'address', 'status', 'check', 'recover'].includes(command)) {
     throw new Error('未知启动命令。可直接启动，或使用 url、status、recover。');
   }
@@ -150,13 +152,18 @@ export async function startConsole(args = process.argv.slice(2), dependencies = 
   const maintenance = ['status', 'check', 'recover'].includes(command);
   // Address helpers only use Node built-ins and work before dependency setup.
   // Recovery must remain available even when the listening settings are invalid.
-  let address;
-  if (!maintenance) {
-    const { consoleHost, consoleUrl } = await import('../src/console-address.mjs');
-    address = consoleUrl(consoleHost(env), env.CW_PORT) + '/';
-  }
+  const host = maintenance ? null : consoleHost(env, options);
+  const address = maintenance ? null : consoleUrl(host, env.CW_PORT) + '/';
   if (command === 'url' || command === 'address') {
-    print(address);
+    if (command === 'url') print(address);
+    else {
+      if (Number(env.CW_PORT) === 0) print(`监听主机  ${host}（端口将在启动时自动分配）`);
+      else {
+        print(address);
+        for (const hint of consoleAccessHints(host, env.CW_PORT)) print(hint);
+      }
+      await reportPublicIp(print, { env, fetchImpl: dependencies.fetchImpl });
+    }
     const hold = dependencies.hold ?? (() => new Promise(() => { setInterval(() => {}, 60_000); }));
     await hold();
     return;
@@ -179,10 +186,10 @@ export async function startConsole(args = process.argv.slice(2), dependencies = 
   }
   env.CW_NO_BROWSER = '1';
   env.CW_QUIET_START = '1';
-  print(`[启动] ${address}（请保持此窗口打开）`);
+  print('[启动] 正在启动控制台，请保持此窗口打开。');
   const launch = dependencies.launch ?? (async () => {
     process.chdir(root);
-    process.argv = [process.argv[0], path.join(root, 'src', 'app.mjs'), 'console'];
+    process.argv = [process.argv[0], path.join(root, 'src', 'app.mjs'), 'console', ...options];
     await import(pathToFileURL(path.join(root, 'src', 'app.mjs')).href);
   });
   await launch();

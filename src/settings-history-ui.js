@@ -74,8 +74,8 @@ function historyName(label, value = '') {
   return input;
 }
 
-function historyUrl(session) {
-  return '/api/settings/history?account=' + encodeURIComponent(session.owner);
+function historyUrl(session, suffix = '') {
+  return '/api/settings/history' + suffix + '?account=' + encodeURIComponent(session.owner);
 }
 
 function saveHistory(session, name, settings, draft = false) {
@@ -99,19 +99,37 @@ function historySaveScreen() {
 }
 
 function historyList() {
-  historyScreen('历史配置', '只显示当前游戏账号的历史记录。');
+  historyScreen('历史配置');
   void historyWork(async session => {
     const { entries } = await call(historyUrl(session));
-    if (!historyActive(session)) return;
-    if (!entries.length) historyBody.append(el('p', 'dim', '还没有保存过配置。'));
-    for (const entry of entries) {
-      const row = el('div', 'history-record');
-      const text = el('div');
-      text.append(el('strong', '', entry.name), el('small', '', when(entry.at) + (entry.draft ? ' · 历史草稿' : ' · 配置快照')));
-      row.append(text, historyButton('查看与恢复', () => historyWork(session => historyPreview(session, entry.id))));
-      historyBody.append(row);
-    }
+    if (historyActive(session)) historyRenderList(entries);
   });
+}
+
+function historyRenderList(entries) {
+  clear(historyBody);
+  historyStatus.textContent = '';
+  if (!entries.length) historyBody.append(el('p', 'dim', '暂无历史配置。'));
+  for (const [index, entry] of entries.entries()) {
+    const row = el('div', 'history-record');
+    const text = el('div', 'history-record-info');
+    text.append(el('strong', '', entry.name), el('small', '', when(entry.at) + (entry.draft ? ' · 历史草稿' : ' · 配置快照')));
+    const actions = el('div', 'history-record-actions');
+    const remove = historyButton('删除', () => historyWork(async session => {
+      if (!window.confirm('删除历史配置「' + entry.name + '」？')) return;
+      const { entries: remaining } = await call(historyUrl(session, '/delete'), {
+        method: 'POST', body: JSON.stringify({ confirm: true, id: entry.id }),
+      });
+      if (!historyActive(session)) return;
+      historyRenderList(remaining);
+      const next = historyBody.children[Math.min(index, remaining.length - 1)]?.querySelector('button');
+      (next || historyActions.querySelector('button')).focus();
+    }));
+    remove.classList.add('history-delete');
+    actions.append(historyButton('查看与恢复', () => historyWork(session => historyPreview(session, entry.id))), remove);
+    row.append(text, actions);
+    historyBody.append(row);
+  }
 }
 
 function historyDifferences(before, after, prefix = '', rows = []) {

@@ -16,9 +16,24 @@ export function createSettingsHistory(directory) {
     return data;
   }
 
+  function summary({ id, name, at, draft }) {
+    return { id, name, at, draft };
+  }
+
   return {
     list(accountId) {
-      return read(fileFor(accountId)).entries.map(({ id, name, at, draft }) => ({ id, name, at, draft }));
+      return read(fileFor(accountId)).entries.map(summary);
+    },
+    remove(accountId, id) {
+      const file = fileFor(accountId);
+      return withFileLock(file, () => {
+        const data = read(file);
+        const index = data.entries.findIndex(entry => entry.id === id);
+        if (index < 0) throw Error('当前游戏账号没有这条配置记录');
+        data.entries.splice(index, 1);
+        atomicJson(file, data);
+        return data.entries.map(summary);
+      });
     },
     preview(accountId, id, options) {
       const entry = read(fileFor(accountId)).entries.find(row => row.id === id);
@@ -45,7 +60,7 @@ export function createSettingsHistory(directory) {
         const entry = { id: randomUUID(), name: title, at: new Date().toISOString(), draft, document };
         data.entries = [entry, ...data.entries].slice(0, 50);
         atomicJson(file, data);
-        return { id: entry.id, name: entry.name, at: entry.at, draft: entry.draft };
+        return summary(entry);
       });
     },
   };

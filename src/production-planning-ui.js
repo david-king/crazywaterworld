@@ -45,7 +45,12 @@ function productionPlanSummary(data) {
     if (Number.isFinite(data.upperBound)) summary.appendChild(el('span', 'dim', '约需 ' + productionPlanDuration(data.upperBound)));
     return summary;
   }
-  if (data.missingReads?.length) return note('生产数据还不完整，暂时无法预计备齐时间。请稍后重新生成计划。');
+  if (data.missingReads?.length) {
+    const reasons = data.missingReads.map(reason => reason.replace(/^[a-zA-Z]\w*(?: · |$)/, '')).filter(Boolean);
+    const summary = note('生产数据还不完整，暂时无法预计备齐时间。');
+    for (const reason of new Set(reasons)) summary.appendChild(el('span', null, reason));
+    return summary;
+  }
   if (data.status === 'infeasible') return note('按当前条件，无法备齐所有需求。');
   return note('暂时无法预计全部需求的备齐时间。');
 }

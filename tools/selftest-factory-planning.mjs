@@ -34,6 +34,25 @@ function fixture() {
 }
 const products = plan => plan.actions.filter(step => step.request === 'StartFactoryProduceRequest').map(step => step.body.productId);
 
+test('升级规划记录逐栋结构化原因，预览保留原文，补齐材料后安排升级', () => {
+  const f = fixture();
+  f.config.tables.BuildingUpgradeCfg = table([
+    { buildingType: '食品厂', level: 2, consume: [['螺丝', 4]] },
+    { buildingType: '民居', level: 2, playerLevel: 41, curPeople: 200 },
+  ]);
+  f.survey.buildings.push({ buildingId: '1民居', type: '民居', level: 1, product: [] });
+  const inspect = () => planWorld(f.survey, { config: f.config, enabled: key => key === 'upgrade' });
+  const before = inspect();
+  assert.deepEqual(before.upgradeChecks.find(row => row.kind === 'materials').items, [{ id: '螺丝', name: '螺丝', missing: 4 }]);
+  assert(before.upgradeReasons.includes('食品厂-1缺螺丝 ×4'));
+  assert(before.upgradeReasons.includes('民居-1需要角色 41 级'));
+  f.stock.set('螺丝', 4); f.survey.player.level = 41;
+  const after = inspect();
+  assert(after.actions.some(step => step.kind === 'upgrade' && step.body.buildingId === '1食品厂'));
+  assert.equal(after.upgradeChecks.length, 1);
+  assert.equal(after.upgradeChecks[0].kind, 'population');
+});
+
 test('低优先级工厂保留海兽已齐的整批进阶材料，优先级反转后正常生产', () => {
   const f = fixture();
   Object.assign(f.settings.factory, { demandFirst: true, demandPriority: ['petAdvance', 'cargo'] });

@@ -1,15 +1,27 @@
 import { isIP } from 'node:net';
+import { networkInterfaces } from 'node:os';
 
 export function normalizeConsoleHost(value) {
   let host = String(value ?? '').trim() || '127.0.0.1';
   if (host.startsWith('[') && host.endsWith(']')) host = host.slice(1, -1);
   if (!host.includes('%') && isIP(host)) return host;
   if (host.length <= 253 && host.split('.').every(label => /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/i.test(label))) return host;
-  throw new Error('CW_HOST 请填写 IP 地址或主机名，不要包含 http://、端口或路径');
+  throw new Error('--host 或 CW_HOST 请填写 IP 地址或主机名，不要包含 http://、端口或路径');
 }
 
-export function consoleHost(env = process.env) {
-  return normalizeConsoleHost(env.CW_HOST);
+export function isConsoleHostOption(arg) {
+  return arg === '--host' || arg?.startsWith('--host=');
+}
+
+export function consoleHost(env = process.env, args = []) {
+  const index = args.findLastIndex(isConsoleHostOption);
+  if (index < 0) return normalizeConsoleHost(env.CW_HOST);
+  const option = args[index];
+  const next = args[index + 1];
+  if (option === '--host' && (next === undefined || next.startsWith('--'))) return '0.0.0.0';
+  const host = option === '--host' ? next : option.slice('--host='.length);
+  if (!host.trim()) throw new Error('--host 的地址不能为空，可单独使用 --host 监听所有 IPv4 网卡');
+  return normalizeConsoleHost(host);
 }
 
 // Wildcard addresses describe where to listen, not where a browser should go.
@@ -24,4 +36,42 @@ export function consoleUrl(host, port) {
     return `http://${ipv6 === '[::]' ? '[::1]' : ipv6}:${value}`;
   }
   return `http://${normalized}:${value}`;
+}
+
+// Use the bound socket's address at startup so hostnames and port 0 are resolved.
+export function consoleAccessHints(host, port, interfaces = networkInterfaces) {
+  const name = normalizeConsoleHost(host);
+  const ip = isIP(name) === 6 ? new URL(`http://[${name}]`).hostname.slice(1, -1) : name;
+  if ((isIP(ip) === 4 && ip.startsWith('127.')) || ip === '::1' || ip.toLowerCase() === 'localhost') {
+    return ['监听范围  仅本机可直接访问'];
+  }
+  if (ip !== '0.0.0.0' && ip !== '::') return [`监听地址  ${consoleUrl(ip, port)}/`];
+  const family = ip === '::' ? 6 : 4;
+  const urls = new Set();
+  try {
+    for (const entry of Object.values(interfaces()).flat()) {
+      if (!entry || entry.internal || isIP(entry.address) !== family) continue;
+      // Link-local IPv6 addresses require a zone on the connecting device.
+      if (family === 6 && (entry.address.includes('%') || /^fe[89ab]/i.test(entry.address))) continue;
+      urls.add(consoleUrl(entry.address, port) + '/');
+    }
+  } catch { /* Interface enumeration can be unavailable on a restricted host. */ }
+  return urls.size ? Array.from(urls, url => '网卡地址  ' + url)
+    : [`监听地址  ${ip}（未找到可列出的 IPv${family} 网卡地址）`];
+}
+
+export async function reportPublicIp(print, { env = process.env, fetchImpl = fetch } = {}) {
+  if (env.CW_SHOW_PUBLIC_IP === '0') return;
+  for (const endpoint of ['https://api64.ipify.org', 'https://checkip.amazonaws.com']) {
+    try {
+      const response = await fetchImpl(endpoint, { signal: AbortSignal.timeout(2500), redirect: 'error' });
+      if (!response.ok) { await response.body?.cancel(); continue; }
+      const ip = (await response.text()).trim();
+      if (isIP(ip) && !ip.includes('%')) {
+        print('公网出口 IP  ' + ip);
+        return;
+      }
+    } catch { /* Try the other IP service after a timeout or network error. */ }
+  }
+  print('公网出口 IP  查询失败，可稍后重试');
 }

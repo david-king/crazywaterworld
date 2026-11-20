@@ -159,7 +159,7 @@ try{
    assert.equal(recoveredLedger.snapshot().uncertain, 0);
    assert.deepEqual(recoveryEvents, [{
     event: 'operation', operationId: record.id, dedupeKey: uniqueKey,
-    module: 'guildMutual', request, phase: 'confirmed', result: 'confirmed',
+    module: 'guildMutual', request, phase: 'confirmed', result: 'confirmed', recovered: true,
    }]);
    await run(rebuilt, recoveredLedger, options);
    assert.equal(recoveryEvents.length, 1);
@@ -185,7 +185,7 @@ try{
   assert.equal(l.keyRecords()[uniqueKey].confirmed, true);
   assert.deepEqual(events, [{
    event: 'operation', operationId: null, dedupeKey: uniqueKey,
-   module: 'guildMutual', request: 'GuildAidHelpRequest', phase: 'confirmed', result: 'confirmed',
+   module: 'guildMutual', request: 'GuildAidHelpRequest', phase: 'confirmed', result: 'confirmed', recovered: true,
   }]);
   await run(f, l, {target: 1});
   assert.equal(events.length, 1);

@@ -11,7 +11,10 @@ process.env.CW_DATA_DIR = directory;
 process.env.CW_CONFIG_PACK = path.join(directory, 'config.json');
 process.env.CW_RESOURCE_DIR = path.join(directory, 'resources');
 process.env.CW_RESOURCE_AUTO_UPDATE = '0';
-fs.writeFileSync(process.env.CW_CONFIG_PACK, '[]');
+fs.writeFileSync(process.env.CW_CONFIG_PACK, JSON.stringify([
+  [1, 'ResourceCfg', { data: [{ id: 'GOLD', show_name: '金币' }, { id: 'RUBY', show_name: '钻石' }] }],
+  [2, 'ItemCfg', { data: ['种子','公会科技点','汽油'].map(id => ({ id, show_name: id })) }],
+]));
 const { accountFromCredential, saveStore, loadStore } = await import('../src/accounts.mjs');
 const { saveAutomationSettings, settingsFromNative } = await import('../src/automation-settings.mjs');
 const { automationTasks } = await import('../src/automation.mjs');
@@ -33,12 +36,16 @@ GameClient.prototype.connect = async function (login) {
   const index = rows.findIndex(row => row.id === login.eworldParams.openId);
   assert.ok(index >= 0, '只能连接隔离测试账号');
   logins.push(rows[index].id);
+  this.fixtureGold = index ? 7654321 : 3112412;
   live.add(this);
   const otherRole = login.worldId === 9002;
   return { result: 0, playerInfo: { playerId: otherRole ? 3 : index + 1, worldId: otherRole ? 9002 : 9001,
     level: 5, nickname: otherRole ? '二区船长' : rows[index].lastSeen.nickname } };
 };
-GameClient.prototype.request = async name => {
+GameClient.prototype.request = async function (name) {
+  if (name === 'AllResourceRequest') return { list: [{ res: 3, amount: this.fixtureGold }, { res: 4, amount: 45422 }] };
+  if (name === 'AfkInfoRequest') return { afkInfo: { level: 67, afkFinishTime: 1 } };
+  if (name === 'OtherPlayerInfoRequest') return { power: 1871646 };
   if (name === 'GameWorldListRequest') return { recentWorlds: [
     { worldId: 9001, roleInfo: { id: 1, worldId: 9001, nickname: '海风船长' } },
     { worldId: 9002, roleInfo: { id: 3, worldId: 9002, nickname: '二区船长' } },
@@ -49,7 +56,8 @@ GameClient.prototype.request = async name => {
 GameClient.prototype.send = () => {};
 GameClient.prototype.sendWatch = async () => ({});
 GameClient.prototype.stop = function () { live.delete(this); };
-const protocol = Object.fromEntries(['OnWaterRequest', 'OnWaterResponse', 'AllItemRequest', 'AllItemResponse'].map(name => [name, true]));
+const protocol = Object.fromEntries(['OnWater', 'AllItem', 'AllResource', 'AfkInfo']
+  .flatMap(name => [[name + 'Request', true], [name + 'Response', true]]));
 const app = createConsole({ port: 0, protocol });
 const output = path.resolve('output/account-controls');
 fs.mkdirSync(output, { recursive: true });
@@ -68,10 +76,72 @@ try {
     const page = await context.newPage();
     page.on('pageerror', error => errors.push(error.message));
     page.setDefaultTimeout(10000);
+    if (width === 1280) {
+      await page.addInitScript(() => history.replaceState({consoleView:{tab:'account'}}, ''));
+    }
     await page.goto(root);
     await page.locator('#account-picker-title').filter({ hasText: '当前验收账号' }).waitFor();
     await page.locator('#tabs [data-tab="account"]').click();
     const cards = page.locator('#accounts .account-card');
+    await cards.nth(0).getByRole('button', {name:'区服管理'}).waitFor();
+    const heading = page.locator('.account-page-heading');
+    const title = await heading.locator('h2').boundingBox();
+    const count = await heading.locator('#account-count').boundingBox();
+    for (const name of ['导入账号', '导出账号', '添加账号']) {
+      const button = await heading.getByRole('button', { name, exact: true }).boundingBox();
+      const centerY = button.y + button.height / 2;
+      assert.ok([title, count].every(box => centerY >= box.y && centerY <= box.y + box.height),
+        width + 'px账号标题、数量及操作保持同一行');
+      if (width < 768) assert.equal(button.height, 32, width + 'px手机工具栏使用紧凑按钮');
+    }
+    if (width < 768) {
+      await page.evaluate(() => window.scrollTo(0, 0));
+      for (const selector of ['#loop-every', '#logs-open', '#import-accounts']) {
+        const hit = await page.locator(selector).evaluate(control => {
+          const box = control.getBoundingClientRect();
+          const target = control.closest('label') ?? control;
+          return [-21, 21].every(offset => target.contains(document.elementFromPoint(
+            box.x + box.width / 2, box.y + box.height / 2 + offset)));
+        });
+        assert.ok(hit, width + 'px触屏点击控件上下边缘可命中 ' + selector);
+      }
+    }
+    if (width === 1280) {
+      await cards.nth(0).getByText('连接后读取资源').waitFor();
+      assert.deepEqual(logins, [], '恢复账号页只显示保存的角色资料');
+      await cards.nth(0).getByRole('button', {name:'连接并读取'}).click();
+    }
+    const firstGold = cards.nth(0).locator('[data-account-field="resources"]').getByText('3,112,412');
+    const secondGold = cards.nth(1).locator('[data-account-field="resources"]').getByText('7,654,321');
+    await firstGold.waitFor();
+    await cards.nth(0).getByText('等级 67 · 收益已满').waitFor();
+    await cards.nth(0).getByText('1,871,646').waitFor();
+    assert.equal(await cards.nth(0).locator('[data-account-field="world"]').innerText(), '海岛9001服');
+    assert.equal(await page.locator('#account-worlds-dialog').isVisible(), false);
+    assert.equal(await page.getByRole('button', { name: '查看详情', exact: true }).count(), 0);
+    if (width === 1280) {
+      const [a, b] = await Promise.all([cards.nth(0).boundingBox(), cards.nth(1).boundingBox()]);
+      assert.ok(Math.abs(a.y - b.y) < 1 && Math.abs(a.width - b.width) < 1 && b.x > a.x, '账号卡片等宽并排');
+      await cards.nth(1).getByRole('button', {name:'连接并读取'}).click();
+      await secondGold.waitFor();
+      assert.equal(loadStore().activeId, 'first', '读取非当前账号不切号');
+      const manageSecond = cards.nth(1).getByRole('button', {name:'区服管理'});
+      await manageSecond.click();
+      const manager = page.getByRole('dialog', {name:'第二个验收账号 · 区服管理'});
+      await Promise.all([
+        page.waitForRequest(request => new URL(request.url()).pathname === '/api/worlds' && new URL(request.url()).searchParams.get('account') === 'second'),
+        manager.getByRole('button', {name:'加载区服'}).click(),
+      ]);
+      await manager.getByText('二区船长', {exact:false}).waitFor();
+      await page.keyboard.press('Escape');
+      assert.ok(await manageSecond.evaluate(button => button === document.activeElement));
+      assert.equal(loadStore().activeId, 'first', '管理其他账号的区服保留当前账号');
+      await cards.nth(1).getByRole('button', {name:'切换账号'}).click();
+      await cards.nth(1).locator('[data-account-field="current"]').waitFor();
+      assert.ok(await firstGold.isVisible() && await secondGold.isVisible(), '切换后两张卡片都保留自己的余额');
+      await cards.nth(0).getByRole('button', {name:'切换账号'}).click();
+      await cards.nth(0).locator('[data-account-field="current"]').waitFor();
+    }
     const first = cards.nth(0).locator('[data-account-action="loop"]');
     const second = cards.nth(1).locator('[data-account-action="loop"]');
     async function checkStatus(index, expected) {
@@ -90,6 +160,32 @@ try {
     assert.equal(app.sessions.get('first')?.loop.running ?? false, false);
     assert.equal(app.sessions.get('second')?.loop.running ?? false, false);
     if (width === 1280) assert.equal(mailReads, 0, '打开页面读取资料不会执行挂机任务');
+
+    const headerHeights = await page.evaluate(async () => {
+      const { actions, accountsById } = window.cwConsoleStore.getState();
+      const original = accountsById.first.status;
+      const heights = [];
+      try {
+        for (const status of [
+          { paused: true },
+          { syncingProduction: true, state: 'CONNECTING' },
+          { connected: true, looping: true },
+        ]) {
+          actions.setStatus('first', status);
+          await Promise.resolve();
+          heights.push(document.querySelector('.headline').getBoundingClientRect().height);
+        }
+      } finally {
+        actions.setStatus('first', original);
+      }
+      return heights;
+    });
+    assert.ok(headerHeights.every(height => height === headerHeights[0]), width + 'px暂停、恢复同步和挂机期间页头高度稳定');
+    if (width === 1280) {
+      const brand = await page.locator('.mast').boundingBox();
+      const picker = await page.locator('#account-picker').boundingBox();
+      assert.ok(picker.y < brand.y + brand.height, '桌面账号工具栏与标题保持同一行');
+    }
 
     // No render function is called: a store update must reach all DOM consumers.
     await page.locator('#account-picker-trigger').click();
@@ -146,16 +242,20 @@ try {
     await checkStatus(1, '挂机中');
     await page.unroute('**/api/accounts/pause?account=second');
 
+    await secondGold.waitFor();
     await cards.nth(0).scrollIntoViewIfNeeded();
     await page.screenshot({ path: path.join(output, 'accounts-' + width + '.png'), fullPage: true, animations: 'disabled' });
     assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), true, '页面无横向溢出');
     for (const card of await cards.all()) {
       const layout = await card.locator('.account-card-actions').evaluate(actions => {
         const box = actions.getBoundingClientRect();
-        return [...actions.children].map(button => {
+        return [...actions.children].filter(button => !button.hidden).map(button => {
           const rect = button.getBoundingClientRect();
+          const range = document.createRange();
+          range.selectNodeContents(button);
+          const text = range.getBoundingClientRect();
           return { top: rect.top, fits: rect.left >= box.left - 1 && rect.right <= box.right + 1,
-            textFits: button.scrollWidth <= button.clientWidth && button.scrollHeight <= button.clientHeight };
+            textFits: text.left >= rect.left && text.right <= rect.right && text.top >= rect.top && text.bottom <= rect.bottom };
         });
       });
       assert.ok(layout.every(button => button.fits && button.textFits), width + 'px按钮及文字完整可见');
@@ -187,11 +287,11 @@ try {
     assert.equal(app.sessions.get('first').loop.running, false, '刷新不重启已暂停的挂机');
     if (width === 320) {
       const oldClient = app.sessions.get('first').client;
-      await cards.nth(0).locator('[data-account-action="details"]').click();
+      await cards.nth(0).getByRole('button', {name:'区服管理'}).click();
       await page.locator('#load-worlds').click();
       await page.locator('#worlds').getByRole('button', { name: '添加角色' }).click();
       await page.locator('#worlds .acct').filter({ hasText: '二区船长' }).getByRole('button', { name: '已添加' }).waitFor();
-      await page.locator('#account-info-close').click();
+      await page.getByRole('button', {name:'关闭区服管理'}).click();
       const nextRole = cards.filter({ hasText: '二区船长' });
       const switchRole = nextRole.getByRole('button', { name: '切换并托管' });
       await switchRole.waitFor();
@@ -210,7 +310,11 @@ try {
       assert.equal(oldClient.connected, false);
       assert.equal(app.sessions.get('first').paused, true);
       assert.equal(app.sessions.get('second').client.connected, true, '其他登录账号继续在线');
-      console.log('通过：从旧账号详情添加二区，保留原区并切换托管');
+      await page.reload();
+      await firstGold.waitFor();
+      await secondGold.waitFor();
+      assert.equal(app.sessions.get('first').paused, true, '重开账号页可查看已暂停角色的上次余额');
+      console.log('通过：从当前账号卡片添加二区，保留原区并切换托管');
     }
     console.log('通过：' + width + 'px账号启停、单行按钮、请求锁及当前账号隔离');
     await context.close();

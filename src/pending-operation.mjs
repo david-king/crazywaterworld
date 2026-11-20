@@ -7,6 +7,7 @@ export function createPendingOperation(ledger, {
   isNotSent = error => error.notSent === true,
   client,
   module,
+  label,
 }) {
   let ticket = null;
   let started = false;
@@ -20,11 +21,12 @@ export function createPendingOperation(ledger, {
   }
 
   return {
+    get operationId() { return log?.operationId; },
     reserve(...args) {
       if (ticket || settled) throw new Error('操作已经预留或结算');
       ticket = ledger.reserve(...args);
       if (client) log = createOperationLog(client, {
-        operationId: ticket.id, dedupeKey: args[3]?.uniqueKey, module, request,
+        ticket, operationId: ticket.id, dedupeKey: args[3]?.uniqueKey, module, request, label,
       });
       return ticket;
     },

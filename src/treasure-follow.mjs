@@ -1,5 +1,6 @@
 // 跟随只使用当前连接实际收到的舰队状态。推送是增量，不把未出现的舰队推断为返航。
 import {exactAutomationId} from './automation-policy.mjs';
+import { inDailyWindows } from './daily-time-windows.mjs';
 const watches=new WeakMap();
 const now=c=>Math.floor((Date.now()+(c.serverClockOffsetMs||0))/1000);
 const valid=n=>Number.isSafeInteger(n)&&n>=0;
@@ -13,7 +14,7 @@ export function watchTreasureTravel(client){
    const id=exactAutomationId(item.owner?.playerId);
    if(!id||!/^\d+远征船$/.test(item.buildingId??''))continue;
    const key=id+':'+item.buildingId,previous=fleets.get(key);
-   const row={playerId:id,name:item.owner?.nickname||'',buildingId:item.buildingId,state:item.state,uid:item.treasureLootUid??0,targetGrid:item.targetGridIdx??0,startGrid:item.startGridIdx??0,startedAt:item.moveStartTs??0,arriveAt:item.moveEndTs??0,seenAt:time,guildId:exactAutomationId(item.owner?.guildId)};
+   const row={playerId:id,name:item.owner?.nickname||'',buildingId:item.buildingId,state:item.state,uid:item.treasureLootUid??0,targetGrid:item.targetGridIdx??0,targetCityId:item.targetCityId??0,startGrid:item.startGridIdx??0,startedAt:item.moveStartTs??0,arriveAt:item.moveEndTs??0,seenAt:time,guildId:exactAutomationId(item.owner?.guildId)};
    if(row.state===2&&(!valid(row.startedAt)||!row.startedAt||!valid(row.arriveAt)||row.arriveAt<=time||row.startedAt>time+30||!valid(row.targetGrid)||!row.targetGrid))continue;
    // 已确认结束的同一段旧行军不能被迟到快照重新激活。
    if(row.state===2&&previous&&(row.startedAt<previous.latestStart||previous.fleet.state!==2&&row.startedAt<=previous.latestStart))continue;
@@ -34,3 +35,11 @@ export function matchesFollowDeparture(fleet,preferences,ownId,others=[]){
  // 同名出发者无法用昵称消歧时等待，不随便跟随第一人。
  return new Set(others.filter(f=>f.name===fleet.name).map(f=>f.playerId)).size<=1;
 }
+
+export function matchesChaseDeparture(fleet, preferences, ownId, others = []) {
+ return preferences?.chase && fleet.state === 2 && !fleet.targetCityId && fleet.playerId !== ownId &&
+   preferences.chaseNames.includes(fleet.name) &&
+   !others.some(other => other.name === fleet.name && other.playerId !== fleet.playerId);
+}
+
+export const treasureChaseActive = (preferences, time) => !!preferences?.chase && inDailyWindows(preferences.chaseWindows, time);

@@ -10,6 +10,7 @@
 // 服务端是否接受仍以实际回包为准，这里只保证"发出去的一定是客户端也会发的"。
 
 import { farmInventory } from './farm-planting.mjs';
+import { linkOperationResult } from './operation-log.mjs';
 import { normalize } from './worlds.mjs';
 import { planAdvancedHeroGrowth, readAdvancedHeroContext, runAdvancedHeroStep, verifyAdvancedHeroStep } from './hero-advanced-growth.mjs';
 import { planHeroGearSteps, readHeroGearContext, executeHeroGearStep, verifyHeroGearStep } from './hero-gear-growth.mjs';
@@ -334,14 +335,14 @@ export async function runHeroPlan(client, protocol, plan, { allowMutate = false,
         writePending = false;
         const entry = { step, targetLevel, ok: true, ...outcome };
         await afterAction?.(budgetStep, ticket, outcome.response ? entry : { ...entry, sent: true });
-        results.push(entry);
+        results.push(linkOperationResult(entry, ticket));
         onStep?.(entry);
       } catch (error) {
         const notSent = !sent || (writePending && error.notSent === true);
         if (prepared) await cancelAction?.(budgetStep, ticket, { notSent, error });
         blocked.add(key);
         const entry = { step, targetLevel, ok: false, ...(error.code === 'AUTOMATION_SKIP' ? { skipped: true } : {}), error: error.message };
-        results.push(entry);
+        results.push(linkOperationResult(entry, ticket));
         onStep?.(entry);
         break;
       }

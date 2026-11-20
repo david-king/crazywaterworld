@@ -134,6 +134,7 @@ function confirmRecoveredOperation(client, ledger, uniqueKey, record, request) {
     request,
     phase: 'confirmed',
     result: 'confirmed',
+    recovered: true,
   });
 }
 
@@ -158,7 +159,7 @@ async function mutualStep(context, options, startIdentity, day, signal, exchange
   if (state.ready.length) {
     if (Object.values(ledger.keyRecords()).some(record=>!record.confirmed && matching(record,state) && record.details.kind==='guildAidClaim')) return {done:true,pending:true,reason:'上次领取结果待确认，暂不重复领取或赠送'};
     const operation = createPendingOperation(ledger, {
-      client, module: 'guildMutual', request: 'GotMyGuildAidRequest',
+      client, module: 'guildMutual', request: 'GotMyGuildAidRequest', label: '领取联盟求助物资',
       isNotSent: error => error.guildAidClaimNotSent === true,
     });
     let selectedMaterialCount = 0;
@@ -173,11 +174,11 @@ async function mutualStep(context, options, startIdentity, day, signal, exchange
       if (result.ok) {operation.confirm();exchange.received+=selectedMaterialCount;}
       if (!result.ok) {
         operation.fail(new Error(result.label));
-        return {done:true,pending:true,received,reason:result.label};
+        return {operationId:operation.operationId,done:true,pending:true,received,reason:result.label};
       }
     } catch(error) {
       const { pending } = operation.fail(error);
-      return {done:true,pending,received,reason:'领取未完成：'+error.message};
+      return {operationId:operation.operationId,done:true,pending,received,reason:'领取未完成：'+error.message};
     }
     if (!allowed()) return {done:true,received,reason:'账号已暂停，本次互助结束'};
     state=await readMutualAid(client,config,player,options);
@@ -191,15 +192,15 @@ async function mutualStep(context, options, startIdentity, day, signal, exchange
       if(!allowed() || state.day!==day || beijingDay(nowOf(client)*1000)!==day || ledger.snapshot().day!==day)return{done:true,received,reason:'发起求助前状态已变化'};
       const key=`guildAidAsk:${state.worldId}:${state.playerId}:${day}:${state.askUsed}`;
       if(ledger.hasKey(key))return{done:true,pending:true,received,reason:'同一次求助计数已有提交记录，等待刷新'};
-      const operation = createPendingOperation(ledger, { client, module: 'guildMutual', request: 'GuildAidAskRequest' });
+      const operation = createPendingOperation(ledger, { client, module: 'guildMutual', request: 'GuildAidAskRequest', label: '发起联盟物资求助' });
       operation.reserve({guildAidAsks:1},{guildAidAsks:limit},{},{uniqueKey:key,details:{kind:'guildAidAsk',worldId:state.worldId,playerId:state.playerId,day,itemId:options.askItemId,nextCount:state.askUsed+1,beforeIds:state.ownRequests.map(r=>r.id)}});
       try{
         await operation.send(() => client.sendWatch('GuildAidAskRequest',{reqItemId:options.askItemId,type:0},{window:400}));
         const after=await readMutualAid(client,config,player,options);
         if(after.day!==day || after.askUsed!==state.askUsed+1 || !after.ownRequests.some(r=>r.itemId===options.askItemId && (r.ready || r.endTime>after.now) && !state.ownRequests.some(old=>old.id===r.id)))throw new Error('计数或新求助记录尚未确认');
         operation.confirm();exchange.seen=true;
-        return{received,published:1,askUsed:after.askUsed,askLimit:state.askLimit,reason:`已发起${displayMaterial(config,options.askItemId)}求助，游戏今日${after.askUsed}/${state.askLimit}次`};
-      }catch(error){const {pending}=operation.fail(error);return{done:true,pending,received,reason:'发起求助未完成：'+error.message};}
+        return{operationId:operation.operationId,received,published:1,askUsed:after.askUsed,askLimit:state.askLimit,reason:`已发起${displayMaterial(config,options.askItemId)}求助，游戏今日${after.askUsed}/${state.askLimit}次`};
+      }catch(error){const {pending}=operation.fail(error);return{operationId:operation.operationId,done:true,pending,received,reason:'发起求助未完成：'+error.message};}
     }
   }
   const used=ledger.snapshot().counters.guildAidGifts ?? 0;
@@ -218,9 +219,9 @@ async function mutualStep(context, options, startIdentity, day, signal, exchange
   if (!chosen) return {received,waiting:true,reason:(state.candidates.length?'可赠送的求助已有处理记录，等待列表刷新':state.reason)+'，'+options.checkEverySeconds+'秒后再检查'};
   if (!allowed() || state.day!==day || beijingDay(nowOf(client)*1000)!==day || ledger.snapshot().day!==day || chosen.endTime<=nowOf(client)) return {done:true,received,reason:'赠送前状态或日期已变化，本次结束'};
   const key=`guildAidGift:${state.worldId}:${state.playerId}:${chosen.id}`;
-  const operation = createPendingOperation(ledger, { client, module: 'guildMutual', request: 'GuildAidHelpRequest' });
+  const operation = createPendingOperation(ledger, { client, module: 'guildMutual', request: 'GuildAidHelpRequest', label: '向' + chosen.name + '赠送' + chosen.material });
   operation.reserve({guildAidGifts:1},{guildAidGifts:options.target},{},{uniqueKey:key,details:{kind:'guildAidGift',day,worldId:state.worldId,playerId:state.playerId,guildId:state.guildId,reqId:chosen.id,memberId:chosen.memberId,itemId:chosen.itemId}});
-  if (!allowed()) {operation.cancel();return{done:true,received,reason:'已停止，未发送赠送'};}
+  if (!allowed()) {operation.cancel();return{operationId:operation.operationId,done:true,received,reason:'已停止，未发送赠送'};}
   try {
     const reply=await operation.send(() => client.request('GuildAidHelpRequest',{reqId:[automationWireId(chosen.id)],type:0},'GotRewardResponse',8000));
     if (!Array.isArray(reply?.reward?.asset) || !reply.reward.asset.some(row=>typeof row.id==='string' && quantity(row.num)>0)) throw new Error('服务端未返回可确认的互助奖励');
@@ -232,11 +233,11 @@ async function mutualStep(context, options, startIdentity, day, signal, exchange
     if(!allowed() || !same(startIdentity,after))throw new Error('赠送后账号或联盟已变化');
     if(after.askIds.includes(chosen.id))throw new Error('求助完成状态尚未确认');
     operation.confirm();
-    return {received,sent:1,reason:`已赠给${chosen.name}：${chosen.material} ×1`};
+    return {operationId:operation.operationId,received,sent:1,reason:`已赠给${chosen.name}：${chosen.material} ×1`};
   } catch(error) {
     const { rejected } = operation.fail(error);
-    if (rejected) return{received,waiting:true,reason:(error.notSent===true?'本次赠送未发送：':'游戏拒绝本次赠送：')+error.message+'；稍后重新检查'};
-    return {done:true,pending:true,received,reason:'赠送结果未知，已保留1次额度并停止：'+error.message};
+    if (rejected) return{operationId:operation.operationId,received,waiting:true,reason:(error.notSent===true?'本次赠送未发送：':'游戏拒绝本次赠送：')+error.message+'；稍后重新检查'};
+    return {operationId:operation.operationId,done:true,pending:true,received,reason:'赠送结果未知，已保留1次额度并停止：'+error.message};
   }
 }
 
@@ -264,7 +265,7 @@ export function createGuildMutualTask() {
       if(controller)throw new Error('当前账号已有互助任务，请先停止或等待完成');
       const options=mutualOptions(input);controller=new AbortController();const {signal}=controller;
       state={running:true,stopping:false,sent:0,received:0,published:0,reason:'正在核对盟友、求助和库存',options};
-      let last='';const update=next=>{Object.assign(state,next);const signature=JSON.stringify([state.running,state.reason,state.sent,state.received,state.published,state.pending]);if(signature!==last){last=signature;report?.(view());}};
+      let last='';const update=({operationId,...next})=>{Object.assign(state,next);const signature=JSON.stringify([state.running,state.reason,state.sent,state.received,state.published,state.pending]);if(signature!==last){last=signature;report?.({...view(),operationId});}};
       (async()=>{try{const context=await open();signal.throwIfAborted();update(await runGuildMutual(context,options,{signal,onStep:update,wait:context.wait??sleep}));}
         catch(error){state.reason=error.message;state.failed=!signal.aborted;}
         finally{if(signal.aborted)state.reason=signal.reason.message;controller=null;update({running:false,stopping:false});}})();

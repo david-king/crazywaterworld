@@ -14,7 +14,7 @@ import { planHeroes } from '../src/heroes.mjs';
 import { DAILY_DRIVERS, runDailies } from '../src/dailies.mjs';
 import { serviceCargo } from '../src/cargo.mjs';
 import { runLoop } from '../src/loop.mjs';
-import { retiredAutomationTasks, migratedAutomationTasks, taskSettings } from '../src/automation.mjs';
+import { retiredAutomationTasks, removedScheduleKeys, taskSettings } from '../src/automation.mjs';
 
 const parent = path.join(os.tmpdir(),'cw-parameter-test-runs');
 fs.mkdirSync(parent, { recursive: true });
@@ -398,6 +398,8 @@ try {
     }
     for (const [field, values] of [
       ['marchSpeedUp', ['true', 1, null]],
+      ['outboundSpeedUp', ['true', 1, null]], ['returnSpeedUp', ['true', 1, null]],
+      ['returnTargetSeconds', [-1, 3601, 0.5, '60', null]],
       ['marchTargetSeconds', [-1, 3601, 0.5, '60', null]],
       ['dailyDiamondLimit', [-1, 100000001, 0.5, '300', null]],
     ]) {
@@ -530,7 +532,7 @@ try {
       const settings = settingsFromNative(tasks);
       const restored = importAutomationSettings(exportAutomationSettings(settings));
       for (const key of keys) {
-        const expected = migratedAutomationTasks.has(key) ? undefined : retiredAutomationTasks.has(key) ? false : enabled;
+        const expected = removedScheduleKeys.has(key) ? undefined : retiredAutomationTasks.has(key) ? false : enabled;
         assert.equal(restored.schedule[key], expected, key + ' 仅退役开关归一化为关闭');
         assert.equal(nativeTaskValues(restored, {})[key], expected);
       }
@@ -541,7 +543,7 @@ try {
     const normalized = validateSettings(legacy);
     assert.deepEqual(normalized.forge, legacy.forge, '兼容旧装备开关时不改已授权的锻造设置');
     for (const key of retiredAutomationTasks) {
-      const expected = migratedAutomationTasks.has(key) ? undefined : false;
+      const expected = removedScheduleKeys.has(key) ? undefined : false;
       assert.equal(normalized.schedule[key], expected);
       assert.equal(nativeTaskValues(legacy, { [key]: true })[key], expected, '未迁移的旧开关也不能参与执行');
       assert.equal(taskSettings({ [key]: true })[key], expected, '仅有旧任务配置的账号也不能恢复退役任务');
@@ -550,7 +552,7 @@ try {
     const oldDocument = { ...exportAutomationSettings(defaultSettings()), version: 1 };
     for (const key of keys) delete oldDocument.settings.schedule[key];
     const restored = importAutomationSettings(oldDocument);
-    for (const key of ['guildOrders', 'radarAuto', 'radarRepair', 'equipmentCollect', 'equipmentCraft', 'museumCollect', 'museumExplore', 'petCollect', 'petBreed', 'weekLotterySpin', 'weekOrderSubmit', 'merchantTrade', 'beautyVotes', 'compassSpin']) assert.equal(restored.schedule[key], migratedAutomationTasks.has(key) ? undefined : false, key);
+    for (const key of ['guildOrders', 'radarAuto', 'radarRepair', 'equipmentCollect', 'equipmentCraft', 'museumCollect', 'museumExplore', 'petCollect', 'petBreed', 'weekLotterySpin', 'weekOrderSubmit', 'merchantTrade', 'beautyVotes', 'compassSpin']) assert.equal(restored.schedule[key], removedScheduleKeys.has(key) ? undefined : false, key);
     assert.equal(restored.schedule.weekOrderFinal, false);
     assert.equal(restored.schedule.vipDaily, false);
   });

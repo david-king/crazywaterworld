@@ -1,7 +1,8 @@
 import { displayMaterial } from './config.mjs';
 import { normalize } from './worlds.mjs';
 import { createHmac, randomBytes } from 'node:crypto';
-import { legacyFleetReservationReason } from './fleet-availability.mjs';
+import { fleetRecordReason, legacyFleetReservationReason } from './fleet-availability.mjs';
+import { prepareFleetLineups, fleetFormationSignature, markFleetLineupsDispatched, markFleetLineupsCancelled, recoverFleetLineups } from './fleet-lineups.mjs';
 
 // A map refresh can still contain a swept target, including after a lost reply.
 const dailySweepAttempts = new WeakMap();
@@ -246,7 +247,7 @@ function huntKey(session, parts) {
   return createHmac('sha256', session.secret).update(JSON.stringify([session.revision, ...parts])).digest('hex');
 }
 
-export async function inspectHunt(client, config, player, enterMap = false) {
+export async function inspectHunt(client, config, player, enterMap = false, allowPreset = false) {
   const session = huntSession(client);
   const world = normalize(player?.worldId);
   const tables = config?.tables ?? {};
@@ -317,14 +318,14 @@ export async function inspectHunt(client, config, player, enterMap = false) {
     const key = huntKey(session, ['fleet', world, fleet.buildingId, positions.map(p => [p.heroId, normalize(p.pos)]), formation?.presetId, normalize(formation?.petUid)]);
     const held = [...session.pending.values()].some(f => f.buildingId === fleet.buildingId);
     const reason = held ? '已派出或尚待确认' : !/^\d+远征船$/.test(fleet.buildingId) ? '无法确认远征舰队建筑' : !(building?.level > 0) ? '舰队建筑尚未建成' :
-      !ids.length ? '请先在「活动 → 海盗首杀」查看并保存这支舰队的首次编队' : fleet.state !== 1 ? '舰队未闲置' :
+      !ids.length && !(allowPreset && formation?.presetId > 0 && !fleet.autoFight?.isOn) ? '请先在「活动 → 海盗首杀」查看并保存这支舰队的首次编队' : fleet.state !== 1 ? '舰队未闲置' :
       fleet.treasureLootUid || fleet.chipWar?.rewardTs || fleet.curGridIdx > 0 ? '舰队正在驻守地块或执行其他任务' :
       !(fleet.durability > 0) ? '舰队没有耐久，请先修理' : '';
     const number = /^([1-9]\d*)远征船$/.exec(fleet.buildingId)?.[1];
     const option = { key, buildingId: fleet.buildingId, maxDura: fleet.maxDura, name: number ? '远征舰队 ' + number + ' 队' : '远征舰队', power: fleet.power ?? null,
-      durability: fleet.durability ?? 0, heroes: ids.map(id => tables.HeroCfg?.data?.find(h => h.id === id)?.name || '已编队英雄'), reason };
+      durability: fleet.durability ?? 0, needsPreset: !ids.length, heroes: ids.map(id => tables.HeroCfg?.data?.find(h => h.id === id)?.name || '已编队英雄'), reason };
     view.fleets.push(option);
-    fleets.set(key, { fleet, option });
+    fleets.set(key, { fleet, option, formation });
   }
   if (!view.targets.length) view.reason ||= '地图上暂无可首杀的下一等级海盗';
   if (!view.fleets.length) view.reason ||= buildings.some(b => b.level > 0 && /^\d+远征船$/.test(b.buildingId))
@@ -332,25 +333,62 @@ export async function inspectHunt(client, config, player, enterMap = false) {
   return snapshot;
 }
 
-export async function pirateHuntOptions(client, config, player) {
-  return (await inspectHunt(client, config, player)).view;
+export async function pirateHuntOptions(client, config, player, allowPreset = false) {
+  return (await inspectHunt(client, config, player, false, allowPreset)).view;
 }
 
-export async function startPirateHunt(client, config, player, { targetKey, fleetKey, enabled = () => true, report, beforeSend,
-  reservationReason = fleet => legacyFleetReservationReason(client, fleet.buildingId) }) {
-  if (!enabled()) throw new Error('账号已暂停，出征已取消');
-  const { view, targets, fleets, revision } = await inspectHunt(client, config, player, true);
-  const session = huntSession(client);
+function checkHuntSelection(session, {view, targets, revision}, targetKey, troop) {
   if (view.reason) throw new Error(view.reason);
-  const selection = targets.get(targetKey), troop = fleets.get(fleetKey);
+  const selection = targets.get(targetKey);
   if (!selection || !troop || revision !== session.revision) throw new Error('目标或舰队状态已变化，请刷新后重新选择');
   const { pirate, target } = selection;
   if (session.pending.has(pirate.uid) || target.reason) throw new Error(target.reason || '该目标已经派出舰队');
   if (troop.option.reason) throw new Error(troop.option.reason);
-  if (!enabled()) throw new Error('账号已暂停，出征已取消');
-  const reservation = await beforeSend?.({view,target,fleet:troop.fleet});
-  const held = reservationReason(troop.fleet);
-  if (!enabled() || client.connected === false || held) throw Object.assign(new Error(held || '账号已暂停或断开，出征已取消'), { notSent:true });
+  return selection;
+}
+
+export async function startPirateHunt(client, config, player, { targetKey, fleetKey, enabled = () => true, report, beforeSend,
+  preset, ledger, prepareDispatch, reservationReason = fleet => legacyFleetReservationReason(client, fleet.buildingId) }) {
+  const session = huntSession(client);
+  const live = () => enabled() && client.connected !== false;
+  if (!live()) throw new Error('账号已暂停或断开，出征已取消');
+  let snapshot = await inspectHunt(client, config, player, true, Boolean(preset));
+  let troop = snapshot.fleets.get(fleetKey);
+  const { pirate, target } = checkHuntSelection(session, snapshot, targetKey, troop);
+  const buildingId = troop.fleet.buildingId;
+  let lineupKeys = [], sent = false;
+  try {
+    if (preset) {
+      await prepareDispatch?.();
+      const reason = fleetRecordReason(ledger.keyRecords(), buildingId, normalize(player.worldId)) || reservationReason(troop.fleet);
+      if (reason) throw new Error(reason);
+      lineupKeys = await prepareFleetLineups(client, config, player, { kind: 'pirateLineup', ledger, enabled: live,
+        selections: [{ buildingId, preset, expectedFormation: troop.formation }] });
+      snapshot = await inspectHunt(client, config, player);
+      troop = [...snapshot.fleets.values()].find(row => row.fleet.buildingId === buildingId);
+      checkHuntSelection(session, snapshot, targetKey, troop);
+      if (fleetFormationSignature(troop.formation) !== fleetFormationSignature(preset.formation)) throw new Error('出征舰队的阵容已变化');
+    }
+    if (!live()) throw new Error('账号已暂停或断开，出征已取消');
+    const reservation = await beforeSend?.({ view: snapshot.view, target, fleet: troop.fleet, fleetKey: troop.option.key, lineupKeys });
+    const held = reservationReason(troop.fleet);
+    if (!live() || held) throw new Error(held || '账号已暂停或断开，出征已取消');
+    if (lineupKeys.length) markFleetLineupsDispatched(ledger, lineupKeys, { [buildingId]: reservation.key });
+    sent = true;
+    return await sendHunt(client, session, player, pirate, target, troop, reservation, report);
+  } catch (error) {
+    if (!sent || (error.prompt && error.request === 'ChallengePirateRequest')) {
+      error.notSent = true;
+      if (lineupKeys.length) {
+        markFleetLineupsCancelled(ledger, lineupKeys);
+        await recoverFleetLineups(client, player, ledger, { enabled: live, onlyKeys: new Set(lineupKeys) });
+      }
+    }
+    throw error;
+  }
+}
+
+async function sendHunt(client, session, player, pirate, target, troop, reservation, report) {
   const flight = { uid: pirate.uid, type: pirate.type, level: pirate.level, grid: pirate.gridIdx, city: pirate.cityId,
     world:String(normalize(player.worldId)), reservationId:reservation?.id,
     buildingId: troop.fleet.buildingId, report, label: troop.option.name + ' 讨伐' + target.name + ' ' + target.level + ' 级' };

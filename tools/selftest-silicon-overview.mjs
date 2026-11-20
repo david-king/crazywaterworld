@@ -135,6 +135,23 @@ try {
     assert(PAGE.includes('id="silicon-refresh"')); assert(PAGE.includes('非今日收益'));
     for (const match of PAGE.matchAll(/<script\b[^>]*>([\s\S]*?)<\/script>/g)) new vm.Script(match[1]);
   });
+  await test('只读概览按区服和矿位展示在途或未确认派遣，已确认归港和个人矿实际落位后不占旧格', async () => {
+    const f = siliconFixture(), worldId = String(f.player.worldId);
+    const make = (confirmed, details) => ({ confirmed, details: { kind: 'siliconDispatch', worldId, gridId: 5000, index: 0, buildingId: '1远征船', ...details } });
+    const keys = {
+      first: make(false, {}),
+      second: make(true, { index: 1, buildingId: '2远征船', opponent: { nickname: '守方' } }),
+      third: make(true, { index: 2, buildingId: '3远征船', gridId: 3000 }),
+      elsewhere: make(false, { worldId: '9999' })
+    };
+    const options = { ledger: { keyRecords: () => structuredClone(keys) } };
+    Object.assign(f.state.fleets[1], { state: 2, targetGridIdx: 5000 });
+    f.occupy('3远征船', 3000, 111, 1);
+    const pending = { gridId: 5000, index: 0, fleetId: '1远征船', pending: true, kind: 'dispatch' };
+    assert.deepEqual((await read(f, options)).dispatches, [pending, { gridId: 5000, index: 1, fleetId: '2远征船', pending: false, kind: 'attack' }]);
+    f.returnFleet('2远征船'); assert.deepEqual((await read(f, options)).dispatches, [pending]);
+    assert.deepEqual(f.client.writes, []);
+  });
   const f = siliconFixture();
   fs.writeFileSync(process.env.CW_CONFIG_PACK, JSON.stringify(Object.entries(f.config.tables).map(([name, table], index) => [index, name, table])));
   saveStore({ activeId: 'silicon-view', accounts: [{ id: 'silicon-view', label: '硅矿概览隔离测试', url: 'wss://invalid.invalid', login: {}, automation: { paused: true, enabled: false } }] });

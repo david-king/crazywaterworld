@@ -1,6 +1,6 @@
 import * as React from "react"
 import { renderToStaticMarkup } from "react-dom/server"
-import { Boxes, Building2, CalendarDays, Check, ChevronDown, CircleUserRound, Download, LayoutDashboard, Monitor, Moon, MoreHorizontal, RefreshCw, ScrollText, Settings2, Ship, Sun, Swords, UsersRound, X } from "lucide-react"
+import { Boxes, Building2, CalendarDays, Check, ChevronDown, CircleUserRound, Download, LayoutDashboard, Monitor, Moon, MoreHorizontal, RefreshCw, ScrollText, Search, Settings2, Ship, Sun, Swords, UsersRound, X } from "lucide-react"
 import { Button } from "./button"
 import { Badge } from "./badge"
 import { Card, CardHeader, CardTitle, CardContent, CardFooter } from "./card"
@@ -8,7 +8,7 @@ import { DialogFooter, DialogHeader, DialogTitle } from "./dialog"
 import { NativeSelect } from "./native-select"
 import { Input } from "./input"
 import { Table, TableHeader, TableBody, TableRow, TableHead, TableCell } from "./table"
-import { LOG_GROUPS, LOG_GROUP_TONES } from "../log-categories.mjs"
+import { LOG_GROUPS } from "../log-categories.mjs"
 
 // 手机底栏使用短名。
 const tabs = [
@@ -50,6 +50,7 @@ export function chrome() {
           <span id="loop-hint" className="sr-only" role="status" />
         </div>
         <span id="hint" className="warn" />
+        <Button id="console-quick-open" type="button" size="icon-sm" variant="outline" className="pointer-coarse:size-10" aria-label="站内搜索" title="站内搜索（Ctrl / ⌘ + K）" aria-keyshortcuts="Control+k Meta+k" aria-haspopup="dialog" aria-controls="console-quick-dialog"><Search aria-hidden="true" /></Button>
         <div id="theme-picker" className="theme-picker">
           <Button id="theme-trigger" type="button" size="icon-sm" variant="outline" className="pointer-coarse:size-10" aria-label="切换主题，当前为跟随系统" title="切换主题，当前为跟随系统" aria-haspopup="menu" aria-controls="theme-menu" aria-expanded="false">
             {themes.map(([mode, , Icon]) => <span key={mode} data-theme-icon={mode} hidden={mode !== "system"}><Icon aria-hidden="true" /></span>)}
@@ -73,20 +74,24 @@ export function journal() {
   return renderToStaticMarkup(<dialog id="journal-dialog" aria-label="运行日志"><aside id="journal" aria-label="运行日志">
     <DialogHeader><DialogTitle className="journal-title">运行日志<Badge id="log-count">0</Badge></DialogTitle></DialogHeader>
     <Button id="logs-close" size="icon-sm" variant="ghost" aria-label="关闭运行日志"><X aria-hidden="true" /></Button>
-    <div className="log-filter-row"><span className="log-filter-label" id="log-groups-label">分类</span><div id="log-tabs" className="log-tags" role="tablist" aria-labelledby="log-groups-label">
-      {["全部", ...Object.keys(LOG_GROUPS)].map((name, index) => <button key={name} type="button" id={`log-tab-${index}`} className="log-tag log-group-tag" data-tone={LOG_GROUP_TONES[name] || "neutral"} role="tab" data-log-group={index === 0 ? "all" : name} aria-selected={index === 0} aria-controls="log-panel" tabIndex={index === 0 ? 0 : -1}>{name}<span data-log-group-count="">0</span></button>)}
+    <div className="log-filter-row"><span className="log-filter-label" id="log-features-label">功能</span><div id="log-tabs" className="log-tags" role="tablist" aria-labelledby="log-features-label">
+      <button type="button" id="log-tab-all" className="log-tag log-group-tag" data-tone="neutral" role="tab" data-log-feature="all" aria-selected="true" aria-controls="log-panel"><span>全部</span><span data-log-feature-count="">0</span></button>
     </div></div>
     <div className="log-filter-row"><span className="log-filter-label" id="log-accounts-label">账号</span><div id="log-account-tabs" className="log-tags" role="group" aria-labelledby="log-accounts-label">
       <button type="button" className="log-tag log-group-tag log-account-filter" data-tone="neutral" data-log-account="all" aria-pressed="true" aria-controls="log-panel"><span data-log-account-name="">全部</span><span data-log-account-count="">0</span></button>
     </div></div>
     <div className="log-actions">
+      <NativeSelect size="sm" id="log-group" aria-label="日志分类" aria-controls="log-panel">
+        <option value="all">全部分类</option>
+        {Object.keys(LOG_GROUPS).map(name => <option key={name} value={name}>{name}</option>)}
+      </NativeSelect>
       <div className="log-filter" role="group" aria-label="日志筛选">
         <button type="button" id="log-all" aria-pressed="true">全部</button>
         <button type="button" id="log-issues" aria-pressed="false">警告与错误</button>
       </div>
       <Button id="log-clear" size="sm" variant="outline" disabled aria-label="清空所选账号日志" title="选择一个账号后可清空该账号的全部运行日志">清空</Button>
     </div>
-    <div id="log-panel" role="tabpanel" aria-labelledby="log-tab-0" tabIndex={0}>
+    <div id="log-panel" role="tabpanel" aria-labelledby="log-tab-all" tabIndex={0}>
       <div id="log" role="log" aria-live="polite" aria-label="操作记录" />
       <p id="log-empty">还没有运行记录</p>
     </div>
@@ -95,6 +100,13 @@ export function journal() {
 
 export function dialogs() {
   return renderToStaticMarkup(<>
+    <dialog id="console-quick-dialog" aria-labelledby="console-quick-title">
+      <DialogHeader className="flex-row items-center justify-between"><DialogTitle id="console-quick-title">站内搜索</DialogTitle><Button type="button" id="console-quick-close" size="icon-sm" variant="ghost" aria-label="关闭站内搜索"><X aria-hidden="true" /></Button></DialogHeader>
+      <Input id="console-quick-query" type="search" role="combobox" aria-label="搜索功能或页面文字" placeholder="搜索功能或页面文字" autoComplete="off" aria-autocomplete="list" aria-controls="console-quick-results" aria-expanded="true" />
+      <div id="console-quick-results" role="listbox" aria-label="搜索结果" />
+      <p id="console-quick-empty" className="dim" role="status" hidden>没有找到匹配的结果</p>
+      <p className="dim for-mouse">↑ ↓ 选择 · Enter 跳转 · Esc 关闭</p>
+    </dialog>
     <dialog id="console-version-warning" aria-labelledby="console-version-title" aria-describedby="console-version-description">
       <DialogHeader>
         <DialogTitle id="console-version-title" tabIndex={-1} autoFocus>需要刷新控制台</DialogTitle>
@@ -179,31 +191,48 @@ export function templates() {
       </Button>
     </template>
     <template id="ui-account-card">
-      <Card className="account-card">
-        <CardHeader>
+      <Card className="account-card gap-3 py-4 max-md:gap-3">
+        <CardHeader className="grid-cols-[minmax(0,1fr)_auto] gap-x-2 gap-y-0 px-4">
           <div className="account-card-heading">
-            <div className="account-card-badges"><Badge data-account-field="current" variant="secondary" hidden>当前</Badge></div>
-            <details className="account-card-menu">
-              <summary aria-label="更多账号操作"><MoreHorizontal aria-hidden="true" /></summary>
-              <div className="account-menu-content">
-                <Button type="button" variant="ghost" size="sm" className="w-full justify-start" data-account-action="rename">修改备注</Button>
-                <Button type="button" variant="ghost" size="sm" className="w-full justify-start" data-account-action="export">导出账号</Button>
-                <Button type="button" variant="ghost" size="sm" className="w-full justify-start text-destructive" data-account-action="remove">移除账号</Button>
-              </div>
-            </details>
+            <CardTitle className="leading-normal" data-account-field="title" tabIndex={-1} />
+            <Badge data-account-field="status" className="chip rounded-md max-w-full whitespace-normal text-left" variant="outline" />
+            <Badge data-account-field="current" variant="secondary" hidden>当前</Badge>
           </div>
-          <CardTitle className="leading-normal" data-account-field="title" />
+          <details className="account-card-menu col-start-2 row-span-2 row-start-1">
+            <summary aria-label="更多账号操作"><MoreHorizontal aria-hidden="true" /></summary>
+            <div className="account-menu-content">
+              <Button type="button" variant="ghost" size="sm" className="h-7 w-full justify-start px-2.5" data-account-action="rename">修改备注</Button>
+              <Button type="button" variant="ghost" size="sm" className="h-7 w-full justify-start px-2.5" data-account-action="export">导出账号</Button>
+              <Button type="button" variant="ghost" size="sm" className="h-7 w-full justify-start px-2.5 text-destructive" data-account-action="remove">移除账号</Button>
+            </div>
+          </details>
           <p className="dim" data-account-field="channel" />
         </CardHeader>
-        <CardContent>
+        <CardContent className="px-4">
           <dl className="account-card-data">
             <div><dt>角色</dt><dd data-account-field="role" /></div>
-            <div><dt>区服</dt><dd className="account-card-world"><span data-account-field="world" /><Badge data-account-field="status" className="chip rounded-md max-w-full whitespace-normal text-left" variant="outline" /></dd></div>
             <div><dt>等级</dt><dd data-account-field="level" /></div>
             <div><dt>战力</dt><dd data-account-field="power" /></div>
+            <div><dt>区服</dt><dd data-account-field="world" /></div>
+            <div className="basis-full"><dt>闯关挂机收益</dt><dd data-account-field="afk" /></div>
           </dl>
+          <div className="account-resources">
+            <div className="account-resources-heading">
+              <h3>资源</h3>
+              <Button type="button" size="sm" variant="ghost" data-account-action="refresh">刷新资料</Button>
+            </div>
+            <div className="resource-strip" data-account-field="resources" />
+          </div>
         </CardContent>
-        <CardFooter className="account-card-footer items-stretch"><p className="dim" data-account-field="seen" /><div className="account-card-actions"><Button type="button" variant="outline" size="sm" className="px-1 text-xs sm:px-1.5 sm:text-sm" data-account-action="details" aria-haspopup="dialog" aria-controls="account-info-dialog">查看详情</Button><Button type="button" variant="outline" size="sm" className="px-1 text-xs sm:px-1.5 sm:text-sm" data-account-action="login-settings" aria-haspopup="dialog" aria-controls="account-login-dialog">登录设置</Button><Button type="button" variant="outline" size="sm" className="px-1 text-xs sm:px-1.5 sm:text-sm" data-account-action="select">切换账号</Button><Button type="button" size="sm" className="px-1 text-xs sm:px-1.5 sm:text-sm" data-account-action="loop">开始挂机</Button></div></CardFooter>
+        <CardFooter className="account-card-footer items-stretch px-4">
+          <p className="dim" data-account-field="seen" />
+          <div className="account-card-actions">
+            <Button type="button" variant="outline" size="sm" className="px-1 text-xs sm:px-1.5 sm:text-sm" data-account-action="worlds" aria-haspopup="dialog" aria-controls="account-worlds-dialog">区服管理</Button>
+            <Button type="button" variant="outline" size="sm" className="px-1 text-xs sm:px-1.5 sm:text-sm" data-account-action="login-settings" aria-haspopup="dialog" aria-controls="account-login-dialog">登录设置</Button>
+            <Button type="button" variant="outline" size="sm" className="px-1 text-xs sm:px-1.5 sm:text-sm" data-account-action="select">切换账号</Button>
+            <Button type="button" size="sm" className="px-1 text-xs sm:px-1.5 sm:text-sm" data-account-action="loop">开始挂机</Button>
+          </div>
+        </CardFooter>
       </Card>
     </template>
   </>)

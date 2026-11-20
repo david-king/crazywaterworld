@@ -496,6 +496,15 @@ try {
       observeBaseAutomationPlan(detailedRewards,
         planBaseAutomation(detailed.snapshot, detailed.config, detailed.settings), detailed.settings, 30000);
       const detailedView = await read('base-detailed');
+      assert.equal(detailedView.controls.find(row => row.key === 'events.enabled').observation.state, 'unsynced');
+      detailedRewards.observe('collect', '建筑和工厂的旧合并记录');
+      detailedRewards.observe('factory.gain', '工厂产品已收取', 'ok');
+      detailedRewards.observe('building.collect', '建筑产出待领取');
+      detailedRewards.observe('events.enabled', '事件回执待确认', 'pending');
+      const controls = (await read('base-detailed')).controls;
+      assert.equal(controls.find(row => row.key === 'factory.gain').observation.text, '工厂产品已收取');
+      assert.equal(controls.find(row => row.key === 'building.collect').observation.text, '建筑产出待领取');
+      assert.equal(controls.find(row => row.key === 'events.enabled').observation.state, 'pending');
       const gold = detailedView.controls.find(row => row.key === 'gold.enabled');
       assert.match(gold.observation.text, /付费点金/);
       assert.equal(gold.nextCheck, detailedRewards.nextCheck('gold.enabled'));

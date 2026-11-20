@@ -140,7 +140,6 @@ try {
     for (const [route, payload] of [
       ['login-settings', { settings: view.settings.login, revision: view.revision }],
       ['loop/control', { key: 'cityWar.enabled', enabled: true, revision: view.revision }],
-      ['loop/fishing-reserve', { fishingGoldReserve: 100 }],
     ]) {
       const refused = await api(id, route, payload);
       assert.equal(refused.status, 400, route + ' 不能绕过完整配置的恢复确认');

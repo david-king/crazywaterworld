@@ -131,7 +131,7 @@ await test('未到本分项主题或积分达标只暂停活动，不改普通�
   for (const scenario of ['other', 'completed']) {
     const f = fixture('forge', scenario === 'other' ? 4 : 2);
     Object.assign(f.settings.forge, { enabled: true, collect: true, craft: true });
-    f.settings.schedule.ticketRecruit = true;
+    f.settings.schedule.freeRecruit = true;
     if (scenario === 'completed') f.state.rankList[0].score = 100;
     const before = structuredClone(f.settings);
     assert.equal(await f.context(), null);

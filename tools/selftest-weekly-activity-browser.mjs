@@ -184,7 +184,7 @@ try {
   await expand(page, ['pet']);
   assert.equal(await field(page, 'petScore').inputValue(), '20000');
   assert.deepEqual(loadAutomationSettings('weekly-a'), beforeCollapse, '收起和展开不改配置或保存版本');
-  assert.match(await page.locator('#config-usage').textContent(), /已配置 6 项全天活动；执行情况见日志/);
+  await page.locator('#config-usage').getByText('已选 6 个活动主题').waitFor();
   assert.doesNotMatch(await page.locator('#config-usage').textContent(), /当前未开启具体执行项目/);
   console.log('通过：军备竞赛页签唯一且合并领奖，广告位于日常行动之后，无时间输入并自动保存积分');
 

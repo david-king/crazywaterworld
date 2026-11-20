@@ -4,11 +4,13 @@ import { nextOrderTier, surveyTasks } from '../src/tasks.mjs';
 
 let now = 1000;
 const deadlines = new Map();
+const observations = new Map();
 const scheduler = {
   now: () => now,
   nextDay: () => 10000,
   due: key => now >= (deadlines.get(key) ?? 0),
   defer: (key, time) => deadlines.set(key, time),
+  observe: (key, text) => observations.set(key, text),
 };
 const protocol = {
   DailyTaskInfoRequest: true, DailyTaskInfoResponse: true, DrawDailyTaskRewardResponse: true,
@@ -53,6 +55,8 @@ gift.drawnPack = []; gift.resetTime = 2800;
 daily.dailyTask = []; daily.dailyResetTime = 3000;
 daily.weeklyActivity = 20; daily.weeklyRewardClaimed = [];
 const failedGift = await run(scheduler);
+assert.equal(observations.get('dailies.claimDailyChest'), '已领取 1/1 档');
+assert.equal(observations.get('dailies.claimWeeklyChest'), '已领取 0/1 档');
 assert.match(failedGift.find(item => !item.ok).error, /尚未确认/);
 assert(['gift', 'dailyRewards'].every(key => scheduler.due(key)), 'unconfirmed gifts or empty task lists must not defer');
 assert.equal(deadlines.get('chests'), 2180, 'unfinished weekly tiers must be checked again before tomorrow');
@@ -63,6 +67,8 @@ daily.weeklyRewardClaimed = [1]; daily.dailyRewardClaimed = [];
 client.sendWatch = async name => { calls.push(name); if (name === 'GotFreeDailyPackRequest') gift.drawnPack = ['赠礼']; };
 await run(scheduler);
 assert(calls.includes('DrawDailyTaskRewardRequest') && calls.includes('DrawDailyRewardRequest'));
+assert.match(observations.get('dailies.claimDailyChest'), /等待同步/);
+assert.equal(observations.get('dailies.claimWeeklyChest'), '已领取 1/1 档');
 assert.equal(deadlines.get('gift'), 2800);
 assert(scheduler.due('dailyRewards') && scheduler.due('chests'), 'requests without a confirmed claim flag do not postpone future checks');
 daily.dailyResetTime = 0; daily.dailyRewardClaimed = [1]; daily.dailyTask[0].rewardClaimed = true;

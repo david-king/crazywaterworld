@@ -24,7 +24,7 @@ source[0].automation.loginRecovery = { status: 'waiting', secret: 'runtime-only'
 saveStore({ version: 1, activeId: source[1].id, accounts: source });
 let custom = defaultSettings();
 custom.loop.everySeconds = 37;
-custom.gather.fishingGoldReserve = 321;
+custom.gather.targetLevel = 3;
 custom = saveAutomationSettings(source[1].id, custom, { revision: 0 }).settings;
 let app, root, passed = 0, only, full;
 const test = async (name, work) => { await work(); passed++; console.log('通过：' + name); };

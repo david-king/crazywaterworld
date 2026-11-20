@@ -61,8 +61,8 @@ function enabledFields(value, prefix = '') {
   return Object.entries(value).flatMap(([key, child]) => enabledFields(child, prefix ? prefix + '.' + key : key));
 }
 function assertEnabledSettings(settings, allowed = []) {
-  // 隐藏兼容字段及装备总控下的默认动作不会单独触发自动执行。
-  assert.deepEqual(enabledFields(settings).sort(), ['ads.noPrivilege', 'forge.collect', 'forge.craft', ...allowed].sort());
+  // 装备和巨轮的默认子选项均受各自的总开关控制。
+  assert.deepEqual(enabledFields(settings).sort(), ['ads.noPrivilege', 'forge.collect', 'forge.craft', 'treasure.outboundSpeedUp', ...allowed].sort());
   assert.equal(settings.forge.enabled, false);
   assert.equal(settings.forge.nativeAuto, false);
 }
@@ -160,12 +160,12 @@ try {
       assertEnabledSettings(view.settings);
       assert.equal(view.settings.loop.rounds, 8);
       assert.equal(view.settings.loop.everySeconds, 37);
-      assert.equal(view.settings.gather.fishingGoldReserve, 321);
+      assert.equal(Object.hasOwn(view.settings.gather, 'fishingGoldReserve'), false);
       const loop = await api(id, 'loop');
       assertIdle(loop);
       assert.equal(loop.rounds, 8);
       assert.equal(loop.everyMs, 37000);
-      assert.equal(loop.fishingGoldReserve, 321);
+      assert.equal(Object.hasOwn(loop, 'fishingGoldReserve'), false);
       assert.equal(loadStore().accounts.find(account => account.id === id).automation.tasks, undefined);
       if (attempt === 0) { await close(); await open(); }
     }

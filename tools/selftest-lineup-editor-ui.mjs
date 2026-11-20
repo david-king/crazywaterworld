@@ -529,7 +529,7 @@ await test('挑战恢复状态刷新仅更新提示，保留编辑器DOM、筛�
 await test('阵容阶段通知只刷新当前账号状态，不占用运行日志', () => {
   const streams = [], refreshes = [], logs = [];
   const context = vm.createContext({
-    current: 'account-a', stream: null, Date,
+    current: 'account-a', stream: null, compactLogs: true, Date,
     updateLogSummary() {}, clearLogBefore() {},
     appendLog: entry => logs.push(clone(entry)),
     refreshSavedLineups: () => { refreshes.push(context.current); return Promise.resolve(); },
@@ -553,7 +553,7 @@ await test('阵容阶段通知只刷新当前账号状态，不占用运行日�
   context.subscribe(); context.subscribe();
   assert.equal(streams.length, 1, '重复订阅不应创建额外事件流');
   const stream = streams[0];
-  assert.equal(stream.url, '/api/events?scope=all');
+  assert.equal(stream.url, '/api/events?scope=all&compact=1');
   for (const phase of ['switching', 'battling', 'restoring', 'idle']) {
     stream.dispatch('lineup-changed', { account: 'account-a', phase });
   }
@@ -650,6 +650,16 @@ await test('查看弹窗仅请求离线目录，站位只读，缺海兽信息�
   assert(f.calls.every(request => request.url.startsWith('/api/lineup-presets?') && !request.body));
   assert.deepEqual(clone(data.presets[0].formation), before);
   assert.equal(f.state.editor, null);
+});
+
+await test('查看阵容时，英雄列表与站位都采用已读取的账号皮肤', async () => {
+  const f = fixture(), data = savedData();
+  data.catalog = editorData();
+  f.runtime.response = () => data;
+  f.state.editor.heroes[0].icon = { name: '已装备的皮肤' };
+  f.context.iconEl = icon => new Element('span', '', icon?.name);
+  await f.context.openSavedLineupViewer('account-a', 'p1');
+  assert.equal(f.body.querySelector('dialog').textContent.split('已装备的皮肤').length - 1, 2);
 });
 
 await test('关闭与Esc返回触发按钮，草稿保留，切号关闭弹窗', async () => {

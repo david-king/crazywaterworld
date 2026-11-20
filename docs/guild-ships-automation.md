@@ -18,7 +18,7 @@
 | 活动末日 23:25 兜底 | 仅在真实活动结束推送确认当天为最后一天时，允许一船放宽品质、奖励与水姆币筛选；持久记录阻止再次兜底 |
 | 红船缺料生产 | 只为符合当前规则、确有可用船员位的红船产生需求；遵守其他订单预留；由工厂生产开关执行，独立于工厂“优先需求”选项 |
 | 红船自定义出航 | 实际只能延后**申请船长时间**；游戏协议没有直接发船请求，不能承诺此时准确开航 |
-| 联盟工事捐赠 | 捐已有、明确选中的材料；不兑换、不购买、不创建、不拆除、不执行最终完工 |
+| 联盟工事捐赠 | 按工事缺口、物料筛选和可用库存捐赠 |
 
 ## 真实商船协议与客户端逻辑
 
@@ -52,7 +52,7 @@
 - `CityFortInfoRequest { cityId }` → `CityFortInfoResponse { fort, dailyDonateNum, ... }`；`fort.process[]` 是 `{ itemId, num }` 累计材料进度。
 - `WorldFortCfg.donateCost` 是总材料需求，`FortDonateMaterialCfg` 给出可捐材料的真实规则，`FortSeasonUnlockCfg` 决定赛季开放。`FORT_BUILDING = 0`，`FORT_ACTIVE = 1`。
 - `DonateFortRequest { cityId, item: { itemId, num }, selectPackNum: 0 }` → `DonateFortResponse { process[], reward }`。始终把 `selectPackNum` 设为 0；该参数在客户端用于兑换不足材料，本实现不启用。
-- 工事材料选择为空时，仅沿用 `alliance.allowedMaterials` 的明确选择；两者皆空不会捐赠任意材料。
+- 「捐赠物料」留空时可捐工事仍缺的任意物料，选中后只捐所选物料。「排除物料」优先，即使两处同时选中也会跳过。展开列表时读取当前区服和联盟的在建工事，只列出仍有缺口的物料。读取失败或账号离线时显示全部物资，已保存的选择可跨工事使用。
 - `reserve` 是每种库存保留量；额外保留周订单、贸易港和居民订单。`dailyLimit = 0` 表示不加本工具日限，正数同时计入服务器 `dailyDonateNum` 和持久预占数量。
 
 ## 确认、持久化和离线验证

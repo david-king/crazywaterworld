@@ -339,8 +339,10 @@ export async function runEquipmentForge(client, protocol, config, player, { getS
           && making.finishTime > beforeFinishTime && making.finishTime >= sentAt;
       } };
       try {
-        confirmOrderMaterialSpends(player, actualStock);
-        materialReservation = beginOrderMaterialSpend(player, step.costs.filter(cost => cost.id !== 'GOLD').map(cost => ({ id: cost.id, have: actualStock.get(cost.id) ?? 0, need: cost.num })), step.label, { operation });
+        const materials = step.costs.filter(cost => cost.id !== 'GOLD')
+          .map(({ id, num }) => ({ id, have: actualStock.get(id) ?? 0, need: num }));
+        confirmOrderMaterialSpends(player, actualStock, materials.map(cost => cost.id));
+        materialReservation = beginOrderMaterialSpend(player, materials, step.label, { operation });
         goldReservation = reserveGold(player, fresh.gold, step.gold, 'MakeEquipRequest', { operation });
       } catch (error) { cancelOrderMaterialSpend(materialReservation); cancelUnsentGold(goldReservation); ledger.cancel(ticket); report({ step, ok: false, skipped: true, error: error.message }); continue; }
       if (!current() || settings !== getSettings()) { cancelOrderMaterialSpend(materialReservation); cancelUnsentGold(goldReservation); ledger.cancel(ticket); break; }

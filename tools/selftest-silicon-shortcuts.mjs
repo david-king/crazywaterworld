@@ -19,6 +19,8 @@ function fixture() {
   return f;
 }
 const dispatch = (gridId = 5000, index = 0) => ({ kind: 'dispatch', gridId, index });
+const attack = (gridId = 5000, index = 0, nickname = '敌方船长', guildIdx = 8, power = 900) =>
+  ({ kind: 'attack', gridId, index, opponent: { nickname, guildIdx, power } });
 const retreat = (fleetId = '1远征船', gridId = 5000) => ({ kind: 'retreat', fleetId, gridId });
 const preview = (f, intent = dispatch()) => previewSiliconShortcut(f.client, f.protocol, f.config, f.player, intent, f.options);
 const run = (f, quote, fleet = '1远征船') => runSiliconShortcut(f.client, f.protocol, f.config, f.player, quote, fleet, f.options);
@@ -59,10 +61,54 @@ try {
       const quote = await preview(f); assert(quote.fleets.every(row => !row.step)); await assert.rejects(() => run(f, quote)); assert.deepEqual(f.client.writes, []);
     }
   });
+  await test('个人矿派往三号位后按游戏顺序落在一号位，三号位可重新选队', async () => {
+    const f = fixture(), intent = dispatch(3000, 2);
+    await run(f, await preview(f, intent)); assert((await preview(f, intent)).fleets.every(row => !row.step));
+    f.occupy('1远征船', 3000, 39, 1);
+    assert((await preview(f, intent)).fleets.find(row => row.id === '2远征船').step);
+    assert.equal(f.client.writes.length, 1);
+  });
   await test('确认后矿位被占、费用上涨或舰队忙碌时不发送旧请求', async () => {
     for (const change of [f => f.enemy(0), f => { f.config.tables.WorldParamCfg.data[0].paramValue = 600; }, f => { f.state.fleets[0].state = 3; }]) {
       const f = fixture(), quote = await preview(f); change(f); await assert.rejects(() => run(f, quote)); assert.deepEqual(f.client.writes, []);
     }
+  });
+  await test('手动抢占高战力守军并记入所选舰队日计数，首奖进度变化不影响目标身份', async () => {
+    const f = fixture(); f.enemy(1, '敌方船长', 14000000, 8, 4000);
+    const quote = await preview(f, attack(4000, 1, '敌方船长', 8, 14000000));
+    assert(quote.fleets.every(row => row.step)); assert.deepEqual(f.client.writes, []);
+    f.state.positions[4000][0].player.rewardTimes++;
+    assert.equal((await run(f, quote, '2远征船')).status, 'confirmed');
+    assert.deepEqual(f.client.writes, [{ name: 'ChipMineSendFleetRequest', body: { gridId: 4000, index: 1, fleetId: '2远征船' } }]);
+    assert.equal(f.ledger.confirmedCounters().siliconAttacks2, 1); assert.equal(f.ledger.confirmedCounters().siliconPetrol, 500);
+    assert.equal(f.state.fightTimes, 1);
+  });
+  await test('初等矿、空位、同盟和自己的舰队不能抢占', async () => {
+    for (const [grid, setup] of [[3000, f => f.enemy(0, '敌方船长', 900, 8, 3000)], [5000, () => {}],
+      [5000, f => f.enemy(0, '敌方船长', 900, 7)], [5000, f => f.occupy('2远征船')]]) {
+      const f = fixture(); setup(f);
+      const quote = await preview(f, attack(grid)); assert(quote.fleets.every(row => !row.step)); assert.deepEqual(f.client.writes, []);
+    }
+  });
+  await test('预览和提交均核对占领者，目标离开、换人、换盟、战力变化或次数耗尽时取消', async () => {
+    for (const change of [f => f.state.positions[5000].pop(), f => { f.state.positions[5000][0].player.nickname = '替换者'; },
+      f => { f.state.positions[5000][0].player.guildIdx = 19; }, f => { f.state.positions[5000][0].player.power++; },
+      f => { f.state.fightTimes = f.state.maxFightTimes; }]) {
+      const f = fixture(); f.enemy(0); const quote = await preview(f, attack()); change(f);
+      await assert.rejects(() => run(f, quote), /抢占/); assert((await preview(f, attack())).fleets.every(row => !row.step));
+      assert.deepEqual(f.client.writes, []);
+    }
+  });
+  await test('手动抢占遵守每队安全名单、日上限及所有舰队共享的待确认次数', async () => {
+    const f = fixture(); f.enemy(0);
+    f.settings.silicon.fleets[0].safePlayers = ['敌方船长']; f.settings.silicon.fleets[1].safeGuilds = ['8'];
+    f.settings.silicon.fleets[2].dailyAttackLimit = 1; f.ledger.confirm(f.ledger.reserve({ siliconAttacks3: 1 }));
+    const q = await preview(f, attack()); assert(q.fleets.every(row => !row.step));
+    assert.deepEqual(q.fleets.map(row => row.reason), ['目标在这支舰队的安全名单中', '目标在这支舰队的安全名单中', '这支舰队已达每日抢占上限']);
+    const g = fixture(); g.enemy(0); g.enemy(1); g.state.maxFightTimes = 1; g.unknown = true;
+    assert.equal((await run(g, await preview(g, attack()))).status, 'unknown');
+    const next = await preview(g, attack(5000, 1)); assert.match(next.fleets[1].reason, /共享抢占次数不足/);
+    assert.equal(g.ledger.pendingCounters().siliconAttacks1, 1); assert.equal(g.client.writes.length, 1);
   });
   await test('实际汽油、共享周期额度和自定日奖励上限仍生效', async () => {
     for (const change of [f => { f.state.fuel = 499; },
@@ -123,6 +169,12 @@ try {
     assert.equal((await post('action', payload(q), 'two')).ok, false);
   });
   let completedQuote;
+  await test('同一矿位刷新选队替换旧确认，刷新和重放旧确认都不派遣', async () => {
+    const first = await getQuote();
+    const refreshed = await (await post('preview', { ...dispatch(), previousToken: first.token })).json();
+    assert(refreshed.token); assert.notEqual(refreshed.token, first.token);
+    assert.equal((await post('action', payload(first))).ok, false); assert.equal(f.client.writes.length, 0);
+  });
   await test('并发双击同一确认只发送一次，归港后重放旧确认也不再派遣', async () => {
     const q = await getQuote(); completedQuote = q;
     let started, release; const entered = new Promise(resolve => { started = resolve; }); const gate = new Promise(resolve => { release = resolve; });

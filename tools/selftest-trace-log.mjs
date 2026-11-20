@@ -6,11 +6,34 @@ import { EventEmitter } from 'node:events';
 import { createTraceLog, emitDiagnostic, traceJson } from '../src/trace-log.mjs';
 import { createProtocolDiagnostics } from '../src/protocol-diagnostics.mjs';
 import { createOperationLog } from '../src/operation-log.mjs';
+import { createOperationJournal } from '../src/business-journal.mjs';
 import { formatConsoleLog } from '../src/console-log.mjs';
 import { classifyLog } from '../src/log-categories.mjs';
 import { prepareAd } from '../src/ad-shop.mjs';
 
 const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'cw-trace-log-'));
+{
+  const updates = [];
+  const journal = createOperationJournal((level, message, data, quiet) => updates.push({ level, message, data, quiet }), 10, 5);
+  const phase = (id, phase, result, reason) => journal.phase({ operationId: id, phase, result, reason, label: '仓库升级' });
+  phase('slow', 'reserved', 'pending');
+  phase('slow', 'sent', 'pending');
+  await new Promise(resolve => setTimeout(resolve, 20));
+  assert.equal(updates.length, 1);
+  assert(updates[0].quiet);
+  assert.match(updates[0].message, /进行中/);
+  phase('slow', 'cancelled', 'rejected', '材料不足');
+  assert.equal(updates.at(-1).level, 'error');
+  assert.match(updates.at(-1).message, /拒绝.*材料不足/);
+  assert(!updates.at(-1).quiet);
+  phase('stopped', 'reserved', 'pending');
+  phase('stopped', 'cancelled', 'not-sent');
+  assert.match(updates.at(-1).message, /已取消，未发送/);
+  phase('cleared', 'reserved', 'pending');
+  journal.clear();
+  await new Promise(resolve => setTimeout(resolve, 20));
+  assert.equal(updates.length, 3, '清空时取消尚未展示的进度计时器');
+}
 const douyinTrace = JSON.parse(traceJson({ sessionid: 'fixture-web-session', hostSessionId: 'fixture-host-session',
   frameId: 'fixture-verification-frame', image: 'data:image/png;base64,fixture-challenge',
   anonymousCode: 'fixture-anonymous-code', cloudCode: 'fixture-cloud-code', code: 'fixture-login-code',
@@ -236,9 +259,32 @@ try {
   tracked.phase('unknown', 'pending', { reason: 'token=secret-operation' });
   tracked.close();
   const chain = webEntries.filter(entry => entry.operationId === tracked.operationId);
-  assert.deepEqual(chain.map(entry => entry.phase), ['reserved', 'sent', 'unknown']);
+  assert.deepEqual(chain.map(entry => entry.phase), ['unknown']);
+  assert.equal(chain[0].level, 'warn');
+  assert.match(chain[0].detail, /已预留[\s\S]*已发送[\s\S]*结果待确认/);
   assert(chain.every(entry => entry.dedupeKey === 'test:key'));
   assert.doesNotMatch(JSON.stringify(chain), /secret-/);
+  tracked.phase('confirmed', 'confirmed');
+  const resolved = session.log.filter(entry => entry.operationId === tracked.operationId);
+  assert.equal(resolved.length, 1);
+  assert.equal(resolved[0].rowId, chain[0].rowId);
+  assert(resolved[0].id > chain[0].id);
+  assert.equal(resolved[0].level, 'info');
+  assert.match(resolved[0].message, /复核已确认/);
+  assert.match(resolved[0].detail, /结果待确认/);
+  const start = webEntries.length;
+  for (let i = 0; i < 10; i++) {
+    const op = createOperationLog(session.client, { request: 'WriteRequest', label: '家具作坊开工' });
+    session.client.emit('sent', { dir: 'out', name: 'WriteRequest', seq: 11 + i });
+    op.phase('confirmed', 'confirmed');
+    session.operations.step(op.operationId, 'info', '家具作坊已开始施工', { title: '家具作坊已开始施工' });
+    op.close();
+  }
+  await new Promise(resolve => setImmediate(resolve));
+  const finished = webEntries.slice(start);
+  assert.equal(finished.length, 10);
+  assert.equal(new Set(finished.map(row => row.operationId)).size, 10);
+  assert(finished.every(row => row.message.includes('家具作坊已开始施工') && row.detail.includes('已预留')));
   app.emit(session, 'error', quotedError.message, { diagnostic: quotedError.stack });
   session.client.emit('diagnostic', { ...diagnosticEvent, event: 'protocol-decode-error' });
   const protocolError = webEntries.at(-1);
@@ -254,6 +300,9 @@ try {
   assert.doesNotMatch(streamed, /secret-/);
   await reader.cancel();
   const trace = fs.readFileSync(path.join(dataDir, 'protocol.log'), 'utf8');
+  const phases = trace.split('\n').filter(line => line.includes('] operation ') && line.includes(tracked.operationId))
+    .map(line => JSON.parse(line.slice(line.indexOf('] operation ') + 12)).phase);
+  assert.deepEqual(phases, ['reserved', 'sent', 'unknown', 'confirmed']);
   assert.match(trace, /\[MyFleetsResponse\] seq=7 .*20远征船/);
   assert.match(trace, /-> \[TreasureLootSendFleetsRequest\] seq=8 32B .*5001.*20远征船/);
   assert.match(trace, /diagnostic .*treasure-plan/);

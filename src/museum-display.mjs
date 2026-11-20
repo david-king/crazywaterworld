@@ -150,7 +150,7 @@ export async function runMuseumDisplay(client, protocol, config, { player, getSe
       if (!step) break;
       check();
       const uniqueKey = prefix + step.body.exhibitionId + ':' + step.body.caseIndex;
-      operation = createPendingOperation(ledger, { client, module: 'museum.display', request: REQUEST });
+      operation = createPendingOperation(ledger, { client, module: 'museum.display', request: REQUEST, label: step.label });
       operation.reserve({}, {}, {}, { uniqueKey, details: { kind: 'museumDisplay', ...step.body } });
       try { check(); } catch (error) { operation.cancel(); throw error; }
       const reply = await operation.send(() => client.request(REQUEST, step.body, RESPONSE, 8000));
@@ -159,13 +159,14 @@ export async function runMuseumDisplay(client, protocol, config, { player, getSe
       if (matching.length !== 1 || matching[0].antiqueId !== step.body.antiqueId) throw new Error('服务器上架回执未确认目标展柜与藏品');
       const after = await get('MuseumInfoRequest');
       if (!displayedAt(after, step.body)) throw new Error('上架后的展柜状态尚未同步');
+      const operationId = operation.operationId;
       operation.confirm(); operation = null;
       ledger.releaseCompletedKey(uniqueKey);
-      emit({ step, label: step.label, ok: true, status: 'confirmed' });
+      emit({ step, label: step.label, ok: true, status: 'confirmed', operationId });
     }
   } catch (error) {
     const failure = operation?.fail(error);
-    emit({ ok: false, ...(error.code === 'AUTOMATION_SKIP' ? { skipped: true } : {}),
+    emit({ ok: false, operationId: operation?.operationId, ...(error.code === 'AUTOMATION_SKIP' ? { skipped: true } : {}),
       status: failure?.pending ? 'pending' : 'waiting', reason: error.message, error: error.message });
   } finally {
     if (locked) activeAccounts.delete(account);

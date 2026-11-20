@@ -7,6 +7,7 @@ import { warForgeFixture, warForgeSettings } from './fixtures/war-forge.mjs';
 import { defaultSettings, validateSettings, importAutomationSettings, createUsageLedger, saveAutomationSettings, loadAutomationSettings } from '../src/automation-settings.mjs';
 import { cityPetrolCost, readCityWar, planCityWar, runCityWar } from '../src/city-war.mjs';
 import { readEquipmentForge, planEquipmentForge, releaseStaleEquipmentForge, runEquipmentForge } from '../src/equipment-forge.mjs';
+import { beginOrderMaterialSpend, pendingOrderMaterialSpends } from '../src/order-reservations.mjs';
 import { readTreasureLoot, planTreasureLoot, runTreasureLoot } from '../src/treasure-loot.mjs';
 import { runLoop } from '../src/loop.mjs';
 import { exactAutomationId } from '../src/automation-policy.mjs';
@@ -307,6 +308,32 @@ await check('普通材料用尽后，按缺口和万能材料保留量补足', a
   const plan=await forgePlan(f,s);assert(plan.actions[0].body.universal);assert.deepEqual(plan.actions[0].costs.at(-1),{id:'蓝装材料自选包',num:10});
   s.forge.universalReserve=90;assert.equal((await forgePlan(f,s)).actions.length,1);
   s.forge.universalReserve=91;assert.equal((await forgePlan(f,s)).actions.length,0);
+});
+await check('喂养粗铁扣款待确认时，装备厂仍可用武器材料开工', async () => {
+  const f = warForgeFixture(), settings = warForgeSettings();
+  f.state.materials.粗铁 = 50;
+  const feed = beginOrderMaterialSpend(f.player, [{ id: '粗铁', have: 50, need: 1 }],
+    '喂养培育队列 1', { operation: { verify: () => false } });
+
+  const result = await forgeRun(f, settings);
+  assert.equal(result.results.find(row => row.step.kind === 'forgeStart')?.status, 'confirmed');
+  assert.deepEqual(f.client.writes.map(row => row.name), ['MakeEquipRequest']);
+  assert.deepEqual(pendingOrderMaterialSpends(f.player), [feed]);
+});
+await check('配方实际消耗的普通或万能材料有待确认扣款时跳过锻造', async () => {
+  for (const id of ['蓝武器材料', '蓝装材料自选包']) {
+    const f = warForgeFixture(), settings = warForgeSettings();
+    f.state.materials.蓝武器材料 = 30;
+    settings.forge.universal = true;
+    beginOrderMaterialSpend(f.player, [{ id, have: f.state.materials[id], need: 1 }],
+      '上次消费', { operation: { verify: () => false } });
+
+    const result = await forgeRun(f, settings);
+    const entry = result.results.find(row => row.step.kind === 'forgeStart');
+    assert.equal(entry?.skipped, true, id);
+    assert.match(entry.error, /上次消费的材料扣款尚未确认/);
+    assert.equal(f.client.writes.length, 0, id);
+  }
 });
 await check('锻造开始确认，制作中不重复，入库后才继续下一件', async () => {
   const f=warForgeFixture(),s=warForgeSettings(),u=ledger();
@@ -831,7 +858,8 @@ await check('城战窗口内无有效目标不阻断巨轮，跨入有效窗口�
   const g=warForgeFixture();g.state.war.startTime=Math.floor(Date.now()/1000)+5;let mapReads=0;
   g.beforeRead=name=>{if(name==='WorldInfoRequest'&&++mapReads===2)g.client.serverClockOffsetMs=10000;};
   await runLoop(g.client,g.protocol,{config:g.config,player:g.player,rounds:1,allowMutate:true,getSettings:()=>s,usageLedger:ledger(),isEnabled:()=>false});
-  assert.equal(g.client.writes.length,0,'读取期间跨入有效城战窗口仍不能把保留舰队派往巨轮');
+  assert.deepEqual(g.client.writes.map(row => row.name), ['MoveFleetsToCityRequest'],
+    '读取期间开战时应保留舰队，并在主轮检查点派往城战目标');
 });
 
 fs.writeFileSync(path.join(directory,'accounts.json'),JSON.stringify({version:1,activeId:'a',accounts:['a','b'].map(id=>({id,label:'城战锻造模拟'+id,url:'ws://127.0.0.1:1',login:{},automation:{enabled:false,paused:true}}))}));

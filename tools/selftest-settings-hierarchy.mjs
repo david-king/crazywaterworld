@@ -88,7 +88,6 @@ function fixture({ navigation = false } = {}) {
     const closeHelpTip = () => {};
     const location = { get hash() { return env.hash; } };
     const history = { replaceState(state, title, hash) { env.hash = hash; } };
-    const Option = function(text, value) { const option = el('option', '', text); option.value = value; return option; };
     const clear = node => { for (const child of [...node.children]) child.remove(); return node; };
     configRenderUsage = () => {};
     configUpdateState = () => {};
@@ -208,7 +207,7 @@ test('军备竞赛主项平铺且参数可展开收起，全天参与与积分�
 test('英雄、藏品、装备各有唯一设置入口，原有分组书签指向新分类', () => {
   const f = fixture({ navigation: true }); f.renderPage();
   const categories = {
-    heroes: ['heroes', 'hero-recruit'],
+    heroes: ['heroes', 'hero-recruit', 'appointments'],
     antique: ['antique', 'antique-recruit'],
     equipment: ['forge'],
   };
@@ -218,11 +217,12 @@ test('英雄、藏品、装备各有唯一设置入口，原有分组书签指�
       f.env.hash = '#config-group-' + group; f.applyHash();
       assert(visible(f.env.node('config-group-' + group)));
       assert.equal(f.editor.category, category);
-      assert.equal(f.env.node('config-preview-scope').value, 'module:' + group);
+      assert.equal(f.editor.selectedGroups[category], group);
     }
   }
   for (const [id, keys] of Object.entries({
-    'hero-recruit': ['schedule.freeRecruit', 'schedule.ticketRecruit', 'schedule.heroAdRecruit', 'schedule.heroRecruitRewards'],
+    'hero-recruit': ['schedule.freeRecruit', 'schedule.heroAdRecruit', 'schedule.heroRecruitRewards'],
+    appointments: ['appointments.enabled', 'appointments.priorities'],
     'antique-recruit': ['schedule.freeAntiqueRecruit', 'schedule.antiqueAdRecruit', 'schedule.antiqueRecruitRewards'],
   })) assert.deepEqual(new Set(f.editor.groups.get(id).fields.map(field => field.key)), new Set(keys));
   for (const key of ['schedule.equipmentCollect', 'schedule.equipmentCraft']) {
@@ -231,7 +231,7 @@ test('英雄、藏品、装备各有唯一设置入口，原有分组书签指�
   f.env.hash = '#config-group-equipment-legacy'; f.applyHash();
   assert(visible(f.env.node('config-group-forge')));
   assert.equal(f.editor.category, 'equipment');
-  assert.equal(f.env.node('config-preview-scope').value, 'module:forge');
+  assert.equal(f.editor.selectedGroups.equipment, 'forge');
   f.env.hash = '#config-group-daily-collections'; f.applyHash();
   assert(visible(f.env.node('config-group-hero-recruit')));
   assert.equal(f.env.saves, 0);
@@ -265,7 +265,7 @@ test('建筑与多分组分类切换、键盘导航和旧链接都能定位同�
   f.activateGroup('farm');
   f.env.node('config-family-construction').onclick();
   assert(visible(f.env.node('config-group-building')));
-  assert.equal(f.env.node('config-preview-scope').value, 'module:building');
+  assert.equal(f.editor.selectedGroups.base, 'building');
   assert.equal(f.env.hash, '#config-group-building');
   f.env.node('config-family-construction').onkeydown({ key: 'ArrowRight', preventDefault() {} });
   assert(visible(f.env.node('config-group-farm')), '再次进入生产保留上次选择');
@@ -309,7 +309,11 @@ test('所有显式父项位于同组，字段无重复且依赖无环', () => {
     ['merchant.autoBuyPointers', 'merchant.autoSpeedUp'], ['merchant.pointerDailyDiamondLimit', 'merchant.autoBuyPointers'],
     ['silicon.fleets.0.huntPlayers', 'silicon.fleets.0.huntEnabled'],
     ['antique.targetStar', 'antique.star'],
-    ['treasure.marchTargetSeconds', 'treasure.marchSpeedUp'], ['treasure.dailyDiamondLimit', 'treasure.marchSpeedUp'],
+    ['cityWar.recallLeadMinutes', 'cityWar.recallSilicon'], ['treasure.recallLeadMinutes', 'treasure.recallSilicon'],
+    ['treasure.chaseNames', 'treasure.chase'], ['treasure.chaseWindows', 'treasure.chase'], ['treasure.chaseSpeedUp', 'treasure.chase'],
+    ['treasure.chaseTargetSeconds', 'treasure.chaseSpeedUp'], ['treasure.chaseDailyDiamondLimit', 'treasure.chaseSpeedUp'],
+    ['treasure.outboundSpeedUp', 'treasure.marchSpeedUp'], ['treasure.marchTargetSeconds', 'treasure.outboundSpeedUp'],
+    ['treasure.returnSpeedUp', 'treasure.marchSpeedUp'], ['treasure.returnTargetSeconds', 'treasure.returnSpeedUp'], ['treasure.dailyDiamondLimit', 'treasure.outboundSpeedUp'], ['treasure.returnDailyDiamondLimit', 'treasure.returnSpeedUp'],
   ]) assert.equal(fields.get(child)?.parent, parent, child);
 });
 test('巨轮跟随后续方式仅在跟随与反复攻占同时开启时展示，切换开关保留选项', () => {
@@ -524,25 +528,45 @@ test('三级开关关闭隐藏全部后代，重新启用保留子开关与预�
   assert(visible(budget.node)); assert.equal(parent.disclosure.getAttribute('aria-expanded'), 'true');
 });
 
-test('巨轮加速开关控制秒数与预算显隐，关闭后保留配置', () => {
+test('三支硅矿舰队仅展示去程和回城的加速开关、阈值和预算', () => {
+  const f = fixture(), fields = f.groups.find(group => group.id === 'silicon').fields;
+  for (const i of [0,1,2]) {
+    const prefix = 'silicon.fleets.' + i + '.';
+    for (const key of ['repairSpeedUp','repairDailyDiamonds','repairTargetSeconds']) assert(!fields.some(field => field.key === prefix + key));
+    assert(fields.some(field => field.key === prefix + 'autoRepair'));
+    for (const mode of ['march','return']) {
+      const toggle = prefix + mode + 'SpeedUp';
+      assert.equal(fields.find(field => field.key === toggle).parent, prefix + 'enabled');
+      for (const suffix of ['TargetSeconds','DailyDiamonds']) {
+        const field = fields.find(field => field.key === prefix + mode + suffix);
+        assert.equal(field.parent, toggle);
+        const fleet = f.editor.draft.silicon.fleets[i];
+        fleet.enabled = true; fleet[mode + 'SpeedUp'] = true; assert(field.when(f.editor.draft));
+        fleet[mode + 'SpeedUp'] = false; assert(!field.when(f.editor.draft));
+      }
+    }
+  }
+});
+
+test('巨轮去程和回城分别控制秒数与每日预算', () => {
   const f = fixture();
-  Object.assign(f.editor.draft.treasure, { marchTargetSeconds: 90, dailyDiamondLimit: 300 });
-  f.mount(f.groups.find(group => group.id === 'treasure').fields.filter(field => [
-    'treasure.marchSpeedUp', 'treasure.marchTargetSeconds', 'treasure.dailyDiamondLimit',
-  ].includes(field.key)));
-  const speed = f.widget('treasure.marchSpeedUp'), seconds = f.widget('treasure.marchTargetSeconds');
-  const budget = f.widget('treasure.dailyDiamondLimit');
-  assert.equal(speed.spec.kind, 'switch'); assert.equal(seconds.spec.unit, '秒'); assert.equal(budget.spec.unit, '钻石');
-  assert(!visible(seconds.node)); assert(!visible(budget.node));
-  f.set('treasure.marchSpeedUp', true);
-  assert(!visible(seconds.node),'启用功能不自动展开配置');f.expand('treasure.marchSpeedUp');
-  assert(visible(seconds.node)); assert(visible(budget.node));
+  Object.assign(f.editor.draft.treasure, { marchTargetSeconds: 90, returnTargetSeconds: 20, dailyDiamondLimit: 300 });
+  const fields = ['marchSpeedUp', 'outboundSpeedUp', 'marchTargetSeconds', 'returnSpeedUp', 'returnTargetSeconds', 'dailyDiamondLimit', 'returnDailyDiamondLimit'];
+  f.mount(f.groups.find(group => group.id === 'treasure').fields.filter(field => fields.includes(field.key.split('.')[1])));
+  const shown = key => visible(f.widget('treasure.' + key).node);
+  assert(!shown('outboundSpeedUp')); assert(!shown('returnSpeedUp')); assert(!shown('dailyDiamondLimit'));
+  f.set('treasure.marchSpeedUp', true); f.expand('treasure.marchSpeedUp');
+  assert(shown('outboundSpeedUp')); assert(shown('returnSpeedUp')); assert(!shown('dailyDiamondLimit'));
+  f.expand('treasure.outboundSpeedUp');
+  assert(shown('marchTargetSeconds')); assert(shown('dailyDiamondLimit')); assert(!shown('returnTargetSeconds'));
+  f.set('treasure.returnSpeedUp', true); f.expand('treasure.returnSpeedUp');
+  f.set('treasure.outboundSpeedUp', false);
+  assert(!shown('marchTargetSeconds')); assert(shown('returnTargetSeconds')); assert(!shown('dailyDiamondLimit')); assert(shown('returnDailyDiamondLimit'));
   f.set('treasure.marchSpeedUp', false);
-  assert(!visible(seconds.node)); assert(!visible(budget.node));
+  assert(!shown('returnTargetSeconds')); assert(!shown('dailyDiamondLimit'));
   assert.equal(f.editor.draft.treasure.marchTargetSeconds, 90);
+  assert.equal(f.editor.draft.treasure.returnTargetSeconds, 20);
   assert.equal(f.editor.draft.treasure.dailyDiamondLimit, 300);
-  f.set('treasure.marchSpeedUp', true);
-  assert(visible(seconds.node)); assert(visible(budget.node));
 });
 
 test('默认收起、按需展开；手动收起后重新启用不擅自展开', () => {
@@ -648,9 +672,14 @@ test('世界Boss领奖只在世界分组出现，首战派遣与领奖独立控�
   const ids = [...f.editor.groups.values()].filter(item => item.category === 'daily').map(item => item.id);
   const daily = ids.indexOf('daily-actions');
   assert.deepEqual(ids.slice(daily - 2, daily + 2), ['league', 'arena', 'daily-actions', 'ad-rewards']);
-  assert.deepEqual(f.editor.groups.get('arena').fields.map(field => field.key), ['schedule.arena', 'arena.target', 'arena.maxPowerRatio', 'arena.keepTickets']);
+  assert.deepEqual(f.editor.groups.get('arena').fields.map(field => field.key), ['schedule.arena', 'arena.target', 'arena.maxPowerRatio', 'arena.fallbackLowerRank', 'arena.dailyBattleLimit', 'arena.claimTask']);
   assert.deepEqual(f.editor.groups.get('league').fields.map(field => field.key),
-    ['schedule.leagueChallenge', 'league.target', 'league.maxPowerRatio', 'league.keepTickets', 'schedule.leagueCollect', 'schedule.leaguePassRewards']);
+    ['schedule.leagueChallenge', 'league.target', 'league.maxPowerRatio', 'league.fallbackWeakest', 'league.dailyBattleLimit', 'league.claimTask', 'schedule.leagueCollect', 'schedule.leaguePassRewards']);
+  for (const [key, owner] of [['dailies.claimTasks', 'rewards'], ['arena.claimTask', 'arena'], ['league.claimTask', 'league'],
+    ['schedule.leagueCollect', 'league'], ['schedule.leaguePassRewards', 'league']]) {
+    assert.deepEqual([...f.editor.groups.values()].filter(group => group.fields.some(field => field.key === key)).map(group => group.id), [owner]);
+  }
+  assert(!f.widget('schedule.dailyRewards'), '旧的统一领奖开关不应显示');
   f.env.hash = '#config-group-daily-challenges'; f.applyHash();
   assert.equal(f.editor.selectedGroups.daily, 'league');
 });

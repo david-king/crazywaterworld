@@ -64,7 +64,7 @@ function fixture() {
     const resetWechatLogin = () => env.clean('wechat-qr');
     const resetAccountAddCapture = () => env.clean('capture');
     const refreshPhoneDevice = async () => { env.deviceReads++; };
-    const pollCapture = async () => { env.captureReads++; };
+    const beginCapture = async channel => { env.captureReads++; env.reviewChannel = channel; };
     // 真实页面的支付宝首次渲染早于wizard初始化。
     accountAddChanged('alipay', 'idle');
     ${script}
@@ -108,6 +108,7 @@ await test('选中各渠道只显示对应入口，采集按钮按渠道呈现',
     assert.deepEqual(env.cleanup, []);
     assert.equal(env.deviceReads, channel === 'phone' ? 1 : 0);
     assert.equal(env.captureReads, ['wechat', 'douyin'].includes(channel) ? 1 : 0);
+    assert.equal(env.reviewChannel, ['wechat', 'douyin'].includes(channel) ? channel : undefined);
     env.choose(channel === 'phone' ? 'alipay' : 'phone');
     assert.equal(env.channel(), channel, '完成当前渠道清理后才可重新选择');
   }

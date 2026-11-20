@@ -143,6 +143,7 @@ await test('随机事件断线重连清除旧状态，未同步与空列表可�
 });
 await test('生成页面脚本语法有效，独立预览与地图入口完整',()=>{
  for(const match of PAGE.matchAll(/<script>([\s\S]*?)<\/script>/g))new vm.Script(match[1]);
- assert.ok(PAGE.includes('value="radar"'));assert.ok(PAGE.includes('value="pirateHunt"'));assert.ok(PAGE.includes('id="world-map-refresh"'));assert.ok(PAGE.includes('id="overview-task-filter"'));assert.ok(PAGE.includes('id="overview-task-search"'));
+ assert.ok(PAGE.includes("radar:'radar'"));assert.ok(PAGE.includes("'pirate-hunt':'pirateHunt'"));
+ for(const id of ['config-preview','world-map-refresh','overview-task-filter','overview-task-search'])assert.ok(PAGE.includes('id="'+id+'"'),id);
 });
 console.log('整轮优化专项 '+passed+'/'+passed+' 通过');

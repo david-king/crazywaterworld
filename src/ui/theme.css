@@ -66,6 +66,10 @@
   --header-h: 97px;
 }
 
+@media (max-width: 768px) {
+  :root { --text-sm: 0.8125rem; --text-sm--line-height: 1.45; }
+}
+
 html[data-theme="dark"] {
   color-scheme: dark;
   --background: oklch(0.145 0 0);
@@ -241,8 +245,8 @@ html[data-theme="dark"] {
     mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23000' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='m6 9 6 6 6-6'/%3E%3C/svg%3E") center / contain no-repeat;
   }
   details[open] > summary::after { @apply rotate-180; }
-  :is(.overview-task-group, .inventory-category, .guild-tech-group) { @apply border-b last:border-b-0; }
-  :is(.overview-task-group, .inventory-category, .guild-tech-group) > summary { @apply py-3; }
+  :is(.overview-task-group, .guild-tech-group) { @apply border-b last:border-b-0; }
+  :is(.overview-task-group, .guild-tech-group) > summary { @apply py-3; }
 
   /* Select 触发器样式的多选框 */
   .config-multi { @apply rounded-md border border-input bg-transparent shadow-xs; }
@@ -367,8 +371,8 @@ html[data-theme="dark"] {
   html[data-theme="dark"] .log-tag[data-tone=purple] { --log-tag-bg:#30204d; --log-tag-fg:#c4b5fd; }
   button.log-tag { @apply cursor-pointer outline-none focus-visible:ring-[3px] focus-visible:ring-ring/50; }
   button.log-tag:hover { border-color:var(--log-tag-fg); }
-  .log-group-tag { @apply min-h-8 gap-1.5 rounded-full px-2.5; }
-  .log-group-tag:is([aria-selected=true],[aria-pressed=true]) { border-color:var(--log-tag-fg); box-shadow:inset 0 0 0 1px var(--log-tag-fg); }
+  .log-group-tag { @apply min-h-6 gap-1 rounded-md px-1.5; }
+  .log-group-tag:is([aria-selected=true],[aria-pressed=true]) { border-color:var(--log-tag-fg); }
   @media (pointer:coarse) {
     .log-group-tag { @apply min-h-9; }
     .log-account { @apply min-h-7; }
@@ -389,44 +393,66 @@ html[data-theme="dark"] {
 
   /* 与手机布局使用相同的 768px 边界，避免输入框在临界宽度恢复桌面尺寸。 */
   @media (max-width: 768px) {
-    .hosting-controls #loop-every { @apply h-10 w-full min-w-0 px-1; }
-    .hosting-controls > button { @apply h-10 min-w-0 px-1.5 text-xs; }
+    .hosting-controls #loop-every { @apply w-full min-w-0 px-1; }
+    .hosting-controls > button { @apply min-w-0 px-1.5 text-xs; }
     .hosting-controls #logs-open { @apply gap-1; }
     .hosting-controls #logs-open > svg { @apply hidden; }
   }
 
 }
 
-/* 四列以上的表格在窄屏变成一行一张卡片，避免内容被挤成竖排。 */
-@container main (max-width: 600px) {
-  :is(.table-stack, .sea-records) thead { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); }
-  .table-stack :is(table, tbody, tr) { display: block; width: 100%; }
-  .table-stack tr { padding: 0.75rem 0; border-bottom: 1px solid var(--border); }
-  .table-stack tr:last-child { border-bottom: 0; }
-  .table-stack td { display: block; position: relative; min-height: 1.5rem; padding: 0.25rem 0 0.25rem 5.5rem; border: 0; text-align: left; white-space: normal; overflow-wrap: anywhere; }
-  .table-stack td::before { content: attr(data-label); position: absolute; left: 0; top: 0.3125rem; width: 5rem; color: var(--muted-foreground); font-size: 0.75rem; font-weight: 400; line-height: 1.4; }
-  .table-stack td:first-child { padding-left: 0; font-weight: 500; }
-  .table-stack td:first-child::before { display: none; }
-  .table-stack td:empty { display: none; }
-}
-
-/* 海面的小表共用表头，工厂和订单在窄屏按记录换行。 */
-:is(#world-factories, #world-orders, #production-plan-result) th { height:2rem; padding-inline:0.625rem; color:var(--muted-foreground); font-size:0.75rem; }
-:is(#world-factories, #world-orders, #production-plan-result) td { padding:0.25rem 0.625rem; overflow-wrap:anywhere; }
+/* 建筑、订单与排产共用的小表。 */
+:where(#world-factories, #world-orders, #production-plan-result) th { height:2rem; padding-inline:0.625rem; color:var(--muted-foreground); font-size:0.75rem; }
+:where(#world-factories, #world-orders, #production-plan-result) td { padding:0.25rem 0.625rem; overflow-wrap:anywhere; }
 @container main (max-width: 600px) {
   #production-plan-result .plan-demand-table td { padding:0; }
-  #production-plan-result .table-stack td:not(:first-child) { padding-inline-start:5.5rem; }
-  .sea-records :is(table, tbody) { display: block; }
-  .sea-records tbody tr { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 0.25rem 0.75rem; align-items: start; padding: 0.5rem 0.625rem; }
-  .sea-records tbody tr.factory-detail[hidden] { display: none; }
-  :is(#world-factories, #world-orders) .sea-records td { display: flex; flex-wrap: wrap; align-items: baseline; gap: 0 0.375rem; min-width: 0; padding: 0; }
-  .sea-records td::before { content: attr(data-label); color: var(--muted-foreground); font-size: 0.75rem; }
-  .sea-records td:first-child { font-weight: 600; }
-  .sea-records td:first-child::before, #world-orders td:last-child::before { content: none; }
-  .world-factory-section td:first-child, .world-factory-section td:nth-child(4), #world-orders td:nth-child(n+3) { grid-column: 1 / -1; }
-  .world-farm-section td:nth-child(n+3), .world-factory-section .factory-detail td { grid-column:1 / -1; }
-  .world-factory-section .factory-detail td { font-weight: normal; }
-  .world-farm-section th { white-space: normal; }
+}
+
+/* 窄屏下每条记录独占一行，让字段名与可换行的值各占一列。 */
+@container main (max-width: 46.5rem) {
+  :is(.table-stack, .sea-records) thead { position:absolute; width:1px; height:1px; overflow:hidden; clip-path:inset(50%); }
+  :is(.table-stack, .sea-records) :is(table, tbody) { display:block; width:100%; }
+  :is(.table-stack, .sea-records) td { display:grid; grid-template-columns:var(--record-label, 5rem) minmax(0, 1fr); align-items:baseline; gap:0.375rem; min-width:0; padding:0; border:0; white-space:normal; overflow-wrap:anywhere; text-align:start; }
+  :is(.table-stack, .sea-records) td > * { min-width:0; max-width:100%; justify-self:start; }
+  :is(.table-stack, .sea-records) td::before { content:attr(data-label); font-size:0.75rem; font-weight:400; color:var(--muted-foreground); }
+  :is(.table-stack, .sea-records) td:first-child { display:block; font-weight:600; }
+  :is(.table-stack, .sea-records) td:first-child::before { content:none; }
+  .table-stack tbody tr { display:grid; gap:0.25rem; padding:0.5rem 0; }
+  #production-plan-result .table-stack tbody tr { padding-inline:0.625rem; }
+  .table-stack td:empty { display:none; }
+
+  .sea-records { --record-label:3.75rem; }
+  .sea-records tbody tr { display:grid; grid-template-columns:minmax(0, 1fr) fit-content(48%); gap:0.25rem 0.5rem; align-items:center; padding:0.5rem 0.625rem; border:0; }
+  .sea-records tbody tr + tr { border-top:1px solid var(--border); }
+  .sea-records td { grid-column:1 / -1; align-items:start; }
+  .sea-records td:has(.plan-material-roots)::before { line-height:1.5rem; }
+  .sea-records td:first-child { grid-column:1; grid-row:1; }
+  :is(.world-factory-section, .world-slot-section) td:nth-child(3),
+  :is(.world-farm-section, #world-orders) td:nth-child(2) {
+    grid-column:2; grid-row:1; grid-template-columns:auto minmax(0, 1fr); justify-self:end; font-size:0.75rem;
+  }
+  .world-factory-section td:nth-child(2) { grid-column:1; grid-row:2; }
+  .world-factory-section td:nth-child(5) { grid-column:2; grid-row:2; grid-template-columns:auto minmax(0, 1fr); justify-self:end; }
+  .world-factory-section .factory-detail td { grid-column:1 / -1; font-weight:400; }
+  .sea-records .factory-toggle { max-width:100%; height:auto; min-height:2.5rem; text-align:start; white-space:normal; }
+  .sea-records .factory-toggle > span:last-child { min-width:0; overflow-wrap:anywhere; }
+}
+
+@media (max-width:768px) and (pointer:coarse) {
+  [data-slot=button]:is([data-size=sm], [data-size=default]) { min-height:2.75rem; }
+  #theme-trigger, #console-quick-open { min-width:2.75rem; min-height:2.75rem; }
+  /* 上下扩展命中区域，横向仍由各按钮独立响应。 */
+  :is(.hosting-controls,.account-page-actions,.account-card-actions,.account-resources-heading) > button::after {
+    content:""; position:absolute; inset-inline:0; top:50%; height:2.75rem; translate:0 -50%;
+  }
+  .hosting-interval { padding-block:0.375rem; margin-block:-0.375rem; }
+}
+@media (max-width:768px) {
+  .hosting-controls #loop-every,
+  :is(.hosting-controls,.account-page-actions,.account-card-actions,.account-resources-heading) > [data-slot=button] {
+    position:relative; height:2rem; min-height:2rem; padding-block:0;
+  }
+  .account-page-actions > button { min-width:2.75rem; padding-inline:0.5rem; gap:0.25rem; }
 }
 
 /* 只放必须盖过工具类的规则。 */

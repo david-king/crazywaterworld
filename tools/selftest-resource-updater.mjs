@@ -201,6 +201,23 @@ try {
     assert.equal(f.events.filter(event => event.level === 'info').length, 1);
     await f.updater.stop();
   });
+  await check('获取配置时只读取一次当前资源指针和检查记录', async () => {
+    const f = fixture(); process.env.CW_RESOURCE_DIR = f.root;
+    await f.updater.check();
+    const reads = new Map(['active.json', 'check.json'].map(name => [path.join(f.root, name), 0]));
+    const originalRead = fs.readFileSync;
+    fs.readFileSync = function (file, ...args) {
+      if (reads.has(file)) reads.set(file, reads.get(file) + 1);
+      return originalRead.call(this, file, ...args);
+    };
+    try {
+      assert.equal(getConfig().tables.MarkerCfg.data[0].revision, 1);
+      assert.deepEqual([...reads.values()], [1, 1]);
+    } finally {
+      fs.readFileSync = originalRead;
+      await f.updater.stop();
+    }
+  });
   await check('仅发布清单变化时不重复下载，更新发布版本记录', async () => {
     const f = fixture(); process.env.CW_RESOURCE_DIR = f.root;
     await f.updater.check(); const before = activeResources({ root: f.root }), beforeConfig = getConfig();

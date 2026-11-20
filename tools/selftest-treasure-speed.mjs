@@ -25,7 +25,7 @@ const nowOf = f => Math.floor((Date.now() + (f.client.serverClockOffsetMs || 0))
 
 function fixture() {
   const f = treasureCycleFixture(), s = treasureCycleSettings();
-  Object.assign(s.treasure, { marchSpeedUp: true, marchTargetSeconds: 60, dailyDiamondLimit: 300 });
+  Object.assign(s.treasure, { marchSpeedUp: true, marchTargetSeconds: 60, dailyDiamondLimit: 300, returnDailyDiamondLimit: 300 });
   Object.assign(s.resources, { allowDiamonds: true, diamondDailyLimit: 300, diamondThreshold: 0 });
   f.config.tables.WorldParamCfg.data.push({ paramName: '行军加速消耗', paramValue: 30 });
   f.state.ruby = 1000;
@@ -81,12 +81,71 @@ async function depart(f, s, usage) {
   assert.equal(result.results[0]?.status, 'confirmed');
   assert.equal(speeds(f).length, 0);
 }
+function startReturn(f) {
+  const fleet = fleetOf(f);
+  f.client.serverClockOffsetMs = 600000;
+  Object.assign(fleet, { startGridIdx: 500, targetGridIdx: 123, cityId: 7, targetCityId: 7,
+    moveStartTs: nowOf(f), moveEndTs: nowOf(f) + 180 });
+}
 const check = async (name, work) => {
   try { await work(); results.push({ name, passed: true }); console.log('通过：' + name); }
   catch (error) { results.push({ name, passed: false, error: error.stack }); console.error('失败：' + name + '\n' + error.stack); }
 };
 
 try {
+  await check('追杀去程独立花钻并绑定原对手，普通去程开关与额度不能代付', async () => {
+    const { f, s } = fixture(), usage = ledger();
+    Object.assign(s.treasure, { chase: true, chaseNames: ['对手甲', '对手乙'], chaseSpeedUp: true, chaseTargetSeconds: 0,
+      chaseDailyDiamondLimit: 60, autoJoin: false, marchSpeedUp: false, dailyDiamondLimit: 0, qualities: [] });
+    Object.assign(f.state.targets[0], { ownerGuildIdx: 8, ownerFleetNum: 1 });
+    f.state.defenders[72] = [{ guildIdx: 8, name: '对手甲' }];
+    f.state.stats.todayRewardTimes = 3;
+    const result = await run(f, s, usage);
+    assert.deepEqual(result.results.map(row => row.step.kind), ['treasureDispatch', 'treasureSpeed']);
+    assert.equal(usage.snapshot().counters.treasureChaseDiamonds, 30);
+    f.state.defenders[72][0].name = '对手乙';
+    assert.deepEqual((await preview(f, s, usage)).actions, []);
+    f.state.defenders[72][0].name = '对手甲';
+    s.resources.diamondThreshold = 970;
+    assert.deepEqual((await preview(f, s, usage)).actions, []);
+    s.resources.diamondThreshold = 0;
+    s.treasure.chaseSpeedUp = false;
+    Object.assign(s.treasure, { marchSpeedUp: true, dailyDiamondLimit: 300 });
+    assert.deepEqual((await preview(f, s, usage)).actions, []);
+    s.treasure.chaseSpeedUp = true;
+    await run(f, s, usage); await run(f, s, usage);
+    assert.equal(speeds(f).length, 2);
+    assert.equal(usage.snapshot().counters.diamonds, 60);
+    assert.equal(usage.snapshot().counters.treasureOutboundDiamonds ?? 0, 0);
+  });
+
+  await check('追杀去程在最终读舰队时跨过截止分钟，停止花钻，回城仍按回城设置加速', async () => {
+    const { f, s } = fixture(), usage = ledger();
+    const todayUTC = Math.floor(Date.now() / 86400000) * 86400000;
+    f.client.serverClockOffsetMs = todayUTC - Date.now();
+    Object.assign(s.treasure, { autoJoin: false, chase: true, chaseNames: ['对手甲'], chaseWindows: ['08:00-08:01'],
+      chaseSpeedUp: false, chaseDailyDiamondLimit: 120, returnSpeedUp: true });
+    Object.assign(f.state.targets[0], { ownerGuildIdx: 8, ownerFleetNum: 1 });
+    f.state.defenders[72] = [{ guildIdx: 8, name: '对手甲' }];
+    await run(f, s, usage);
+    assert.equal(dispatches(f).length, 1);
+    s.treasure.chaseSpeedUp = true;
+    assert.equal((await preview(f, s, usage)).actions[0]?.speedMode, 'chase');
+    let reads = 0;
+    f.beforeRead = name => {
+      if (name === 'MyFleetsRequest' && ++reads === 3) f.client.serverClockOffsetMs = todayUTC + 60000 - Date.now();
+    };
+    const result = await run(f, s, usage);
+    assert.match(result.results[0].reason, /追杀时间范围/);
+    assert.equal(speeds(f).length, 0);
+    assert.equal(usage.snapshot().counters.diamonds ?? 0, 0);
+    assert.deepEqual((await preview(f, s, usage)).actions, []);
+    const now = nowOf(f);
+    Object.assign(fleetOf(f), { startGridIdx: 500, targetGridIdx: 123, cityId: 7, targetCityId: 7, moveStartTs: now, moveEndTs: now + 180 });
+    assert.equal((await run(f, s, usage)).results[0]?.step.speedMode, 'return');
+    assert.equal(speeds(f).length, 1);
+  });
+
   await check('默认关闭加速与预算，普通出征保持可用', async () => {
     const defaults = defaultSettings();
     assert.equal(defaults.treasure.marchSpeedUp, false);
@@ -255,6 +314,124 @@ try {
       const { f, s } = fixture(), usage = ledger(); await depart(f, s, usage); change(fleetOf(f));
       await run(f, s, usage);
       assert.equal(speeds(f).length, 0);
+    }
+  });
+
+  await check('仅启用回城时去程不花钻，结算后仍按回城阈值加速', async () => {
+    const { f, s } = fixture(), usage = ledger();
+    Object.assign(s.treasure, { outboundSpeedUp: false, returnSpeedUp: true, marchTargetSeconds: 3600, returnTargetSeconds: 90 });
+    await run(f, s, usage);
+    assert.equal(dispatches(f).length, 1); assert.equal(speeds(f).length, 0);
+    startReturn(f);
+    f.state.stats.todayRewardTimes = 3;
+    f.state.targets = [];
+    const plan = await preview(f, s, usage);
+    assert.equal(plan.actions.length, 1); assert.equal(plan.actions[0].direction, 'return');
+    assert.match(plan.actions[0].label, /回城/);
+    assert.equal(usage.snapshot().counters.diamonds ?? 0, 0);
+    const result = await run(f, s, usage);
+    assert.equal(result.results[0].status, 'confirmed');
+    await run(f, s, usage);
+    assert.equal(speeds(f).length, 1); assert.equal(usage.confirmedCounters().treasureDiamonds, 30);
+  });
+
+  await check('去程预算耗尽仍可用回城预算，回城为零或关闭时不花钻', async () => {
+    for (const [enabled, budget, count] of [[false, 90, 1], [true, 0, 1], [true, 30, 2]]) {
+      const { f, s } = fixture(), usage = ledger();
+      Object.assign(s.treasure, { returnSpeedUp: enabled, dailyDiamondLimit: 30, returnDailyDiamondLimit: budget });
+      assert.equal((await run(f, s, usage)).results.at(-1).step.direction, 'outbound');
+      startReturn(f); await run(f, s, usage);
+      assert.equal(speeds(f).length, count); assert.equal(usage.confirmedCounters().diamonds, 30 * count);
+    }
+  });
+
+  await check('同轮一队去程一队回城，各用本方向余额并检查全局总额', async () => {
+    for (const globalLimit of [30, 60]) {
+      const { f, s } = fixture(), usage = ledger();
+      Object.assign(s.treasure, { fleetIds: ['1远征船','2远征船'], marchSpeedUp: false, returnSpeedUp: true,
+        dailyDiamondLimit: 30, returnDailyDiamondLimit: 30 });
+      await run(f, s, usage);
+      startReturn(f);
+      f.state.fleets[1].moveEndTs = nowOf(f) + 300;
+      s.treasure.marchSpeedUp = true; s.resources.diamondDailyLimit = globalLimit;
+      const directions = globalLimit === 30 ? ['return'] : ['return','outbound'];
+      assert.deepEqual((await preview(f, s, usage)).actions.map(a => a.direction), directions);
+      assert.deepEqual((await run(f, s, usage)).results.map(r => r.step.direction), directions);
+      assert.equal(usage.confirmedCounters().treasureReturnDiamonds, 30);
+      assert.equal(usage.confirmedCounters().treasureOutboundDiamonds ?? 0, globalLimit - 30);
+    }
+  });
+
+  await check('升级前的共享用量占用当天预算，未知费用不能因拆项而重花', async () => {
+    const { f, s } = fixture(), usage = ledger(); await depart(f, s, usage);
+    Object.assign(s.treasure, { dailyDiamondLimit: 30, returnDailyDiamondLimit: 0 });
+    const ticket = usage.reserve({ diamonds: 30, treasureDiamonds: 30 });
+    assert.equal((await preview(f, s, usage)).actions.length, 0);
+    await run(f, s, usage); assert.equal(speeds(f).length, 0);
+    usage.cancel(ticket);
+    await run(f, s, usage); assert.equal(speeds(f).length, 1);
+  });
+
+  await check('回城必须匹配本次货轮、出发格、所属城市和所选舰队', async () => {
+    for (const patch of [{ startGridIdx: 501 }, { targetCityId: 8 }, { treasureLootUid: 73 },
+      { state: 1 }, { state: 3 }, { targetGridIdx: 500 }, { moveStartTs: 100 }]) {
+      const { f, s } = fixture(), usage = ledger(); await depart(f, s, usage);
+      startReturn(f); s.treasure.returnSpeedUp = true;
+      Object.assign(fleetOf(f), patch);
+      await run(f, s, usage);
+      assert.equal(speeds(f).length, 0);
+    }
+  });
+
+  await check('旧派遣记录可从同一去程恢复回城依据，过期的去程无法复用', async () => {
+    for (const sameJourney of [true, false]) {
+      const { f, s } = fixture(), usage = ledger(); await depart(f, s, usage);
+      const key = treasureDispatchKey(f.player.worldId, 72, '1远征船');
+      const { cargoGridIdx, ...legacy } = usage.keyRecords()[key].details;
+      assert.equal(cargoGridIdx, 500);
+      usage.updateKeyDetails(key, legacy);
+      s.treasure.outboundSpeedUp = false; s.treasure.returnSpeedUp = true;
+      if (!sameJourney) fleetOf(f).moveStartTs++;
+      await run(f, s, usage);
+      startReturn(f); await run(f, s, usage);
+      assert.equal(speeds(f).length, sameJourney ? 1 : 0);
+    }
+  });
+
+  await check('已归队的历史记录不能授权后来同一货轮的回城加速', async () => {
+    const { f, s } = fixture(), usage = ledger(); await depart(f, s, usage);
+    f.returnFromTreasure('1远征船');
+    await checkFleetSettlement(f.client, f.player, usage);
+    startReturn(f); Object.assign(fleetOf(f), { state: 2, treasureLootUid: 72 });
+    s.treasure.returnSpeedUp = true;
+    await run(f, s, usage);
+    assert.equal(speeds(f).length, 0);
+  });
+
+  await check('回城最终复核拦截换目标或关闭方向开关', async () => {
+    for (const change of [(f, s) => { s.treasure.returnSpeedUp = false; },
+      f => { fleetOf(f).targetCityId = 0; }]) {
+      const { f, s } = fixture(), usage = ledger(); await depart(f, s, usage);
+      startReturn(f); s.treasure.returnSpeedUp = true;
+      let reads = 0;
+      f.beforeRead = name => { if (name === 'MyFleetsRequest' && ++reads === 3) change(f, s); };
+      await run(f, s, usage);
+      assert.equal(reads, 3); assert.equal(speeds(f).length, 0);
+      assert.equal(usage.snapshot().counters.diamonds ?? 0, 0);
+    }
+  });
+
+  await check('回城超时不重发，结算只接受原回城航程提前', async () => {
+    for (const same of [true, false]) {
+      const { f, s } = fixture(), usage = ledger(); await depart(f, s, usage);
+      startReturn(f); s.treasure.returnSpeedUp = true; f.speedMode = 'unknown';
+      assert.equal((await run(f, s, usage)).results[0].status, 'unknown');
+      await run(f, s, usage); assert.equal(speeds(f).length, 1);
+      fleetOf(f).moveEndTs = nowOf(f) + 40;
+      if (!same) fleetOf(f).startGridIdx++;
+      await checkFleetSettlement(f.client, f.player, usage);
+      assert.equal(usage.confirmedCounters().diamonds ?? 0, same ? 30 : 0);
+      assert.equal(usage.pendingCounters().diamonds ?? 0, same ? 0 : 30);
     }
   });
 

@@ -1,14 +1,13 @@
 // All tasks start disabled. Only explicit saved choices enable an account's
 // schedule; adding a task must never silently opt existing accounts into it.
-// 只限制钓具强化的金币支出，其他挂机任务不使用此预算。
-export const defaultFishingGoldReserve = 10_000;
 export const defaultCompassSpinCount = 10;
 export const maxCompassSpinCount = 999;
 
 // 旧字段仅兼容导入，统一停用，不能在新模块关闭后恢复执行。
 // 装备由 forge.enabled 控制；联盟募兵、互助由 alliance.enabled 及对应细项控制；巨轮由 treasure.enabled 控制。
 export const migratedAutomationTasks = new Set(['museumCollect', 'museumExplore', 'petCollect', 'petBreed', 'radarAuto', 'radarRepair', 'museumRevenue', 'museumAchievements', 'worldBossDamage']);
-export const retiredAutomationTasks = new Set(['equipmentCollect', 'equipmentCraft', 'guildOrders', 'guildAidCollect', 'guildAidHelp', 'treasureLoot', ...migratedAutomationTasks]);
+export const removedScheduleKeys = new Set([...migratedAutomationTasks, 'ticketRecruit']);
+export const retiredAutomationTasks = new Set(['equipmentCollect', 'equipmentCraft', 'guildOrders', 'guildAidCollect', 'guildAidHelp', 'treasureLoot', ...removedScheduleKeys]);
 
 export const automationTasks = [
   ['armsRaceRewards', '自动领奖', '周期活动', false],
@@ -101,7 +100,6 @@ export const automationTasks = [
   ['freeRecruit', '英雄免费招募', '日常', false],
   ['heroRecruitRewards', '英雄累计招募档位领奖', '招募', false],
   ['freeGold', '免费点金', '日常', false],
-  ['ticketRecruit', '英雄招募券单抽', '日常', false],
   ['arena', '竞技场挑战', '日常', false],
   ['trialSweep', '试炼每日首轮免费扫荡', '挑战', false],
   ['trialPaidSweep', '试炼钻石扫荡', '挑战', false],
@@ -138,7 +136,7 @@ export function worldTaskKey(kind) {
 
 export function dailyTaskKey(id, action) {
   switch (id) {
-    case 1002: return action.body.way === 1 ? 'freeRecruit' : 'ticketRecruit';
+    case 1002: return action.body.way === 1 ? 'freeRecruit' : null;
     case 1005: return 'arena';
     case 1006: return action.body.free ? 'freeGold' : 'paidGold';
     case 1007: return 'shop';

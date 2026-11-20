@@ -1,15 +1,15 @@
+import { linkOperationResult } from './operation-log.mjs';
 import { normalize } from './worlds.mjs';
 
 const skip = reason => ({ label: '钓具养成', skipped: true, reason });
 
-export async function upgradeFishingOnce(client, config, { playerLevel, reserveGold, enabled, targetLevel = Infinity, beforeAction, afterAction, cancelAction, dryRun = false }) {
+export async function upgradeFishingOnce(client, config, { playerLevel, enabled, targetLevel = Infinity, beforeAction, afterAction, cancelAction, dryRun = false }) {
   if (!enabled()) return skip('已暂停');
   const tables = config?.tables;
   const unlock = tables?.ModuleOpenCfg?.data?.find(row => row.moduleId === '小玩法升级')?.playerLevel;
   if (!Number.isSafeInteger(unlock) || unlock < 1) return skip('缺少钓具养成的开放等级配置');
   if (!Number.isSafeInteger(playerLevel) || playerLevel < 1) return skip('无法确认角色等级');
   if (playerLevel < unlock) return skip('角色 ' + unlock + ' 级开放，当前 ' + playerLevel + ' 级');
-  if (!Number.isSafeInteger(reserveGold) || reserveGold < 0) return skip('无法确认预留金币数量');
 
   // Keep protobuf defaults here: an omitted zero progress decodes as enhance=0.
   const water = await client.request('OnWaterRequest', {}, 'OnWaterResponse');
@@ -37,7 +37,7 @@ export async function upgradeFishingOnce(client, config, { playerLevel, reserveG
     const assets = normalize(await client.request('AllResourceRequest', {}, 'AllResourceResponse'));
     const gold = assets?.list?.find(row => row.res === 3)?.amount;
     if (!Number.isSafeInteger(gold) || gold < 0) return skip('无法确认当前金币余额');
-    if (gold - cost < reserveGold) return skip('本次强化需 ' + cost + ' 金币，现有 ' + gold + '，需保留 ' + reserveGold);
+    if (gold < cost) return skip('本次强化需 ' + cost + ' 金币，现有 ' + gold);
   }
 
   if (!enabled()) return skip('已暂停');
@@ -48,20 +48,20 @@ export async function upgradeFishingOnce(client, config, { playerLevel, reserveG
   const ticket = await beforeAction?.(action);
   let dispatched = false, writePending = false;
   try {
-    if (!enabled()) { await cancelAction?.(action, ticket, { notSent: true }); return skip('已暂停'); }
+    if (!enabled()) { await cancelAction?.(action, ticket, { notSent: true }); return linkOperationResult(skip('已暂停'), ticket); }
     dispatched = writePending = true;
     const reply = await client.request(action.request, action.body, action.response);
     writePending = false;
     const after = reply?.levelInfo;
-    if (promote && after?.level === next.level) { await afterAction?.(action, ticket, { ok: true, body: reply }); return { label: '钓具已从 ' + level + ' 级升至 ' + after.level + ' 级', ok: true }; }
+    if (promote && after?.level === next.level) { await afterAction?.(action, ticket, { ok: true, body: reply }); return linkOperationResult({ label: '钓具已从 ' + level + ' 级升至 ' + after.level + ' 级', ok: true }, ticket); }
     if (!promote && after?.level === level && Number.isSafeInteger(after.enhance) && after.enhance > progress) {
       await afterAction?.(action, ticket, { ok: true, body: reply });
-      return { label: '钓具 ' + level + ' 级强化进度 ' + progress + ' → ' + after.enhance + '/' + current.enhance + '（消耗 ' + current.cost[1] + ' 金币）', ok: true };
+      return linkOperationResult({ label: '钓具 ' + level + ' 级强化进度 ' + progress + ' → ' + after.enhance + '/' + current.enhance + '（消耗 ' + current.cost[1] + ' 金币）', ok: true }, ticket);
     }
     throw new Error('服务端未确认钓具' + (promote ? '升级' : '强化进度增加'));
   } catch (error) {
     const notSent = !dispatched || writePending && error.notSent === true;
     await cancelAction?.(action, ticket, { notSent, error });
-    throw error;
+    throw linkOperationResult(error, ticket);
   }
 }

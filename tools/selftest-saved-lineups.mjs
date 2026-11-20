@@ -6,6 +6,7 @@ import path from 'node:path';
 const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'cw-saved-lineups-'));
 process.env.CW_DATA_DIR = directory;
 const { getLineupCatalog, normalizeFormation, formationSignature, validateLineupSettings, readLineupEditor, validateEditorFormation } = await import('../src/saved-lineups.mjs');
+const { iconIndex } = await import('../src/art.mjs');
 
 const formation = { presetId: 1, heroPositions: [{ heroId: 'a', pos: { x: 4, y: 4 } }], petUid: '9007199254740993' };
 const config = { tables: {
@@ -30,7 +31,7 @@ function fixture({ pets = [{ uid: { low: 1, high: 2097152, unsigned: false }, pe
       assert.equal(response, name.replace('Request', 'Response'));
       if (name === 'AllPetRequest' && failPet) throw new Error('海兽读取失败');
       const replies = {
-        GetFormationRequest: { formation }, AllHeroRequest: { heroes: [{ heroId: 'a', level: 10, power: 123 }, { heroId: 'b', level: 5, power: 77 }] },
+        GetFormationRequest: { formation }, AllHeroRequest: { heroes: [{ heroId: 'a', skinId: 0, level: 10, power: 123 }, { heroId: 'b', skinId: 990007, level: 5, power: 77 }] },
         MyFormationPresetRequest: { ids: [7] }, AllPetRequest: { pets },
       };
       assert(Object.hasOwn(replies, name), '编辑器只能读取已确认的协议');
@@ -86,7 +87,15 @@ try {
 
   assert.deepEqual(getLineupCatalog(null), { heroes: [], formations: [] });
   assert.deepEqual(getLineupCatalog({ tables: {} }), { heroes: [], formations: [] });
+  config.tables.UnitViewCfg = { data: [{ id: 'a', resId: '00091' }, { id: 'b', resId: '00092' }] };
+  config.tables.HeroSkinCfg = { data: [{ heroId: 'a', skinId: 990008, headId: 'hero_head_990008' },
+    { heroId: 'b', skinId: 990007, headId: 'hero_head_990008' }] };
+  const icons = iconIndex().icons;
+  for (const id of ['00091', '00092', '990007', '990008']) {
+    icons['hero_head_' + id] = { bundle: 'fixture', page: 'head.png', x: 0, y: 0, w: 20, h: 20 };
+  }
   const catalog = getLineupCatalog(config);
+  assert.deepEqual(catalog.heroes.slice(0, 2).map(hero => hero.icon.name), ['hero_head_00091', 'hero_head_00092']);
   assert.deepEqual(catalog.heroes.map(hero => hero.heroId), ['a', 'b', 'c'], '离线目录包括所有配置英雄');
   assert.equal(catalog.heroes[2].name, '英雄丙');
   assert.equal(catalog.formations[1].effect, '攻速+15%');
@@ -98,6 +107,10 @@ try {
 
   const client = fixture();
   const editor = await readLineupEditor(client, config, { mainlineStage: 6 });
+  assert.deepEqual(editor.heroes.map(hero => hero.icon.name), ['hero_head_00091', 'hero_head_990007']);
+  delete icons.hero_head_990007;
+  const withoutSkinArt = await readLineupEditor(fixture(), config, { mainlineStage: 6 });
+  assert.equal(withoutSkinArt.heroes[1].icon.name, 'hero_head_00092', '缺少已装备皮肤素材时使用本英雄的默认头像');
   assert.deepEqual(client.calls, ['GetFormationRequest', 'AllHeroRequest', 'MyFormationPresetRequest', 'AllPetRequest']);
   assert.equal(editor.capacity, 2);
   assert.equal(editor.formations[0].unlocked, true);

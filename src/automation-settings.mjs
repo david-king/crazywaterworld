@@ -5,11 +5,12 @@ import { randomUUID } from 'node:crypto';
 import { atomicJson, readJson, withFileLock } from './json-store.mjs';
 import { accountKey, dataDirectory } from './usage-ledger.mjs';
 export { beijingDay, createUsageLedger, usageFile } from './usage-ledger.mjs';
-import { taskSettings, retiredAutomationTasks, migratedAutomationTasks } from './automation.mjs';
+import { taskSettings, retiredAutomationTasks, migratedAutomationTasks, removedScheduleKeys } from './automation.mjs';
 import { EXTENDED_DEFAULTS, EXTENDED_CONSTRAINTS, SILICON_FLEET_NUMBERS, siliconTierLabels, validateSiliconFleets } from './extended-settings.mjs';
 import { treasureRewardOptions } from './treasure-reward-filter.mjs';
+import { dailyWindowPattern } from './daily-time-windows.mjs';
 import { activityAutomationDefaults, activityAutomationFields } from './activity-automation.mjs';
-import { DEFAULT_APPOINTMENT_PRIORITIES, normalizeAppointmentPriorities } from './appointment-priorities.mjs';
+import { APPOINTMENT_PRIORITIES, DEFAULT_APPOINTMENT_PRIORITIES, normalizeAppointmentPriorities } from './appointment-priorities.mjs';
 import { validateLineupSettings, validateFleetLineupBindings } from './saved-lineups.mjs';
 import { fleetSpeedDefaults, fleetSpeedEnabled, FLEET_SPEED_NUMBERS, validateFleetSpeeds } from './fleet-speed-settings.mjs';
 import { cityWarFleetStrategy, cityWarUsesGlobalStrategy, validateCityWarFleetStrategies } from './city-war-settings.mjs';
@@ -21,9 +22,12 @@ export const settingsFile = () => path.join(dataDirectory(), 'automation-setting
 export const SETTINGS_FORMAT = 'crazywaterworld-automation';
 // 文件 version / 账号 settingsVersion 是格式编号，只随结构迁移调整；
 // revision 是每次保存递增的修订号，仅用于并发冲突检查，不能用作格式版本。
-export const SETTINGS_SCHEMA_VERSION = 23;
+export const SETTINGS_SCHEMA_VERSION = 35;
 const LEGACY_SETTINGS_FORMAT = 'crazywaterword-automation';
 const treasureQualityLabels = { ORANGE: '万吨货轮', PURPLE: '中型货轮', BLUE: '小型货轮' };
+const treasureChaseDefaults = {
+  chase: false, chaseNames: [], chaseWindows: [], chaseSpeedUp: false, chaseTargetSeconds: 60, chaseDailyDiamondLimit: 0,
+};
 const treasureRewardFilterDefaults = {
   rewardMatchMode: 'any', rewardMinHits: 2,
   fallbackMediumRewardMatchMode: 'any', fallbackMediumRewardMinHits: 2,
@@ -60,7 +64,7 @@ export const DEFAULT_SETTINGS = {
   factory: { enabled: false, gain: false, produce: false, cooperateNative: false, disabledTypes: [], keepStock: 50, checkEverySeconds: 30, demandFirst: false, demandPriority: DEMAND_SOURCES.map(([id]) => id), speedUpSources: [], speedUp: false, speedUpItems: [] },
   farm: { enabled: false, harvest: false, autoPlant: false, customPlant: false, crops: [], speedUp: false },
   // 总开关与细项独立保存；开启总开关不会开启任何细项。
-  gather: { enabled: false, fishing: false, fishBook: false, floaters: false, antiqueFloaters: false, continueWhenFull: false, diving: false, keyOpen: false, salvage: false, upgradeFishing: false, upgradeDiving: false, upgradeSalvage: false, targetLevel: 2, fishingGoldReserve: 10000 },
+  gather: { enabled: false, fishing: false, fishBook: false, floaters: false, antiqueFloaters: false, continueWhenFull: false, diving: false, keyOpen: false, salvage: false, upgradeFishing: false, upgradeDiving: false, upgradeSalvage: false, targetLevel: 2 },
   resident: { enabled: false, skipCrops: false, skipProduction: false, blockedMaterials: [], minExp: 0, minGold: 0, dailyCap: 0, rewards: false, reroll: false },
   cargo: { enabled: false, dailyLoadLimit: 0 },
   events: { enabled: false, otherOption: 1 },
@@ -75,8 +79,8 @@ export const DEFAULT_SETTINGS = {
     universal: false, keepExp: 0, targetLevel: 0, targetStar: 0 },
   appointments: { enabled: false, priorities: [...DEFAULT_APPOINTMENT_PRIORITIES] },
   dailies: { enabled: false, claimTasks: false, claimDailyChest: false, claimWeeklyChest: false, claimGift: false },
-  arena: { target: 'weakest', keepTickets: 0, maxPowerRatio: 0 },
-  league: { target: 'weakest', keepTickets: 0, maxPowerRatio: 0 },
+  arena: { target: 'weakest', dailyBattleLimit: 3, maxPowerRatio: 0, fallbackLowerRank: false, claimTask: false },
+  league: { target: 'weakest', dailyBattleLimit: 1, maxPowerRatio: 0, fallbackWeakest: false, claimTask: false },
   tasks: { main: false, branch: false, achievements: false },
   progression: { enabled: false, mainline: false, trials: false, raidIds: ['1','2','3'], maxFailures: 3 },
   lineups: { presets: [], mainlinePresetId: '', trialPresets: [] },
@@ -87,19 +91,21 @@ export const DEFAULT_SETTINGS = {
   fleetSpeed: { fleets: [1,2,3].map(id => fleetSpeedDefaults(id + '远征船')) },
   worldBoss: { enabled: false, fleetIds: [], fleetPresets: [], minDurabilityPercent: 80 },
   radar: { runEnabled:false, enabled:false, repairIdle:false, fleetIds:[], types:['pirate','collect','refugee','spy','fixed'], allowMaterials:false, minDurabilityPercent:80, checkEverySeconds:30 },
+  pirate: { enabled: false },
   pirateSweep: { type: '1' },
   pirateHunt: { enabled: false, maxFailures: 3, fleetIds: [], types: [], maxLevel: 0, minDurabilityPercent: 80, checkEverySeconds: 15 },
   treasure: { enabled: false, autoJoin: false, qualities: Object.keys(treasureQualityLabels), follow: false, followMode: 'trigger', fleetIds: [], followNames: [], followPlayerIds: [], avoidPlayerIds: [],
-    rewardItems: [], ...treasureRewardFilterDefaults, avoidNames: [], allowHostile: false, minDurabilityPercent: 80,
+    rewardItems: [], ...treasureRewardFilterDefaults, ...treasureChaseDefaults, avoidNames: [], allowHostile: false, minDurabilityPercent: 80,
     maxProgress: 90, personalProgressLimit: 20, dailyDispatchLimit: 0, checkEverySeconds: 15, participationMode: 'untilFull', repeatAttack: false,
-    autoRepair: false,
-    marchSpeedUp: false, marchTargetSeconds: 60, dailyDiamondLimit: 0,
+    autoRepair: false, recallSilicon: false, recallLeadMinutes: 5,
+    marchSpeedUp: false, outboundSpeedUp: true, marchTargetSeconds: 60,
+    returnSpeedUp: false, returnTargetSeconds: 60, dailyDiamondLimit: 0, returnDailyDiamondLimit: 0,
     fallbackEnabled: false, fallbackAfter: '21:00', fallbackTargetRewards: 3,
     fallbackQualities: ['PURPLE', 'BLUE'], fallbackMediumRewardPriority: [], fallbackSmallRewardPriority: [] },
   // 攻守目标由跟随全局的舰队共用；每队还可独立保存两套策略。
   cityWar: { enabled: false, fleetIds: [], defenceFleetIds: [], targetMode: 'alliance', targetPriority: 'fewestAllied', cityRefs: [],
     defenceTargetMode: 'alliance', defenceTargetPriority: 'fewestAllied', defenceCityRefs: [], fleetStrategies: {}, autoRepair: false,
-    nativeCommissionLimit: -1, repairBelowPercent: 80, reserveDuringWar: false, checkEverySeconds: 15 },
+    nativeCommissionLimit: -1, repairBelowPercent: 80, reserveDuringWar: false, recallSilicon: false, recallLeadMinutes: 5, checkEverySeconds: 15 },
   forge: { decompose: false, decomposeQualities: [], enabled: false, nativeAuto: false, collect: true, craft: true, buildingIds: [], recipeIds: [], universal: false,
     universalReserve: 0, checkEverySeconds: 30 },
   antique: { enabled: false, activate: false, activateQualities: [], star: false, starQualities: [], targetStar: 0, universal: false,
@@ -144,7 +150,7 @@ const constraints = {
   'building.disabledTypes': strings(), 'factory.disabledTypes': strings(), 'factory.keepStock': int(100000), 'factory.checkEverySeconds': int(300, 1),
   'factory.demandPriority': { ...strings(12), values: DEMAND_SOURCES.map(([id]) => id) },
   'factory.speedUpSources': { ...strings(12), values: DEMAND_SOURCES.map(([id]) => id) },
-  'factory.speedUpItems': strings(), 'farm.crops': { kind: 'crops' }, 'gather.targetLevel': int(1000, 1), 'gather.fishingGoldReserve': int(),
+  'factory.speedUpItems': strings(), 'farm.crops': { kind: 'crops' }, 'gather.targetLevel': int(1000, 1),
   'resident.blockedMaterials': strings(), 'resident.minExp': int(), 'resident.minGold': int(), 'resident.dailyCap': int(),
   'pet.releaseQualities': { ...strings(4), values: ['BLUE','PURPLE','ORANGE','RED'] },
   'forge.decomposeQualities': { ...strings(5), values: ['GREEN','BLUE','PURPLE','ORANGE','RED'] },
@@ -158,8 +164,8 @@ const constraints = {
   'appointments.priorities': { ...strings(7), values: DEFAULT_APPOINTMENT_PRIORITIES },
   'trials.raidIds': { ...strings(3), values: ['1','2','3'] }, 'trials.paidPerRaidLimit': int(100),
   'trials.dailyDiamondBudget': int(100000), 'trials.maxSingleCost': int(10000),
-  'arena.target': { kind: 'choice', values: ['weakest', 'rank'] }, 'arena.keepTickets': int(100000),
-  'league.target': { kind: 'choice', values: ['weakest', 'score'] }, 'league.keepTickets': int(100000),
+  'arena.target': { kind: 'choice', values: ['weakest', 'rank'] }, 'arena.dailyBattleLimit': int(100000),
+  'league.target': { kind: 'choice', values: ['weakest', 'score'] }, 'league.dailyBattleLimit': int(100000),
   'arena.maxPowerRatio': int(1000), 'league.maxPowerRatio': int(1000),
   'progression.raidIds': { ...strings(3), values: ['1','2','3'] }, 'progression.maxFailures': int(100, 1),
   'pirateHunt.maxFailures': int(100, 1),
@@ -167,6 +173,8 @@ const constraints = {
   'pirateHunt.fleetIds': strings(10), 'pirateHunt.types': strings(20), 'pirateHunt.maxLevel': int(1000),
   'pirateHunt.minDurabilityPercent': int(100), 'pirateHunt.checkEverySeconds': int(60, 5),
   'treasure.fleetIds': strings(10), 'treasure.followNames': strings(30), 'treasure.followPlayerIds': strings(30),
+  'treasure.chaseNames': strings(30), 'treasure.chaseTargetSeconds': int(3600), 'treasure.chaseDailyDiamondLimit': int(100000000),
+  'treasure.chaseWindows': strings(10),
   'treasure.qualities': { ...strings(3), values: Object.keys(treasureQualityLabels) },
   'treasure.rewardItems': strings(100), 'treasure.avoidNames': strings(30),
   'treasure.rewardMatchMode': rewardMatchMode, 'treasure.rewardMinHits': int(100, 1),
@@ -174,10 +182,11 @@ const constraints = {
   'treasure.fallbackSmallRewardMatchMode': rewardMatchMode, 'treasure.fallbackSmallRewardMinHits': int(100, 1),
   'treasure.minDurabilityPercent': int(100), 'treasure.maxProgress': int(100, 1),
   'treasure.personalProgressLimit': int(100),
+  'treasure.recallLeadMinutes': int(1440, 1), 'cityWar.recallLeadMinutes': int(1440, 1),
   'treasure.dailyDispatchLimit': int(1000), 'treasure.checkEverySeconds': int(300, 5),
   'treasure.avoidPlayerIds': strings(100), 'treasure.participationMode': { kind: 'choice', values: ['untilFull', 'always'] },
   'treasure.followMode': { kind: 'choice', values: ['trigger', 'eachTime'] },
-  'treasure.marchTargetSeconds': int(3600), 'treasure.dailyDiamondLimit': int(100000000),
+  'treasure.marchTargetSeconds': int(3600), 'treasure.returnTargetSeconds': int(3600), 'treasure.dailyDiamondLimit': int(100000000), 'treasure.returnDailyDiamondLimit': int(100000000),
   'treasure.fallbackAfter': { kind: 'time' }, 'treasure.fallbackTargetRewards': int(100, 1),
   'treasure.fallbackQualities': { ...strings(2), values: ['PURPLE', 'BLUE'] },
   'treasure.fallbackMediumRewardPriority': strings(100), 'treasure.fallbackSmallRewardPriority': strings(100),
@@ -222,12 +231,12 @@ const nativeFields = {
   buildSupply: ['building.supply'],
   upgrade: ['building.upgrade'], finishOrder: ['resident.enabled'], startProduce: ['factory.produce'],
   speedUp: ['building.speedUp', 'factory.speedUp'], denyOrder: ['resident.reroll'], paidGold: ['gold.enabled'],
-  dailyRewards: ['dailies.claimTasks'], chests: ['dailies.claimDailyChest', 'dailies.claimWeeklyChest'], gift: ['dailies.claimGift'],
+  dailyRewards: ['dailies.claimTasks', 'arena.claimTask', 'league.claimTask'], chests: ['dailies.claimDailyChest', 'dailies.claimWeeklyChest'], gift: ['dailies.claimGift'],
   tasks: ['loop.tasks', 'resident.rewards'],
 };
 export function applyNativeTask(settings, key, enabled) {
   const result = copy(settings);
-  if (migratedAutomationTasks.has(key)) { delete result.schedule[key]; return result; }
+  if (removedScheduleKeys.has(key)) { delete result.schedule[key]; return result; }
   if (retiredAutomationTasks.has(key)) enabled = false;
   if (Object.hasOwn(result.schedule, key)) result.schedule[key] = enabled;
   for (const field of nativeFields[key] ?? []) { const [group, name] = field.split('.'); result[group][name] = enabled; }
@@ -237,13 +246,13 @@ export function applyNativeTask(settings, key, enabled) {
   }
   return result;
 }
-export function settingsFromNative(tasks, { rounds = 0, everySeconds = 60, fishingGoldReserve = 10000 } = {}) {
+export function settingsFromNative(tasks, { rounds = 0, everySeconds = 60 } = {}) {
   let result = defaultSettings();
   for (const [key, value] of Object.entries(taskSettings(tasks))) result = applyNativeTask(result, key, value);
+  result.pirate.enabled = tasks?.pirate === true;
   if (tasks?.heroGrowth) result.heroes.needsSelection = true;
   result.loop.rounds = rounds;
   result.loop.everySeconds = Math.max(1, Number.isSafeInteger(everySeconds) ? everySeconds : 60);
-  result.gather.fishingGoldReserve = fishingGoldReserve;
   // Native-only accounts still need their original selections before the
   // retired task registry discards them. Never reopen an existing module gate.
   for (const key of migratedAutomationTasks) if (typeof tasks?.[key] === 'boolean') result.schedule[key] = tasks[key];
@@ -261,8 +270,8 @@ export function settingsFromLegacyNative(tasks, options) {
     'building.enabled': ['collect', 'finishUpgrade', 'build', 'buildSupply', 'upgrade', 'speedUp', 'adSpeedUpBuilding'],
     'factory.enabled': ['collect', 'startProduce', 'buildSupply', 'speedUp', 'adSpeedUpProduce'],
     'gather.enabled': ['autoFish', 'fishEnhance', 'floaters', 'antiqueFloaters', 'autoDive', 'diveEnhance', 'autoSalvage', 'salvageEnhance'],
-    'dailies.enabled': ['dailyRewards', 'chests', 'gift', 'freeGold', 'freeRecruit', 'ticketRecruit', 'arena', 'pirate', 'shop'],
-    'loop.dailies': ['freeGold', 'freeRecruit', 'ticketRecruit', 'arena', 'pirate', 'paidGold', 'shop'],
+    'dailies.enabled': ['dailyRewards', 'chests', 'gift', 'freeGold', 'freeRecruit', 'arena', 'shop'],
+    'loop.dailies': ['freeGold', 'freeRecruit', 'arena', 'paidGold', 'shop'],
     'museum.runEnabled': ['museumCollect', 'museumExplore', 'museumRevenue', 'museumAchievements'],
     'radar.runEnabled': ['radarAuto', 'radarRepair'],
     'progression.enabled': ['stageAuto'],
@@ -290,7 +299,7 @@ export function nativeTaskValues(settings, current) {
   for (const [key, fields] of Object.entries(nativeFields)) result[key] = fields.some(field => { const [group, name] = field.split('.'); return settings[group][name]; });
   result.heroGrowth = false; // The old mainline-only job has been retired.
   for (const key of retiredAutomationTasks) result[key] = false;
-  for (const key of migratedAutomationTasks) delete result[key];
+  for (const key of removedScheduleKeys) delete result[key];
   result.startProduce = settings.factory.produce || settings.factory.cooperateNative;
   result.speedUp = settings.building.speedUp || settings.factory.speedUp || settings.farm.speedUp || settings.factory.speedUpSources.length > 0;
   return result;
@@ -301,7 +310,7 @@ export function hasExtraWork(settings) {
   if (settings?.weeklyActivity?.enabled && ['farm', 'pet', 'antique', 'order', 'forge', 'hero'].some(kind => settings.weeklyActivity[kind + 'Enabled'])) return true;
   if (fleetSpeedEnabled(settings) || settings?.appointments?.enabled || settings?.alliance?.enabled || settings?.guildShip?.enabled || settings?.heroRaid?.enabled || settings?.silicon?.enabled || settings?.resourceFields?.enabled) return true;
   return !!settings && ((settings.loop.world && (settings.museum.runEnabled !== false && ['enabled', 'upgrade', 'revenue', 'achievements', 'display'].some(key => settings.museum[key]) || settings.events.enabled || settings.pet.enabled || (settings.gather.enabled !== false && settings.gather.diving && settings.gather.keyOpen))) || (settings.loop.heroes && settings.heroes.enabled)
-    || (settings.progression?.enabled && (settings.progression.mainline || settings.progression.trials)) || settings.pirateHunt?.enabled);
+    || (settings.progression?.enabled && (settings.progression.mainline || settings.progression.trials)) || (settings.pirate?.enabled && (settings.schedule.pirate || settings.pirateHunt.enabled)));
 }
 export function hasBaseWork(settings) {
   return !!settings && ((settings.loop.world && (settings.museum.runEnabled !== false && ['enabled', 'upgrade', 'revenue', 'achievements', 'display'].some(key => settings.museum[key]) || settings.events.enabled ||
@@ -329,8 +338,20 @@ function validateCurrentSettings(input, { partial = false, catalog = null } = {}
   input = migrateVersion17Settings(migrateVersion16Settings(input));
   input = migrateVersion19Settings(migrateVersion18Settings(input));
   input = migrateVersion20Settings(input);
+  // 旧页面仍携带硅矿共享预算；新版缺失方向预算时交由字段校验报告。
+  if (plain(input?.silicon) && Object.hasOwn(input.silicon, 'dailyDiamondLimit')) input = migrateVersion25Settings(input);
+  input = migrateVersion26Settings(input);
+  input = migrateVersion28Settings(input);
+  input = migrateVersion29Settings(input);
+  input = migrateVersion34Settings(input);
+  if (['arena', 'league'].some(group => plain(input?.[group]) && Object.hasOwn(input[group], 'keepTickets'))) input = migrateVersion23Settings(input);
   if (plain(input?.resourceFields) && !Object.hasOwn(input.resourceFields, 'refillAfterLoss')) {
     input = { ...input, resourceFields: { ...input.resourceFields, refillAfterLoss: false } };
+  }
+  if (plain(input?.radar) && typeof input.radar.monthCardSweep === 'boolean') {
+    const { monthCardSweep, ...radar } = input.radar;
+    if (monthCardSweep && radar.enabled === false) radar.enabled = true;
+    input = { ...input, radar };
   }
   if (plain(input) && plain(input.weeklyActivity)) input = { ...input, weeklyActivity: migrateWeeklyActivitySettings(input.weeklyActivity) };
   // This additive limit was absent from saved version 2 settings. Only fill
@@ -410,7 +431,7 @@ function validateCurrentSettings(input, { partial = false, catalog = null } = {}
   validateWeeklyActivitySettings(output.weeklyActivity, errors);
   if (output.heroes.heroIds.length) output.heroes.needsSelection = false;
   if (output.progression.trials && !output.progression.raidIds.length) errors['progression.raidIds'] = '请选择自动推关的试炼副本';
-  if (output.pirateHunt.enabled && !output.pirateHunt.fleetIds.length) errors['pirateHunt.fleetIds'] = '请选择自动讨伐海盗的舰队';
+  if (output.pirateHunt.enabled && !output.pirateHunt.fleetIds.length) errors['pirateHunt.fleetIds'] = '请至少选择一支首杀舰队';
   if(!output.forge.nativeAuto && output.forge.decompose && !output.forge.decomposeQualities.length)errors['forge.decomposeQualities']='请选择可自动分解的装备品质';
   if(output.pet.release && !output.pet.releaseQualities.length)errors['pet.releaseQualities']='请选择可自动放生的海兽品质';
   if (output.antique.activate && !output.antique.activateQualities.length) errors['antique.activateQualities'] = '请选择自动激活的藏品品质';
@@ -420,7 +441,9 @@ function validateCurrentSettings(input, { partial = false, catalog = null } = {}
   for(const key of ['worldBoss','follow','silicon','resourceFields'])if(!output.fleetDispatch.priority.includes(key))output.fleetDispatch.priority.push(key);
   if (output.resourceFields.enabled && !output.resourceFields.fleetIds.length) errors['resourceFields.fleetIds'] = '请选择自动占领资源田的舰队';
   if (output.resourceFields.fleetIds.some(value => !/^[1-9]\d*远征船$/.test(value))) errors['resourceFields.fleetIds'] = '请选择有效的远征舰队';
-  if (output.silicon.windows.some(value => !/^([01]\d|2[0-3]):[0-5]\d-([01]\d|2[0-3]):[0-5]\d$/.test(value))) errors['silicon.windows'] = '时段格式为 HH:mm-HH:mm，每行一个；支持跨午夜';
+  for (const [field, windows] of [['silicon.windows', output.silicon.windows], ['treasure.chaseWindows', output.treasure.chaseWindows]]) {
+    if (windows.some(value => !dailyWindowPattern.test(value))) errors[field] = '时段格式为 HH:mm-HH:mm，每行一个，支持跨午夜';
+  }
   if (output.pirateHunt.fleetIds.some(value=>! /^[1-9]\d*远征船$/.test(value))) errors['pirateHunt.fleetIds']='请选择有效的海盗首杀舰队';
   if (output.pirateHunt.types.some(value=>! /^[1-9]\d*$/.test(value))) errors['pirateHunt.types']='请选择有效的海盗类型';
   if (![1,5,10,50].includes(output.eventActions.compassDrawCount)) errors['eventActions.compassDrawCount']='请选择1、5、10或50次';
@@ -429,11 +452,12 @@ function validateCurrentSettings(input, { partial = false, catalog = null } = {}
   if (output.farm.customPlant && !output.farm.crops.length) errors['farm.crops'] = '启用自定义种植前，请至少添加一种作物';
   // An empty species selection pauses breeding, including migrated accounts
   // which must choose their spending targets in the unified configuration.
-  if (output.treasure.enabled && !output.treasure.autoJoin && !output.treasure.follow) errors['treasure.autoJoin'] = '请至少开启自动参加或跟随指定玩家';
+  if (output.treasure.enabled && !output.treasure.autoJoin && !output.treasure.follow && !output.treasure.chase) errors['treasure.autoJoin'] = '请至少开启自动参加、跟随指定玩家或追杀';
   if (output.treasure.enabled && !output.treasure.fleetIds.length) errors['treasure.fleetIds'] = '请明确选择参与巨轮的舰队，空名单不会派遣';
   if (output.treasure.fallbackEnabled && !output.treasure.fallbackQualities.length) errors['treasure.fallbackQualities'] = '开启兜底前，请至少选择一种货轮';
   if (output.treasure.follow && !output.treasure.followNames.length && !output.treasure.followPlayerIds.length && !errors['treasure.followNames'] && !errors['treasure.followPlayerIds']) errors['treasure.followNames'] = '开启跟随前，请添加玩家完整昵称或角色ID';
-  for (const field of ['followNames', 'avoidNames']) if (output.treasure[field].some(value => value !== value.trim() || value.length > 40 || /[\r\n\u0000-\u001f]/.test(value))) errors['treasure.' + field] = '请输入不重复的完整昵称，每项不超过40字符，不含首尾空格或换行';
+  if (output.treasure.chase && !output.treasure.chaseNames.length && !errors['treasure.chaseNames']) errors['treasure.chaseNames'] = '开启追杀前，请填写对手的完整昵称';
+  for (const field of ['followNames', 'avoidNames', 'chaseNames']) if (output.treasure[field].some(value => value !== value.trim() || value.length > 40 || /[\r\n\u0000-\u001f]/.test(value))) errors['treasure.' + field] = '请输入不重复的完整昵称，每项不超过40字符，不含首尾空格或换行';
   for (const field of ['followPlayerIds', 'avoidPlayerIds']) if (output.treasure[field].some(value => !/^[1-9]\d{0,18}$/.test(value) || BigInt(value) > (1n << 63n) - 1n)) errors['treasure.' + field] = '角色ID必须为完整的正整数文本，不能使用科学计数法';
   if (output.treasure.fleetIds.some(value => !/^[1-9]\d*远征船$/.test(value))) errors['treasure.fleetIds'] = '请选择有效的远征舰队';
   if (output.cityWar.enabled && !output.cityWar.fleetIds.length) errors['cityWar.fleetIds'] = '请明确选择参与城战接续的舰队';
@@ -468,7 +492,8 @@ function validateCurrentSettings(input, { partial = false, catalog = null } = {}
       'forge.buildingIds': 'forgeBuildings', 'forge.recipeIds': 'forgeRecipes',
       'alliance.allowedMaterials': 'materials', 'alliance.blockedMaterials': 'materials',
       'alliance.requestMaterials': 'materials', 'alliance.techIds': 'guildTech',
-      'guildShip.rewardItems': 'materials', 'guildShip.disabledMaterials': 'materials', 'guildFort.materials': 'materials',
+      'guildShip.rewardItems': 'materials', 'guildShip.disabledMaterials': 'materials',
+      'guildFort.materials': 'materials', 'guildFort.blockedMaterials': 'materials',
     })) {
       const [group, key] = name.split('.');
       const allowed = new Set((catalog[collection] ?? []).map(v => String(v.value)));
@@ -510,6 +535,7 @@ export function settingsCatalog(config) {
     pirateTypes: unique(rows('WorldPirateCfg').map(r=>option(r.type,r.showName))),
     trialRaids: rows('TrialRaidCfg').map(r => option(r.raidId, r.title)),
     demandSources: DEMAND_SOURCES.map(([value, label]) => option(value, label)),
+    appointmentPriorities: APPOINTMENT_PRIORITIES.map(({ id, label }) => option(id, label)),
     expeditionFleets: rows('BuildingUnlockCfg').filter(r => r.buildingType === '远征船' && /^[1-9]\d*远征船$/.test(r.buildingId)).map(r => option(r.buildingId, '远征舰队 ' + r.buildingId.replace('远征船', '') + ' 队')),
     cityTargets: Object.entries(config?.tables ?? {}).filter(([name]) => /^\d+_CityCfg$/.test(name)).flatMap(([name, table]) => (table.data ?? []).map(row => option(name.split('_')[0] + ':' + row.id, '场景' + name.split('_')[0] + ' · ' + row.name + '（' + row.id + '）'))),
     forgeBuildings: rows('BuildingUnlockCfg').filter(r => r.buildingType === '装备厂').map(r => option(r.buildingId, r.buildingId)),
@@ -652,7 +678,7 @@ export function importAutomationSettings(document, options) {
   return validateSettings(migrateSettingsVersion(document.settings, document.version), { ...options, partial: false });
 }
 
-const settingsMigrations = new Map([[1, migrateVersion1Settings], [2, migrateVersion2Settings], [3, migrateVersion3Settings], [4, migrateVersion4Settings], [5, migrateVersion5Settings], [6, migrateVersion6Settings], [7, migrateVersion7Settings], [8, migrateVersion8Settings], [9, migrateVersion9Settings], [10, migrateVersion10Settings], [11, migrateVersion11Settings], [12, migrateVersion12Settings], [13, migrateVersion13Settings], [14, migrateVersion14Settings], [15, migrateVersion15Settings], [16, migrateVersion16Settings], [17, migrateVersion17Settings], [18, migrateVersion18Settings], [19, migrateVersion19Settings], [20, migrateVersion20Settings], [21, migrateVersion21Settings], [22, migrateVersion22Settings]]);
+const settingsMigrations = new Map([[1, migrateVersion1Settings], [2, migrateVersion2Settings], [3, migrateVersion3Settings], [4, migrateVersion4Settings], [5, migrateVersion5Settings], [6, migrateVersion6Settings], [7, migrateVersion7Settings], [8, migrateVersion8Settings], [9, migrateVersion9Settings], [10, migrateVersion10Settings], [11, migrateVersion11Settings], [12, migrateVersion12Settings], [13, migrateVersion13Settings], [14, migrateVersion14Settings], [15, migrateVersion15Settings], [16, migrateVersion16Settings], [17, migrateVersion17Settings], [18, migrateVersion18Settings], [19, migrateVersion19Settings], [20, migrateVersion20Settings], [21, migrateVersion21Settings], [22, migrateVersion22Settings], [23, migrateVersion23Settings], [24, migrateVersion24Settings], [25, migrateVersion25Settings], [26, migrateVersion26Settings], [27, migrateVersion27Settings], [28, migrateVersion28Settings], [29, migrateVersion29Settings], [30, migrateVersion30Settings], [31, migrateVersion31Settings], [32, migrateVersion32Settings], [33, migrateVersion33Settings], [34, migrateVersion34Settings]]);
 const supportedSettingsVersion = version => Number.isSafeInteger(version) && version >= 1;
 const entrySettingsVersion = entry => Object.hasOwn(entry, 'settingsVersion') ? entry.settingsVersion : 1;
 function newestSettingsVersion(store) {
@@ -1052,7 +1078,8 @@ function migrateVersion20Settings(settings) {
 
 function migrateVersion21Settings(settings) {
   if (!plain(settings)) return settings;
-  const next = { arena: { ...DEFAULT_SETTINGS.arena }, league: { ...DEFAULT_SETTINGS.league }, ...settings };
+  const combat = { target: 'weakest', keepTickets: 0 };
+  const next = { arena: { ...combat }, league: { ...combat }, ...settings };
   if (plain(settings.schedule)) next.schedule = { leagueChallenge: false, ...settings.schedule };
   return next;
 }
@@ -1062,6 +1089,126 @@ function migrateVersion22Settings(settings) {
   const next = { ...settings };
   for (const group of ['arena', 'league']) {
     if (plain(next[group])) next[group] = { maxPowerRatio: 0, ...next[group] };
+  }
+  return next;
+}
+
+function migrateVersion34Settings(settings) {
+  if (!plain(settings?.schedule) || !Object.hasOwn(settings.schedule, 'ticketRecruit')) return settings;
+  const schedule = { ...settings.schedule };
+  delete schedule.ticketRecruit;
+  return { ...settings, schedule };
+}
+
+function migrateVersion33Settings(settings) {
+  if (!plain(settings?.treasure)) return settings;
+  return { ...settings, treasure: { chaseWindows: [], ...settings.treasure } };
+}
+
+function migrateVersion32Settings(settings) {
+  if (!plain(settings?.treasure)) return settings;
+  return { ...settings, treasure: { ...treasureChaseDefaults, ...settings.treasure } };
+}
+
+function migrateVersion31Settings(settings) {
+  if (!plain(settings) || Object.hasOwn(settings, 'pirate')) return settings;
+  const hunt = settings.pirateHunt?.enabled === true;
+  const sweep = settings.schedule?.pirate === true;
+  const dailyEnabled = settings.loop?.dailies === true && settings.dailies?.enabled === true;
+  const next = { ...settings, pirate: { enabled: hunt || (sweep && dailyEnabled) } };
+  // 首杀已开启时，避免解除旧日常开关后意外开始扫荡。
+  if (hunt && sweep && !dailyEnabled) next.schedule = { ...settings.schedule, pirate: false };
+  return next;
+}
+
+function migrateVersion30Settings(settings) {
+  if (!plain(settings?.guildFort) || Object.hasOwn(settings.guildFort, 'blockedMaterials')) return settings;
+  return { ...settings, guildFort: { ...settings.guildFort, blockedMaterials: [] } };
+}
+
+function migrateVersion29Settings(settings) {
+  if (!plain(settings)) return settings;
+  const next = { ...settings };
+  if (plain(next.arena)) next.arena = { fallbackLowerRank: false, ...next.arena };
+  if (plain(next.league)) next.league = { fallbackWeakest: false, ...next.league };
+  return next;
+}
+
+function migrateVersion28Settings(settings) {
+  if (!plain(settings?.gather) || !Object.hasOwn(settings.gather, 'fishingGoldReserve')) return settings;
+  const { fishingGoldReserve, ...gather } = settings.gather;
+  return { ...settings, gather };
+}
+
+function migrateVersion27Settings(settings) {
+  if (!plain(settings)) return settings;
+  const next = { ...settings };
+  for (const group of ['treasure', 'cityWar']) {
+    if (plain(next[group])) next[group] = { recallSilicon: false, recallLeadMinutes: 5, ...next[group] };
+  }
+  return next;
+}
+
+function migrateVersion26Settings(settings) {
+  if (!Array.isArray(settings?.silicon?.fleets)) return settings;
+  const fleets = settings.silicon.fleets.map(fleet => {
+    if (!plain(fleet)) return fleet;
+    const { repairSpeedUp, repairDailyDiamonds, repairTargetSeconds, ...travel } = fleet;
+    return travel;
+  });
+  return { ...settings, silicon: { ...settings.silicon, fleets } };
+}
+
+function migrateVersion25Settings(settings) {
+  if (!plain(settings)) return settings;
+  const next = { ...settings };
+  const t = settings.treasure;
+  if (plain(t) && !Object.hasOwn(t, 'returnDailyDiamondLimit')) {
+    const budget = t.dailyDiamondLimit;
+    const returning = t.returnSpeedUp && Number.isSafeInteger(budget) && budget > 0 && budget <= 100000000
+      ? (t.outboundSpeedUp === false ? budget : Math.floor(budget / 2)) : 0;
+    next.treasure = { ...t, ...(returning ? { dailyDiamondLimit: budget - returning } : {}), returnDailyDiamondLimit: returning };
+  }
+  if (plain(settings.silicon) && Object.hasOwn(settings.silicon, 'dailyDiamondLimit')) {
+    const { dailyDiamondLimit, ...silicon } = settings.silicon;
+    if (!Number.isSafeInteger(dailyDiamondLimit) || dailyDiamondLimit < 0 || dailyDiamondLimit > 100000) {
+      throw new SettingsError({ 'silicon.dailyDiamondLimit': '原硅矿每日钻石预算须为 0–100000 之间的整数' });
+    }
+    if (Array.isArray(silicon.fleets)) {
+      const fleets = silicon.fleets.map(fleet => plain(fleet) ? { ...fleet } : fleet);
+      const choices = fleets.filter(plain).flatMap(fleet => ['repair', 'march']
+        .filter(mode => fleet[mode + 'SpeedUp']).map(mode => ({ fleet, mode })));
+      let recipients = choices.filter(({ fleet }) => fleet.enabled);
+      if (!recipients.length) recipients = choices;
+      if (!recipients.length && plain(fleets[0])) recipients = [{ fleet: fleets[0], mode: 'march' }];
+      recipients.forEach(({ fleet, mode }, index) => {
+        const key = mode + 'DailyDiamonds';
+        if (!Object.hasOwn(fleet, key)) fleet[key] = Math.floor(dailyDiamondLimit / recipients.length) +
+          Number(index < dailyDiamondLimit % recipients.length);
+      });
+      silicon.fleets = fleets;
+    }
+    next.silicon = silicon;
+  }
+  return next;
+}
+
+function migrateVersion24Settings(settings) {
+  if (!plain(settings?.treasure)) return settings;
+  return { ...settings, treasure: { outboundSpeedUp: true, returnSpeedUp: false, returnTargetSeconds: 60, ...settings.treasure } };
+}
+
+function migrateVersion23Settings(settings) {
+  if (!plain(settings)) return settings;
+  const next = { ...settings };
+  for (const group of ['arena', 'league']) {
+    if (!plain(settings[group])) continue;
+    const { keepTickets, ...fields } = settings[group];
+    next[group] = {
+      dailyBattleLimit: keepTickets > 0 ? 0 : DEFAULT_SETTINGS[group].dailyBattleLimit,
+      claimTask: settings.dailies?.claimTasks ?? false,
+      ...fields,
+    };
   }
   return next;
 }

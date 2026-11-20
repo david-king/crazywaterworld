@@ -158,7 +158,7 @@ async function persistedUserRootContainsCert() {
 
 export async function verifyRootView(contains = persistedUserRootContainsCert) {
   if (process.platform === 'win32' && !isInstalled() && await contains()) {
-    throw Object.assign(new Error(`Windows 的当前用户 Root 已保存本证书（${caThumbprint()}），但本进程看不到它。请从开始菜单打开普通 PowerShell，在项目目录运行 node src/app.mjs console，无需再次导入。若原控制台仍运行，请先设置 $env:CW_PORT='17323'。`), { code: 'CW_CA_VIEW' });
+    throw Object.assign(new Error(`Windows 的当前用户 Root 已保存本证书（${caThumbprint()}），但本进程看不到它。请结束旧控制台，从开始菜单打开普通 PowerShell，在项目目录用原启动命令重新启动控制台。`), { code: 'CW_CA_VIEW' });
   }
 }
 
@@ -190,7 +190,7 @@ async function addToUserRoot(signal) {
   } catch (error) {
     signal?.throwIfAborted();
     const code = /CW_CA_HRESULT=(0x[0-9A-F]+)/i.exec(error.stderr)?.[1] ?? error.code;
-    if (code === '0x800704C7' || code === '0x80090036') throw trustError('Windows 证书信任确认已取消，请重试并在系统安全警告中选择“是”');
+    if (code === '0x800704C7' || code === '0x80090036') throw trustError('Windows 证书信任确认已取消。');
     if (code === '0x80070005') throw trustError('Windows 拒绝写入当前用户根证书库（0x80070005），请检查此设备的证书策略');
     throw trustError(`Windows 未能添加当前用户测试 CA（${code}）`);
   }
@@ -234,7 +234,7 @@ export async function certificateCommand(args = process.argv.slice(2)) {
     console.log(`leaf for ${arg}: cached=${result.cached} ${result.key}`);
   } else if (cmd === 'install') {
     await verifyRootView();
-    await installCa();
+    if (!isInstalled()) await installCa();
     console.log(`installed=${isInstalled()}\n${caFingerprint()}`);
   } else if (cmd === 'uninstall') {
     uninstallCa();

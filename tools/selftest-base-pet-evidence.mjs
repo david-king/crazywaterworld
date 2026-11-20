@@ -27,7 +27,7 @@ function fixture(kind) {
   const room = { buildingId: '1宠物培育室', level: 3, petBreed: { maxQLength: 3,
     breedQ: kind === 'petFeed' ? [structuredClone(original)] : [], maturePets: [] } };
   const state = { room, original, now, stock: 100, gold: 1000, writes: [], reads: [], change: () => {}, beforeRead: () => {} };
-  const client = { connected: true, serverClockOffsetMs: 0,
+  const client = { connected: true, serverClockOffsetMs: 0, latencyMs: 20,
     async request(name, body = {}, response = name.replace('Request', 'Response')) {
       assert(protocol[name] && protocol[response], '读请求及回包必须存在于真实协议');
       protocol[name].encode(body).finish();
@@ -66,6 +66,34 @@ function fixture(kind) {
 }
 
 try {
+  await test('投喂后同星海兽提前进入待领取，回读库存后释放预留', async () => {
+    const f = fixture('petFeed'), queue = f.state.room.petBreed;
+    queue.breedQ[0].star = 2;
+    queue.maturePets.push({ petId: 'wanted', star: 2 });
+    f.state.change = () => {
+      queue.breedQ = [];
+      queue.maturePets.push({ petId: 'wanted', star: 2 });
+    };
+    assert.equal((await f.run())[0].ok, true);
+    assert.equal(f.state.writes.length, 1);
+    assert(f.state.reads.some(row => row.afterWrite && row.name === 'AllItemRequest'));
+    await f.assertPending(false);
+  });
+  for (const mode of ['wrong-star', 'existing-mature', 'ambiguous-queue', 'unknown-clock']) {
+    await test('投喂任务消失但提前成熟证据不完整：' + mode, async () => {
+      const f = fixture('petFeed'), queue = f.state.room.petBreed;
+      queue.breedQ[0].star = 2;
+      if (mode === 'existing-mature') queue.maturePets.push({ petId: 'wanted', star: 2 });
+      if (mode === 'ambiguous-queue') queue.breedQ.push({ ...queue.breedQ[0], idx: 8 });
+      if (mode === 'unknown-clock') f.client.latencyMs = 0;
+      f.state.change = () => {
+        queue.breedQ = [];
+        queue.maturePets = [{ petId: 'wanted', star: mode === 'wrong-star' ? 1 : 2 }];
+      };
+      assert.equal((await f.run())[0].ok, false);
+      await f.assertPending(true);
+    });
+  }
   await test('投喂静默后旧任务自然成熟，不能冒充投喂成功', async () => {
     const f = fixture('petFeed');
     f.state.change = () => {

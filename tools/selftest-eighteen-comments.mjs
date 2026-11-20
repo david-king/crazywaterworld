@@ -5,7 +5,7 @@ import {readActivityStatistics,activityRewardState} from '../src/activity-statis
 import {activityRankCatalog,readActivityRanking} from '../src/activity-rankings.mjs';
 import {readWorldOverview} from '../src/world-overview.mjs';
 import {readWorldTarget} from '../src/world-target.mjs';
-import {runtimeProgress} from '../src/runtime-progress.mjs';
+import {runtimeProgress, stepObservation} from '../src/runtime-progress.mjs';
 import {PAGE} from '../src/page.mjs';
 import {manualPage} from '../src/ui/dist/console.mjs';
 let count=0;const test=async(name,fn)=>{await fn();count++;console.log('通过：'+name);};
@@ -55,6 +55,11 @@ await test('城战详情读取失败不把未知状态说成没有宣战',async(
  const f=await commentsEighteenFixture();const r=await readWorldTarget(f.client,f.protocol,f.config,f.player,f.settings,ledger,{layer:'cities',key:'city-'+f.targetCity});assert(r.notes.some(n=>n.includes('未确认')));assert(!r.notes.some(n=>n.includes('不是本联盟当前有效宣战目标')));
 });
 await test('进度和条件分列，真实开关限制不被执行成功覆盖',()=>{
+ assert.equal(stepObservation({ok:true, sent:{}}).state,'sent');
+ assert.equal(stepObservation({ok:true, skipped:true}).state,'waiting');
+ assert.equal(stepObservation({ok:false, pending:true, skipped:true}).state,'pending');
+ const failure=runtimeProgress({key:'forge.enabled',enabled:true},{state:'error',text:'需要材料 1/2'}, {}, {running:true,connected:true});
+ assert.equal(failure.progress,'—');assert.equal(failure.condition,'需要材料 1/2');
  const r=runtimeProgress({key:'schedule.pirate',enabled:true,blockedBy:[]},{text:'今日免费扫荡次数已用完（15/15）',state:'waiting'},{counters:{pirateSweeps:11}},{running:true,connected:true});assert.match(r.progress,/15\/15/);
  const blocked=runtimeProgress({key:'forge.enabled',enabled:true,blockedBy:['基地总控']},{text:'已完成',state:'ok'},{counters:{forgeStarts:2}},{running:true,connected:true});assert.match(blocked.condition,/基地总控/);
  const pending=runtimeProgress({key:'forge.enabled',enabled:false,blockedBy:[]},{text:'等待确认2单',state:'pending'},{counters:{}},{running:true,connected:true});assert.match(pending.condition,/已关闭.*等待确认/);
@@ -72,7 +77,8 @@ await test('页面脚本可解析，废弃入口移除且主分支独有入口�
  assert(!/['"]\/api\/activity-ranks(?:\?|['"])/.test(PAGE),'旧活动榜单目录入口已移除');
  assert(PAGE.includes('/api/activity-ranks/view?key=week-cross'),'军备竞赛仍使用独立的只读榜单入口');
  for(const id of ['activities-list','overview-task-groups','inventory-query','world-map-fleets'])assert.equal((PAGE.match(new RegExp('id="'+id+'"','g'))??[]).length,1,id);
- assert(PAGE.includes('当前进度'));assert(PAGE.includes('当前条件'));assert(PAGE.includes('width:165px'));assert(PAGE.includes('width:100px'));
+ assert(PAGE.includes('<span>功能</span><span>状态</span><span>结果或原因</span>'));
+ for(const id of ['overview-task-search','overview-task-filter','overview-matches'])assert(PAGE.includes('id="'+id+'"'),id);
 });
 await test('建筑一览移除一键领取、任务奖励、海面单轮操作和资源田面板', () => {
  const manual = manualPage();

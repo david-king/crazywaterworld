@@ -84,7 +84,7 @@ export function nativePreferenceEnabled(settings, key) {
     fishEnhance: () => settings.loop.world && settings.gather.upgradeFishing,
     diveEnhance: () => settings.loop.world && settings.gather.upgradeDiving,
     salvageEnhance: () => settings.loop.world && settings.gather.upgradeSalvage,
-    dailyRewards: () => settings.dailies.enabled && settings.dailies.claimTasks,
+    dailyRewards: () => settings.dailies.enabled && (settings.dailies.claimTasks || settings.arena?.claimTask || settings.league?.claimTask),
     chests: () => settings.dailies.enabled && (settings.dailies.claimDailyChest || settings.dailies.claimWeeklyChest),
     gift: () => settings.dailies.enabled && settings.dailies.claimGift,
     tasks: () => settings.loop.tasks || (settings.loop.world && settings.resident.rewards),
@@ -95,9 +95,8 @@ export function nativePreferenceEnabled(settings, key) {
     paidGold: () => settings.loop.dailies && settings.gold.enabled,
     freeGold: () => settings.loop.dailies && settings.dailies.enabled,
     freeRecruit: () => settings.loop.dailies && settings.dailies.enabled,
-    ticketRecruit: () => settings.loop.dailies && settings.dailies.enabled,
     arena: () => settings.loop.dailies && settings.dailies.enabled,
-    pirate: () => settings.loop.dailies && settings.dailies.enabled,
+    pirate: () => settings.pirate?.enabled && settings.schedule.pirate,
     shop: () => settings.loop.dailies && settings.dailies.enabled,
   };
   if (map[key]) return !!map[key]();
@@ -186,7 +185,7 @@ export function createActionGuard(client, getSettings, ledger, { enabled = () =>
   // request bodies may be retried after an earlier unknown action is settled.
   const forget = record => { record.log.close(); reservations.delete(record.token); };
   const reportOutcome = (record, outcome) => {
-    const confirmed = outcome?.ok && !('sent' in outcome);
+    const confirmed = outcome?.ok && !outcome.materialsPending && !['unknown', 'pending'].includes(outcome.status) && !('sent' in outcome);
     record.log.phase(confirmed ? 'confirmed' : 'unknown', confirmed ? 'confirmed' : 'pending', { reason: outcome?.reason });
   };
   return {
@@ -315,7 +314,7 @@ export function createActionGuard(client, getSettings, ledger, { enabled = () =>
       }
       for (const [id, balance] of nextBalances) remaining.set(id, balance);
       const token = ticket ?? Object.freeze({});
-      const log = createOperationLog(client, { request: step.request, label: step.label, module: step.kind || step.scope || 'automation', dedupeKey: step.uniqueKey ?? null });
+      const log = createOperationLog(client, { ticket: token, operationId: ticket?.id, request: step.request, label: step.label, module: step.kind || step.scope || 'automation', dedupeKey: step.uniqueKey ?? null });
       if (operation?.onConfirmed) {
         const onConfirmed = operation.onConfirmed;
         operation.onConfirmed = () => { onConfirmed(); log.phase('confirmed', 'confirmed'); };
@@ -421,7 +420,8 @@ export function createActionGuard(client, getSettings, ledger, { enabled = () =>
       if (notSent) { cancelUnsentGold(record.gold); cancelOrderMaterialSpend(record.materials); }
       else if (error?.prompt && error.request === record.request) { rejectGold(record.gold, error); cancelOrderMaterialSpend(record.materials); }
       else { record.log.phase('unknown', 'pending', { reason: error?.message }); record.log.close(); return; }
-      record.log.phase('cancelled', notSent ? 'not-sent' : 'rejected');
+      const rejected = !error?.notSent && error?.prompt && error.request === record.request;
+      record.log.phase('cancelled', rejected ? 'rejected' : 'not-sent', { reason: error?.message });
       forget(record);
       if (record.ticket) ledger.cancel(record.ticket);
       for (const [id, amount] of record.costs) if (remaining.has(id)) remaining.set(id, remaining.get(id) + amount);

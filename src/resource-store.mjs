@@ -31,7 +31,7 @@ export function selectResourceTarget(discovered, saved) {
   return known ? { appVersion: known, source: 'last-known', packageVersion: saved.sourcePackageVersion ?? null } : null;
 }
 
-export function resourceUpdatePolicy(env = process.env, { root = resourceDirectory(env) } = {}) {
+export function resourceUpdatePolicy(env = process.env, { root = resourceDirectory(env), checked = readResourceCheck(root) } = {}) {
   const intervalMinutes = Number(env.CW_RESOURCE_UPDATE_MINUTES ?? 30);
   const maxAgeMinutes = Number(env.CW_RESOURCE_MAX_AGE_MINUTES ?? DEFAULT_RESOURCE_MAX_AGE_MINUTES);
   const enabled = env.CW_RESOURCE_AUTO_UPDATE !== '0' && !env.CW_CONFIG_PACK;
@@ -40,8 +40,7 @@ export function resourceUpdatePolicy(env = process.env, { root = resourceDirecto
     try { discovered = discoverResourceVersion({ env }); }
     catch (error) { discoveryError = error.message; } // The updater can repair a corrupt local cache from the official CDN.
   }
-  const saved = readResourceCheck(root);
-  const target = selectResourceTarget(discovered, saved);
+  const target = selectResourceTarget(discovered, checked);
   const appVersion = env.CW_RESOURCE_APP_VERSION || target?.appVersion || DEFAULT_RESOURCE_APP_VERSION;
   const versionSource = env.CW_RESOURCE_APP_VERSION ? 'explicit' : target?.source || 'fallback';
   if (!Number.isInteger(intervalMinutes) || intervalMinutes < 1 || intervalMinutes > 1440)
@@ -69,10 +68,10 @@ export function writeResourceCheck(root, data) {
   atomicJson(path.join(root, 'check.json'), { ...data, version: 1 });
 }
 
-export function resourceReadiness({ root = resourceDirectory(), policy, now = Date.now(), resources } = {}) {
-  policy ??= resourceUpdatePolicy(process.env, { root });
-  const current = activeResources({ root, honorOverride: false });
+export function resourceReadiness({ root = resourceDirectory(), policy, now = Date.now(), resources,
+  current = activeResources({ root, honorOverride: false }) } = {}) {
   const checked = readResourceCheck(root);
+  policy ??= resourceUpdatePolicy(process.env, { root, checked });
   const result = { ready: true, blocked: false, reason: '', requiredVersion: checked?.required?.version ?? null,
     lastVerifiedAt: checked?.verifiedAt ?? null, maxAgeMinutes: policy.maxAgeMinutes ?? DEFAULT_RESOURCE_MAX_AGE_MINUTES };
   if (!policy.enabled) return result;

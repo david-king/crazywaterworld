@@ -100,6 +100,24 @@ await test('窗口缩放重新计算中文标题行数，重绘最近日志且�
   await sink.close();
 });
 
+await test('公网出口 IP 异步加入置顶标题，转为小窗口或纯文本时仍可见', async () => {
+  const line = '公网出口 IP  203.0.113.8';
+  for (const isTTY of [true, false]) {
+    const terminal = new Terminal({ isTTY }), sink = output(terminal);
+    sink.start(url); await flush();
+    sink.showPublicIp(line); await flush();
+    if (isTTY) {
+      for (let i = 0; i < 50; i++) sink.write('运行日志 ' + i);
+      await flush();
+      assert(terminal.lines().slice(0, terminal.top).some(row => row.includes(line)));
+      terminal.resize(18, 8); await flush();
+    }
+    assert(terminal.text().includes(line));
+    assert(!terminal.text().includes('http://203.0.113.8'));
+    await sink.close();
+  }
+});
+
 await test('窄窗口中的每段地址都链接完整URL，缩放重绘仍保留相同文本', async () => {
   const target = 'https://console.example.test:17323/a/very/long/path?account=demo#settings';
   const terminal = new Terminal({ columns: 24, rows: 24 }), sink = output(terminal);

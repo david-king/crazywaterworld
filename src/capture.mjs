@@ -1,7 +1,8 @@
 // Current-user capture lifecycle. Creating/importing a controller changes no system settings.
 import { platform as systemPlatform } from './platform/index.mjs';
-import { createProxy as defaultCreateProxy, DEFAULT_PROXY_PORT } from '../tools/mitm-proxy.mjs';
+import { createProxy as defaultCreateProxy } from '../tools/mitm-proxy.mjs';
 import { pointsToCapture, prepareCaptureProxy } from './platform/proxy.mjs';
+import { checkProxyPort, DEFAULT_PROXY_PORT, proxyPortFailure, validateProxyPort } from './platform/proxy-port.mjs';
 import { createCaptureJournal, createCaptureRecovery } from './capture-recovery.mjs';
 import { randomUUID } from 'node:crypto';
 import { acquireCaptureLock } from './platform/capture-lock.mjs';
@@ -15,13 +16,14 @@ export function createCaptureController(dependencies = {}) {
   const settings = dependencies.proxySettings ?? systemPlatform.proxy;
   const journal = dependencies.journal ?? createCaptureJournal();
   const createProxy = dependencies.createProxy ?? defaultCreateProxy;
+  const checkPort = dependencies.checkProxyPort ?? checkProxyPort;
   const runtime = dependencies.process ?? process;
   const later = dependencies.setTimeout ?? setTimeout;
   const cancelTimer = dependencies.clearTimeout ?? clearTimeout;
   const now = dependencies.now ?? (() => new Date());
   const defaultPort = dependencies.port ?? DEFAULT_PROXY_PORT;
   const state = {
-    running: false, phase: 'idle', error: null, port: defaultPort,
+    running: false, phase: 'idle', error: null, failureHint: null, port: defaultPort,
     originalProxy: null, caAddedByCapture: false, caInstalledBefore: false,
     capturedAt: null, accountId: null, startedAt: null, log: [],
   };
@@ -61,7 +63,7 @@ export function createCaptureController(dependencies = {}) {
     try { fingerprint = ca.caFingerprint(); } catch {}
     try { thumbprint = ca.caThumbprint(); } catch {}
     return {
-      running: state.running, phase: state.phase, error: state.error, port: state.port, platform: state.platform ?? 'wechat',
+      running: state.running, phase: state.phase, error: state.error, failureHint: state.failureHint, port: state.port, platform: state.platform ?? 'wechat',
       caInstalled, caQueryError, caInstalledBefore: state.caInstalledBefore,
       caAddedByCapture: state.caAddedByCapture,
       proxy, proxyOn: Number(proxy?.ProxyEnable) === 1,
@@ -198,14 +200,14 @@ export function createCaptureController(dependencies = {}) {
     current = run;
     latest = run;
     Object.assign(state, {
-      running: true, phase: 'starting', error: null, port, originalProxy: null, platform,
+      running: true, phase: 'starting', error: null, failureHint: null, port, originalProxy: null, platform,
       caAddedByCapture: false, caInstalledBefore: false,
       accountId: null, capturedAt: null, startedAt: now().toISOString(), log: [],
     });
     let stage = '检查采集设置';
     let failed = false;
     try {
-      if (!Number.isInteger(port) || port < 1 || port > 65535) throw new Error('代理端口必须是 1–65535 的整数');
+      validateProxyPort(port);
       if (!Number.isInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > 86400000) throw new Error('采集超时必须在 1–86400000 毫秒之间');
       run.releaseLock = await acquireLock();
       if (run.cancelled) throw new Error('启动已取消');
@@ -215,6 +217,10 @@ export function createCaptureController(dependencies = {}) {
       if (pointsToCapture(state.originalProxy, port)) {
         throw new Error('系统代理已指向本机采集端口；请先恢复上次的代理设置，避免覆盖原始备份');
       }
+      stage = '检查本地采集端口';
+      await checkPort(port);
+      if (run.cancelled) throw new Error('启动已取消');
+      stage = '检查当前用户证书';
       state.caInstalledBefore = ca.isInstalled();
       const initialRecord = { version: 1, id: randomUUID(), startedAt: state.startedAt, phase: 'starting', port,
         keepCa, ready: false, ca: { installedBefore: state.caInstalledBefore, installAttempted: false, fingerprint: null, created: false }, proxy: null };
@@ -223,7 +229,10 @@ export function createCaptureController(dependencies = {}) {
       installHooks(run);
       run.timer = later(() => {
         if (run.finished || run.cancelled) return;
-        if (latest === run) state.error = '采集超时，未完成登录报文采集与处理；已停止并还原设置。';
+        if (latest === run) {
+          state.failureHint = run.installPending ? '等待 Windows 证书确认超时，本次采集已停止。' : '采集超时，本次采集已停止。';
+          state.error = state.failureHint;
+        }
         void stopRun(run, '等待超时');
       }, timeoutMs);
 
@@ -266,8 +275,15 @@ export function createCaptureController(dependencies = {}) {
       persist(run);
       ca.prepareLeaf(GATEWAY.hostname);
       if (!state.caInstalledBefore) {
+        stage = '核对当前用户根证书库';
         await ca.verifyRootView?.();
         if (run.cancelled) throw new Error('采集启动已取消');
+        // An import outside this session may have finished during the trust check.
+        state.caInstalledBefore = ca.isInstalled(run.record.ca.thumbprint);
+        run.record.ca.installedBefore = state.caInstalledBefore;
+      }
+      if (!state.caInstalledBefore) {
+        stage = '安装当前用户测试 CA';
         // certutil can install a certificate and subsequently fail; always own that rollback.
         run.caAdded = true;
         run.record.ca.installAttempted = true;
@@ -300,7 +316,11 @@ export function createCaptureController(dependencies = {}) {
       }
     } catch (error) {
       failed = true;
-      state.error = `${stage}失败：${error.message}`;
+      if (!run.cancelled || !state.error) {
+        const portHint = (stage === '检查本地采集端口' || stage === '启动本地采集代理') && proxyPortFailure(port, error.code);
+        state.failureHint = portHint || `${stage}失败，请查看运行日志。`;
+        state.error = `${stage}失败：${error.message}`;
+      }
       note(state.error, run);
     } finally {
       finishSetup();

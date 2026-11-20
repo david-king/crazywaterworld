@@ -37,6 +37,9 @@ function harness({ mode = '', trusted = false, certExists = trusted, original = 
       return () => { h.locked = false; };
     },
     process: runtime, port: PORT, now: () => new Date('2026-10-19T00:00:00.000Z'),
+    async checkProxyPort() {
+      if (h.mode === 'port-busy') throw Object.assign(new Error('fixture port in use'), { code: 'EADDRINUSE' });
+    },
     setTimeout(callback, milliseconds) {
       const timer = ++nextTimer;
       h.timers.set(timer, { callback, milliseconds });
@@ -47,6 +50,7 @@ function harness({ mode = '', trusted = false, certExists = trusted, original = 
       CA_CN: 'Fixture CA', CA_CRT: 'fixture.crt',
       caFingerprint() { if (!h.certExists) throw new Error('ENOENT'); return 'fixture-fingerprint'; },
       isInstalled() { return h.trusted; },
+      async verifyRootView() { if (h.mode === 'external-ca-import') h.trusted = true; },
       initCa() {
         events.push('ca:init');
         if (h.mode === 'init-failure') throw new Error('fixture initialization failure');
@@ -58,10 +62,11 @@ function harness({ mode = '', trusted = false, certExists = trusted, original = 
         assert.equal(host, HOST);
         if (h.mode === 'missing-leaf') throw new Error('leaf.key');
       },
-      installCa() {
+      installCa({ signal }) {
         events.push('ca:install');
         if (h.mode === 'install-before-write-failure') throw new Error('fixture install rejected before trust changed');
         h.trusted = true;
+        if (h.mode === 'pending-certificate') return new Promise((resolve, reject) => signal.addEventListener('abort', () => reject(signal.reason), { once: true }));
         if (h.mode === 'install-failure') throw new Error('fixture partial certificate installation');
       },
       uninstallCa() {
@@ -102,6 +107,7 @@ function harness({ mode = '', trusted = false, certExists = trusted, original = 
         async listen() {
           events.push('proxy:listen');
           if (h.mode === 'listen-failure') throw new Error('fixture bind failure');
+          if (h.mode === 'port-race') throw Object.assign(new Error('fixture late conflict'), { code: 'EADDRINUSE' });
           if (h.mode === 'pending-listen') await h.listener.promise;
         },
         async stop() {
@@ -133,6 +139,43 @@ assert.equal(fresh.controller.captureState().running, false);
 assert.deepEqual(fresh.events, [], 'first status read must neither initialize a CA nor change settings');
 await fresh.controller.stopCapture();
 assert.deepEqual(fresh.events, []);
+
+for (const platform of ['wechat', 'douyin']) {
+  const h = harness({ mode: 'port-busy' });
+  const blocked = await h.controller.startCapture({ platform, port: 17323 });
+  assert.match(blocked.failureHint, /17323 已被占用/);
+  assert.deepEqual(h.events, [], 'a known conflict must precede CA initialization, trust and proxy writes');
+  assert.equal(h.journalRecord, null);
+  h.assertClean();
+  h.mode = '';
+  assert.equal((await h.controller.startCapture({ platform })).failureHint, null);
+  await h.controller.stopCapture();
+  h.assertClean();
+}
+
+const lateConflict = harness({ mode: 'port-race' });
+assert.match((await lateConflict.controller.startCapture()).failureHint, /17322 已被占用/);
+assert(lateConflict.events.includes('ca:remove'));
+assert(!lateConflict.events.includes('proxy:set'));
+lateConflict.assertClean();
+
+const externallyTrusted = harness({ mode: 'external-ca-import' });
+const ready = await externallyTrusted.controller.startCapture();
+assert.equal(ready.caInstalledBefore, true);
+assert.equal(ready.caAddedByCapture, false);
+assert.equal(externallyTrusted.journalRecord.ca.installAttempted, false);
+await externallyTrusted.controller.stopCapture();
+assert(!externallyTrusted.events.includes('ca:install') && !externallyTrusted.events.includes('ca:remove'));
+externallyTrusted.assertClean({ retained: true });
+
+const wizardTimeout = harness({ mode: 'pending-certificate' });
+const pendingInstall = wizardTimeout.controller.startCapture();
+await flush();
+wizardTimeout.fireTimeout();
+const timedOut = await pendingInstall;
+assert.match(timedOut.error, /证书确认超时/);
+assert.equal(timedOut.failureHint, timedOut.error);
+wizardTimeout.assertClean();
 
 for (const trusted of [false, true]) {
   const h = harness({ trusted });

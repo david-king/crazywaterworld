@@ -6,6 +6,8 @@ import path from 'node:path';
 import { spawn } from 'node:child_process';
 import { once } from 'node:events';
 import { fileURLToPath } from 'node:url';
+import { createServer } from 'node:net';
+import { checkProxyPort } from '../src/platform/proxy-port.mjs';
 import { createCaptureController } from '../src/capture.mjs';
 import { createCaptureJournal, createCaptureRecovery } from '../src/capture-recovery.mjs';
 import { startConsole } from './start-console.mjs';
@@ -42,7 +44,7 @@ function fixture(directory) {
       change(state => { for (const name of names) { if (name in values) state.proxy[name] = values[name]; else delete state.proxy[name]; } });
     },
   };
-  const dependencies = { journal, ca, proxySettings, acquireLock: async () => async () => {},
+  const dependencies = { journal, ca, proxySettings, checkProxyPort: async () => {}, acquireLock: async () => async () => {},
     createProxy: () => ({ async listen() {}, async stop() {} }) };
   return { read, change, journal, dependencies, recovery: createCaptureRecovery(dependencies) };
 }
@@ -78,6 +80,22 @@ if (process.argv[2] === '--douyin-child') {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'cw-platform-recovery-'));
   try {
     const f = fixture(directory);
+    const occupied = createServer(socket => socket.destroy());
+    await new Promise((resolve, reject) => occupied.once('error', reject).listen(0, '127.0.0.1', resolve));
+    const port = occupied.address().port;
+    try {
+      const controller = createCaptureController({ ...f.dependencies, checkProxyPort });
+      const before = f.read();
+      const result = await controller.startCapture({ port });
+      assert.equal(result.running, false);
+      assert.match(result.failureHint, new RegExp(port + ' 已被占用'));
+      assert.deepEqual(f.read(), before);
+      assert.equal(f.journal.read(), null);
+    } finally {
+      await new Promise(resolve => occupied.close(resolve));
+    }
+    await checkProxyPort(port);
+    await checkProxyPort(port);
     for (const mode of ['--child', '--douyin-child']) {
       await killCaptureChild(mode, directory);
       assert.equal(f.recovery.inspect().pending, true);

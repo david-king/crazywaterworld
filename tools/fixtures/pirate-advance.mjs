@@ -4,15 +4,22 @@ import { loadProtocol } from '../../src/proto.mjs';
 export function pirateAdvanceFixture({mode='win'}={}) {
  const protocol=loadProtocol(),client=new EventEmitter();client.connected=true;client.writes=[];
  const settings=defaultSettings();settings.pirateHunt={...settings.pirateHunt,maxFailures:1,fleetIds:['1远征船'],types:['1'],maxLevel:3,minDurabilityPercent:80,petrolReserve:0,fuelBudget:3000,checkEverySeconds:5};
- const player={level:37,worldId:1001001,scenarioId:1};
+ const player={playerId:'123',mainlineStage:10,level:37,worldId:1001001,scenarioId:1};
  const config={tables:{ModuleOpenCfg:{data:[{moduleId:'世界',playerLevel:16}]},WorldPirateCfg:{data:[1,2,3].map(level=>({season:1,type:1,level,showName:'海盗先锋',power:10000*level}))},'1_SeasonTaskCfg':{data:[{season:1,stage:1,maxPirateLevel:3}]},'1_CityCfg':{data:[{id:1,name:'试验岛'}]},WorldParamCfg:{data:[{paramName:'打野怪消耗汽油',paramValue:300}]},HeroCfg:{data:[{id:'瑞文',name:'骑士瑞文'}]}}};
  const fleet={buildingId:'1远征船',state:1,durability:1000,maxDura:1000,power:100000,curGridIdx:0,autoFight:{isOn:true}};
  const building={buildingId:fleet.buildingId,level:1,fleet:{formation:{presetId:1,heroPositions:[{heroId:'瑞文',pos:{x:1,y:1}}]}}};
+ config.tables.FormationTypePositionCfg={data:[{id:1,position:[1,1]},{id:1,position:[2,1]}]};
+ config.tables.FormationHeroNumCfg={data:[{mainlineStage:0,heroNum:1}]};
+ const defaultFormation=structuredClone(building.fleet.formation);
  const state={level:0,fuel:3000,stage:1,mode,floaters:[{floaterId:'深海宝箱1',num:1},{floaterId:'塑料垃圾1',num:3}],reads:[]};
  client.request=async(name,body={},response)=>{
   state.reads.push(name);if(protocol[name])protocol[name].decode(protocol[name].encode(body).finish());
   let data;
-  if(name==='OnWaterRequest')data={building:[building],floater:state.floaters};
+  if(name==='GetFormationRequest')data={formation:defaultFormation};
+  else if(name==='AllHeroRequest')data={heroes:[{heroId:'瑞文'}]};
+  else if(name==='MyFormationPresetRequest')data={ids:[]};
+  else if(name==='AllPetRequest')data={pets:[]};
+  else if(name==='OnWaterRequest')data={building:[building],floater:state.floaters};
   else if(name==='SeasonTaskStageRequest')data={stage:state.stage};
   else if(name==='UniteWorldsPlanRequest')data={worldIds:[],executeTs:0};
   else if(name==='AllItemRequest')data={items:[{itemId:'汽油',num:state.fuel},{itemId:'RUBY',num:1000}]};
@@ -30,6 +37,10 @@ export function pirateAdvanceFixture({mode='win'}={}) {
  };
  client.sendWatch=async(name,body)=>{
   protocol[name].decode(protocol[name].encode(body).finish());client.writes.push({name,body});
+  if(name==='FleetSaveFormationRequest'){
+   if(body.buildingId!==building.buildingId)throw Error('模拟舰队编号错误');
+   building.fleet.formation=structuredClone(body.formation);return;
+  }
   if(state.mode==='unknown')throw Error('派遣超时');
   const level=body.uid-200;state.fuel-=300;
   Object.assign(fleet,{state:2,targetGridIdx:400+level,targetCityId:1});client.emit('message',{name:'SCMyFleetUpdate',body:{fleets:[fleet]}});

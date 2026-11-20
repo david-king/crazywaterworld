@@ -13,7 +13,9 @@ fs.writeFileSync(process.env.CW_CONFIG_PACK, JSON.stringify([[1, 'HeroCfg', { da
   { id: '瑞文', name: '骑士瑞文', quality: 'PURPLE', type: '英雄' },
   { id: '波奇', name: '波奇', quality: 'PURPLE', type: '英雄' },
   { id: '训练目标', name: '训练木人', quality: 'PURPLE', type: 'NPC' },
-] }], [2, 'BuildingUnlockCfg', { data: [1, 2, 3].map(id => ({ buildingType: '远征船', buildingId: id + '远征船' })) }]]));
+] }], [2, 'BuildingUnlockCfg', { data: [1, 2, 3].map(id => ({ buildingType: '远征船', buildingId: id + '远征船' })) }],
+  [3, 'ItemCfg', { data: ['耐火砖','高温合金','木板'].map(id => ({ id })) }],
+]));
 const { saveStore } = await import('../src/accounts.mjs');
 const { defaultSettings, saveAutomationSettings, loadAutomationSettings, settingsUiRules } = await import('../src/automation-settings.mjs');
 const { GameClient } = await import('../src/client.mjs');
@@ -76,9 +78,10 @@ try {
   {
     const history = page.locator('#config-history-dialog');
     const action = name => history.getByRole('button', { name, exact: true });
+    const record = name => history.locator('.history-record').filter({ hasText: name });
     const preview = async name => {
       await page.locator('#config-history-open').click();
-      await history.locator('.history-record').filter({ hasText: name }).getByRole('button').click();
+      await record(name).getByRole('button', { name: '查看与恢复' }).click();
     };
     await page.locator('#config-history-save').click();
     await history.getByLabel('配置名称').fill('日常方案');
@@ -120,6 +123,33 @@ try {
     assert.equal(loadAutomationSettings('config-a').settings.factory.keepStock, 334);
     await page.reload(); await openConfig();
     console.log('通过：命名快照、差异、跨账号隔离、草稿取回修正和恢复版本冲突');
+
+    const beforeDelete = loadAutomationSettings('config-a');
+    const wrongAccount = await fetch(base + '/api/settings/history/delete?account=config-b', {
+      method: 'POST', body: JSON.stringify({ confirm: true, id: entries[0].id }),
+    });
+    assert.equal(wrongAccount.ok, false);
+    await page.locator('#config-history-open').click();
+    const draftDelete = record('待补水位').getByRole('button', { name: '删除' });
+    page.once('dialog', dialog => dialog.dismiss());
+    await draftDelete.click();
+    assert.deepEqual(await list('config-a'), entries);
+    page.once('dialog', dialog => dialog.accept());
+    await draftDelete.click();
+    await record('待补水位').waitFor({ state: 'detached' });
+    assert.deepEqual(await list('config-a'), [entries[1]]);
+    assert.equal(await history.getByRole('status').isVisible(), false);
+    assert((await history.boundingBox()).height < 200, '一条记录的弹窗应紧凑');
+    await page.setViewportSize({ width: 320, height: 800 });
+    assert(await history.evaluate(node => node.scrollWidth <= node.clientWidth));
+    page.once('dialog', dialog => dialog.accept());
+    await record('日常方案').getByRole('button', { name: '删除' }).click();
+    await history.getByText('暂无历史配置。').waitFor();
+    assert.deepEqual(await list('config-a'), []);
+    assert.deepEqual(loadAutomationSettings('config-a'), beforeDelete);
+    await action('关闭').click();
+    await page.setViewportSize({ width: 1440, height: 1000 });
+    console.log('通过：取消删除、逐条删除草稿和快照、空列表及窄屏布局');
   }
   assert.equal(await page.locator('#tabs [data-tab=idle], #tab-idle').count(), 0);
   assert.equal(await page.locator('#tabs [data-tab=lineups]').count(), 1);
@@ -139,7 +169,48 @@ try {
   }
   assert.equal(await page.locator('#config-root').getByRole('button', { name: /重新载入/ }).count(), 0);
   assert.equal(await page.locator('#config-root').getByText(/上次保存/).count(), 0);
-  console.log('通过：30个模块开关各自归位，旧导航与跨页跳转移除');
+  console.log('通过：模块开关各自归位，旧导航与跨页跳转移除');
+
+  await group('guildFort');
+  for (const [key, empty] of [['materials','任意可捐物料'], ['blockedMaterials','未排除物料']]) {
+    const picker = page.locator('#config-field-guildFort-' + key);
+    assert.equal(await picker.locator('summary').textContent(), empty);
+    await picker.locator('summary').click();
+    await picker.getByText(/显示全部物资/).waitFor();
+    assert.deepEqual(await picker.locator('.config-option').allTextContents(), ['耐火砖','高温合金','木板']);
+    await picker.getByRole('checkbox', { name: '木板' }).check();
+    await picker.locator('summary').click(); await saved();
+  }
+  await page.reload(); await openConfig(); await group('guildFort');
+  const fortRoute = '**/api/settings/guild-fort-materials?account=config-a';
+  let needed = ['高温合金'];
+  await page.route(fortRoute, route => route.fulfill({ json: { itemIds: needed } }));
+  for (const key of ['materials', 'blockedMaterials']) {
+    const picker = page.locator('#config-field-guildFort-' + key);
+    assert.equal(await picker.locator('summary').textContent(), '木板');
+    await picker.locator('summary').click();
+    await picker.getByRole('checkbox', { name: '高温合金' }).check();
+    assert.deepEqual(await picker.locator('.config-option').allTextContents(), ['高温合金']);
+    await picker.locator('summary').click(); await saved();
+    assert.deepEqual(loadAutomationSettings('config-a').settings.guildFort[key], ['木板','高温合金']);
+  }
+  needed = [];
+  const donations = page.locator('#config-field-guildFort-materials');
+  await donations.locator('summary').click();
+  await donations.getByText('当前没有待捐物料。').waitFor();
+  assert.equal(await donations.getByRole('checkbox').count(), 0);
+  await donations.locator('summary').click();
+  await page.unroute(fortRoute);
+  console.log('通过：工事进度筛选和零缺口、离线全部物资、两份名单跨进度保存');
+
+  await group('radar');
+  assert.equal(await page.locator('[data-config-key="radar.monthCardSweep"]').count(), 0);
+  const radar = page.getByRole('switch', { name: '自动处理情报', exact: true });
+  await radar.click(); await saved();
+  assert.equal(loadAutomationSettings('config-a').settings.radar.enabled, true);
+  await page.reload(); await openConfig(); await group('radar');
+  assert(await radar.isChecked());
+  console.log('通过：自动处理情报统一控制普通派遣和月卡扫荡');
 
   await group('resourceFields');
   const fieldConfig = page.locator('#config-group-resourceFields');
@@ -184,20 +255,25 @@ try {
   assert.equal(loadAutomationSettings('config-a').settings.schedule.worldBossRewards, false);
   assert(!Object.hasOwn(loadAutomationSettings('config-a').settings.schedule, 'worldBossDamage'));
   await group('arena');
-  const tickets = page.locator('#config-field-arena-keepTickets');
-  await tickets.fill('2'); await saved();
+  const arenaLimit = page.locator('#config-field-arena-dailyBattleLimit');
+  await arenaLimit.fill('2'); await saved();
   const arenaRatio = page.locator('#config-field-arena-maxPowerRatio');
   await arenaRatio.fill('70'); await saved();
   await group('league');
+  const leagueLimit = page.locator('#config-field-league-dailyBattleLimit');
+  await leagueLimit.fill('0'); await saved();
+  await page.locator('#config-field-league-claimTask').click(); await saved();
   const leagueRatio = page.locator('#config-field-league-maxPowerRatio');
   await leagueRatio.fill('115'); await saved();
   await page.locator('#config-field-schedule-leagueChallenge').click(); await saved();
   await page.reload(); await openConfig(); await group('league');
+  assert.equal(await leagueLimit.inputValue(), '0');
+  assert.equal(await page.locator('#config-field-league-claimTask').getAttribute('aria-checked'), 'true');
   assert.equal(await leagueRatio.inputValue(), '115');
   assert.equal(await page.locator('#config-field-schedule-leagueChallenge').getAttribute('aria-checked'), 'true');
   assert.equal(await page.locator('#config-field-schedule-leagueCollect').getAttribute('aria-checked'), 'false');
   await group('arena');
-  assert.equal(await tickets.inputValue(), '2');
+  assert.equal(await arenaLimit.inputValue(), '2');
   assert.equal(await arenaRatio.inputValue(), '70');
   assert.equal(await page.locator('[data-config-key="schedule.arena"]').count(), 1);
   console.log('通过：世界Boss只有一个领奖入口，自动保存及刷新保留选择，首战派遣保持独立');
@@ -217,11 +293,53 @@ try {
   await bossFleets.locator('summary').click(); await saved();
   assert.deepEqual(loadAutomationSettings('config-a').settings.worldBoss.fleetIds, ['1远征船', '2远征船', '3远征船']);
   assert.equal(await bossLineups.locator('select:visible').count(), 3);
+  assert.equal(await page.getByText('各舰队出战阵容', { exact: true }).isVisible(), false);
+  for (const width of [320, 1440]) {
+    await page.setViewportSize({ width, height: 1000 });
+    const rowsFit = await bossLineups.locator('.config-fleet-lineup:visible').evaluateAll(rows => rows.every(row => {
+      const [label, select, view] = [...row.children].map(node => node.getBoundingClientRect());
+      const center = rect => rect.top + rect.height / 2;
+      return label.left >= 0 && label.right <= select.left && select.right <= view.left && view.right <= innerWidth
+        && Math.abs(center(label) - center(select)) <= 1 && Math.abs(center(select) - center(view)) <= 1;
+    }));
+    assert(rowsFit, width + 'px 每支舰队的名称、阵容和查看按钮均在同一行');
+  }
   await fleetLineup(1).selectOption('boss-first');
   await fleetLineup(2).selectOption('boss-second'); await saved();
   assert.equal(await fleetLineup(3).inputValue(), '', '未指定的舰队沿用当前阵容');
   const expectedFleetPresets = [{ buildingId: '1远征船', presetId: 'boss-first' }, { buildingId: '2远征船', presetId: 'boss-second' }];
   assert.deepEqual(loadAutomationSettings('config-a').settings.worldBoss.fleetPresets, expectedFleetPresets);
+  const fleetView = id => bossLineups.getByRole('button', { name: '查看远征舰队 ' + id + ' 队阵容' });
+  const viewer = page.getByRole('dialog');
+  const closeViewer = () => viewer.getByRole('button', { name: '关闭阵容查看' }).click();
+  const previousClient = bossSession.client, previousPause = bossSession.paused;
+  const water = [{ buildingId: '1远征船', level: 1 }, { buildingId: '3远征船', level: 1, fleet: {
+    formation: { presetId: 7, heroPositions: [{ heroId: '瑞文', pos: { x: 2, y: 5 } }] },
+  } }];
+  let waterReads = 0;
+  try {
+    bossSession.paused = false;
+    bossSession.client = { connected: true, async request(name) {
+      assert.equal(name, 'OnWaterRequest'); waterReads++;
+      return { building: water };
+    } };
+    await fleetView(3).click();
+    await viewer.getByRole('heading', { name: '远征舰队 3 队 · 当前阵容' }).waitFor();
+    await viewer.getByRole('img', { name: '站位 2，5，骑士瑞文' }).waitFor();
+    assert.equal(await viewer.getByText('阵型 7', { exact: true }).isVisible(), true);
+    await closeViewer();
+    water[1].fleet = {};
+    await fleetView(3).click();
+    await viewer.getByText('这支舰队尚未编入英雄。').waitFor();
+    await closeViewer();
+    await fleetView(2).click();
+    await viewer.getByRole('heading', { name: '世界Boss二队' }).waitFor();
+    await viewer.getByRole('img', { name: '站位 4，4，波奇' }).waitFor();
+    await closeViewer();
+    assert.equal(waterReads, 2);
+  } finally {
+    bossSession.client = previousClient; bossSession.paused = previousPause;
+  }
   const beforeCollapse = loadAutomationSettings('config-a');
   await bossDisclosure.click();
   assert.equal(await bossDisclosure.getAttribute('aria-expanded'), 'false');
@@ -279,11 +397,25 @@ try {
   await page.locator('[data-resource-tab=heroes]').click();
   assert.equal(await page.locator('#hero-plan, #hero-run, #hero-view, #hero-table, #formation-view').count(), 0);
   assert.equal(await page.locator('#tab-heroes').getByRole('link', { name: '养成设置' }).count(), 0);
-  for (const title of ['英雄任命', '英雄装备', '装备制造']) {
-    assert.equal(await page.locator('#tab-heroes [data-slot=card-title]').filter({ hasText: title }).isVisible(), true);
-  }
+  assert.equal(await page.locator('#tab-heroes').getByText('英雄装备', { exact: true }).count(), 0);
+  assert.equal(await page.locator('#tab-heroes').getByText('英雄任命', { exact: true }).count(), 0);
+  assert.equal(await page.locator('#tab-heroes [data-slot=card-title]').filter({ hasText: '装备制造' }).isVisible(), true);
   await page.locator('#tabs [data-tab=settings]').click();
   await page.locator('[data-config-tab=heroes]').click();
+  await page.getByRole('tab', { name: '英雄任命', exact: true }).click();
+  const appointmentPanel = page.getByRole('tabpanel', { name: '英雄任命', exact: true });
+  const appointmentSwitch = appointmentPanel.getByRole('switch', { name: '自动委任' });
+  const priorities = settings.appointments.priorities;
+  const reordered = [priorities[1], priorities[0], ...priorities.slice(2)];
+  assert.equal(await appointmentPanel.getByRole('listitem').count(), priorities.length);
+  await appointmentSwitch.click();
+  await appointmentPanel.getByRole('button', { name: '训练营产量提高上移' }).click(); await saved();
+  assert.deepEqual(loadAutomationSettings('config-a').settings.appointments, { enabled: true, priorities: reordered });
+  await page.reload(); await appointmentSwitch.waitFor(); await saved();
+  assert.equal(await appointmentSwitch.getAttribute('aria-checked'), 'true');
+  assert.match(await appointmentPanel.getByRole('listitem').first().textContent(), /训练营产量提高/);
+  console.log('通过：英雄任命从杂项移入英雄标签，开关和优先级自动保存，刷新后保留');
+  await page.getByRole('tab', { name: '英雄养成', exact: true }).click();
   await page.locator('#config-group-heroes').waitFor();
   const picker = page.locator('#config-field-heroes-heroIds');
   assert.match(await picker.locator('summary').textContent(), /重新选择/);
@@ -512,7 +644,7 @@ try {
       return { controls, tabs, overflow: document.documentElement.scrollWidth > innerWidth };
     });
     assert.equal(layout.overflow, false, width + 'px 页面无横向溢出');
-    assert(layout.controls.every(item => Math.abs(item.top - layout.controls[0].top) <= 1 && item.height >= 40 && item.left >= 0 && item.right <= width && !item.overflow), JSON.stringify({ width, layout }));
+    assert(layout.controls.every(item => Math.abs(item.top - layout.controls[0].top) <= 1 && item.height === 32 && item.left >= 0 && item.right <= width && !item.overflow), JSON.stringify({ width, layout }));
     assert.equal(layout.tabs.length, 6);
     assert(layout.tabs.every(item => item.visible && !item.overflow && Math.abs(item.top - layout.tabs[0].top) <= 1), JSON.stringify({ width, layout }));
     assert.equal(await mobile.evaluate(() => [...document.querySelectorAll('.config-subtabs,.config-families')].filter(node => node.getClientRects().length).every(bar => {

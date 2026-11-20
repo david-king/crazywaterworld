@@ -12,6 +12,6 @@ export function filterOpponentsByPower(candidates, ownPower, maxPowerRatio = 0) 
     return Number.isSafeInteger(opponent) && opponent > 0 && BigInt(opponent) <= limit;
   });
   const note = `己方 ${power} × ${maxPowerRatio}%，上限 ${limit}`;
-  if (!eligible.length) return { reason: `没有符合战力上限的对手（${note}）` };
+  if (!eligible.length) return { candidates: [], reason: `没有符合战力上限的对手（${note}）` };
   return { candidates: eligible, note: ' · ' + note };
 }

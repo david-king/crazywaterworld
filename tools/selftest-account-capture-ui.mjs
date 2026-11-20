@@ -78,7 +78,7 @@ function fixture(channel = 'wechat') {
     const reportError = error => env.errors.push(error);
     const accountAddChannel = () => env.channel;
     const accountAddChanged = (channel,phase,options) => env.changes.push({channel,phase,...options});
-    const openConfirm = (title,body,callback) => {env.confirmation={title,body,callback};$('modal').open=true;};
+    const openConfirm = (title,body,callback,label) => {env.confirmation={title,body,callback,label};$('modal').open=true;};
     const closeModal = () => {$('modal').open=false;env.confirmation=null;};
     ${captureScript}
     env.api={beginCapture,pollCapture,renderCapture,resetAccountAddCapture,stopAccountCapture,
@@ -102,6 +102,8 @@ await test('仅当前渠道可以开始，确认前不会修改代理且旧确�
   assert.equal(env.calls.length, 0);
   await env.api.beginCapture('wechat');
   assert.equal(env.count('/start'), 0);
+  assert.equal(env.count(''), 1);
+  assert.equal(env.confirmation.label, '同意并开始采集');
   const oldConfirmation = env.confirmation.callback;
   assert.match(env.confirmation.body.map(element => element.textContent).join(''), /系统代理|本机代理/);
   assert.equal(await env.api.resetAccountAddCapture(), true);
@@ -110,6 +112,48 @@ await test('仅当前渠道可以开始，确认前不会修改代理且旧确�
   await oldConfirmation();
   assert.equal(env.count('/start'), 0);
   assert.equal(env.count('/stop'), 0);
+});
+
+await test('选择另一电脑渠道时提示正在使用的渠道，并跟踪已有采集结束', async () => {
+  const env = fixture('wechat');
+  env.state = { ...idle(), platform: 'douyin', running: true, phase: 'waiting' };
+  await env.api.beginCapture('wechat');
+  assert.equal(env.confirmation, null);
+  assert.match(env.node('cap-hint').textContent, /电脑抖音采集.*正在采集/);
+  assert.equal(env.node('cap-stop').hidden, true);
+  assert.equal(env.node('cap-box').textContent, '');
+  assert.equal(env.timers.size, 1);
+  env.state = idle();
+  await env.timers.values().next().value.callback();
+  assert.equal(env.timers.size, 0);
+  assert.equal(env.node('cap-start').disabled, false);
+  assert.ok(env.calls.every(call => call.route === '/api/capture'));
+});
+
+await test('状态读取失败或上次设置待恢复时，显示可执行的下一步并保留用户确认', async () => {
+  const env = fixture('douyin');
+  const respond = env.respond;
+  env.respond = async () => { throw new Error('fixture-network-error'); };
+  await env.api.beginCapture('douyin');
+  assert.match(env.node('cap-hint').textContent, /检查控制台连接/);
+  assert.equal(env.api.busy(), false);
+  env.respond = respond;
+  for (const recoverable of [true, false]) {
+    env.state = { ...idle(), recovery: { pending: true, recoverable } };
+    await env.api.beginCapture('douyin');
+    assert.match(env.node('cap-hint').textContent, recoverable ? /点击「恢复上次采集残留」/ : /status/);
+    assert.equal(env.node('cap-recover').disabled, !recoverable);
+  }
+  assert.equal(env.confirmation, null);
+  assert.ok(env.calls.every(call => call.route === '/api/capture'));
+});
+
+await test('只在本渠道已就绪时提示重开游戏', async () => {
+  const env = fixture('wechat');
+  for (const phase of ['starting', 'ca', 'proxy', 'waiting', 'captured', 'stopping']) {
+    env.api.renderCapture({ ...idle(), running: true, phase });
+    assert.equal(env.node('cap-box').textContent.includes('重新进入'), phase === 'waiting');
+  }
 });
 
 await test('状态读取与启动请求在途时拒绝关闭，完成后可以清理', async () => {
@@ -124,6 +168,8 @@ await test('状态读取与启动请求在途时拒绝关闭，完成后可以�
   env.respond = route => route.endsWith('/start') ? startGate.promise : Promise.resolve(structuredClone(env.state));
   const starting = env.confirm();
   assert.equal(env.api.busy(), true);
+  assert.match(env.node('cap-hint').textContent, /正在准备采集.*Windows/);
+  assert.equal(env.node('cap-box').textContent, '');
   assert.equal(await env.api.resetAccountAddCapture(), false);
   env.state = { ...idle(), running: true, phase: 'waiting', startedAt: 'fixture-busy-run' };
   startGate.resolve(structuredClone(env.state));
@@ -266,6 +312,9 @@ await test('读取失败但清理已完成时允许重新开始并显示对应�
   assert.equal(env.node('cap-stop').hidden, true);
   assert.equal(env.node('cap-recover').hidden, true);
   assert.equal(env.node('account-add-notice').hidden, true);
+  env.api.renderCapture({ ...env.state, failureHint: '本机采集端口 17323 已被占用。' });
+  assert.equal(env.node('cap-hint').textContent, '本机采集端口 17323 已被占用。');
+  assert.equal(env.node('cap-start').disabled, false);
   await env.api.beginCapture('wechat');
   assert.ok(env.confirmation);
   assert.equal(env.count('/stop'), 0);

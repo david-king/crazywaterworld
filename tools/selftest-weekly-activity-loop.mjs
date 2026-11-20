@@ -23,13 +23,13 @@ const protocol = createDeclaredProtocol([
   'AllResourceRequest', 'AllResourceResponse', 'EquipsRequest', 'EquipsResponse',
   'MonthCardRequest', 'MonthCardResponse', 'MakeEquipRequest',
 ]);
-const nativeTasks = ['guildOrders', 'petCollect', 'petBreed', 'ticketRecruit'];
+const nativeTasks = ['guildOrders', 'petCollect', 'petBreed', 'freeRecruit'];
 let serial = 0, passed = 0;
 async function test(name, work) {
   await work(); passed++; console.log('通过：' + name);
 }
 
-function fixture({ master = true, selected = nativeTasks, state = {}, time = '2026-11-16T04:00:00Z' } = {}) {
+function fixture({ master = true, selected = nativeTasks, freeRecruitReady = true, state = {}, time = '2026-11-16T04:00:00Z' } = {}) {
   const id = ++serial;
   const settings = defaultSettings();
   for (const key of Object.keys(settings.schedule)) settings.schedule[key] = false;
@@ -54,9 +54,9 @@ function fixture({ master = true, selected = nativeTasks, state = {}, time = '20
     AllItemRequest: () => ({ items: [{ itemId: '抽卡券', num: recruited ? 0 : 1 }] }),
     AllResourceRequest: () => ({ list: [{ res: 3, amount: 10000 }] }),
     OnWaterRequest: () => ({ building: [{ buildingId: '1广播站', level: 1 }], workerOrder: [] }),
-    RecruitInfoRequest: () => ({ hero: { freeEndTimeSeconds: now + 3600 } }),
+    RecruitInfoRequest: () => ({ hero: { freeEndTimeSeconds: freeRecruitReady && !recruited ? 0 : now + 3600 } }),
     RecruitStartRequest: body => {
-      assert.equal(body.way, 2, '只恢复原来的用券单抽，免费次数尚未到期');
+      assert.equal(body.way, 1, '普通挂机只使用免费次数');
       recruited = true; writes.push(['RecruitStartRequest', body]);
       return { recruitData: { freeEndTimeSeconds: now + 3600 } };
     },
@@ -175,7 +175,7 @@ try {
       Object.assign(f.before.weeklyActivity, f.settings.weeklyActivity);
       await f.run();
       assert(f.calls.includes('CrossRankInfoRequest'));
-      assert.deepEqual(f.writes, [['RecruitStartRequest', { way: 2 }]]);
+      assert.deepEqual(f.writes, [['RecruitStartRequest', { way: 1 }]]);
       assert(f.reports.some(entry => entry.taskKey === 'weeklyActivity' && scenario.reason.test(entry.reason ?? '')));
       for (const key of nativeTasks) assert.equal(f.settings.schedule[key], true, key + ' 原配置仍为 true');
     });
@@ -189,9 +189,9 @@ try {
     assert(f.calls.includes('CrossRankInfoRequest'));
     assert(f.calls.includes('OnWaterRequest'), '北京时间12点仍应进入农田计划');
     assert(f.calls.includes('GuildOrderRequest'), '北京时间12点仍应进入活动募兵检查');
-    assert(f.calls.includes('DailyTaskInfoRequest'), '种田活动不应关闭日常用券招募');
-    assert.deepEqual(f.writes, [['RecruitStartRequest', { way: 2 }]]);
-    assert(f.reports.some(entry => entry.taskKey === 'weeklyActivity' && /没有联盟订单/.test(entry.reason ?? '')));
+    assert(f.calls.includes('DailyTaskInfoRequest'), '种田活动不应关闭日常免费招募');
+    assert.deepEqual(f.writes, [['RecruitStartRequest', { way: 1 }]]);
+    assert(f.reports.some(entry => entry.taskKey === 'weeklyActivity' && entry.reason === '当前没有可提交的联盟募兵物资需求'));
   });
 
   await test('只启用周活动即可进入真实 runner，即使所有原生任务 callback 均返回 false', async () => {
@@ -211,9 +211,18 @@ try {
     for (const request of ['DailyTaskInfoRequest', 'RecruitInfoRequest', 'OnWaterRequest']) {
       assert(f.calls.includes(request), '关闭活动后恢复原入口 ' + request);
     }
-    assert.deepEqual(f.writes, [['RecruitStartRequest', { way: 2 }]]);
+    assert.deepEqual(f.writes, [['RecruitStartRequest', { way: 1 }]]);
     assert(!f.reports.some(entry => ['guildOrders', 'petCollect', 'petBreed'].includes(entry.key ?? entry.taskKey)), '残留旧开关不能恢复已退役入口');
     assert(!f.calls.includes('GuildInfoRequest') && !f.calls.includes('GuildOrderRequest'), '关闭活动后不恢复旧联盟订单入口');
+  });
+
+  await test('免费招募冷却期间，残留的旧开关也不会消耗招募券', async () => {
+    const f = fixture({ master: false, selected: ['freeRecruit', 'ticketRecruit'], freeRecruitReady: false });
+    f.settings.schedule.ticketRecruit = f.before.schedule.ticketRecruit = true;
+    await f.run();
+    assert(f.calls.includes('RecruitInfoRequest'));
+    assert(!f.calls.includes('AllItemRequest'));
+    assert.deepEqual(f.writes, []);
   });
 
   await test('非打造日完全尊重普通锻造开关，勾选周活动不再阻止普通制造', async () => {

@@ -57,7 +57,9 @@ await test('未知维修跨换日/重建仍锁定；后续维修状态确认后�
  Object.assign(again.state.fleets[0],{state:4,repairing:{endTs:Math.floor(Date.now()/1000)+86460}});await run(again,reopened);assert.equal(reopened.snapshot().uncertain,0);assert.equal(again.client.writes.length,0);
 });
 await test('明确拒绝释放预算，无变化不重复；汽油变化后允许复查',async()=>{
- const f=fixture(),l=ledger();f.state.fuel=2610;f.reject=true;await run(f,l);assert.equal(l.snapshot().uncertain,0);assert.equal(l.snapshot().counters.cityWarPetrol,0);await run(f,l);assert.equal(f.client.writes.length,1);
+ const f=fixture(),l=ledger();f.state.fuel=2610;f.reject=true;
+ const first=await run(f,l);assert.equal(first.rows[0].state,'error');assert.equal(l.snapshot().uncertain,0);assert.equal(l.snapshot().counters.cityWarPetrol,0);
+ const retry=await run(f,l);assert.equal(retry.rows[0].state,'error');assert(retry.rows[0].condition.includes(first.rows[0].condition));assert.equal(f.client.writes.length,1);
  f.state.fuel=2611;f.reject=false;await run(f,l);assert.equal(f.client.writes.length,2);
 });
 await test('报价或设置在复核期间变化取消，暂停不发送',async()=>{

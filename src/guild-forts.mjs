@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto';
 import { exactAutomationId, resourceReserve } from './automation-policy.mjs';
 import { displayMaterial } from './config.mjs';
+import { EXTENDED_DEFAULTS } from './extended-settings.mjs';
 import { toNumber } from './client.mjs';
 import { readOrderReservedStock, beginOrderMaterialSpend, cancelOrderMaterialSpend,
   confirmOrderMaterialOperation, refreshOrderMaterialSpends } from './order-reservations.mjs';
@@ -15,13 +16,7 @@ const number=(raw,label)=>{const n=toNumber(raw);if(!valid(n))throw new Error(la
 const array=(raw,label)=>{if(!Array.isArray(raw))throw new Error(label+'未完整返回');return raw;};
 const digest=value=>createHash('sha256').update(JSON.stringify(value)).digest('hex').slice(0,24);
 
-export function guildFortMaterials(settings){
-  const explicit=settings?.guildFort?.materials??[];
-  // 工事材料留空只沿用明确选中的联盟互助白名单；两个名单都空时不捐任何材料。
-  return explicit.length?explicit:(settings?.alliance?.allowedMaterials??[]);
-}
-
-function preferences(settings){return {enabled:false,materials:[],reserve:0,dailyLimit:0,...settings?.guildFort};}
+function preferences(settings){return {...EXTENDED_DEFAULTS.guildFort,...settings?.guildFort};}
 function watch(client,scheduler){
   if(watched.has(client)){if(scheduler)watched.get(client).scheduler=scheduler;return;}
   const state={scheduler};watched.set(client,state);
@@ -43,9 +38,12 @@ export async function readGuildForts(client,protocol,config,{player,getSettings=
   if(!enabled())return {...view,reason:'已暂停'};
   if(!worldId||!playerId||!guildId)return {...view,reason:'当前没有可确认的联盟身份'};
   const gate=rows(config,'ModuleOpenCfg').find(row=>row.moduleId==='联盟')?.playerLevel;
-  if(!valid(gate)||!valid(player.level)||player.level<gate)return {...view,reason:'联盟尚未开放或条件未确认'};
-  const season=Number(BigInt(worldId)/1000000n%1000n),unlocks=rows(config,'FortSeasonUnlockCfg').filter(row=>row.season<=season);
-  if(!unlocks.length)return {...view,reason:'本赛季尚未开放联盟工事'};
+  if(!valid(gate)||!valid(player.level))return {...view,reason:'联盟开放条件未确认'};
+  if(player.level<gate)return {...view,state:'locked',reason:'角色等级尚未开放联盟'};
+  const seasonRules=rows(config,'FortSeasonUnlockCfg');
+  if(!seasonRules.length)return {...view,reason:'未取得工事赛季配置'};
+  const season=Number(BigInt(worldId)/1000000n%1000n),unlocks=seasonRules.filter(row=>row.season<=season);
+  if(!unlocks.length)return {...view,state:'locked',reason:'本赛季尚未开放联盟工事'};
   const allowedTypes=new Set(unlocks.flatMap(row=>row.fortIdList??[]));
   for(const name of ['GuildInfoRequest','GuildInfoResponse','GuildCityInfoRequest','GuildCityInfoResponse','CityFortInfoRequest','CityFortInfoResponse'])if(!protocol?.[name])throw new Error('缺少真实协议 '+name);
   const guild=(await client.request('GuildInfoRequest',{},'GuildInfoResponse'))?.guild;
@@ -72,9 +70,11 @@ export async function readGuildForts(client,protocol,config,{player,getSettings=
     forts.push({cityId:city.cityId,type:fort.type,recommended:city.recommended===true,needed,progress:[...progress],stamp:digest([city.cityId,fort.type,[...progress].sort()])});
   }
   Object.assign(view,{state:'ready',identity:stamp,worldId,playerId,guildId,day:dayOf(view.now),forts,dailyDonateNum:dailyDonateNum??0});
-  const materials=guildFortMaterials(getSettings()),pref=preferences(getSettings());
-  if(!materials.length)return {...view,reason:'未选择工事材料，联盟互助材料白名单也为空'};
-  view.candidates=forts.sort((a,b)=>Number(b.recommended)-Number(a.recommended)||a.cityId-b.cityId).flatMap(fort=>fort.needed.filter(row=>row.need>0&&materials.includes(row.id)).map(row=>({...row,cityId:fort.cityId,type:fort.type,stamp:fort.stamp})));
+  const pref=preferences(getSettings());
+  const canDonate = row => row.need > 0 && !pref.blockedMaterials.includes(row.id)
+    && (!pref.materials.length || pref.materials.includes(row.id));
+  view.candidates=forts.sort((a,b)=>Number(b.recommended)-Number(a.recommended)||a.cityId-b.cityId)
+    .flatMap(fort=>fort.needed.filter(canDonate).map(row=>({...row,cityId:fort.cityId,type:fort.type,stamp:fort.stamp})));
   if(inventory&&view.candidates.length){
     const state=await readOrderReservedStock(client,protocol,config,{player,settings:getSettings(),enabled,itemIds:[...new Set(view.candidates.map(row=>row.id))]});
     for(const row of view.candidates){row.have=state.stock.get(row.id)??0;row.reserved=(state.reserved.get(row.id)??0)+Math.max(pref.reserve,resourceReserve(getSettings(),row.id));row.available=Math.max(0,row.have-row.reserved);row.num=Math.min(row.need,row.available,pref.dailyLimit>0?Math.max(0,pref.dailyLimit-view.dailyDonateNum):Number.MAX_SAFE_INTEGER);}
@@ -97,7 +97,8 @@ export async function serviceGuildForts(client,protocol,config,{player,getSettin
   const delay=seconds=>scheduler?.defer('guildFort',scheduler.now()+seconds);
   watch(client,scheduler);
   if(!active())return finish({skipped:true,reason:'联盟工事捐赠已关闭'});
-  if(scheduler&&!scheduler.due('guildFort'))return finish({skipped:true,reason:'等待下次检查'});
+  if(scheduler&&!scheduler.due('guildFort'))return {key:'guildFort',label:'联盟工事捐赠',skipped:true,
+    reason:scheduler.status?.('guildFort')?.text || '等待下次检查'};
   if(busy.has(client))return finish({skipped:true,reason:'正在核对联盟工事'});
   busy.add(client);
   try{
@@ -109,11 +110,11 @@ export async function serviceGuildForts(client,protocol,config,{player,getSettin
     await refreshOrderMaterialSpends(client,player,{enabled:active});
     const first=await readGuildForts(client,protocol,config,{player,getSettings,enabled:active});
     const chosen=first.candidates.find(row=>row.num>0);
-    if(!chosen){delay(180);return finish({skipped:true,reason:first.reason||'没有符合所选材料、库存保留和每日上限的待建工事'});}
-    const policy=digest([preferences(getSettings()),guildFortMaterials(getSettings())]);
+    if(!chosen){delay(180);return finish({skipped:true,reason:first.reason||'当前没有符合物料筛选、库存保留和每日上限的捐赠'});}
+    const policy=digest(preferences(getSettings()));
     const current=await readGuildForts(client,protocol,config,{player,getSettings,enabled:active});
     const candidate=current.candidates.find(row=>row.cityId===chosen.cityId&&row.id===chosen.id&&row.stamp===chosen.stamp&&row.num===chosen.num);
-    if(!candidate||!active()||initial.identity!==current.identity||first.day!==current.day||policy!==digest([preferences(getSettings()),guildFortMaterials(getSettings())]))return finish({skipped:true,reason:'工事、库存或配置已变化，下一轮重新核对'});
+    if(!candidate||!active()||initial.identity!==current.identity||first.day!==current.day||policy!==digest(preferences(getSettings())))return finish({skipped:true,reason:'工事、库存或配置已变化，下一轮重新核对'});
     const pref=preferences(getSettings()),key=`guildFort:${current.worldId}:${current.playerId}:${current.day}:${current.cityId??candidate.cityId}:${current.dailyDonateNum}:${digest([candidate.type,candidate.id,candidate.stamp])}`;
     if(ledger.hasKey(key)){delay(180);return finish({skipped:true,reason:'本次工事捐赠已有记录，等待状态更新'});}
     const details={kind:'guildFortDonate',worldId:current.worldId,playerId:current.playerId,guildId:current.guildId,cityId:candidate.cityId,
@@ -121,7 +122,7 @@ export async function serviceGuildForts(client,protocol,config,{player,getSettin
     const ticket=ledger.reserve({guildFortDonations:candidate.num},pref.dailyLimit>0?{guildFortDonations:pref.dailyLimit}:{},{guildFortDonations:current.dailyDonateNum},{uniqueKey:key,details});
     let debit;
     try{debit=beginOrderMaterialSpend(player,[{id:candidate.id,have:candidate.have,need:candidate.num}],'联盟工事',{operation:{verify:async()=>ledger.keyRecords()[key]?.details?.acknowledged===true}});}catch(error){ledger.cancel(ticket);throw error;}
-    if(!active()||identity(player)!==current.identity||dayOf(nowOf(client))!==current.day||policy!==digest([preferences(getSettings()),guildFortMaterials(getSettings())])){ledger.cancel(ticket);cancelOrderMaterialSpend(debit);return finish({skipped:true,reason:'发送前开关、账号或日期已变化'});}
+    if(!active()||identity(player)!==current.identity||dayOf(nowOf(client))!==current.day||policy!==digest(preferences(getSettings()))){ledger.cancel(ticket);cancelOrderMaterialSpend(debit);return finish({skipped:true,reason:'发送前开关、账号或日期已变化'});}
     let received=false;
     try{
       const reply=await client.request('DonateFortRequest',{cityId:candidate.cityId,item:{itemId:candidate.id,num:candidate.num},selectPackNum:0},'DonateFortResponse');received=true;

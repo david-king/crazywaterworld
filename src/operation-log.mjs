@@ -2,9 +2,17 @@ import { randomUUID } from 'node:crypto';
 import { emitDiagnostic } from './trace-log.mjs';
 
 const pending = new WeakMap();
+const ticketIds = new WeakMap();
+
+export function linkOperationResult(result, ticket) {
+  const id = ticketIds.get(ticket);
+  if (id && result && Object.isExtensible(result)) result.operationId = id;
+  return result;
+}
 
 // 每客户端共用一个发送观察者，按预留顺序关联已提交到 socket 的写请求。
-export function createOperationLog(client, { operationId = randomUUID(), dedupeKey = null, module = 'automation', request, label } = {}) {
+export function createOperationLog(client, { ticket, operationId = randomUUID(), dedupeKey = null, module = 'automation', request, label } = {}) {
+  if (ticket && typeof ticket === 'object') ticketIds.set(ticket, operationId);
   const fields = { operationId, dedupeKey, module, request, label };
   let sent = false;
   let lastPhase;
@@ -17,10 +25,11 @@ export function createOperationLog(client, { operationId = randomUUID(), dedupeK
       if (settled) return;
       const signature = phase + ':' + result;
       if (signature === lastPhase) return;
+      const recovered = phase === 'confirmed' && lastPhase === 'unknown:pending';
       lastPhase = signature;
       if (phase === 'sent') sent = true;
       settled = phase === 'confirmed' || phase === 'cancelled';
-      emitDiagnostic(client, 'operation', { ...extra, ...fields, phase, result });
+      emitDiagnostic(client, 'operation', { ...extra, ...fields, phase, result, ...(recovered ? { recovered } : {}) });
     },
     close() {
       const observer = pending.get(client);

@@ -10,7 +10,9 @@ process.env.CW_DATA_DIR = directory;
 process.env.CW_CONFIG_PACK = path.join(directory, 'config.json');
 process.env.CW_PROTO_BUNDLE = path.join(directory, 'intentionally-missing-protocol.js');
 const config = {
-  BuildingCfg: [{ buildingType: '食品厂' }, { buildingType: '农田' }, { buildingType: '民居' }],
+  ItemCfg: [{ id: '金属', show_name: '废金属', type: '原料' }],
+  ResourceRecoverCfg: [{ id: 'ARENA_POINT', recoverMax: 10 }, { id: 'LEAGUE_POINT', recoverMax: 12 }],
+  BuildingCfg: [{ buildingType: '食品厂' }, { buildingType: '农田' }, { buildingType: '民居' }, { buildingType: '宠物培育室' }],
   BuildingUpgradeCfg: [{ buildingType: '民居', level: 1, effect: [] },
     { buildingType: '民居', level: 2, playerLevel: 1, curPeople: 1, condition: [['食品厂', 1]], consume: [['面包', 4]] }],
   BuildingProduceCfg: [{ itemId: '面包', buildType: '食品厂', unlockLevel: 1, produceTime: 60, costItem: [['小麦', 5]] }],
@@ -28,8 +30,11 @@ const { saveStore, loadStore } = await import('../src/accounts.mjs');
 const { createConsole } = await import('../src/server.mjs');
 const { defaultSettings, saveAutomationSettings } = await import('../src/automation-settings.mjs');
 const { watchHeroRaidPushes } = await import('../src/hero-raid-automation.mjs');
+const { captureSpendOperation } = await import('../src/spend-evidence.mjs');
+const { beginOrderMaterialSpend, pendingOrderMaterialSpends } = await import('../src/order-reservations.mjs');
 const requests = ['OnWater', 'AllItem', 'AllResource', 'GameEffect', 'MonthCard', 'AllHero', 'WeekInfo', 'WeekOrderInfo', 'CargoShips', 'GuildOrder', 'RadarInfo'];
-const protocol = createDeclaredProtocol(requests.flatMap(name => [name + 'Request', name + 'Response']));
+const protocol = createDeclaredProtocol([...requests.flatMap(name => [name + 'Request', name + 'Response']),
+  'SpeedUpFactoryProduceRequest', 'FarmSpeedUpRequest', 'GainFactoryProduceRequest', 'GainFactoryProduceResponse']);
 const states = new Map(), live = new Set(), apps = new Set();
 let sequence = 0, passed = 0;
 
@@ -158,6 +163,105 @@ try {
         [['面包', 1, '小麦', 5], ['小麦', 5, '小麦种子', 1]]);
     } finally { await f.close(); }
   });
+  await test('仓库按账号效果刷新原料容量，挑战券按配置标记恢复上限并保留实际数量', async () => {
+    const f = await fixture();
+    try {
+      const { AllItemRequest, AllResourceRequest, GameEffectRequest } = f.state.responses;
+      AllItemRequest.items.push({ itemId: '金属', num: 5860 });
+      AllResourceRequest.list.push({ res: 5, amount: 0 }, { res: 6, amount: 14 });
+      const capacity = { id: 16, value: 6000 };
+      GameEffectRequest.effects.push(capacity);
+      await f.api('connect', {});
+      const readStock = async () => new Map((await f.api('world')).stock.map(row => [row.id, row]));
+      const stock = await readStock();
+      assert.equal(stock.get('金属').name, '废金属');
+      assert.equal(stock.get('金属').cap, 6000);
+      for (const [id, num, cap] of [['ARENA_POINT', 0, 10], ['LEAGUE_POINT', 14, 12]]) {
+        const row = stock.get(id);
+        assert.deepEqual([row.num, row.cap, row.capKind], [num, cap, 'recovery']);
+      }
+      assert.equal(stock.get('GOLD').cap, undefined);
+      capacity.value = 7200;
+      assert.equal((await readStock()).get('金属').cap, 7200);
+      GameEffectRequest.effects = [];
+      const missing = await readStock();
+      assert.equal(missing.get('金属').cap, undefined);
+      assert.equal(missing.get('金属').num, 5860);
+      assert.equal(missing.get('ARENA_POINT').cap, 10);
+    } finally { await f.close(); }
+  });
+  await test('手动加速使用所点格的协议编号，农田可耗尽库存，重复点击、过期目标和未确认扣款均不会重发', async () => {
+    const f = await fixture();
+    try {
+      const speed = target => f.response('world/production-speed', { confirm: true, ...target });
+      const crop = { kind: 'farm', buildingId: '1农田', productId: '小麦', finishTime: f.state.now + 660, maxUse: 6 };
+      assert.equal((await speed(crop)).status, 400);
+      assert.equal(f.state.logins, 0);
+      await f.api('connect', {});
+      const { client, preferences } = f.session();
+      preferences.loop.world = preferences.farm.enabled = preferences.factory.enabled = false;
+      preferences.resources.keepAccelerators = 500;
+      const [factory, farm] = f.state.responses.OnWaterRequest.building;
+      const job = { productId: '面包', finishTime: f.state.now + 174 };
+      const active = { kind: 'factory', buildingId: factory.buildingId, index: 0, ...job, maxUse: 6 };
+      factory.factory.factoryQ.push({ idx: 12, productId: '盐', finishTime: f.state.now + 1000 }, job, { idx: 5, productId: '面包' });
+      farm.farm = { productId: crop.productId, ripeTime: crop.finishTime, plantTime: f.state.now - 60 };
+      const stock = { itemId: '加速器', num: 6 };
+      f.state.responses.AllItemRequest.items.push(stock);
+      const world = await f.api('world');
+      assert.equal(world.accelerators, 6);
+      assert.equal(world.factories[0].jobs[1].index, 0, '省略的协议零号格不等于数组位置');
+      const writes = [];
+      let apply = true;
+      client.sendWatch = async (name, body, options) => {
+        options.beforeSend();
+        writes.push({ name, body });
+        if (!apply) return;
+        if (name === 'SpeedUpFactoryProduceRequest') {
+          assert.deepEqual(body, { buildingId: active.buildingId, index: 0, speedUp: { type: 2, useNum: 3 } });
+          stock.num -= body.speedUp.useNum;
+          factory.factory.factoryQ.splice(1, 1);
+          factory.factory.finishedProducts.push({ id: '面包', num: 1 });
+        } else {
+          assert.equal(name, 'FarmSpeedUpRequest');
+          stock.num -= body.param.useNum;
+          farm.farm.ripeTime -= body.param.useNum * 60;
+        }
+      };
+      const read = client.request.bind(client);
+      client.request = async (name, body, ...rest) => {
+        if (name !== 'GainFactoryProduceRequest') return read(name, body, ...rest);
+        assert.equal(rest[0], 'GainFactoryProduceResponse');
+        writes.push({ name, body });
+        return { products: { asset: factory.factory.finishedProducts.splice(0) } };
+      };
+      assert.equal((await speed({ ...active, index: 5 })).status, 400, '排队格不可加速');
+      assert.equal((await speed({ ...crop, productId: '过期作物' })).status, 400);
+      assert.equal((await speed({ ...crop, maxUse: 0 })).status, 400);
+      assert.equal(writes.length, 0);
+      const pair = await Promise.all([speed(active), speed(active)]);
+      assert.deepEqual(pair.map(r => r.status).sort(), [200, 400]);
+      assert.match(pair.find(r => r.status === 200).data.label, /使用 3 个加速器，已收取成品/);
+      assert.equal(factory.factory.factoryQ[0].idx, 12);
+      assert.deepEqual(writes[1], { name: 'GainFactoryProduceRequest', body: { buildingId: factory.buildingId } });
+      const partial = await speed(crop);
+      assert.equal(partial.status, 200, JSON.stringify(partial.data));
+      assert.deepEqual(writes[2], { name: 'FarmSpeedUpRequest', body: { buildingId: crop.buildingId, param: { type: 2, useNum: 3 } } });
+      assert.equal(partial.data.confirmed, true);
+      assert.equal(stock.num, 0);
+      assert.equal((await speed({ ...crop, finishTime: farm.farm.ripeTime })).status, 400);
+      stock.num = 7;
+      assert.equal((await speed(crop)).status, 400, '部分加速后的旧截止时间失效');
+      apply = false;
+      const fresh = { ...crop, finishTime: farm.farm.ripeTime, maxUse: 1 };
+      const unknown = await speed(fresh);
+      assert.equal(unknown.data.confirmed, false);
+      assert.equal(writes[3].body.param.useNum, 1, '加速量不超过点击时显示的消耗');
+      assert.equal((await speed(fresh)).status, 400);
+      assert.equal(writes.length, 4, '尚未确认的消费不能重复发送');
+      assert.equal(preferences.resources.keepAccelerators, 500);
+    } finally { await f.close(); }
+  });
   await test('真实HTTP保留全部当前订单与完整库存并保持零游戏写入', async () => {
     const f = await fixture();
     try {
@@ -174,6 +278,34 @@ try {
       assert.deepEqual(f.state.sends, []);
       assert(f.state.requests.every(name => requests.some(prefix => name === prefix + 'Request')));
       assert.equal(f.state.logins, 1);
+    } finally { await f.close(); }
+  });
+  await test('重新生成排产时核对投喂结果，提前成熟且库存完整才解除阻塞', async () => {
+    const f = await fixture();
+    try {
+      await f.api('connect', {});
+      const { player, client } = f.session(), water = f.state.responses.OnWaterRequest;
+      f.state.sends.length = 0;
+      client.latencyMs = 25;
+      const room = { buildingId: '1宠物培育室', level: 1, petBreed: { maturePets: [], breedQ: [
+        { idx: 1, petId: '海兽', star: 2, startTime: f.state.now - 60, finishTime: f.state.now + 3600 },
+      ] } };
+      water.building.push(room);
+      const operation = await captureSpendOperation(client, { request: 'PetFeedRequest', body: { jobIdx: 1 } }, { waterSnapshot: water });
+      beginOrderMaterialSpend(player, [{ id: '面包', have: 21, need: 1 }], '喂养培育队列 1', { operation });
+      const blocked = await f.api('world/production-plan');
+      assert(blocked.missingReads.some(reason => reason.includes('喂养培育队列 1')));
+      room.petBreed = { breedQ: [], maturePets: [{ petId: '海兽', star: 2 }] };
+      const items = f.state.responses.AllItemRequest;
+      f.state.responses.AllItemRequest = {};
+      await f.api('world/production-plan');
+      assert.equal(pendingOrderMaterialSpends(player).length, 1);
+      f.state.responses.AllItemRequest = items;
+      const plan = await f.api('world/production-plan');
+      assert.equal(pendingOrderMaterialSpends(player).length, 0);
+      assert.deepEqual(plan.missingReads, []);
+      assert.equal(plan.upperBound, 0);
+      assert.deepEqual(f.state.sends, []);
     } finally { await f.close(); }
   });
   await test('活动HTTP总开关逐项控制联合排产需求，恢复后沿用细项并保持零游戏写入', async () => {

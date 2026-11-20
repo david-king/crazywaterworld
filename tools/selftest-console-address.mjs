@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { consoleHost, consoleUrl, normalizeConsoleHost } from '../src/console-address.mjs';
+import { consoleAccessHints, consoleHost, consoleUrl, normalizeConsoleHost, reportPublicIp } from '../src/console-address.mjs';
 
 const temporary = fs.realpathSync(os.tmpdir()), directory = fs.mkdtempSync(path.join(temporary, 'cw-console-address-'));
 process.env.CW_DATA_DIR = directory;
@@ -38,18 +38,68 @@ try {
     assert.equal(consoleUrl('localhost', 17323), 'http://localhost:17323');
     for (const port of [-1, 65536, 1.5, 'invalid']) assert.throws(() => consoleUrl('localhost', port), /端口/);
   });
-  await test('原启动工具的地址模式读取 CW_HOST，正常启动保留配置', async () => {
+  await test('--host 支持通配与指定地址，覆盖 CW_HOST，启动与预览使用相同配置', async () => {
+    const env = { CW_HOST: 'localhost', CW_PORT: '18000', CW_SHOW_PUBLIC_IP: '0' };
+    assert.equal(consoleHost(env, ['--host']), '0.0.0.0');
+    assert.equal(consoleHost(env, ['--host', '[::1]']), '::1');
+    assert.equal(consoleHost(env, ['--host=192.168.1.8']), '192.168.1.8');
+    for (const args of [['--host='], ['--host', 'http://localhost']]) assert.throws(() => consoleHost(env, args), /--host/);
+    let launches = 0;
+    const lines = [], deps = { env, print: line => lines.push(line), prepare: async () => {}, hold: async () => {}, launch: async () => { launches++; } };
+    await startConsole(['url', '--host', '192.168.1.8'], deps);
+    assert.deepEqual(lines, ['http://192.168.1.8:18000/']);
+    await startConsole(['--host'], deps);
+    assert.equal(launches, 1);
+    await assert.rejects(startConsole(['--host=invalid/path'], deps), /--host/);
+    assert.equal(launches, 1);
+  });
+  await test('网卡地址遵从实际监听范围，过滤回环、链路本地 IPv6 和重复地址', () => {
+    const interfaces = () => ({ loopback: [{ address: '127.0.0.1', internal: true }, { address: '::1', internal: true }],
+      ethernet: ['192.168.1.8', '2001:db8::2', 'fe80::1', 'fe80::2%3'].map(address => ({ address })),
+      alias: [{ address: '192.168.1.8' }] });
+    assert.deepEqual(consoleAccessHints('0.0.0.0', 18000, interfaces), ['网卡地址  http://192.168.1.8:18000/']);
+    assert.deepEqual(consoleAccessHints('0:0:0:0:0:0:0:0', 18000, interfaces), ['网卡地址  http://[2001:db8::2]:18000/']);
+    for (const host of ['127.0.2.1', '[::1]', 'localhost']) {
+      assert.deepEqual(consoleAccessHints(host, 18000, interfaces), ['监听范围  仅本机可直接访问']);
+    }
+    assert.deepEqual(consoleAccessHints('192.168.1.8', 18000, interfaces), ['监听地址  http://192.168.1.8:18000/']);
+    assert.match(consoleAccessHints('0.0.0.0', 18000, () => { throw Error('无网卡信息'); })[0], /未找到/);
+  });
+  await test('公网出口查询验证返回值，支持备用服务、离线与显式关闭', async () => {
+    async function lookup(replies, env = {}) {
+      const lines = [], calls = [];
+      await reportPublicIp(line => lines.push(line), { env, fetchImpl: async (url, { signal, redirect }) => {
+        calls.push(url);
+        assert(signal instanceof AbortSignal); assert.equal(redirect, 'error');
+        const reply = replies.shift();
+        if (reply instanceof Error) throw reply;
+        return reply;
+      } });
+      return { lines, calls: calls.length };
+    }
+    assert.deepEqual(await lookup([new Response('203.0.113.8\n')]), { lines: ['公网出口 IP  203.0.113.8'], calls: 1 });
+    assert.deepEqual(await lookup([new Response('<html>'), new Response('2001:db8::2')]), { lines: ['公网出口 IP  2001:db8::2'], calls: 2 });
+    assert.deepEqual(await lookup([Error('超时'), new Response('错误', { status: 503 })]),
+      { lines: ['公网出口 IP  查询失败，可稍后重试'], calls: 2 });
+    assert.deepEqual(await lookup([], { CW_SHOW_PUBLIC_IP: '0' }), { lines: [], calls: 0 });
+  });
+  await test('url 只打印本机地址，address 额外显示公网出口，正常启动保留监听配置', async () => {
     const env = { CW_HOST: 'localhost', CW_PORT: '18000' }, printed = [];
     let held = 0, launches = 0;
-    const dependencies = { env, print: value => printed.push(value), prepare: async () => {}, hold: async () => { held++; }, launch: async () => { launches++; } };
+    const dependencies = { env, print: value => printed.push(value), prepare: async () => {}, hold: async () => { held++; }, launch: async () => { launches++; },
+      fetchImpl: async () => new Response('203.0.113.8') };
     await startConsole(['url'], dependencies);
     assert.equal(printed.at(-1), 'http://localhost:18000/');
     env.CW_HOST = '::'; await startConsole(['address'], dependencies);
-    assert.equal(printed.at(-1), 'http://[::1]:18000/');
+    assert.equal(printed[1], 'http://[::1]:18000/');
+    assert.equal(printed.at(-1), '公网出口 IP  203.0.113.8');
     env.CW_HOST = '0.0.0.0'; await startConsole(['url'], dependencies);
     assert.equal(printed.at(-1), 'http://127.0.0.1:18000/');
     await startConsole([], dependencies);
     assert.equal(held, 3); assert.equal(launches, 1); assert.equal(env.CW_HOST, '0.0.0.0');
+    env.CW_PORT = '0'; env.CW_SHOW_PUBLIC_IP = '0'; printed.length = 0;
+    await startConsole(['address'], dependencies);
+    assert.deepEqual(printed, ['监听主机  0.0.0.0（端口将在启动时自动分配）']);
   });
   await test('控制台实际绑定指定 IPv4 回环地址，返回 URL 可请求且没有游戏连接', async () => {
     const app = createConsole({ host: consoleHost({ CW_HOST: '127.0.0.1' }), port: 0, protocol: {} });

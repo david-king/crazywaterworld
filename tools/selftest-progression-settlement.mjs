@@ -252,7 +252,7 @@ function enhanceFixture() {
     const guard = createActionGuard(f.client, () => null, null, { player: f.player });
     const options = { beforeAction: before ? async action => { const ticket = await guard.before(action); before(); return ticket; } : guard.before,
       afterAction: guard.after, cancelAction: guard.cancel };
-    if (kind === 'fishEnhance') return upgradeFishingOnce(f.client, enhanceConfig, { playerLevel: 10, reserveGold: 0, enabled: () => f.enabled, ...options });
+    if (kind === 'fishEnhance') return upgradeFishingOnce(f.client, enhanceConfig, { playerLevel: 10, enabled: () => f.enabled, ...options });
     const results = []; await serviceBoats(f.client, enhanceConfig, key => key === kind && f.enabled, row => results.push(row), options); return results[0];
   };
   return f;

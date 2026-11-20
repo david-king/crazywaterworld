@@ -34,6 +34,10 @@ async function runCase({
   const initialFiles = new Map(files);
   let journalRecord = null;
   const code = await main(args, {
+    port: 17322,
+    async checkProxyPort() {
+      if (mode === 'port-busy') throw Object.assign(new Error('fixture port in use'), { code: 'EADDRINUSE' });
+    },
     journal: {
       read() { return journalRecord && structuredClone(journalRecord); },
       write(record) { journalRecord = structuredClone(record); },
@@ -64,6 +68,7 @@ async function runCase({
       caFingerprint() { return 'fixture-fingerprint'; },
       caThumbprint() { return 'a'.repeat(40); },
       isInstalled() { return trusted; },
+      async verifyRootView() { if (mode === 'external-ca-import') trusted = true; },
       initCa() { events.push('init'); return { created: false }; },
       prepareLeaf(host) {
         assert.equal(host, HOST);
@@ -141,7 +146,7 @@ async function runCase({
     assert.equal(runtime.listenerCount(event), 0, 'must release process handlers');
   }
   for (const [filename, text] of initialFiles) assert.equal(files.get(filename), text, 'existing data must remain intact');
-  if (trustedBefore) {
+  if (trustedBefore || mode === 'external-ca-import') {
     assert(!events.includes('uninstall'), 'must preserve an existing CA');
     assert(!events.includes('install'), 'must not reinstall an existing CA');
     assert.equal(trusted, true);
@@ -184,6 +189,14 @@ for (const options of [
   assert.deepEqual(result.events, options.expectedEvents, 'help/decline must not initialize any system dependency');
 }
 console.log('PASS: help, non-TTY refusal, and interactive cancellation have no side effects');
+
+const busyPort = await runCase({ mode: 'port-busy' });
+assert.equal(busyPort.code, 1);
+assert(busyPort.logs.some(line => line.includes('17322 已被占用')));
+assert.deepEqual(busyPort.events.filter(event => ['init', 'install', 'uninstall', 'set', 'listen'].includes(event)), []);
+const externalImport = await runCase({ mode: 'external-ca-import' });
+assert.equal(externalImport.code, 0);
+assert(!externalImport.events.includes('install') && !externalImport.events.includes('uninstall'));
 
 for (const trustedBefore of [false, true]) {
   const result = await runCase({ trustedBefore });

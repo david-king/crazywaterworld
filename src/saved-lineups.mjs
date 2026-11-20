@@ -118,14 +118,15 @@ function description(template, values = []) {
 }
 
 export function getLineupCatalog(config) {
+  const viewIds = new Map(rows(config, 'UnitViewCfg').map(view => [view.id, view.resId]));
   const heads = new Map(rows(config, 'HeadImageCfg').map(head => [head.heroId, head.icon]));
-  const skins = new Map(rows(config, 'HeroSkinCfg').map(skin => [skin.heroId, skin]));
   const items = new Map(rows(config, 'ItemCfg').map(item => [item.id, item]));
   const heroes = rows(config, 'HeroCfg').map(hero => ({
     heroId: hero.id, name: hero.name || hero.id,
     career: hero.career ?? '', faction: hero.faction ?? '', quality: hero.quality ?? '',
-    // Use the caller's configuration snapshot. heroIcon() uses global config.
-    icon: iconEntry(skins.get(hero.id)?.headId) ?? iconEntry(heads.get(hero.id)) ?? iconEntry(items.get(hero.id + '碎片')?.pic),
+    // The game uses UnitViewCfg.resId for the base portrait, including leading zeroes.
+    icon: (viewIds.has(hero.id) ? iconEntry('hero_head_' + viewIds.get(hero.id)) : null)
+      ?? iconEntry(heads.get(hero.id)) ?? iconEntry(items.get(hero.id + '碎片')?.pic),
   }));
   const positions = rows(config, 'FormationTypePositionCfg');
   const definitions = positions.length ? [{ id: 1, name: '基础阵型' }, ...rows(config, 'FormationTypeUnlockCfg')] : [];
@@ -156,7 +157,9 @@ export async function readLineupEditor(client, config, player) {
   const heroes = roster.map(hero => {
     const definition = heroConfig.get(hero.heroId);
     if (!definition) throw new Error('缺少英雄配置 ' + hero.heroId);
-    return { ...definition, name: hero.showName || definition.name, level: hero.level ?? 0, power: toNumber(hero.power ?? 0) };
+    const skinIcon = hero.skinId > 0 ? iconEntry('hero_head_' + hero.skinId) : null;
+    return { ...definition, icon: skinIcon ?? definition.icon, name: hero.showName || definition.name,
+      level: hero.level ?? 0, power: toNumber(hero.power ?? 0) };
   });
   const positions = rows(config, 'FormationTypePositionCfg');
   if (!positions.length || !rows(config, 'FormationHeroNumCfg').length) throw new Error('缺少阵型站位或人数配置');

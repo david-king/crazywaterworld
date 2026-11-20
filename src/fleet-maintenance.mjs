@@ -116,7 +116,7 @@ export async function runFleetMaintenance(client,player,{getSettings,ledger,enab
    const reviewed=planFleetMaintenance(fresh,settings,client),step=reviewed.actions.find(a=>a.uniqueKey===proposed.uniqueKey&&a.cost===proposed.cost&&a.beforeDurability===proposed.beforeDurability);
    if(!step||settings!==getSettings()||!enabled()||!client.connected)continue;
    const signature=JSON.stringify([step.cost,fresh.fuel,step.beforeDurability,step.maxDura,step.policy]),failure=failures.get(step.uniqueKey),view=plan.rows.find(r=>r.id===step.buildingId);
-   if(failure&&failure.until>Date.now()&&failure.signature===signature){view.condition='服务端此前拒绝，等待状态变化后复查';continue;}
+   if(failure&&failure.until>Date.now()&&failure.signature===signature){view.state='error';view.condition='服务端此前拒绝，等待复查：'+failure.reason;continue;}
    const counters=step.source==='cityWar'?{cityWarPetrol:step.cost,cityWarRepairs:1}:{treasurePetrol:step.cost,treasureRepairPetrol:step.cost,treasureRepairs:1};
    const ticket=ledger.reserve(counters,{},{}, {uniqueKey:step.uniqueKey,details:{kind:step.kind,buildingId:step.buildingId,beforeDurability:step.beforeDurability,maxDura:step.maxDura,sentAt:fresh.checkedAt,postBattle:true}});
    if(!enabled()||settings!==getSettings()||!client.connected){ledger.cancel(ticket);break;}
@@ -129,8 +129,8 @@ export async function runFleetMaintenance(client,player,{getSettings,ledger,enab
     if(confirmed)ledger.confirm(ticket);
     entry={step,ok:confirmed,status:confirmed?'confirmed':'unknown',full:confirmed&&fleet.durability>=fleet.maxDura,note:confirmed?(fleet.durability>=fleet.maxDura?'服务器已确认耐久补满':'服务器已确认普通维修，继续监控至满耐久'):'维修已发送，短时复查仍未确认；继续自动核对，期间不重复扣汽油'};
     if(confirmed){view.durability=fleet.durability;view.maxDura=fleet.maxDura;}
-   }catch(error){const rejected=error.repairRejected;if(rejected){ledger.cancel(ticket);failures.set(step.uniqueKey,{until:Date.now()+300000,signature});}entry={step,ok:false,status:rejected?'rejected':'unknown',error:error.message};}
-   onStep?.(entry);view.state=entry.full?'full':entry.status==='confirmed'?'repairing':entry.status==='unknown'?'unknown':'waiting';view.condition=entry.note||entry.error;
+   }catch(error){const rejected=error.repairRejected;if(rejected){ledger.cancel(ticket);failures.set(step.uniqueKey,{until:Date.now()+300000,signature,reason:error.message});}entry={step,ok:false,status:rejected?'rejected':'unknown',error:error.message};}
+   onStep?.(entry);view.state=entry.full?'full':entry.status==='confirmed'?'repairing':entry.status==='unknown'?'unknown':'error';view.condition=entry.note||entry.error;
    if(entry.status!=='rejected')remaining-=step.cost;if(entry.status==='unknown')break;
   }
   if(!enabled()||!client.connected)watch.hold([]);

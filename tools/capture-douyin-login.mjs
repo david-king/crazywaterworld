@@ -5,6 +5,7 @@ import readline from 'node:readline';
 import { pathToFileURL } from 'node:url';
 import { randomUUID } from 'node:crypto';
 import { createCaptureJournal, createCaptureRecovery } from '../src/capture-recovery.mjs';
+import { checkProxyPort, DEFAULT_PROXY_PORT, proxyPortFailure, validateProxyPort } from '../src/platform/proxy-port.mjs';
 
 import { acquireCaptureLock } from './capture-lock.mjs';
 import { pointsToCapture, prepareCaptureProxy } from './proxy-settings.mjs';
@@ -139,14 +140,12 @@ export async function main(argv = process.argv.slice(2), dependencies = {}) {
     ['unhandledRejection', () => outcome({ code: 1, message: '采集发生异步异常。' })],
   ]);
   let exitCode = 1;
+  const port = dependencies.port ?? DEFAULT_PROXY_PORT;
   try {
     ca = dependencies.ca ?? await import('./mitm-ca.mjs');
     settings = dependencies.proxySettings ?? await import('./proxy-settings.mjs');
-    const proxyModule = dependencies.createProxy
-      ? { createProxy: dependencies.createProxy, DEFAULT_PROXY_PORT: 17322 }
-      : await import('./mitm-proxy.mjs');
-    const port = dependencies.port ?? proxyModule.DEFAULT_PROXY_PORT;
-    if (!Number.isInteger(port) || port < 1 || port > 65535) throw new Error('port');
+    const createProxy = dependencies.createProxy ?? (await import('./mitm-proxy.mjs')).createProxy;
+    validateProxyPort(port);
     for (const [event, handler] of handlers) runtime.on(event, handler);
     timer = later(() => outcome({ code: 124, message: '等待超时，未获得登录样本；抖音网关或协议可能不同，或客户端未使用系统代理。' }), options.timeout * 1000);
 
@@ -162,6 +161,9 @@ export async function main(argv = process.argv.slice(2), dependencies = {}) {
       throw new Error('unfinished capture');
     }
     if (pointsToCapture(settings.readCurrent(), port)) throw new Error('stale capture proxy');
+    stage = '检查本地采集端口';
+    await (dependencies.checkProxyPort ?? checkProxyPort)(port);
+    if (done) return (await finished).code;
     stage = '准备本地测试 CA';
     const installedBefore = ca.isInstalled();
     const initial = { version: 1, id: randomUUID(), port, startedAt: now().toISOString(), ready: false, keepCa: false,
@@ -183,6 +185,9 @@ export async function main(argv = process.argv.slice(2), dependencies = {}) {
       stage = '安装当前用户测试 CA';
       await ca.verifyRootView?.();
       installAbort.signal.throwIfAborted();
+      record.ca.installedBefore = ca.isInstalled(record.ca.thumbprint);
+    }
+    if (!record.ca.installedBefore) {
       // 安装可能在报错前已写入证书存储，所以先登记清理责任。
       removeCa = true;
       record.ca.installAttempted = true;
@@ -191,7 +196,7 @@ export async function main(argv = process.argv.slice(2), dependencies = {}) {
       if (!ca.isInstalled()) throw new Error('CA verification');
     }
     stage = '启动本地采集代理';
-    proxy = proxyModule.createProxy({
+    proxy = createProxy({
       port,
       rawLogin: true,
       interceptHosts: options.hosts,
@@ -242,6 +247,10 @@ export async function main(argv = process.argv.slice(2), dependencies = {}) {
       io.log(result.message);
       exitCode = result.code;
     } else {
+      if (stage === '检查本地采集端口' || stage === '启动本地采集代理') {
+        const message = proxyPortFailure(port, error.code);
+        if (message) io.error(message);
+      }
       if (['CW_MISSING_CA_FILE', 'CW_CA_TRUST', 'CW_CA_VIEW'].includes(error.code)) io.error(error.message);
       io.error(`${stage}失败，正在还原本次系统改动。`);
       exitCode = 1;

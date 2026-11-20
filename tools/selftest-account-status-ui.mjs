@@ -102,17 +102,20 @@ function fixture(rows = [
     const refreshActivities = () => env.effects.push('activities');
     const refreshStages = () => env.effects.push('stages');
     const refreshLoop = () => { loopAccount = current; renderHostingControl(); env.effects.push('loop'); };
-    const renderOverview = data => env.overviews.push(structuredClone(data));
+    consoleStore.subscribe((state, previous) => {
+      const data = state.gameByAccount[state.currentAccountId]?.overview;
+      if (data && data !== previous.gameByAccount[state.currentAccountId]?.overview) env.overviews.push(data);
+    });
     const maybeRefreshWorldMap = () => env.effects.push('world-map');
     ${overview ? overviewScript : "const refreshOverview = () => env.effects.push('overview');"}
     const subscribe = () => env.effects.push('subscribe');
     const configAccountChanged = () => env.effects.push('config');
     const giftAccountChanged = () => env.effects.push('gift');
     const loginSettingsAccountChanged = () => env.effects.push('login-settings');
-    const appointmentsAccountChanged = () => {};
     const siliconAccountChanged = () => {}, maybeRefreshSilicon = () => {};
     const resourceFieldsAccountChanged = () => {};
     const renderAccounts = () => env.effects.push('account-cards');
+    const refreshAccountCards = () => env.effects.push('card-resources');
     const resetWorldMap = () => env.effects.push('clear-map');
     const resetProductionPlan = () => env.effects.push('clear-production');
     let accounts = [], current = null, dailyAccount = null, dailyVersion = 0;
@@ -335,20 +338,22 @@ await test('旧总览响应保留较新的异地登录状态，同时继续展�
   assert.equal(env.overviews[0].resources[0].amount, 321);
 });
 
-await test('未连接的账号详情保持缓存，定时总览仅刷新已连接详情', async () => {
+await test('账号页轮询走卡片读取，离开账号页后停止', async () => {
   const env = fixture([{ id: 'account-a', title: '缓存角色', status: { connected: false } }],
     'account-a', { overview: true });
   env.node('tab-overview').classList.add('hidden');
   env.node('tab-heroes').classList.add('hidden');
   env.node('tab-account').classList.remove('hidden');
-  env.node('account-info-dialog').open = true;
   await env.api.refreshOverview();
   assert.equal(env.calls.length, 0, '打开未连接详情不会由定时刷新自动登录游戏');
   env.api.setAccountStatus('account-a', { connected: true });
   env.respond = async () => ({ status: { connected: true }, player: { nickname: '已连接角色' } });
   await env.api.refreshOverview();
-  assert.deepEqual(env.calls.map(call => call.route), ['/api/overview']);
-  assert.equal(env.overviews[0].player.nickname, '已连接角色');
+  assert.deepEqual(env.calls, []);
+  assert.equal(env.effects.filter(effect => effect === 'card-resources').length, 2);
+  env.node('tab-account').classList.add('hidden');
+  await env.api.refreshOverview();
+  assert.equal(env.effects.filter(effect => effect === 'card-resources').length, 2);
 });
 
 await test('账号列表重叠读取只采用最新响应并阻止同时状态轮询', async () => {
@@ -585,7 +590,6 @@ await test('暂停挂机立即提交，连接和手动操作入口保持可用',
   assert.equal(env.node('loop-toggle').textContent, '开始挂机');
   assert.equal(env.node('loop-toggle').disabled, false);
   assert.equal(env.node('account-pause').textContent, '暂停托管');
-  assert.equal(env.node('account-info-refresh').disabled, false);
   assert.equal(env.node('production-plan-refresh').disabled, false);
   assert.equal(env.api.disconnected.has('a'), false);
 });
@@ -607,7 +611,6 @@ await test('暂停挂机后空闲连接仍可暂停托管，退出中也可断�
     assert.equal(env.api.snapshot().connected, false);
     assert.equal(env.node('account-pause').textContent, '恢复托管');
     assert.equal(env.node('loop-toggle').disabled, true);
-    assert.equal(env.node('account-info-refresh').disabled, true);
   }
 });
 

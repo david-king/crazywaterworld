@@ -12,8 +12,9 @@ function section(start, end) {
 }
 const source = [
   section('function configRecoveryMessage(', 'function configMessage('),
-  section('function setTaskSwitch(', 'const pirateAdvanceErrors'),
+  section('function setTaskSwitch(', 'const pirateManualMessage'),
   section('function renderHostingControl(', 'function renderAccountSelect('),
+  section('function resetAutomationOverview(', 'function renderAutomationOverview('),
   section('function renderLoop(', 'async function toggleAutoTask('),
   section('async function saveLoopInterval(', 'let orderClockOffset=0;'),
 ].join('\n');
@@ -62,16 +63,18 @@ function fixture() {
   };
   const api = newStateFunction('env', `
     let current = 'a', loopAccount = null, loopVersion = 0, loopFieldDefaults = null, loopSettingsRevision = null, accountStatusRevision = 0;
-    let overviewLoopOwner = null, overviewLoopData = null, overviewRenderKey = '', snapshot = {};
+    let overviewLoopOwner = null, overviewLoopData = null, snapshot = {};
     stateActions.replaceAccounts([{ id: 'a', status: {} }, { id: 'b', status: {} }], 'a');
     consoleStore.subscribe(state => { snapshot = CWConsoleState.selectCurrentStatus(state); });
     const savingTasks = new Set(), loopIntervalSaves = new Map(), taskInputs = [], pirateFailureOptions = new Map(), hostingActions = new Set(), connectingAccounts = new Set();
     const $ = env.node, document = { hidden: false }, configFlush = env.flush;
+    const overviewList = $('overview-task-groups'), overviewSlots = new Map(), overviewObserver = {disconnect() {}};
     const call = (route, options) => env.call(current, route, options);
     const reportError = error => env.errors.push(error);
     const renderAutomationOverview = data => { overviewLoopOwner = current; overviewLoopData = data; };
     const renderPirateAdvance = () => {}, filterIdleControls = () => {}, clear = () => {};
     const configIntervalSaved = () => {};
+    const configEditor = {owner:null}, configVisible = () => false;
     const configSyncRecovery = data => env.recoveryChecks.push(data.settingsRecovery);
     const paintConnection = () => env.statusRenders.push(['picker', structuredClone(snapshot)]);
     const renderAccounts = () => env.statusRenders.push(['cards', structuredClone(snapshot)]);

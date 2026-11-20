@@ -3,7 +3,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import { EventEmitter } from 'node:events';
 import path from 'node:path';
-import { automationTasks, taskSettings, defaultFishingGoldReserve } from '../src/automation.mjs';
+import { automationTasks, taskSettings } from '../src/automation.mjs';
 import { surveyDailies, runDailies } from '../src/dailies.mjs';
 import { runWorld } from '../src/world.mjs';
 import { runLoop } from '../src/loop.mjs';
@@ -83,17 +83,13 @@ try {
   const player = app.sessions.get('a').player;
   app.sessions.get('a').client.emit('message', { name: 'SCPlayerExpUpdate', body: { level: 7, exp: 100 } });
   assert.equal(player.level, 7);
-  assert.equal((await api('a', '')).fishingGoldReserve, defaultFishingGoldReserve);
   assert.equal((await api('a', '')).tasks.find(t => t.key === 'fishEnhance').enabled, false);
-  await api('a', '/fishing-reserve', { fishingGoldReserve: 12500 });
-  assert.equal((await request('loop/fishing-reserve', { fishingGoldReserve: -1 })).status, 400);
-  assert.equal((await api('b', '')).fishingGoldReserve, defaultFishingGoldReserve);
+  assert.equal((await request('loop/fishing-reserve', { fishingGoldReserve: 12500 })).status, 404);
   assert.equal((await (await request('accounts/pause', { paused: true })).json()).paused, true);
   const before = logins;
   await app.close();
   await open();
   assert.equal((await api('a', '')).running, false);
-  assert.equal((await api('a', '')).fishingGoldReserve, 12500);
   for (const [route, payload] of [['overview'], ['connect', {}], ['worlds/enter', { confirm: true, worldId: 1 }], ['loop/start', { confirm: true }]]) {
     assert.match((await (await request(route, payload)).json()).error, /账号已暂停/);
   }

@@ -14,9 +14,8 @@ export const RESOURCE = { 1: 'EXP', 3: 'GOLD', 4: 'RUBY', 5: 'ARENA_POINT', 6: '
 
 // 小文件是 bundle 描述；资源包更新后可能同样大甚至更小，不能用大小判断版本。
 // 同步副本仅作可离线保留的来源，不能永久遮蔽游戏刚下载的新缓存。
-export function findConfigPack() {
+export function findConfigPack(resources = activeResources()) {
   if (process.env.CW_CONFIG_PACK && fs.existsSync(process.env.CW_CONFIG_PACK)) return process.env.CW_CONFIG_PACK;
-  const resources = activeResources();
   if (resources) return resources.configFile;
   const candidates = wechatConfigCandidates(APPID).filter((file) => fs.statSync(file).size > 1_000_000);
   if (fs.existsSync(CONFIG_PACK_PATH)) candidates.unshift(CONFIG_PACK_PATH);
@@ -104,8 +103,9 @@ export function loadConfig({ file, resources = file ? null : activeResources() }
 
 let cached = null, cachedSource = '';
 export function getConfig({ allowStale = false } = {}) {
-  if (!allowStale) assertResourcesReady();
-  const resources = activeResources(), file = resources?.configFile || findConfigPack();
+  const resources = activeResources();
+  if (!allowStale) assertResourcesReady({ current: resources });
+  const file = findConfigPack(resources);
   const signature = file ? JSON.stringify([file, fs.statSync(file).mtimeMs, resources?.version, resources?.bundleVersions]) : '';
   if (!cached || cachedSource !== signature) {
     const next = loadConfig({ file, resources });
