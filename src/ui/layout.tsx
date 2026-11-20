@@ -149,11 +149,6 @@ export function dialogs() {
       <Input id="account-label-input" aria-label="账号备注" />
       <DialogFooter><Button value="ok">确认</Button><Button value="cancel" variant="outline">取消</Button></DialogFooter>
     </form></dialog>
-    <dialog id="factory-production-dialog" aria-labelledby="factory-production-title">
-      <DialogHeader><DialogTitle id="factory-production-title" /></DialogHeader>
-      <div id="factory-production-body" />
-      <DialogFooter><Button id="factory-production-close" type="button" variant="outline">关闭</Button></DialogFooter>
-    </dialog>
     <div id="ui-help-popover" className="help-popover" role="dialog" aria-modal="false" aria-labelledby="ui-help-title" tabIndex={-1} hidden>
       <div className="help-popover-head"><strong id="ui-help-title">说明</strong><Button id="ui-help-close" size="icon-xs" variant="ghost" aria-label="关闭说明"><X aria-hidden="true" /></Button></div>
       <div id="ui-help-body" />
@@ -166,6 +161,8 @@ export function templates() {
   return renderToStaticMarkup(<>
     <template id="ui-table"><Table><TableHeader><TableRow><TableHead /></TableRow></TableHeader><TableBody><TableRow><TableCell /></TableRow></TableBody></Table></template>
     <template id="ui-button"><Button variant="outline" size="sm" /></template>
+    <template id="ui-building-card"><Card><CardHeader className="flex-row flex items-center justify-between"><CardTitle><h2 /></CardTitle></CardHeader><CardContent /></Card></template>
+    <template id="ui-factory-toggle"><Button type="button" variant="ghost" size="sm" className="factory-toggle -ml-1 justify-start px-1 has-[>svg]:px-1"><ChevronDown aria-hidden="true" className="size-3.5" /></Button></template>
     <template id="ui-confirm"><Button size="sm" /></template>
     <template id="ui-select"><NativeSelect size="sm" /></template>
     <template id="ui-number"><Input type="number" /></template>
@@ -206,7 +203,7 @@ export function templates() {
             <div><dt>战力</dt><dd data-account-field="power" /></div>
           </dl>
         </CardContent>
-        <CardFooter className="account-card-footer items-stretch"><p className="dim" data-account-field="seen" /><div className="account-card-actions"><Button type="button" variant="outline" size="sm" className="px-2" data-account-action="details" aria-haspopup="dialog" aria-controls="account-info-dialog">查看详情</Button><Button type="button" variant="outline" size="sm" className="px-2" data-account-action="login-settings" aria-haspopup="dialog" aria-controls="account-login-dialog">登录设置</Button><Button type="button" variant="outline" size="sm" className="px-2" data-account-action="select">切换账号</Button><Button type="button" size="sm" className="px-2" data-account-action="loop">开始挂机</Button></div></CardFooter>
+        <CardFooter className="account-card-footer items-stretch"><p className="dim" data-account-field="seen" /><div className="account-card-actions"><Button type="button" variant="outline" size="sm" className="px-1 text-xs sm:px-1.5 sm:text-sm" data-account-action="details" aria-haspopup="dialog" aria-controls="account-info-dialog">查看详情</Button><Button type="button" variant="outline" size="sm" className="px-1 text-xs sm:px-1.5 sm:text-sm" data-account-action="login-settings" aria-haspopup="dialog" aria-controls="account-login-dialog">登录设置</Button><Button type="button" variant="outline" size="sm" className="px-1 text-xs sm:px-1.5 sm:text-sm" data-account-action="select">切换账号</Button><Button type="button" size="sm" className="px-1 text-xs sm:px-1.5 sm:text-sm" data-account-action="loop">开始挂机</Button></div></CardFooter>
       </Card>
     </template>
   </>)

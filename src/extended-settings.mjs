@@ -1,5 +1,6 @@
 // 截图对照新增模块：默认只提供配置，不替用户开启资源消费。
-export const siliconFleetDefaults = id => ({ id, enabled: false, tier: 'ORANGE', emptyOnly: false,
+export const siliconTierLabels = { BLUE: '初等', PURPLE: '中等', ORANGE: '高等' };
+export const siliconFleetDefaults = id => ({ id, enabled: false, tiers: ['ORANGE'], emptyOnly: false,
   opponentOrder: 'powerDesc', maxPowerRatio: 100, failureLimit: 1, dailyAttackLimit: 30,
   pursuit: false, huntEnabled: false, huntPlayers: [], huntRetreat: 'never',
   safePlayers: [], safeGuilds: [], autoRepair: false, repairSpeedUp: false,
@@ -49,7 +50,8 @@ export function validateSiliconFleets(value, errors, catalog) {
     ids.add(row.id);
     for (const [key, initial] of Object.entries(defaults)) if (typeof initial === 'boolean' && typeof row[key] !== 'boolean') errors[prefix + '.' + key] = '开关值必须为 true 或 false';
     for (const [key, rule] of Object.entries(SILICON_FLEET_NUMBERS)) if (!Number.isSafeInteger(row[key]) || row[key] < rule.min || row[key] > rule.max) errors[prefix + '.' + key] = `请输入 ${rule.min}–${rule.max} 之间的整数`;
-    if (!['BLUE', 'PURPLE', 'ORANGE'].includes(row.tier)) errors[prefix + '.tier'] = '请选择初等、中等或高等硅矿';
+    if (!Array.isArray(row.tiers) || row.tiers.some(tier => typeof tier !== 'string' || !Object.hasOwn(siliconTierLabels, tier))
+      || new Set(row.tiers).size !== row.tiers.length) errors[prefix + '.tiers'] = '请选择不重复的硅矿等级';
     if (!['powerAsc', 'powerDesc'].includes(row.opponentOrder)) errors[prefix + '.opponentOrder'] = '请选择有效战力顺序';
     if (!['never', 'afterReward', 'onTarget'].includes(row.huntRetreat)) errors[prefix + '.huntRetreat'] = '请选择有效的追杀撤退策略';
     for (const key of ['safePlayers', 'safeGuilds', 'huntPlayers']) if (!Array.isArray(row[key]) || row[key].length > 100 || new Set(row[key]).size !== row[key].length || row[key].some(v => typeof v !== 'string' || !v.trim() || v !== v.trim() || v.length > 80 || /[\r\n\u0000-\u001f]/.test(v))) errors[prefix + '.' + key] = '请输入不重复的完整名称，每行一个';

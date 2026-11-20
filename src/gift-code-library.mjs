@@ -1,11 +1,15 @@
 import path from 'node:path';
-import { createHash } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { DATA_DIR } from './accounts.mjs';
 import { initialGiftCodeCatalog } from './gift-code-catalog.mjs';
 import { atomicJson, readJson, withFileLock } from './json-store.mjs';
+import { articleRule, codePattern, parseGiftCodeArticle, upgradeGiftRule, wikiRule } from './gift-code-extraction.mjs';
+import { channelConfig, fetchChannelBody, parseChannelBody } from './gift-code-channel.mjs';
 
-const codePattern = /^[\p{L}\p{N}_-]{1,128}$/u;
+export { parseGiftCodeArticle };
 export const GIFT_CODE_SOURCE = 'https://m.ali213.net/news/gl2602/1747967.html';
+export const GIFT_CODE_WIKI = 'https://fkssj.game-wiki.cn/api/public/codes';
+const isDefaultChannel = id => id === 'ali213' || id === 'game-wiki';
 export const giftDay = time => new Date(time + 8 * 3600000).toISOString().slice(0, 10);
 const expiredDate = (date, now) => Boolean(date) && Date.parse(date + 'T23:59:59.999+08:00') < now;
 export const hasGiftCodeHistory = row => row.status === 'skipped' ? String(row.detail ?? '').includes('已有兑换记录')
@@ -21,40 +25,13 @@ function normalizeExpiry(value, now) {
   return value;
 }
 
-export function parseGiftCodeArticle(html) {
-  const text = String(html).replace(/<script\b[^>]*>[\s\S]*?<\/script>/gi, '').replace(/<style\b[^>]*>[\s\S]*?<\/style>/gi, '')
-    .replace(/<(?:br\b[^>]*|\/p|\/div|\/li|\/h[1-6])>/gi, '\n').replace(/<[^>]*>/g, '')
-    .replace(/&#(x[0-9a-f]+|[0-9]+);/gi, (_, value) => {
-      const code = value[0].toLowerCase() === 'x' ? parseInt(value.slice(1), 16) : Number(value);
-      return code > 0 && code <= 0x10ffff ? String.fromCodePoint(code) : '';
-    }).replace(/&(nbsp|amp|quot|apos|lt|gt);/gi, (_, name) => ({ nbsp:' ', amp:'&', quot:'"', apos:"'", lt:'<', gt:'>' })[name.toLowerCase()]);
-  if (!text.includes('疯狂水世界')) throw Error('来源页面不是疯狂水世界礼包码文章');
-  const start = /一[、.．]\s*兑换码/.exec(text), end = /二[、.．]\s*使用方式/.exec(text);
-  if (!start || !end || end.index <= start.index) throw Error('来源页面格式已变化，保留原有码库');
-  const rows = new Map();
-  for (const line of text.slice(start.index + start[0].length, end.index).split(/\r?\n/)) {
-    const value = line.trim();
-    if (!value || /兑换码[：:]?$/.test(value)) continue;
-    const match = /^([\p{L}\p{N}_-]{1,128})(?:[（(]有效期至\s*(\d{4})[\/-](\d{1,2})[\/-](\d{1,2})[）)])?$/u.exec(value);
-    if (!match) throw Error('来源页面含无法识别的礼包码条目，保留原有码库');
-    const expiresAt = match[2] ? `${match[2]}-${match[3].padStart(2, '0')}-${match[4].padStart(2, '0')}` : null;
-    const stamp = expiresAt ? Date.parse(expiresAt + 'T00:00:00Z') : 0;
-    if (expiresAt && (!Number.isFinite(stamp) || new Date(stamp).toISOString().slice(0, 10) !== expiresAt)) throw Error('来源页面有效期格式异常');
-    rows.set(match[1], { code: match[1], expiresAt });
-  }
-  if (!rows.size) throw Error('来源页面没有解析到礼包码，保留原有码库');
-  const updated = /更新时间[：:]\s*(\d{4}-\d{2}-\d{2})\s+(\d{2}:\d{2}:\d{2})/.exec(text);
-  const timestamp = updated ? Date.parse(updated[1] + 'T' + updated[2] + '+08:00') : NaN;
-  return { rows: [...rows.values()], sourceUpdatedAt: Number.isFinite(timestamp) ? new Date(timestamp).toISOString() : null };
-}
-
 // The bundled catalog remains available offline. Manual entries and explicit
 // server-expiry tombstones share one transaction so a rejected batch saves none.
-export function createGiftCodeLibrary({ directory = DATA_DIR, now = Date.now, catalog = initialGiftCodeCatalog, fetcher = fetch } = {}) {
+export function createGiftCodeLibrary({ directory = DATA_DIR, now = Date.now, catalog = initialGiftCodeCatalog, fetcher } = {}) {
   const file = path.join(directory, 'shared-gift-codes.json');
   const catalogFile = path.join(directory, 'public-gift-codes.json');
   const preferenceFile = path.join(directory, 'gift-code-preferences.json');
-  let fetching = null;
+  const fetching = new Map();
   const read = () => {
     const data = readJson(file, { version: 1, codes: [], expired: [] });
     if (data?.version !== 1 || !Array.isArray(data.codes) || !Array.isArray(data.expired ?? [])) throw Error('共享礼包码数据库无效');
@@ -69,7 +46,15 @@ export function createGiftCodeLibrary({ directory = DATA_DIR, now = Date.now, ca
     const data = readJson(catalogFile, { version: 1, codes: [], expired: [] });
     if (data?.version !== 1 || !Array.isArray(data.codes) || !Array.isArray(data.expired)
       || [...data.codes, ...data.expired].some(row => !row || typeof row.code !== 'string')) throw Error('公共礼包码数据库无效');
-    return data;
+    data.channels ??= [];
+    data.wiki ??= { enabled: true, codes: [] };
+    if (typeof data.wiki.enabled !== 'boolean' || !Array.isArray(data.wiki.codes)) throw Error('Wiki 礼包码缓存无效');
+    if (!Array.isArray(data.channels) || data.channels.some(row => !row || typeof row.id !== 'string'
+      || !Array.isArray(row.codes) || typeof row.enabled !== 'boolean')) throw Error('礼包码渠道数据无效');
+    // Older catalogs stored only the sync state for the two preconfigured channels.
+    return upgradeGiftRule({ id: 'ali213', name: '游侠网', url: GIFT_CODE_SOURCE, enabled: true, ...(data.mode ? {} : articleRule), ...data,
+      wiki: upgradeGiftRule({ id: 'game-wiki', name: '疯狂水世界 Wiki', url: GIFT_CODE_WIKI, ...(data.wiki.mode ? {} : wikiRule), ...data.wiki }),
+      channels: data.channels.map(upgradeGiftRule) });
   };
   const preferences = () => {
     const data = readJson(preferenceFile, { version: 1, accounts: [] });
@@ -83,12 +68,92 @@ export function createGiftCodeLibrary({ directory = DATA_DIR, now = Date.now, ca
     if (!account) { account = { id, enabled: false }; data.accounts.push(account); }
     work(account); atomicJson(preferenceFile, data); return { ...account };
   });
+  const sourceList = data => [data.wiki, data, ...data.channels];
+  const sourceState = (data, id) => id === 'ali213' ? data : id === 'game-wiki' ? data.wiki : data.channels.find(source => source.id === id);
   const currentSource = () => {
-    const data = readPublic();
-    return { ...(data.lastSuccessAt ? { source: GIFT_CODE_SOURCE, updatedAt: data.sourceUpdatedAt, codes: data.codes } : catalog(now())),
-      retired: data.expired, sourceKind: data.lastSuccessAt ? 'synced' : 'bundled',
-      lastSyncedAt: data.lastSuccessAt ?? null, lastError: data.lastError ?? '' };
+    const data = readPublic(), enabled = sourceList(data).filter(channel => channel.enabled);
+    const useBundle = data.enabled && !data.lastSuccessAt && data.url === GIFT_CODE_SOURCE && data.mode === articleRule.mode && data.pattern === articleRule.pattern;
+    const base = useBundle ? catalog(now()) : data.enabled && data.lastSuccessAt
+      ? { source: data.url, updatedAt: data.sourceUpdatedAt, codes: data.codes } : { source: null, codes: [] };
+    const codes = [...base.codes], known = new Map();
+    for (const [index, row] of codes.entries()) if (!known.has(row.code)) known.set(row.code, index);
+    for (const channel of [data.wiki, ...data.channels]) {
+      if (!channel.enabled) continue;
+      for (const row of channel.codes) {
+        const index = known.get(row.code);
+        if (index === undefined) {
+          known.set(row.code, codes.length);
+          codes.push(row);
+        } else if (row.expiresAt && (!codes[index].expiresAt || row.expiresAt < codes[index].expiresAt)) {
+          codes[index] = { ...codes[index], expiresAt: row.expiresAt };
+        }
+      }
+    }
+    const times = enabled.map(channel => channel.lastSuccessAt).filter(Boolean).sort();
+    const source = !times.length && base.source ? base.source : enabled.length === 1 ? enabled[0].url : null;
+    return { ...base, source, codes, retired: data.expired,
+      sourceKind: times.length ? 'synced' : useBundle ? 'bundled' : 'custom',
+      lastSyncedAt: times.at(-1) ?? null,
+      lastError: enabled.filter(channel => channel.lastError).map(channel => channel.name + '：' + channel.lastError).join('；') };
   };
+  const updateSources = work => withFileLock(catalogFile, () => {
+    const data = readPublic();
+    const result = work(data);
+    if (result !== false) atomicJson(catalogFile, data);
+    return result;
+  });
+  const parseChannel = async channel => {
+    const originalUrl = channel.url === GIFT_CODE_SOURCE || channel.url === GIFT_CODE_WIKI;
+    const body = await fetchChannelBody(channel.url, fetcher ?? (originalUrl ? fetch : undefined));
+    return parseChannelBody(channel, body, now());
+  };
+  const dueToday = source => !source.lastSuccessAt || giftDay(Date.parse(source.lastSuccessAt)) !== giftDay(now());
+  function syncChannel(id, force) {
+    if (fetching.has(id)) return fetching.get(id);
+    const token = randomUUID();
+    const channel = updateSources(data => {
+      const state = sourceState(data, id);
+      if (!state || state.enabled === false || !dueToday(state) || state.leaseUntil > now()
+        || state.lastAttemptAt && now() - state.lastAttemptAt < (force ? 60000 : 3600000)) return false;
+      Object.assign(state, { token, lastAttemptAt: now(), leaseUntil: now() + 90000 });
+      return sourceList(data).find(item => item.id === id);
+    });
+    if (!channel) return;
+    // A rule edit, disable, deletion or expired lease can supersede this request.
+    const finish = apply => updateSources(data => {
+      const state = sourceState(data, id);
+      if (!state || state.token !== token) return false;
+      delete state.token;
+      state.leaseUntil = 0;
+      apply(state, data);
+    });
+    const job = (async () => {
+      try {
+        const parsed = await parseChannel(channel);
+        finish((state, data) => {
+          const at = new Date(now()).toISOString();
+          const retired = new Set([...data.expired, ...read().expired].map(row => row.code));
+          const keepPrevious = id === 'ali213' && channel.mode === articleRule.mode && channel.pattern === articleRule.pattern;
+          const codes = new Map(keepPrevious ? state.codes.map(row => [row.code, row]) : []);
+          for (const row of parsed.rows) {
+            if (retired.has(row.code)) continue;
+            if (expiredDate(row.expiresAt, now())) {
+              codes.delete(row.code);
+              data.expired.push({ code: row.code, reason: '来源注明的有效期已结束', at });
+              retired.add(row.code);
+            } else {
+              codes.set(row.code, { ...row, firstSeenAt: codes.get(row.code)?.firstSeenAt ?? at, lastSeenAt: at });
+            }
+          }
+          Object.assign(state, { codes: [...codes.values()], sourceUpdatedAt: parsed.sourceUpdatedAt ?? null, lastSuccessAt: at, lastError: '' });
+        });
+      } catch (error) {
+        if (finish(state => { state.lastError = error.message; }) !== false) throw Error(channel.name + '：' + error.message);
+      }
+    })().finally(() => { if (fetching.get(id) === job) fetching.delete(id); });
+    fetching.set(id, job);
+    return job;
+  }
   const merge = (state, source) => {
     const rows = new Map();
     for (const row of source.codes) if (!rows.has(row.code)) rows.set(row.code, { ...row, manual: false });
@@ -102,6 +167,47 @@ export function createGiftCodeLibrary({ directory = DATA_DIR, now = Date.now, ca
     return [...rows.values()].map(row => ({ ...row, expired: expired.has(row.code) || expiredDate(row.expiresAt, now()) }));
   };
   const library = {
+    channels() {
+      return sourceList(readPublic()).map(({ id, name, url, enabled, pattern, mode, jsonField, lastSuccessAt, lastError }) =>
+        ({ id, name, url, enabled, pattern, mode, jsonField, builtin: isDefaultChannel(id), lastSuccessAt, lastError }));
+    },
+    saveChannel(input) {
+      const config = channelConfig(input);
+      return updateSources(data => {
+        const id = input.id ?? randomUUID();
+        const existing = sourceState(data, id);
+        if (input.id != null && !existing) throw Error('渠道已删除，请刷新列表');
+        if (existing) {
+          if (['url', 'mode', 'pattern', 'jsonField'].some(key => existing[key] !== config[key])) {
+            Object.assign(existing, { codes: [], token: null, leaseUntil: 0, lastAttemptAt: 0, lastSuccessAt: null, sourceUpdatedAt: null, lastError: '' });
+            fetching.delete(id);
+          }
+          Object.assign(existing, config);
+        } else {
+          if (data.channels.length >= 16) throw Error('最多可添加 16 个自定义渠道');
+          data.channels.push({ id, ...config, enabled: true, codes: [] });
+        }
+        return { id };
+      });
+    },
+    previewChannel: async input => (await parseChannel(channelConfig(input))).rows.map(row => row.code),
+    setChannelEnabled(id, enabled) {
+      if (typeof enabled !== 'boolean') throw Error('渠道开关无效');
+      updateSources(data => {
+        const source = sourceState(data, id);
+        if (!source) throw Error('渠道不存在');
+        if ((source.enabled !== false) === enabled) return false;
+        Object.assign(source, { enabled, token: null, leaseUntil: 0, lastAttemptAt: 0 });
+        fetching.delete(id);
+      });
+    },
+    removeChannel(id) {
+      updateSources(data => {
+        if (isDefaultChannel(id) || !sourceState(data, id)) throw Error('请选择已有的自定义渠道');
+        data.channels = data.channels.filter(row => row.id !== id);
+        fetching.delete(id);
+      });
+    },
     entries() { return merge(read(), currentSource()).filter(row => !row.expired); },
     available(rows) {
       const handled = new Set(rows.filter(hasGiftCodeHistory).map(row => row.code));
@@ -190,53 +296,19 @@ export function createGiftCodeLibrary({ directory = DATA_DIR, now = Date.now, ca
       withFileLock(preferenceFile, () => { const data = preferences(); data.accounts = data.accounts.filter(account => account.id !== id); atomicJson(preferenceFile, data); });
     },
     due() {
-      const data = readPublic(), time = now();
-      return (!data.lastSuccessAt || giftDay(Date.parse(data.lastSuccessAt)) !== giftDay(time)) && new Date(time + 8 * 3600000).getUTCHours() >= 8;
+      const time = now();
+      return new Date(time + 8 * 3600000).getUTCHours() >= 8
+        && sourceList(readPublic()).some(channel => channel.enabled && dueToday(channel));
     },
     async refresh({ force = false } = {}) {
-      if (fetching) return fetching;
-      const data = readPublic(), time = now();
-      if (data.lastSuccessAt && giftDay(Date.parse(data.lastSuccessAt)) === giftDay(time)) return library.view();
-      if (data.lastAttemptAt && time - data.lastAttemptAt < (force ? 60000 : 3600000) || data.leaseUntil > time) return library.view();
-      const claimed = withFileLock(catalogFile, () => {
-        const latest = readPublic();
-        if (latest.leaseUntil > now() || latest.lastSuccessAt && giftDay(Date.parse(latest.lastSuccessAt)) === giftDay(now())) return false;
-        latest.lastAttemptAt = now(); latest.leaseUntil = now() + 90000; atomicJson(catalogFile, latest); return true;
-      });
-      if (!claimed) return library.view();
-      fetching = (async () => {
-        try {
-          const response = await fetcher(GIFT_CODE_SOURCE, { redirect: 'error', signal: AbortSignal.timeout(20000),
-            headers: { 'user-agent': 'CrazyWaterWorld-GiftCatalog/1.0', accept: 'text/html' } });
-          if (!response.ok) throw Error('来源站点返回 HTTP ' + response.status);
-          const chunks = []; let size = 0;
-          for await (const chunk of response.body) {
-            size += chunk.byteLength;
-            if (size > 2 * 1024 * 1024) throw Error('来源页面超过大小限制');
-            chunks.push(Buffer.from(chunk));
-          }
-          const parsed = parseGiftCodeArticle(Buffer.concat(chunks).toString('utf8'));
-          withFileLock(catalogFile, () => {
-            const latest = readPublic(), retired = new Set([...latest.expired, ...read().expired].map(row => row.code));
-            const codes = new Map(latest.codes.map(row => [row.code, row]));
-            for (const row of parsed.rows) {
-              if (retired.has(row.code)) continue;
-              if (expiredDate(row.expiresAt, now())) {
-                codes.delete(row.code); latest.expired.push({ code: row.code, reason: '来源注明的有效期已结束', at: new Date(now()).toISOString() }); retired.add(row.code); continue;
-              }
-              codes.set(row.code, { ...row, firstSeenAt: codes.get(row.code)?.firstSeenAt ?? new Date(now()).toISOString(), lastSeenAt: new Date(now()).toISOString() });
-            }
-            Object.assign(latest, { codes: [...codes.values()], sourceUpdatedAt: parsed.sourceUpdatedAt,
-              lastSuccessAt: new Date(now()).toISOString(), lastError: '', leaseUntil: 0 });
-            atomicJson(catalogFile, latest);
-          });
-        } catch (error) {
-          withFileLock(catalogFile, () => { const latest = readPublic(); latest.lastError = error.message; latest.leaseUntil = 0; atomicJson(catalogFile, latest); });
-          throw error;
-        }
-        return library.view();
-      })().finally(() => { fetching = null; });
-      return fetching;
+      const pending = sourceList(readPublic()).filter(channel => channel.enabled && dueToday(channel));
+      const errors = [];
+      for (let i = 0; i < pending.length; i += 4) {
+        const result = await Promise.allSettled(pending.slice(i, i + 4).map(channel => syncChannel(channel.id, force)));
+        for (const item of result) if (item.status === 'rejected') errors.push(item.reason.message);
+      }
+      if (errors.length) throw Error(errors.join(' / '));
+      return library.view();
     },
   };
   return library;

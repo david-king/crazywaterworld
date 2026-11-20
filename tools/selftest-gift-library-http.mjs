@@ -62,6 +62,26 @@ try {
   saveStore({ version: 1, activeId: null, accounts: [] });
   await open();
 
+  await test('无账号可校验、添加、修改、停用和删除采集渠道', async () => {
+    const route = '/api/gift-codes/channels/';
+    const draft = { confirm: true, name: '测试公告', url: 'https://example.org/news', pattern: '码：(\\w+)' };
+    for (const url of ['file:///news', 'http://[::1]/', 'http://127.0.0.1', 'https://user:pass@example.org']) {
+      await post(route + 'preview', { ...draft, url }, 400);
+    }
+    await post(route + 'save', { ...draft, pattern: '(' }, 400);
+    await post(route + 'save', { ...draft, confirm: false }, 400);
+    const { channels } = await post(route + 'save', draft);
+    const id = channels.find(channel => channel.name === draft.name).id;
+    await post(route + 'save', { ...draft, id, name: '新公告' });
+    await post(route + 'toggle', { confirm: true, id, enabled: false });
+    const edited = (await get(initialQuery([]))).channels.find(channel => channel.id === id);
+    assert.equal(edited.name, '新公告');
+    assert.equal(edited.enabled, false);
+    await post(route + 'delete', { confirm: true, id });
+    assert.deepEqual((await get(initialQuery([]))).channels.map(channel => channel.id), ['game-wiki', 'ali213']);
+    assert.equal(connections, 0);
+  });
+
   await test('没有账号也能读取码库、批量添加和载入，查询不会连接游戏', async () => {
     const before = await get(initialQuery([]));
     assert(Array.isArray(before.displayRows));

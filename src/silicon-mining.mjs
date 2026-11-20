@@ -57,7 +57,8 @@ export function siliconInWindow(windows, time) {
     return start === end || (start < end ? minute >= start && minute < end : minute >= start || minute < end);
   });
 }
-export const siliconInterval = settings => settings?.silicon?.fleets?.some(fleet => fleet.enabled && (fleet.huntEnabled || fleet.pursuit && !fleet.emptyOnly && fleet.tier !== 'BLUE')) ? 120000 : 600000;
+const pursuitEnabled = fleet => !fleet.huntEnabled && fleet.pursuit && !fleet.emptyOnly && fleet.tiers.some(tier => tier !== 'BLUE');
+export const siliconInterval = settings => settings?.silicon?.fleets?.some(fleet => fleet.enabled && (fleet.huntEnabled || pursuitEnabled(fleet))) ? 120000 : 600000;
 export function watchSiliconMining(client) {
   if (watchers.has(client)) return watchers.get(client);
   const listeners = new Set(), pricing = watchFleetRepairPricing(client);
@@ -145,7 +146,7 @@ export async function readSiliconMining(client, protocol, config, player, { sett
     try { snapshot.repairs[policy.id] = await get(client, protocol, 'FleetRepairParam', { buildingId: policy.id }); }
     catch { snapshot.notes.push(policy.id + '维修报价未同步'); }
   }
-  if (p.fleets.some(fleet => fleet.enabled && !fleet.huntEnabled && fleet.pursuit && !fleet.emptyOnly && fleet.tier !== 'BLUE')) {
+  if (p.fleets.some(fleet => fleet.enabled && pursuitEnabled(fleet))) {
     try { const black = await get(client, protocol, 'BlackList'); if (!Array.isArray(black.list)) throw Error(); snapshot.blacklist = black.list.filter(row => exactAutomationId(row.playerId) && row.nickname).map(row => ({ id: exactAutomationId(row.playerId), name: nameKey(row.nickname) })); }
     catch { snapshot.notes.push('游戏黑名单未同步，本轮不追击'); }
   }
@@ -156,7 +157,7 @@ const opponentKey = player => hash([nameKey(player.nickname), player.guildIdx]);
 export function siliconPursuitActive(snapshot, policy, settings) {
   // rewardResetTime 是服务端三日周期，不把每15分钟产奖误当作三日重置。
   const start = snapshot.reward?.rewardResetTime - 3 * 86400;
-  return !policy.huntEnabled && policy.pursuit && !policy.emptyOnly && policy.tier !== 'BLUE' && integer(settings.silicon.pursuitMinutes, 1)
+  return pursuitEnabled(policy) && integer(settings.silicon.pursuitMinutes, 1)
     && snapshot.checkedAt >= start && snapshot.checkedAt < start + settings.silicon.pursuitMinutes * 60;
 }
 function capReason(snapshot, p) {
@@ -188,12 +189,12 @@ function huntReservationReason(snapshot, policy, own, settings, keys, client) {
 }
 function miningCandidates(snapshot, policy, settings, state, fleet, used, plannedAttacks, targetHeld, attacksOnly = false) {
   const pursuit = siliconPursuitActive(snapshot, policy, settings), candidates = [];
-  for (const mine of snapshot.mines.filter(mine => mine.tier === policy.tier && !mine.reason)) {
+  for (const mine of snapshot.mines.filter(mine => policy.tiers.includes(mine.tier) && !mine.reason)) {
     if (!pursuit && !attacksOnly) {
       const count = mine.tier === 'BLUE' ? 3 : mine.positionNum;
       for (let index = 0; index < count; index++) if (!mine.positions.some(position => position.index === index && position.player) && !targetHeld(mine.gridId, index)) candidates.push({ mine, index, opponent: null });
     }
-    if (policy.emptyOnly || policy.tier === 'BLUE' || (policy.dailyAttackLimit > 0 && (used['siliconAttacks' + fleetNumber(policy.id)] ?? 0) >= policy.dailyAttackLimit) || snapshot.fightTimes + plannedAttacks >= snapshot.maxFightTimes) continue;
+    if (policy.emptyOnly || mine.tier === 'BLUE' || (policy.dailyAttackLimit > 0 && (used['siliconAttacks' + fleetNumber(policy.id)] ?? 0) >= policy.dailyAttackLimit) || snapshot.fightTimes + plannedAttacks >= snapshot.maxFightTimes) continue;
     for (const position of mine.positions) {
       const target = position.player;
       if (!target || target.fleetId || target.guildIdx === snapshot.guildIdx || !nameKey(target.nickname) || !integer(fleet?.power, 1) || target.power > fleet.power * (policy.maxPowerRatio ?? 100) / 100) continue;

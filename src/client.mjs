@@ -4,6 +4,7 @@ import { EventEmitter } from 'node:events';
 import { createCodec } from './codec.mjs';
 import { inspectGameFrame } from './frame-header.mjs';
 import { emitDiagnostic } from './trace-log.mjs';
+import { rememberTournament } from './tournament-state.mjs';
 
 export const MAX_SEQ = 2147483647;
 const HALF_SEQ = (MAX_SEQ - 1) / 2;
@@ -53,6 +54,7 @@ export class GameClient extends EventEmitter {
     super();
     // 各玩法在同一连接上注册独立推送观察器（均按连接单例）；保留有限上限以发现重复注册。
     this.setMaxListeners(32);
+    this.on('message', ({ name, body }) => rememberTournament(this, name, body));
     this.url = url;
     this.login = login;
     // Keep helpers and the wire codec on the same immutable protocol snapshot.
@@ -538,6 +540,7 @@ export class GameClient extends EventEmitter {
   }
 
   releaseRequests(reason) {
+    this.tournament = undefined;
     clearInterval(this.gapTimer);
     this.gapTimer = null;
     if (this.tickTimer !== null) clearInterval(this.tickTimer);

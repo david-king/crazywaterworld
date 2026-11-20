@@ -2,9 +2,7 @@ import { displayMaterial } from './config.mjs';
 import { normalize } from './worlds.mjs';
 import { emitDiagnostic } from './trace-log.mjs';
 
-// V74 domestic mini-game builds: use the SDK's app/channel pair as well as the
-// live AdvChannelCfg switch. Unknown or overseas packages must not use this path.
-const apps = new Map([['1400', '14021170'], ['1422', '14021167']]);
+const waitingApps = new Map([['1400', '14021170'], ['1422', '14021167']]);
 const task = 'adShop';
 const title = '广告商店免广告领奖';
 const inProgress = new WeakSet();
@@ -25,13 +23,10 @@ function versionAtLeast(version, minimum) {
   return true;
 }
 
-export function channelUnavailable(tables, player, clientInfo, language) {
+export function channelUnavailable(tables, player, clientInfo) {
   const channel = String(clientInfo?.channelId ?? '');
-  if (!apps.has(channel) || String(clientInfo?.appId) !== apps.get(channel) || language !== 'zh_CN'
-    || (player?.channelId && String(player.channelId) !== channel)
-    || (player?.appId && String(player.appId) !== apps.get(channel))) return '暂未确认此客户端支持国内免广告领奖';
   const settings = tables?.AdvChannelCfg?.data?.find(r => String(r.key) === channel);
-  if (settings?.isOpen !== true || !versionAtLeast(clientInfo.originVersion, settings.minAppVersion)) return '当前渠道或客户端版本未开放广告商店';
+  if (settings?.isOpen !== true || !versionAtLeast(clientInfo?.originVersion, settings.minAppVersion)) return '当前渠道或客户端版本未开放广告商店';
   const level = tables?.ModuleOpenCfg?.data?.find(r => r.moduleId === '广告')?.playerLevel;
   if (!Number.isSafeInteger(level) || !Number.isSafeInteger(player?.level)) return '未能确认广告商店开放等级';
   if (player.level < level) return '角色达到 ' + level + ' 级开放';
@@ -54,9 +49,14 @@ export function adWaitMs(settings) {
 }
 
 export async function adAccess(client, tables, { player, clientInfo, language, settings }) {
-  const reason = channelUnavailable(tables, player, clientInfo, language);
+  const reason = channelUnavailable(tables, player, clientInfo);
   if (reason) return { reason };
   if (await hasSkipPrivilege(client, tables, player)) return { waitMs: 0 };
+  const channel = String(clientInfo?.channelId ?? '');
+  const app = waitingApps.get(channel);
+  if (!app || String(clientInfo?.appId) !== app || language !== 'zh_CN'
+    || (player?.channelId && String(player.channelId) !== channel)
+    || (player?.appId && String(player.appId) !== app)) return { reason: '当前账号没有免广告权益，请在游戏内观看广告领取' };
   return { waitMs: adWaitMs(settings) };
 }
 

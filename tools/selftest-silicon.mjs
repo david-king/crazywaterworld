@@ -21,7 +21,9 @@ try {
   await test('新配置默认禁用，三舰队参数可独立校验及保留', () => {
     const defaults = defaultSettings(); assert.equal(defaults.silicon.enabled, false); assert(defaults.silicon.fleets.every(fleet => !fleet.enabled));
     const s = siliconSettings(); s.silicon.fleets[1].safePlayers = ['盟友']; assert.deepEqual(validateSettings(s).silicon.fleets[1].safePlayers, ['盟友']);
-    s.silicon.fleets[1].tier = 'RED'; assert.throws(() => validateSettings(s));
+    for (const invalid of [['RED'], ['BLUE', 'BLUE'], 'BLUE']) {
+      s.silicon.fleets[1].tiers = invalid; assert.throws(() => validateSettings(s));
+    }
   });
   await test('读状态和预览无写入；协议真实往返保留大整数角色', async () => {
     const f = siliconFixture(), s = siliconSettings(), ledger = usage(f), snapshot = await read(f, s, ledger);
@@ -89,8 +91,31 @@ try {
     assert.equal((await plan(f, s, ledger)).actions.length, 0);
     s.silicon.fleets[0].safePlayers = []; assert.equal((await plan(f, s, ledger)).actions[0].opponent.nickname, '敌方船长');
     f.state.positions[5000].pop(); assert.equal((await plan(f, s, ledger)).actions[0].opponent, null);
-    s.silicon.fleets[0].tier = 'BLUE'; for (let i = 0; i < 3; i++) f.enemy(i, '低矿敌人' + i, 10, 8, 3000);
+    s.silicon.fleets[0].tiers = ['BLUE']; for (let i = 0; i < 3; i++) f.enemy(i, '低矿敌人' + i, 10, 8, 3000);
     assert.equal((await plan(f, s, ledger)).actions.length, 0);
+  });
+  await test('多选等级任一有空位即派遣，未选等级和空选均不派遣', async () => {
+    for (const openGrid of [4000, 5000]) {
+      const f = siliconFixture(), s = siliconSettings(), ledger = usage(f), fleet = s.silicon.fleets[0];
+      fleet.tiers = ['PURPLE', 'ORANGE']; fleet.emptyOnly = true;
+      const fullGrid = openGrid === 4000 ? 5000 : 4000;
+      for (let i = 0; i < 3; i++) f.enemy(i, '占矿玩家' + i, 900, 8, fullGrid);
+      await run(f, s, ledger);
+      assert.deepEqual(f.client.writes.map(write => write.body.gridId), [openGrid]);
+    }
+    const f = siliconFixture(), s = siliconSettings(), ledger = usage(f);
+    s.silicon.fleets[0].tiers = [];
+    await run(f, s, ledger); assert.equal(f.client.writes.length, 0);
+  });
+  await test('混选时初等矿只占空位，中等矿仍可抢占', async () => {
+    const f = siliconFixture(), s = siliconSettings(), ledger = usage(f);
+    s.silicon.fleets[0].tiers = ['BLUE', 'PURPLE'];
+    for (let i = 0; i < 3; i++) {
+      f.enemy(i, '初等玩家' + i, 999, 8, 3000);
+      f.enemy(i, '中等玩家' + i, 800, 8, 4000);
+    }
+    await run(f, s, ledger);
+    assert.deepEqual(f.client.writes.map(write => write.body.gridId), [4000]);
   });
   await test('服务器全局30次与每舰日抢占限制同时生效', async () => {
     const f = siliconFixture(), s = siliconSettings(), ledger = usage(f); s.silicon.fleets[0].emptyOnly = false; for (let i = 0; i < 3; i++) f.enemy(i, '敌人' + i);
@@ -263,7 +288,7 @@ try {
       ['服务器次数耗尽', f => { f.state.fightTimes = f.state.maxFightTimes; }],
       ['舰队每日次数耗尽', (f, s, p, ledger) => { p.dailyAttackLimit = 1; ledger.confirm(ledger.reserve({ siliconAttacks1: 1 }, {}, {})); }],
       ['只占空位', (f, s, p) => { p.emptyOnly = true; }],
-      ['初等矿不抢占', (f, s, p) => { p.tier = 'BLUE'; f.state.positions[3000] = f.state.positions[5000]; }],
+      ['初等矿不抢占', (f, s, p) => { p.tiers = ['BLUE']; f.state.positions[3000] = f.state.positions[5000]; }],
     ];
     for (const [label, mutate] of cases) {
       const f = siliconFixture(), s = siliconSettings(), ledger = usage(f), policy = hunt(s); f.enemy(0, '名单目标', 900); f.enemy(1, '其他甲', 100); f.enemy(2, '其他乙', 100);

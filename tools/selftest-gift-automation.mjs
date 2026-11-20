@@ -6,7 +6,7 @@ import path from 'node:path';
 const temporary = fs.realpathSync(os.tmpdir());
 const directory = fs.mkdtempSync(path.join(temporary, 'cw-gift-auto-'));
 process.env.CW_DATA_DIR = path.join(directory, 'accounts');
-const { createGiftCodeLibrary, publicGiftCodes, parseGiftCodeArticle, GIFT_CODE_SOURCE } = await import('../src/gift-code-library.mjs');
+const { createGiftCodeLibrary, publicGiftCodes, parseGiftCodeArticle, GIFT_CODE_SOURCE, GIFT_CODE_WIKI } = await import('../src/gift-code-library.mjs');
 const { createGiftCodeAutomation } = await import('../src/gift-code-automation.mjs');
 const { giftCodeStatus } = await import('../src/gift-codes.mjs');
 let passed = 0;
@@ -40,6 +40,7 @@ try {
         if (fail) throw Error('fixture offline');
         return new Response(article(['ONLINE', 'EXPIRED（有效期至2026/11/18）']));
       } });
+    library.setChannelEnabled('game-wiki', false);
     assert.equal(library.due(), false, '北京时间八点前不定时同步');
     clock++;
     clock += 999;
@@ -65,11 +66,104 @@ try {
     let clock = Date.parse('2026-11-19T01:00:00Z'), release, calls = 0, broken = false;
     const library = createGiftCodeLibrary({ directory: path.join(directory, 'concurrent'), now: () => clock,
       fetcher: async () => { calls++; if (!broken) await new Promise(resolve => { release = resolve; }); return new Response(broken ? article(['bad!']) : article(['GOOD'])); } });
+    library.setChannelEnabled('game-wiki', false);
     const first = library.refresh(), second = library.refresh();
     release(); await Promise.all([first, second]); assert.equal(calls, 1);
     clock += 86400000; broken = true;
     await assert.rejects(library.refresh());
     assert.deepEqual(library.entries().map(row => row.code), ['GOOD']);
+  });
+
+  await test('旧缓存自动加入 Wiki，两个默认渠道独立同步，重叠码取较早的到期日', async () => {
+    const location = path.join(directory, 'default-channels');
+    fs.mkdirSync(location);
+    fs.writeFileSync(path.join(location, 'public-gift-codes.json'), JSON.stringify({ version: 1,
+      codes: [{ code: 'SHARED', expiresAt: null }], expired: [], lastSuccessAt: '2026-11-19T00:00:00Z' }));
+    let clock = Date.parse('2026-11-19T04:00:00Z');
+    let wiki = { updated_at: '2026-11-19T08:00:00', codes: [
+      { code: 'SHARED', status: 'valid', expires_at: '2026-11-22T23:59:00' },
+      { reward: '礼包{钻石}', feedback: { code: 'NESTED', status: 'invalid' }, status: 'valid', expires_at: null, code: '中文码' },
+      { code: 'FUTURE', status: 'valid', starts_at: '2026-11-21T00:00:00' },
+      { code: 'EXPIRED', status: 'valid', expires_at: '2026-11-19T10:00:00' },
+      { code: 'PENDING', feedback: { code: 'NESTED', status: 'valid' }, status: 'pending_review' }, { code: 'INVALID', status: 'invalid' },
+    ], candidates: [{ code: 'NOT_YET', status: 'valid' }], expired: [{ code: 'OLD' }] };
+    const calls = [];
+    const options = { directory: location, now: () => clock, fetcher: async url => {
+      calls.push(url);
+      if (url === GIFT_CODE_WIKI) return Response.json(wiki);
+      assert.equal(url, GIFT_CODE_SOURCE);
+      return new Response(article(['SHARED', 'ARTICLE']));
+    } };
+    const library = createGiftCodeLibrary(options);
+    assert.deepEqual(library.channels().map(row => [row.name, row.enabled]), [['疯狂水世界 Wiki', true], ['游侠网', true]]);
+    await library.refresh();
+    assert.deepEqual(calls, [GIFT_CODE_WIKI], '游侠网当日旧缓存仍然生效');
+    assert.deepEqual(library.available([]), ['SHARED', '中文码']);
+    assert.equal(library.entries()[0].expiresAt, '2026-11-22');
+    clock += 86400000;
+    wiki = { error: '暂时不可用' };
+    await assert.rejects(library.refresh(), /Wiki/);
+    assert.deepEqual(library.available([]), ['SHARED', 'ARTICLE', '中文码']);
+    wiki = { codes: [{ code: '中文码', status: 'invalid' }] };
+    clock += 61000;
+    await library.refresh({ force: true });
+    assert.deepEqual(library.available([]), ['SHARED', 'ARTICLE'], '明确下架后更新 Wiki 快照');
+    library.setChannelEnabled('game-wiki', false);
+    assert.deepEqual(createGiftCodeLibrary(options).channels().map(row => row.enabled), [false, true]);
+  });
+
+  await test('两个默认渠道均可改名、改网址和规则，刷新后按保存的规则提取', async () => {
+    const options = { directory: path.join(directory, 'edit-defaults'), fetcher: async url => {
+      if (url === GIFT_CODE_SOURCE) return new Response(article(['ARTICLE']));
+      if (url === GIFT_CODE_WIKI) return Response.json({ codes: [{ code: 'WIKI', status: 'valid' }] });
+      return new Response('公告编号：' + new URL(url).pathname.slice(1));
+    } };
+    const library = createGiftCodeLibrary(options);
+    await library.refresh();
+    const expected = { text: 'ARTICLE', raw: 'WIKI' };
+    for (const source of library.channels()) {
+      const renamed = { ...source, name: source.name + '公告' };
+      assert.deepEqual(await library.previewChannel(renamed), [expected[source.mode]]);
+      library.saveChannel(renamed);
+      assert.equal(library.channels().find(row => row.id === source.id).lastSuccessAt, source.lastSuccessAt);
+      const draft = { ...renamed, mode: 'raw', jsonField: '', pattern: '编号：([A-Za-z0-9-]+)', url: 'https://example.org/' + source.id };
+      assert.deepEqual(await library.previewChannel(draft), [source.id]);
+      assert.throws(() => library.saveChannel({ ...draft, pattern: '(' }), /正则/);
+      library.saveChannel(draft);
+      assert(!library.available([]).includes(expected[source.mode]));
+    }
+    const restarted = createGiftCodeLibrary(options);
+    assert.deepEqual(restarted.available([]), []);
+    await restarted.refresh();
+    assert.deepEqual(restarted.available([]).sort(), ['ali213', 'game-wiki']);
+    for (const channel of restarted.channels()) {
+      assert(channel.name.endsWith('公告'));
+      assert.equal(channel.url, 'https://example.org/' + channel.id);
+      assert.equal(channel.mode, 'raw');
+      assert.equal(channel.pattern, '编号：([A-Za-z0-9-]+)');
+    }
+  });
+
+  await test('旧专用模式转换成可编辑正则，自定义规则、网址、开关和缓存保留', async () => {
+    const location = path.join(directory, 'migrate-patterns');
+    fs.mkdirSync(location);
+    const cache = { enabled: false, lastSuccessAt: '2026-11-19T00:00:00Z', codes: [{ code: 'CACHED', expiresAt: null }] };
+    const custom = { ...cache, id: 'mine', name: '我的规则', url: 'https://example.org/page', mode: 'raw', pattern: 'special=(.+)' };
+    const oldWiki = { ...cache, mode: 'wiki', pattern: '', name: '已有渠道', url: 'https://example.org/api' };
+    fs.writeFileSync(path.join(location, 'public-gift-codes.json'), JSON.stringify({
+      version: 1, ...cache, mode: 'article', pattern: '', expired: [], wiki: oldWiki,
+      channels: [custom, { ...oldWiki, id: 'legacy-copy' }],
+    }));
+    const library = createGiftCodeLibrary({ directory: location });
+    const [wiki, article, mine, copy] = library.channels();
+    assert.equal(wiki.mode, 'raw'); assert.equal(wiki.jsonField, 'codes'); assert(wiki.pattern.includes('(?<code>'));
+    assert.equal(wiki.url, oldWiki.url); assert.equal(wiki.name, oldWiki.name); assert.equal(wiki.enabled, false);
+    assert.equal(article.mode, 'text'); assert(article.pattern.includes('(?<code>'));
+    assert.equal(mine.pattern, custom.pattern); assert.equal(mine.jsonField, ''); assert.equal(copy.pattern, wiki.pattern);
+    library.saveChannel({ ...wiki, name: '改名' });
+    assert.equal(createGiftCodeLibrary({ directory: location }).channels()[0].lastSuccessAt, cache.lastSuccessAt);
+    library.setChannelEnabled('game-wiki', true);
+    assert.deepEqual(library.available([]), ['CACHED']);
   });
 
   await test('自动兑换默认关闭，设置按账号持久保存且删除账号保留共享码', () => {
@@ -83,6 +177,62 @@ try {
     library.removeAccount('one');
     assert.equal(library.auto('one').enabled, false);
     assert(library.entries().some(row => row.code === 'SHARED'));
+  });
+
+  await test('预览和同步使用同一提取规则，按渠道缓存、失败隔离、按码去重', async () => {
+    let clock = Date.parse('2026-11-19T01:00:00Z');
+    const pages = new Map([
+      [GIFT_CODE_SOURCE, article(['SHARED'])],
+      [GIFT_CODE_WIKI, '{"codes":[]}'],
+      ['https://example.org/news', '<p>礼包码：<b>中文_码</b></p><p>兑换码：SHARED</p><p>兑换码：中文_码</p>'],
+      ['https://example.org/data', '{"code":"JSON-1"}'],
+    ]);
+    const directoryForChannels = path.join(directory, 'sources');
+    const options = { directory: directoryForChannels, now: () => clock, fetcher: async url => new Response(pages.get(url)) };
+    const library = createGiftCodeLibrary(options);
+    const news = { name: '公告', url: 'https://example.org/news', mode: 'text', pattern: '(礼包码|兑换码)：(?<code>[\\p{L}\\p{N}_-]+)' };
+    const api = { name: '接口', url: 'https://example.org/data', mode: 'raw', pattern: '"code":"([^"]+)"' };
+    assert.deepEqual(await library.previewChannel(news), ['中文_码', 'SHARED']);
+    assert.equal(library.channels().length, 2);
+    assert(!library.available([]).includes('中文_码'));
+    const { id } = library.saveChannel(news);
+    library.saveChannel(api);
+    await library.refresh();
+    assert.deepEqual(library.available([]), ['SHARED', '中文_码', 'JSON-1']);
+    assert.deepEqual(createGiftCodeLibrary(options).channels(), library.channels());
+    assert.deepEqual(await library.previewChannel({ ...api, pattern: 'JSON-1' }), ['JSON-1']);
+    for (const pattern of ['[', 'absent', '("code")']) {
+      await assert.rejects(library.previewChannel({ ...api, pattern }));
+    }
+    clock += 86400000;
+    pages.set(news.url, '<p>改版中</p>'); pages.set(api.url, '{"code":"JSON-2"}');
+    await assert.rejects(library.refresh(), /公告.*未匹配/);
+    assert.deepEqual(library.available([{ code: 'SHARED', status: 'used' }]), ['中文_码', 'JSON-2']);
+    library.setChannelEnabled(id, false);
+    assert.deepEqual(library.available([]), ['SHARED', 'JSON-2']);
+    library.setChannelEnabled(id, true);
+    library.addManualBatch(['中文_码']);
+    library.removeChannel(id);
+    library.setChannelEnabled('ali213', false);
+    assert.deepEqual(library.available([]), ['JSON-2', '中文_码']);
+  });
+
+  await test('修改规则后，旧请求的迟到响应不能写回新规则', async () => {
+    let release;
+    const library = createGiftCodeLibrary({ directory: path.join(directory, 'edit-source'), fetcher: async url => {
+      if (url.endsWith('/old')) await new Promise(resolve => { release = resolve; });
+      return new Response(url.endsWith('/old') ? 'OLD' : 'NEW');
+    } });
+    library.setChannelEnabled('ali213', false);
+    library.setChannelEnabled('game-wiki', false);
+    const config = { name: '公告', url: 'https://example.org/old', pattern: 'OLD' };
+    const { id } = library.saveChannel(config);
+    const old = library.refresh();
+    library.saveChannel({ ...config, id, url: 'https://example.org/new', pattern: 'NEW' });
+    await library.refresh();
+    release(); await old;
+    assert.deepEqual(library.available([]), ['NEW']);
+    assert.equal(library.due(), false);
   });
 
   // Use the production redemption pipeline, narrowing the library to fixture

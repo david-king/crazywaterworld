@@ -90,6 +90,38 @@ function fixture(id) {
   return f;
 }
 
+{
+  const f = fixture(1005), settings = defaultSettings();
+  settings.arena.target = 'rank';
+  settings.dailies.enabled = true;
+  f.arena.challenges.push(opponent(65, 811, 1200));
+  const survey = await surveyDailies(f, protocol, { config, player, settings, idle: true, probeGift: false });
+  assert.equal(survey.tasks[0].actions[0].body.rank, 65, '排名策略选择可挑战的最高名次');
+  settings.arena.keepTickets = f.tickets;
+  const result = await runDailies(f, protocol, survey, { config, settings, allowMutate: true, claimRewards: false });
+  assert.match(result[0].reason, /保留数量/);
+  assert.deepEqual(f.writes, []);
+}
+
+{
+  const f = fixture(1005), settings = defaultSettings();
+  settings.dailies.enabled = true;
+  Object.assign(settings.arena, { target: 'rank', maxPowerRatio: 70 });
+  f.arena.myself.power = { low: 1000, high: 0 };
+  f.arena.challenges.push(opponent(65, 811, 701), opponent(70, 812, 700));
+  const preview = () => surveyDailies(f, protocol, { config, player, settings, idle: true, probeGift: false });
+  const survey = await preview();
+  assert.equal(survey.tasks[0].actions[0].body.rank, 70, '先过滤超出上限的对手，保留恰好 70% 的对手，再按排名选人');
+  f.arena.myself.power = 600;
+  const results = await runDailies(f, protocol, survey, { config, settings, allowMutate: true, claimRewards: false });
+  assert.match(results[0].reason, /上限 420/);
+  assert.deepEqual(f.writes, [], '发送前重读战力，全部超限时保留挑战券');
+  delete f.arena.myself.power;
+  assert.match((await preview()).tasks[0].reason, /己方战力/);
+  settings.arena.maxPowerRatio = 0;
+  assert.equal((await preview()).tasks[0].actions[0].body.rank, 65);
+}
+
 for (const idle of [false, true]) {
   const f = fixture(1005);
   const survey = await f.preview(idle);

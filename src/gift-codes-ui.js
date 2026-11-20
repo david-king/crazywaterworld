@@ -65,11 +65,12 @@ function paintGiftAccounts(){
   picker.value=giftViewed;picker.disabled=!giftAccounts.length;
 }
 function paintGiftInitial(){
+  paintGiftChannels(giftInitial?.channels??[]);
   $('gift-load-initial').disabled=giftLoading;
   $('gift-load-initial').textContent=giftLoading?'正在载入…':'载入未兑换码';
   const note=$('gift-code-initial-note');
   if(giftInitialError)note.textContent=giftInitialError;
-  else if(!giftInitial)note.textContent='正在读取码库…';
+  else if(!giftInitial)note.textContent=giftLoading?'':'正在读取码库…';
   else{
     const rows=giftInitial.displayRows??[];
     const summary=['码库 '+rows.length+' 条'];
@@ -78,6 +79,7 @@ function paintGiftInitial(){
     if(giftInitial.lastError)summary.push('同步失败，使用缓存：'+giftInitial.lastError);
     note.textContent=summary.join(' · ');
   }
+  note.hidden=!note.textContent;
   const body=clear($('gift-code-library-rows'));
   for(const entry of giftInitial?.displayRows??[]){
     const pending=entry.usage?.some(row=>['queued','sending'].includes(row.status));
@@ -89,7 +91,7 @@ function paintGiftInitial(){
     });
     body.append(tr);
   }
-  if(!body.children.length){const row=el('tr'),cell=el('td','',giftInitial?'暂无符合条件的礼包码':'正在读取码库…');cell.colSpan=3;row.append(cell);body.append(row);}
+  if(giftInitial&&!body.children.length){const row=el('tr'),cell=el('td','','暂无符合条件的礼包码');cell.colSpan=3;row.append(cell);body.append(row);}
 }
 async function refreshGiftInitial(){
   const version=++giftInitialVersion,context=giftContext;
@@ -114,6 +116,106 @@ $('gift-load-initial').onclick=async()=>{
   }
 };
 $('gift-show-processed').onchange=paintGiftInitial;
+let giftChannelId=null,giftChannelBusy=false,giftChannelListKey='';
+const giftChannelPost=(action,values)=>call('/api/gift-codes/channels/'+action,{method:'POST',body:JSON.stringify({confirm:true,...values})});
+function paintGiftChannelMode(){
+  const raw=$('gift-channel-mode').value==='raw';
+  for(const field of ['json-label','json'])$('gift-channel-'+field).hidden=!raw;
+}
+function openGiftChannel(channel){
+  if(giftChannelBusy)return;
+  giftChannelId=channel?.id??null;
+  $('gift-channel-title').textContent=channel?'编辑渠道':'添加渠道';
+  $('gift-channel-name').value=channel?.name??'';
+  $('gift-channel-url').value=channel?.url??'';
+  $('gift-channel-mode').value=channel?.mode??'text';
+  $('gift-channel-json').value=channel?.jsonField??'';
+  $('gift-channel-pattern').value=channel?.pattern??'(?:礼包码|兑换码)[：:]\\s*(?<code>[\\p{L}\\p{N}_-]+)';
+  $('gift-channel-result').textContent='';
+  paintGiftChannelMode();
+  $('gift-channel-dialog').showModal();$('gift-channel-name').focus();
+}
+function paintGiftChannels(channels){
+  if(!$('gift-channel-list-dialog').open)return;
+  const emptyNote=channels.length?'':giftInitialError||(giftInitial?'暂无渠道':'正在读取渠道…');
+  const key=JSON.stringify([channels,giftChannelBusy,emptyNote]);
+  if(key===giftChannelListKey)return;
+  giftChannelListKey=key;
+  const list=clear($('gift-channel-list'));
+  const errors=clear($('gift-channel-errors'));
+  $('gift-channel-add').disabled=giftChannelBusy;
+  if(emptyNote){
+    const row=el('tr'),cell=el('td','dim',emptyNote);
+    cell.colSpan=3;row.append(cell);list.append(row);
+  }
+  for(const channel of channels){
+    const row=el('tr'),info=el('td'),identity=el('div','gift-channel-identity');
+    const name=el('span','gift-channel-name',channel.name),url=el('small','dim gift-channel-url',channel.url);
+    name.title=channel.name;url.title=channel.url;
+    identity.append(name,url);info.append(identity);
+    const lastSync=channel.lastSuccessAt?when(channel.lastSuccessAt):'未同步';
+    if(channel.enabled&&channel.lastError)errors.append(el('p','',channel.name+' 同步失败：'+channel.lastError));
+    const actions=el('div','gift-channel-actions'),cell=el('td');
+    cell.append(actions);row.append(info,el('td','gift-channel-time',lastSync),cell);
+    function action(label,run){
+      const button=el('button','',label);button.type='button';button.disabled=giftChannelBusy;
+      button.setAttribute('aria-label',label+' '+channel.name);button.onclick=run;actions.append(button);
+    }
+    action('编辑',()=>openGiftChannel(channel));
+    action(channel.enabled?'停用':'启用',()=>changeGiftChannel('toggle',{id:channel.id,enabled:!channel.enabled}));
+    if(!channel.builtin){
+      action('删除',()=>{if(confirm('删除渠道“'+channel.name+'”及其采集缓存？'))return changeGiftChannel('delete',{id:channel.id});});
+    }
+    list.append(row);
+  }
+}
+function giftChannelSetBusy(value){
+  giftChannelBusy=value;
+  for(const id of ['name','url','mode','json','pattern','preview','save','cancel'])$('gift-channel-'+id).disabled=value;
+  paintGiftChannels(giftInitial?.channels??[]);
+}
+async function changeGiftChannel(action,values){
+  if(giftChannelBusy)return;
+  giftChannelSetBusy(true);
+  const status=$('gift-channel-status');status.textContent='';
+  try{
+    const result=await giftChannelPost(action,values);
+    if(giftInitial)giftInitial.channels=result.channels;
+    await refreshGiftCodes();
+  }catch(error){(action==='save'?$('gift-channel-result'):status).textContent=error.message;return;}
+  finally{giftChannelSetBusy(false);}
+  if(action==='save')$('gift-channel-dialog').close();
+}
+function giftChannelDraft(){
+  return { id:giftChannelId,name:$('gift-channel-name').value,url:$('gift-channel-url').value,
+    mode:$('gift-channel-mode').value,jsonField:$('gift-channel-mode').value==='raw'?$('gift-channel-json').value:'',pattern:$('gift-channel-pattern').value };
+}
+$('gift-channel-add').onclick=()=>openGiftChannel();
+$('gift-channel-show').onclick=()=>{
+  $('gift-channel-status').textContent='';
+  $('gift-channel-list-dialog').showModal();
+  paintGiftChannels(giftInitial?.channels??[]);
+};
+$('gift-channel-close').onclick=()=>$('gift-channel-list-dialog').close();
+$('gift-channel-dialog').onclose=()=>{
+  const list=$('gift-channel-list-dialog');
+  if(list.open&&!list.contains(document.activeElement))$('gift-channel-add').focus();
+};
+$('gift-channel-cancel').onclick=()=>{if(!giftChannelBusy)$('gift-channel-dialog').close();};
+$('gift-channel-dialog').oncancel=event=>{if(giftChannelBusy)event.preventDefault();};
+$('gift-channel-save').onclick=()=>changeGiftChannel('save',giftChannelDraft());
+$('gift-channel-preview').onclick=async()=>{
+  if(giftChannelBusy)return;
+  const draft=giftChannelDraft(),result=$('gift-channel-result');
+  giftChannelSetBusy(true);result.textContent='正在获取渠道内容…';
+  try{
+    const {codes}=await giftChannelPost('preview',draft);
+    result.textContent='匹配到 '+codes.length+' 个不同礼包码\n'+codes.join('\n');
+  }catch(error){result.textContent=error.message;}
+  finally{giftChannelSetBusy(false);}
+};
+for(const field of ['name','url','mode','json','pattern'])$('gift-channel-'+field).oninput=()=>{$('gift-channel-result').textContent='';};
+$('gift-channel-mode').onchange=paintGiftChannelMode;
 $('gift-select-all').onclick=()=>{giftChosen=true;giftSelected=new Set(giftAccounts.filter(giftCanStart).map(account=>account.id));paintGiftAccounts();void refreshGiftInitial();};
 $('gift-select-none').onclick=()=>{giftChosen=true;giftSelected.clear();paintGiftAccounts();void refreshGiftInitial();};
 function paintGiftPage(){

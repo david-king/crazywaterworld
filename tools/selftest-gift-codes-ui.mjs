@@ -15,7 +15,7 @@ const deferred=()=>{let resolve,reject;const promise=new Promise((yes,no)=>{reso
 const tick=async()=>{for(let i=0;i<15;i++)await Promise.resolve();};
 const record=code=>({code,status:'success',detail:'金币 ×10',at:'2026-11-19T00:00:00Z',retryable:false});
 function fixture(accountList=[{id:'a',title:'账号A',paused:false,running:false,connected:false,counts:{},total:0,available:2,autoRedeem:false}]){
-  const env={nodes:new Map(),accounts:accountList,calls:[],downloads:[],timers:[],csvVersion:'page-1',csvError:null,blobReads:0};
+  const env={nodes:new Map(),accounts:accountList,channels:[],calls:[],downloads:[],timers:[],csvVersion:'page-1',csvError:null,blobReads:0};
   class Node{
     constructor(tag='div'){this.tagName=tag;this.textContent='';this.children=[];this.attributes={};this.value='';this.disabled=false;this.checked=false;this.open=false;this.classList={contains:()=>false};}
     append(...items){this.children.push(...items);for(const item of items)item.parent=this;}
@@ -45,8 +45,10 @@ function fixture(accountList=[{id:'a',title:'账号A',paused:false,running:false
     if(url.pathname==='/api/gift-codes/accounts')return {accounts:env.accounts};
     if(url.pathname==='/api/gift-codes/initial'||url.pathname==='/api/gift-codes/load'){
       if(env.initialGate)await env.initialGate;
-      return {displayRows:env.library,tryCodes:env.library.filter(row=>row.eligible).map(row=>row.code),available:env.library.length,total:env.library.length};
+      return {channels:env.channels,displayRows:env.library,tryCodes:env.library.filter(row=>row.eligible).map(row=>row.code),available:env.library.length,total:env.library.length};
     }
+    if(url.pathname==='/api/gift-codes/channels/preview')return {codes:['中文_礼包','VIP888']};
+    if(url.pathname==='/api/gift-codes/channels/save'){env.channels=[{...body,id:'custom',enabled:true}];return {channels:env.channels};}
     if(url.pathname==='/api/gift-codes/manual'){
       if(env.manualGate)await env.manualGate;
       if(env.manualError)throw Error(env.manualError);
@@ -86,6 +88,64 @@ function fixture(accountList=[{id:'a',title:'账号A',paused:false,running:false
 }
 let passed=0;
 const test=async(name,work)=>{await work();passed++;console.log('通过：'+name);};
+await test('从渠道列表新增并预览，保存后返回表格继续编辑',async()=>{
+  const e=fixture([]);await e.api.refresh();
+  const list=e.node('gift-channel-list-dialog');
+  assert.equal(list.open,false);
+  e.node('gift-channel-show').onclick();assert(list.open);
+  e.node('gift-channel-add').onclick();
+  assert(e.node('gift-channel-dialog').open);
+  e.node('gift-channel-name').value='活动公告';
+  e.node('gift-channel-url').value='https://example.org/news';
+  const pattern=e.node('gift-channel-pattern').value;
+  assert.equal(new RegExp(pattern,'gmu').exec('礼包码：中文_礼包').groups.code,'中文_礼包');
+  await e.node('gift-channel-preview').onclick();
+  assert.match(e.node('gift-channel-result').textContent,/2 个.*\n中文_礼包\nVIP888/);
+  assert.deepEqual(e.channels,[]);
+  await e.node('gift-channel-save').onclick();
+  assert.equal(e.node('gift-channel-dialog').open,false);
+  assert(list.open);
+  const row=e.node('gift-channel-list').firstChild;
+  assert.equal(row.tagName,'tr');assert.equal(row.children.length,3);
+  row.lastChild.firstChild.children.find(button=>button.textContent==='编辑').onclick();
+  assert.equal(e.node('gift-channel-url').value,'https://example.org/news');
+  assert.equal(e.node('gift-channel-pattern').value,pattern);
+  e.node('gift-channel-cancel').onclick();assert(list.open);
+  e.node('gift-channel-close').onclick();assert.equal(list.open,false);
+  assert.equal(e.calls.some(call=>call.path.endsWith('/redeem')||call.path.endsWith('/auto')),false);
+});
+await test('最近一次同步列只显示最近成功时间，停用或同步失败仍保留时间',async()=>{
+  const e=fixture([]),stamp='2026-11-20T02:09:59Z';
+  e.channels=[
+    {name:'正常',enabled:true,lastSuccessAt:stamp},
+    {name:'暂停',enabled:false,lastSuccessAt:stamp},
+    {name:'失联',enabled:true,lastSuccessAt:stamp,lastError:'连接超时'},
+    {name:'新渠道',enabled:true},
+  ];
+  await e.api.refresh();e.node('gift-channel-show').onclick();
+  assert(page.includes('<th scope="col">最近一次同步</th>'));
+  assert.deepEqual(e.node('gift-channel-list').children.map(row=>row.children[1].textContent),[stamp,stamp,stamp,'未同步']);
+  assert.equal(e.node('gift-channel-errors').firstChild.textContent,'失联 同步失败：连接超时');
+});
+await test('打开默认渠道编辑器时直接显示当前提取正则',async()=>{
+  const e=fixture([]);
+  e.channels=[{id:'game-wiki',name:'Wiki',mode:'raw',jsonField:'codes',pattern:'"code":"([^"]+)"'},
+    {id:'ali213',name:'游侠网',mode:'text',pattern:'公告：(?<code>.+)'}]
+    .map(channel=>({...channel,builtin:true,url:'https://example.org/'+channel.id,enabled:true}));
+  await e.api.refresh();e.node('gift-channel-show').onclick();
+  for(const [index,channel] of e.channels.entries()){
+    const row=e.node('gift-channel-list').children[index];
+    row.lastChild.firstChild.children.find(button=>button.textContent==='编辑').onclick();
+    assert.equal(e.node('gift-channel-name').value,channel.name);
+    assert.equal(e.node('gift-channel-url').value,channel.url);
+    assert.equal(e.node('gift-channel-mode').value,channel.mode);
+    assert(!e.node('gift-channel-pattern').hidden);
+    assert.equal(e.node('gift-channel-pattern').value,channel.pattern);
+    assert.equal(e.node('gift-channel-json').hidden,channel.mode!=='raw');
+    e.node('gift-channel-cancel').onclick();
+  }
+});
+assert(!page.includes('option value="wiki"')&&!page.includes('option value="article"'));
 await test('没有账号也能批量保存，去重后全库共享且不发送兑换请求',async()=>{
   const e=fixture([]);await e.api.refresh();
   assert.equal(e.node('gift-code-start').disabled,true);

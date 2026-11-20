@@ -81,6 +81,8 @@ export function activityTaskEnabled(settings, key) {
 }
 
 export function activityProductionEnabled(settings, source) {
+  if (source === 'petAdvance') return !settings || !!(settings.loop?.world && settings.pet?.enabled && settings.pet.advance);
+  if (source === 'petFeed') return !settings || !!(settings.loop?.world && settings.pet?.enabled && settings.pet.feed);
   if (source === 'merchant') return controlEnabled(settings, 'weekOrder.enabled');
   if (source === 'heroRaid') return settings?.heroRaid?.enabled !== false;
   return true;

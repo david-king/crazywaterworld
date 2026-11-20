@@ -191,12 +191,12 @@ try {
     }
   });
 
-  await check('原生委任额度为零只阻止接续，不解除城战预留', async () => {
+  await check('原生委任额度为零时直接接续并保留所选城战舰队', async () => {
     const f = warForgeFixture(), settings = warForgeSettings();
     f.config.tables.VipLevelCfg.data.find(row => row.level === 3).effects = [];
     const plan = await preview(f, settings);
-    assert.equal(plan.actions.length, 0);
-    assert(plan.fleets.every(fleet => /原生舰队委任尚未解锁/.test(fleet.reason)));
+    assert.deepEqual(plan.actions.map(step => step.buildingId), ['1远征船', '2远征船']);
+    assert.deepEqual(plan.nativeOffFleetIds, []);
     assert.deepEqual(plan.reservedFleetIds, ['1远征船', '2远征船']);
   });
 

@@ -307,7 +307,7 @@ export const DAILY_DRIVERS = {
   1014: { id: 1014, title: '累计请求帮助', probes: [], evaluate: lockedReason('联盟求助') },
   1015: { id: 1015, title: '城战获得功勋', probes: [], evaluate: automationReason('城战接续（20:00-21:00 限时）', '世界与挑战') },
   1016: { id: 1016, title: '博物馆探险', probes: [], evaluate: automationReason('派遣博物馆探险队', '博物馆') },
-  1017: { id: 1017, title: '参与积分赛', probes: [['LeagueInfoRequest', {}]], evaluate: lockedReason('跨服积分赛') },
+  1017: { id: 1017, title: '参与积分赛', probes: [], evaluate: automationReason('积分赛每日挑战', '日常与活动 → 积分赛') },
 };
 
 function automationReason(label, group = '联盟') {
@@ -429,7 +429,7 @@ async function sendAction(client, protocol, action, timeout) {
 // claimRewards 走的是「收尾」：驱动动作发完服务端才更新完成数，所以这里重新问一次
 // DailyTaskInfoResponse，先把达标任务的奖励领了（奖励里的活跃度会把活跃度顶上去），
 // 再领活跃度宝箱。少了这一步，任务做完了奖励还挂在服务端上。
-export async function runDailies(client, protocol, survey, { allowMutate = false, allowPaid = false, claimRewards = true, config = null, timeout = 15000, onStep, allowAction = () => true, settings = null, beforeAction, afterAction, cancelAction } = {}) {
+export async function runDailies(client, protocol, survey, { allowMutate = false, allowPaid = false, claimRewards = true, config = null, timeout = 15000, onStep, allowAction = () => true, settings = null, getSettings = () => settings, beforeAction, afterAction, cancelAction } = {}) {
   if (!allowMutate) throw new Error('完成日常会改变账号状态，需要 --yes');
   const results = [];
   if (settings && !settings.dailies.enabled) return results;
@@ -474,7 +474,7 @@ export async function runDailies(client, protocol, survey, { allowMutate = false
           }
           body = sweepResult?.body;
         } else if (action.request === 'ArenaChallengeRequest' && typeof arenaDailyDriver.run === 'function') {
-          const arenaResult = await arenaDailyDriver.run({ client, protocol, action, timeout, allowAction, performWrite });
+          const arenaResult = await arenaDailyDriver.run({ client, protocol, action, timeout, allowAction, getSettings, performWrite });
           if (arenaResult?.skipped) {
             await cancelAction?.(action, ticket, { notSent: !writeAttempted, error: new Error(arenaResult.reason) });
             const outcome = { id: entry.task.id, title: entry.task.title, request: action.request, note: action.note, skipped: true, reason: arenaResult.reason };

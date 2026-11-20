@@ -21,7 +21,12 @@ export function giftCodesPage() {
       <div className="bar gift-redeem-actions"><Button id="gift-code-start" disabled>开始兑换</Button><span id="gift-code-state" role="status" aria-live="polite" /></div>
     </Panel>
     <Panel title="共享礼包码库">
-      <div className="bar gift-library-toolbar"><Button type="button" variant="outline" size="sm" id="gift-load-initial">载入未兑换码</Button><Button type="button" variant="outline" size="sm" id="gift-batch-add" aria-haspopup="dialog" aria-controls="gift-batch-dialog">批量新增</Button><label><input id="gift-show-processed" type="checkbox" /> 显示已处理</label></div>
+      <div className="bar gift-library-toolbar">
+        <Button type="button" variant="outline" size="sm" id="gift-load-initial">载入未兑换码</Button>
+        <Button type="button" variant="outline" size="sm" id="gift-batch-add" aria-haspopup="dialog" aria-controls="gift-batch-dialog">批量新增</Button>
+        <Button type="button" variant="outline" size="sm" id="gift-channel-show" aria-haspopup="dialog" aria-controls="gift-channel-list-dialog">渠道列表</Button>
+        <label><input id="gift-show-processed" type="checkbox" /> 显示已处理</label>
+      </div>
       <p id="gift-code-initial-note" className="dim" role="status" />
       <div className="gift-library-table"><table><thead><tr><th scope="col">礼包码</th><th scope="col">可用状态</th><th scope="col">到期日期（北京时间）</th></tr></thead><tbody id="gift-code-library-rows" /></table></div>
     </Panel>
@@ -38,6 +43,40 @@ export function giftCodesPage() {
       <div className="overflow-auto table-stack"><table><thead><tr>{['礼包码','状态','结果','时间','操作'].map(title=><th scope="col" key={title}>{title}</th>)}</tr></thead><tbody id="gift-code-history" /></table></div>
       <div className="bar gift-record-pagination"><label htmlFor="gift-page-size">每页</label><select id="gift-page-size" defaultValue="10">{[10,20,50,100].map(size=><option key={size} value={size}>{size} 条</option>)}</select><Button variant="outline" id="gift-prev" disabled>上一页</Button><span id="gift-page" role="status" /><Button variant="outline" id="gift-next" disabled>下一页</Button></div>
     </Panel>
+    <dialog id="gift-channel-list-dialog" aria-labelledby="gift-channels-title">
+      <div className="gift-channel-list-heading">
+        <DialogTitle id="gift-channels-title">渠道列表</DialogTitle>
+        <Button type="button" size="sm" id="gift-channel-add" aria-haspopup="dialog" aria-controls="gift-channel-dialog"><Plus aria-hidden="true" />新增</Button>
+        <Button type="button" variant="ghost" size="icon" id="gift-channel-close" aria-label="关闭渠道列表"><X aria-hidden="true" /></Button>
+      </div>
+      <div className="gift-channel-table">
+        <table aria-labelledby="gift-channels-title">
+          <thead><tr><th scope="col">渠道名称</th><th scope="col">最近一次同步</th><th scope="col">操作</th></tr></thead>
+          <tbody id="gift-channel-list" />
+        </table>
+      </div>
+      <div id="gift-channel-errors" className="dim" />
+      <div id="gift-channel-status" className="dim" role="status" />
+    </dialog>
+    <dialog id="gift-channel-dialog" aria-labelledby="gift-channel-title">
+      <DialogHeader><DialogTitle id="gift-channel-title">添加渠道</DialogTitle></DialogHeader>
+      <div className="gift-batch-fields">
+        <label htmlFor="gift-channel-name">渠道名称</label><Input id="gift-channel-name" maxLength={80} />
+        <label htmlFor="gift-channel-url">渠道网址</label><Input id="gift-channel-url" type="url" maxLength={4096} placeholder="https://…" />
+        <label htmlFor="gift-channel-mode">匹配内容</label>
+        <select id="gift-channel-mode">
+          <option value="text">网页正文</option><option value="raw">原始响应</option>
+        </select>
+        <label id="gift-channel-json-label" htmlFor="gift-channel-json" hidden>JSON 数组字段（选填）</label>
+        <Input id="gift-channel-json" maxLength={128} placeholder="留空匹配完整响应" hidden />
+        <label htmlFor="gift-channel-pattern">提取正则</label>
+        <textarea id="gift-channel-pattern" rows={4} maxLength={2000} spellCheck={false} aria-describedby="gift-channel-hint" />
+        <small id="gift-channel-hint" className="dim">直接填写表达式，默认全局、多行、Unicode 匹配。优先取名为 code 的捕获组，其次取第一组，无捕获组时取整段匹配。</small>
+        <div><Button id="gift-channel-preview" type="button" size="sm" variant="outline">预览提取</Button></div>
+        <output id="gift-channel-result" aria-live="polite" />
+      </div>
+      <DialogFooter><Button id="gift-channel-save" type="button">保存渠道</Button><Button id="gift-channel-cancel" type="button" variant="outline">取消</Button></DialogFooter>
+    </dialog>
     <dialog id="gift-batch-dialog" aria-labelledby="gift-batch-title">
       <DialogHeader><DialogTitle id="gift-batch-title">批量新增礼包码</DialogTitle></DialogHeader>
       <div className="gift-batch-fields"><label htmlFor="gift-batch-input">礼包码</label><textarea id="gift-batch-input" rows={8} maxLength={65536} placeholder="每行一个礼包码" />
@@ -140,13 +179,13 @@ export function activitiesPage() {
 
 export function manualPage() {
   return renderToStaticMarkup(<div className="grid gap-3">
-    <Panel title="海面" help="打开建筑一览时会读取工厂、农田和居民订单。点击工厂的「查看排产」可查看各生产格的情况。">
-      <div id="world-view" role="status" />
-      <div id="world-factories"></div>
-      <div id="world-orders"></div>
-    </Panel>
-    <Panel title="需求联合排产" help="按用户配置的需求优先级逐级优化齐套时间，上游材料继承对应优先级。共享原料和生产位统一安排，独立设施并行生产。结果显示分层工期、投料顺序、时长依据和阻塞原因。">
-      <div className="bar"><Button id="production-plan-refresh" variant="outline">计算联合排产</Button><span id="production-plan-status" className="dim" role="status">连接后可计算</span></div>
+    <div id="world-view" className="dim" role="status" aria-label="海面" />
+    <div id="world-factories" />
+    <div className="world-orders-panel"><Panel title="居民订单" help="材料已齐时可手动提交，结果见运行日志。「需」为订单需求，「缺」为仍欠的数量，「留」为库存中已预留或被本轮其他操作占用的数量。">
+      <div id="world-orders" />
+    </Panel></div>
+    <Panel title="智能排产规划" help="按需求优先级估算备齐时间。点击带箭头的产物可逐层查看原料，数量按从头制作所需的整批用量计算。计划仅供查看。">
+      <div className="bar"><Button id="production-plan-refresh" variant="outline">生成计划</Button><span id="production-plan-status" className="dim" role="status">连接账号后可生成计划</span></div>
       <div id="production-plan-result" aria-live="polite" />
     </Panel>
   </div>)
