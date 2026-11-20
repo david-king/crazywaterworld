@@ -162,8 +162,10 @@ function paintSiliconAction(action, body, footer) {
     message.setAttribute('role', 'status'); body.append(message); return;
   }
   if (quote.reason) body.append(el('p', 'warn', quote.reason));
-  const label = el('label', 'silicon-fleet-choice'), select = el('select');
-  label.append(el('span', 'dim', intent.kind === 'retreat' ? '撤回舰队' : '选择舰队'), select); body.append(label);
+  const field = el('div', 'silicon-fleet-choice'), picker = el('cw-select'), select = el('select');
+  const label = el('label', 'dim', intent.kind === 'retreat' ? '撤回舰队' : '选择舰队');
+  select.id = 'silicon-action-fleet'; label.htmlFor = select.id;
+  picker.append(select); field.append(label, picker); body.append(field);
   const stats = el('p', 'dim');
   for (const fleet of quote.fleets) {
     const option = el('option', '', fleet.name);

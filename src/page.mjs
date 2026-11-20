@@ -320,6 +320,7 @@ function closeModal() {
 function openConfirm(title, bodyNodes, onOk, okLabel = '确认') {
   $('m-title').textContent = title;
   $('m-ok').textContent = okLabel;
+  $('m-ok').disabled = false;
   const body = clear($('m-body'));
   for (const node of bodyNodes) body.appendChild(node);
   $('m-ok').onclick = async () => {
@@ -1565,6 +1566,83 @@ function factoryProduct(job, recipes, num = 1) {
   return planMaterialList([{ id: job.productId, name: job.name, icon: job.icon, num }], recipes);
 }
 
+const pendingFactoryStarts = new Set();
+
+function showFactoryStartState(key, message) {
+  for (const button of document.querySelectorAll('[data-factory-start]')) {
+    if (button.dataset.factoryStart === key) button.disabled = pendingFactoryStarts.has(key);
+  }
+  for (const status of document.querySelectorAll('[data-factory-start-status]')) {
+    if (status.dataset.factoryStartStatus === key) status.textContent = message;
+  }
+}
+
+function chooseFactoryProduct(factory, account, key) {
+  const available = () => current === account && account && !snapshot.paused && !disconnected.has(account) && !pendingFactoryStarts.has(key);
+  if (!available()) return;
+  const choices = el('div', 'factory-product-choices');
+  choices.setAttribute('role', 'radiogroup');
+  choices.setAttribute('aria-label', '选择产物');
+  const detail = el('div', 'factory-recipe-detail');
+  detail.setAttribute('aria-live', 'polite');
+  let selected = factory.manualProducts.find(product => !product.reason) || factory.manualProducts[0];
+  const select = product => {
+    selected = product;
+    clear(detail);
+    detail.appendChild(el('strong', null, product.name + ' ×1'));
+    detail.appendChild(el('span', 'dim', '基础耗时 ' + productionPlanDuration(product.seconds)));
+    if (product.inputs.length) {
+      const list = el('ul', 'factory-recipe-costs');
+      for (const input of product.inputs) {
+        const row = el('li');
+        row.append(el('span', null, input.name + ' ×' + input.num),
+          el('span', 'dim', input.owned == null ? '库存未同步' : '持有 ' + input.owned));
+        list.appendChild(row);
+      }
+      detail.appendChild(list);
+    } else detail.appendChild(el('span', 'dim', '无需原料'));
+    if (product.reason) detail.appendChild(el('strong', null, product.reason));
+    $('m-ok').disabled = !!product.reason;
+  };
+  let initialInput;
+  for (const product of factory.manualProducts) {
+    const label = el('label', 'factory-product-choice');
+    const input = el('input');
+    input.type = 'radio';
+    input.name = 'manual-factory-product';
+    input.value = product.productId;
+    input.checked = product === selected;
+    if (input.checked) initialInput = input;
+    input.onchange = () => { if (input.checked) select(product); };
+    label.append(input, iconEl(product.icon, 24, product.name), el('span', null, product.name));
+    choices.appendChild(label);
+  }
+  openConfirm((factory.displayName || factory.buildingId) + ' · 手动排产',
+    [choices, detail], async () => {
+      if (!available() || selected.reason) throw Error('账号或工厂状态已变化，请重新选择产物');
+      pendingFactoryStarts.add(key);
+      showFactoryStartState(key, '正在提交排产…');
+      let message;
+      try {
+        const result = await call('/api/world/production-start', { method: 'POST', body: JSON.stringify({
+          buildingId: factory.buildingId, productId: selected.productId, productionKey: selected.productionKey, confirm: true,
+        }) });
+        message = result.label;
+      } catch (error) {
+        message = error.message;
+        throw error;
+      } finally {
+        try { if (current === account) await refreshManualWorld(true); }
+        finally {
+          pendingFactoryStarts.delete(key);
+          if (current === account) showFactoryStartState(key, message);
+        }
+      }
+    }, '加入队列 ×1');
+  select(selected);
+  initialInput.focus();
+}
+
 function factoryProductionQueue(factory, recipes, accelerators) {
   const section = el('section', 'factory-game-section');
   section.appendChild(el('h3', null, '游戏生产格'));
@@ -1573,11 +1651,14 @@ function factoryProductionQueue(factory, recipes, accelerators) {
   const queue = el('div', 'factory-queue');
   queue.setAttribute('aria-label', (factory.displayName || factory.buildingId) + '游戏生产格');
   const capacity = Number.isInteger(factory.capacity) && factory.capacity > 0 ? factory.capacity : 6;
+  const account = current, key = JSON.stringify([account, factory.buildingId]);
+  const canChoose = known && factory.capacity > 0 && factory.autoEnabled === false && factory.manualProducts?.length > 0;
   let waiting = 0;
   for (let index = 0; index < capacity; index++) {
     const job = jobs[index];
-    const slot = el('div', 'factory-slot');
-    const header = el('div', 'factory-slot-header');
+    const actionable = !job && canChoose;
+    const slot = el(actionable ? 'button' : 'div', 'factory-slot');
+    const header = el('span', 'factory-slot-header');
     header.appendChild(el('span', 'dim', '格子 ' + (index + 1)));
     slot.appendChild(header);
     if (job) {
@@ -1605,11 +1686,28 @@ function factoryProductionQueue(factory, recipes, accelerators) {
       }
     } else {
       slot.classList.add('factory-empty');
-      slot.appendChild(el('span', 'factory-product dim', known ? '空闲' : '未同步'));
+      if (actionable) {
+        slot.type = 'button';
+        slot.dataset.factoryStart = key;
+        slot.setAttribute('aria-haspopup', 'dialog');
+        slot.setAttribute('aria-label', (factory.displayName || factory.buildingId) + '空闲格 ' + (index + 1) + '，选择产物加入队尾');
+        slot.disabled = pendingFactoryStarts.has(key) || !account || snapshot.paused || disconnected.has(account);
+        slot.onclick = () => chooseFactoryProduct(factory, account, key);
+      }
+      slot.appendChild(el('span', 'factory-product' + (actionable ? '' : ' dim'), actionable ? '＋ 排产' : known ? '空闲' : '未同步'));
     }
     queue.appendChild(slot);
   }
   section.appendChild(queue);
+  const status = el('p', 'factory-start-status dim');
+  status.dataset.factoryStartStatus = key;
+  status.setAttribute('role', 'status');
+  if (pendingFactoryStarts.has(key)) status.textContent = '正在提交排产…';
+  else if (!canChoose && known && jobs.length < capacity && factory.manualProducts) {
+    status.textContent = factory.autoEnabled ? '游戏自动生产中'
+      : !factory.capacity ? '生产格容量未同步' : '当前没有可手动排产的配方';
+  }
+  section.appendChild(status);
   if (jobs.length > capacity) {
     const overflow = jobs.slice(capacity).map(job => job.name || job.productId || '产物未同步');
     section.appendChild(el('p', 'dim', '游戏队列另外返回 ' + overflow.length + ' 项：' + overflow.join('、')));
@@ -2068,7 +2166,8 @@ async function readAccountCard(card) {
   } finally {
     if (card.readingProfile === request) {
       card.readingProfile = null;
-      if (card.isConnected && !$('tab-account').classList.contains('hidden')) renderAccounts();
+      const account = consoleStore.getState().accountsById[card.accountId];
+      if (account && card.isConnected && !$('tab-account').classList.contains('hidden')) renderAccountCard(card, account);
     }
   }
 }
@@ -2102,6 +2201,50 @@ function renderAccountResources(card, view, status) {
   res.replaceChildren(...entries.map(entry => cell(entry.icon, 15, entry.name, entry.amount == null ? '未取得' : fmt(entry.amount), false)));
 }
 
+function renderAccountCard(card, account) {
+  const selected = account.id === current;
+  const status = selected ? snapshot : account.status ?? {};
+  const { card: profile, overview } = consoleStore.getState().gameByAccount[account.id] ?? {};
+  const view = profile && (!overview || profile.readAt >= overview.readAt) ? profile : overview;
+  const seen = { ...account.lastSeen, ...view?.player };
+  const updated = when(view?.readAt || seen.at);
+  const world = account.hasSiblingRoles && account.loginWorldName && seen.worldName && seen.worldName !== account.loginWorldName
+    ? account.loginWorldName + '（现 ' + seen.worldName + '）' : seen.worldName || account.loginWorldName;
+  const fields = {
+    title: account.label || seen.nickname || account.title,
+    channel: accountChannel(account.source),
+    status: connectingAccounts.has(account.id) ? '连接中…' : connectionStatus(status),
+    role: seen.nickname || '待连接读取',
+    world: world || '待连接读取',
+    level: seen.level == null ? '—' : String(seen.level),
+    power: seen.power == null ? '—' : fmt(seen.power),
+    afk: formatAccountAfk(view?.afk) || (view ? '暂无数据' : '待连接读取'),
+    seen: updated ? (view && !status.connected ? '上次读取 ' : '更新于 ') + updated : '连接后更新角色资料',
+  };
+  for (const [name, value] of Object.entries(fields)) {
+    const field = card.querySelector('[data-account-field="' + name + '"]');
+    if (field.textContent !== value) field.textContent = value;
+  }
+  card.querySelector('[data-account-field="role"]').parentNode.hidden = fields.title === fields.role;
+  card.classList.toggle('on', selected);
+  card.querySelector('[data-account-field="current"]').hidden = !selected;
+  const badge = card.querySelector('[data-account-field="status"]');
+  badge.classList.remove('done', 'waiting', 'blocked');
+  badge.classList.add(connectionStatusKind(status, connectingAccounts.has(account.id)));
+  const select = card.querySelector('[data-account-action="select"]');
+  select.hidden = selected;
+  const loop = card.querySelector('[data-account-action="loop"]');
+  const running = status.looping || status.reconnecting;
+  loop.disabled = hostingActions.has(account.id) || !!status.loopStopping || (!running && account.id === current && loopAccount !== current);
+  loop.textContent = status.loopStopping ? '暂停中…' : hostingActions.has(account.id) ? '处理中…' : running ? '暂停挂机' : '开始挂机';
+  loop.title = running ? '停止此账号自动循环，保留游戏连接和手动操作' : '按此账号已保存的任务持续挂机，直到手动暂停';
+  if (account.hasSiblingRoles && status.paused && !loop.disabled) {
+    loop.textContent = '切换并托管';
+    loop.title = '先暂停同一账号的其他角色，再按本角色的配置开始托管';
+  }
+  renderAccountResources(card, view, status);
+}
+
 function renderAccounts() {
   $('export-accounts').disabled = !accounts.length;
   $('account-count').textContent = accounts.length + ' 个账号';
@@ -2119,52 +2262,11 @@ function renderAccounts() {
   const cards = new Map(Array.from(box.children).map(card => [card.accountId, card]));
   accounts.forEach((account, index) => {
     const card = cards.get(account.id) || createAccountCard(account.id);
-    const selected = account.id === current;
-    const status = selected ? snapshot : account.status ?? {};
-    const { card: profile, overview } = consoleStore.getState().gameByAccount[account.id] ?? {};
-    const view = profile && (!overview || profile.readAt >= overview.readAt) ? profile : overview;
-    const seen = { ...account.lastSeen, ...view?.player };
-    const updated = when(view?.readAt || seen.at);
-    const world = account.hasSiblingRoles && account.loginWorldName && seen.worldName && seen.worldName !== account.loginWorldName
-      ? account.loginWorldName + '（现 ' + seen.worldName + '）' : seen.worldName || account.loginWorldName;
-    const fields = {
-      title: account.label || seen.nickname || account.title,
-      channel: accountChannel(account.source),
-      status: connectingAccounts.has(account.id) ? '连接中…' : connectionStatus(status),
-      role: seen.nickname || '待连接读取',
-      world: world || '待连接读取',
-      level: seen.level == null ? '—' : String(seen.level),
-      power: seen.power == null ? '—' : fmt(seen.power),
-      afk: formatAccountAfk(view?.afk) || (view ? '暂无数据' : '待连接读取'),
-      seen: updated ? (view && !status.connected ? '上次读取 ' : '更新于 ') + updated : '连接后更新角色资料',
-    };
-    for (const [name, value] of Object.entries(fields)) {
-      const field = card.querySelector('[data-account-field="' + name + '"]');
-      if (field.textContent !== value) field.textContent = value;
-    }
-    card.querySelector('[data-account-field="role"]').parentNode.hidden = fields.title === fields.role;
-    card.classList.toggle('on', selected);
-    card.querySelector('[data-account-field="current"]').hidden = !selected;
-    const badge = card.querySelector('[data-account-field="status"]');
-    badge.classList.remove('done', 'waiting', 'blocked');
-    badge.classList.add(connectionStatusKind(status, connectingAccounts.has(account.id)));
-    const select = card.querySelector('[data-account-action="select"]');
-    select.hidden = selected;
-    const loop = card.querySelector('[data-account-action="loop"]');
-    const running = status.looping || status.reconnecting;
-    loop.disabled = hostingActions.has(account.id) || !!status.loopStopping || (!running && account.id === current && loopAccount !== current);
-    loop.textContent = status.loopStopping ? '暂停中…' : hostingActions.has(account.id) ? '处理中…' : running ? '暂停挂机' : '开始挂机';
-    loop.title = running ? '停止此账号自动循环，保留游戏连接和手动操作' : '按此账号已保存的任务持续挂机，直到手动暂停';
-    if (account.hasSiblingRoles && status.paused && !loop.disabled) {
-      loop.textContent = '切换并托管';
-      loop.title = '先暂停同一账号的其他角色，再按本角色的配置开始托管';
-    }
+    renderAccountCard(card, account);
     if (box.children[index] !== card) box.insertBefore(card, box.children[index] || null);
-    renderAccountResources(card, view, status);
+    cards.delete(account.id);
   });
-  for (const [id, card] of cards) {
-    if (!accounts.some(account => account.id === id)) card.remove();
-  }
+  for (const card of cards.values()) card.remove();
 }
 
 let worldManager = null;

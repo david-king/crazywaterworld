@@ -376,12 +376,13 @@ try {
   Object.defineProperty(game, 'serverClockOffsetMs', { get: () => fixtureGame.client.serverClockOffsetMs });
   Object.assign(game, { connected: true, festivals: fixtureGame.client.festivals, stop() { this.connected = false; } });
   session.client = game;
-  session.player = { level: 20 };
+  session.player = { level: 20, vip: { vipLevel: 2, dailyReward: [] } };
   const savedTasks = { ...session.loop.tasks };
+  const reads = [];
   let block, kills = 0;
   game.request = async (name, body) => {
+    reads.push(name);
     if (name === 'WeekInfoRequest') return { activityTime: [] };
-    if (name === 'FishEncyclopediaRequest') return {};
     if (name === 'EvilExpelInfoRequest') {
       if (block) { block.enter.resolve(); await bounded(block.release.promise); }
       return { alive: kills ? 0 : 1, killTotal: kills, claimed: 0 };
@@ -393,7 +394,9 @@ try {
   const view = await request('activities');
   assert.equal(view.status, 200);
   assert.equal(view.data.activities.filter(row => row.id.startsWith('linkage:')).length, 6);
-  assert(view.data.eventTasks.some(row => row.key === 'fishBook'));
+  assert(!view.data.eventTasks.some(row => ['fishBook', 'vipDaily', 'vipDailyGift'].includes(row.key)));
+  assert(!reads.includes('FishEncyclopediaRequest'), '刷新活动列表无需读取钓鱼图鉴');
+  assert(!Object.hasOwn(view.data.status, 'vip'));
   const payload = { activityId: 'linkage:101:30', taskKey: 'evilExpel', confirm: true };
   assert.equal((await request('activities/run', { ...payload, confirm: false })).status, 400);
   assert.equal(kills, 0);

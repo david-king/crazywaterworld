@@ -48,6 +48,10 @@ export function stagePanel() {
         <Button id="pirate-manual-once" disabled>挑战一次</Button><Button id="pirate-advance-start" variant="outline" disabled>开始连续挑战</Button><Button id="pirate-advance-stop" variant="outline" disabled>停止挑战</Button>
       </div>
       <p id="pirate-advance-state" role="status" hidden />
+      <details id="pirate-details">
+        <summary>舰队编队、首杀奖励与战报</summary>
+        <div id="pirate-board-view" className="pirate-board" aria-live="polite" />
+      </details>
     </CardContent></Card>
     </div>
   )

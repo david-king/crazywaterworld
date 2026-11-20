@@ -96,7 +96,7 @@ export async function confirmFactoryProductionBeforeHarvest(client, protocol, bu
 // keep its writes serial, then reconcile it once against queue + finished stock.
 export async function runFactoryProductionBatch(client, protocol, steps, {
   config, player, settings = null, getSettings, enabled = () => true,
-  beforeStep, afterStep, cancelStep, window = 400, onStep, checkStep,
+  beforeStep, afterStep, cancelStep, window = 400, onStep, checkStep, checkSnapshot,
 } = {}) {
   if (!Array.isArray(steps) || !steps.length) return { results: [] };
   const results = [], attemptedEntries = new Set(), current = () => getSettings?.() ?? settings;
@@ -167,6 +167,7 @@ export async function runFactoryProductionBatch(client, protocol, steps, {
         || [...reserves].some(([id, amount]) => resourceReserve(current(), id) > amount)) throw new AutomationSkip('生产设置已变化，等待重新核对');
     };
     for (const step of selected) await check(step);
+    if (checkSnapshot) { await checkSnapshot(snapshot.building); ensureLive(); }
     batch = { attempted: [], sealed: false };
     batch.operation = factoryProductionOperation(water, buildingId, batch);
     batchStep = { ...selected[0], costs: costsOf(selected), factoryBatch: batch, label: (selected[0].displayFactory || buildingId) + '连续排产' };
@@ -207,7 +208,7 @@ export async function runFactoryProductionBatch(client, protocol, steps, {
         await check(step);
         pending.set(lock, batch);
         batch.attempted.push({ body: { ...step.body }, costs: structuredClone(step.costs ?? []) }); attempted = true;
-        const sent = await client.sendWatch(step.request, step.body, { window });
+        const sent = await client.sendWatch(step.request, step.body, { window, beforeSend: ensureLive });
         const entry = { step, ok: false, status: 'unknown', sent, reason: '批次已发送，等待统一核对' };
         results.push(entry); attemptedEntries.add(entry);
       } catch (error) {

@@ -216,8 +216,8 @@ function reconcile(snapshot, ledger, onStep, enabled = () => true) {
   reconcileNativeForge(snapshot, ledger);
   // 领取记录先核对。明确看到工厂批次结束且出现新UID，才释放领取与制作的记录。
   for (const [key, record] of Object.entries(ledger.keyRecords())) {
-    if (!enabled()) return;
     if (!key.startsWith('forgeClaim:' + snapshot.worldId + ':') || !ownsRecord(record, snapshot) || record.details?.kind !== 'forgeClaim') continue;
+    if (!enabled()) return;
     const product = observedProduct(record.details, snapshot);
     if (!product) continue;
     const parent = keyOf(snapshot, record.details.buildingId, ledger.keyRecords());
@@ -226,10 +226,10 @@ function reconcile(snapshot, ledger, onStep, enabled = () => true) {
     onStep?.({ step: { kind: 'forgeComplete', label: record.details.buildingId + '锻造产出已领取入库' }, ok: true, status: 'completed', note: product.equipId + ' · ' + product.star + '星' });
   }
   for (const [key, record] of Object.entries(ledger.keyRecords())) {
-    if (!enabled()) return;
     if (!key.startsWith('forge:' + snapshot.worldId + ':') || !ownsRecord(record, snapshot)) continue;
     let data = record.details;
     if (data?.kind !== 'forgeStart' || !integer(data.makeId, 1) || !integer(data.beforeFinishTime) || !Array.isArray(data.beforeUids)) continue;
+    if (!enabled()) return;
     const building = snapshot.buildings.find(row => row.buildingId === data.buildingId), making = building?.equipMaking;
     // A confirmed start has already consumed its materials and gold. Manual speed-ups and new
     // batches can change every queue field, so follow the current factory state.

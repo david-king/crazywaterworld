@@ -64,7 +64,16 @@ try {
     assert.equal(await detail.locator('option[value="2远征船"]').isDisabled(), false);
     assert.deepEqual(await geometry(), initial, '选队确认与查看详情时布局一致');
     const beforeCancel = f.client.writes.length; await detail.getByRole('button', { name: '返回' }).click(); assert.equal(f.client.writes.length, beforeCancel);
-    await open(1, '派遣采集'); await ready(); await detail.getByLabel('选择舰队').selectOption('3远征船');
+    await open(1, '派遣采集'); await ready();
+    const fleetPicker = detail.getByRole('combobox', { name: '选择舰队' });
+    const activate = control => width <= 600 ? control.tap() : control.click();
+    await activate(fleetPicker);
+    const menu = page.getByRole('listbox');
+    assert.equal(await menu.getByRole('option', { name: '1号舰队' }).isDisabled(), true);
+    assert.equal(await menu.getByRole('option', { name: '2号舰队' }).getAttribute('data-state'), 'checked');
+    await activate(menu.getByRole('option', { name: '3号舰队' }));
+    await menu.waitFor({ state: 'hidden' });
+    assert.match(await fleetPicker.textContent(), /3号舰队/);
     assert.equal(await detail.evaluate(node => node.scrollWidth > node.clientWidth + 1), false);
     await detail.screenshot({ path: path.join(output, 'dispatch-' + name + '.png') });
     await detail.getByRole('button', { name: '确认派遣' }).click(); await settled();
@@ -74,6 +83,8 @@ try {
     assert.deepEqual(await geometry(), initial, '派遣后的刷新不移动底部操作栏');
     assert.match(await page.locator('.silicon-fleet').nth(2).textContent(), /前往硅矿/);
     await open(2, '抢占矿位'); await ready();
+    assert.equal(await slot(2).getAttribute('aria-pressed'), 'true');
+    assert.equal(await slot(2).evaluate(node => getComputedStyle(node).backgroundColor === getComputedStyle(node.closest('.silicon-mine')).borderTopColor), true, '选中已占矿位应使用矿区等级色');
     assert.match(await detail.textContent(), /抢占目标 · 测试占领者/);
     assert.match(await detail.textContent(), new RegExp('今日共享抢占剩余 ' + (f.state.maxFightTimes - f.state.fightTimes) + ' 次'));
     assert.deepEqual(await geometry(), initial, '抢占确认栏与空位操作栏对齐');
@@ -94,7 +105,7 @@ try {
     assert.match(await slot(1).textContent(), /空闲/);
     f.returnFleet('2远征船');
     await detail.getByRole('button', { name: '刷新舰队' }).click(); await page.waitForFunction(() => !siliconLoading);
-    assert.equal(await detail.getByLabel('选择舰队').inputValue(), '3远征船');
+    assert.match(await fleetPicker.textContent(), /3号舰队/);
     assert.equal(await detail.locator('option[value="2远征船"]').isDisabled(), false);
     f.enemy(3, '新占领者');
     await page.locator('#silicon-refresh').click(); await settled();
@@ -102,7 +113,9 @@ try {
     f.state.positions[5000] = f.state.positions[5000].filter(row => row.index !== 3);
     assert.equal(f.client.writes.length, writes, '重载、自动和手动刷新都不重复发送');
     await page.locator('.silicon-fleet').nth(0).getByRole('button', { name: '撤回舰队' }).click(); await ready();
-    assert.equal(await detail.getByLabel('撤回舰队').inputValue(), '1远征船');
+    const retreatPicker = detail.getByRole('combobox', { name: '撤回舰队' });
+    assert.match(await retreatPicker.textContent(), /1号舰队/);
+    assert.equal(await retreatPicker.isDisabled(), true);
     await detail.screenshot({ path: path.join(output, 'retreat-' + name + '.png') });
     const fuel = f.state.fuel; await detail.getByRole('button', { name: '确认撤回' }).click(); await settled();
     assert.match(await detail.textContent(), /撤回已确认/); assert.equal(f.state.fuel, fuel); assert.equal(f.client.writes.at(-1).name, 'ChipMineRetreatRequest');

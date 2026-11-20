@@ -118,9 +118,6 @@ function activityRows() {
   if (current && !rows.some(isGuildShipActivity)) {
     rows.push({ id: 'guildShip', name: '联盟商船', kind: 'limited', settingsOnly: true, taskKeys: [] });
   }
-  if (activitiesData && (!activitiesData.catalogOnly || activitiesData.fish)) rows.push({ id: 'fish', name: '钓鱼图鉴', kind: 'permanent', taskKeys: ['fishBook'] });
-  if (activitiesData?.vipLevel > 0) rows.push({ id: 'vip', name: 'VIP 每日奖励', kind: 'permanent', taskKeys: ['vipDaily'] });
-  rows.push({ id: 'pirates', name: '海盗首杀', kind: 'permanent', taskKeys: !activitiesData ? [] : activitiesData.status?.pirates?.rankOpen ? ['campaignReports', 'openRankRewards'] : ['campaignReports'] });
   const order = Object.keys(activityKinds);
   const states = ['active', 'upcoming', 'ended', 'unknown'];
   return rows.sort((a, b) => states.indexOf(activityLifecycle(a)) - states.indexOf(activityLifecycle(b))
@@ -258,7 +255,6 @@ function selectActivity(id, focus = false) {
   const tab = $('activity-tabs').querySelector('[aria-selected=true]');
   if (focus) tab?.focus();
   tab?.scrollIntoView({ block: 'nearest', inline: 'nearest' });
-  refreshProgression();
 }
 
 function renderActivityDetail() {
@@ -284,7 +280,6 @@ function renderActivityDetail() {
   $('activity-end').textContent = row.settingsOnly ? (activitiesData && !activitiesData.catalogOnly ? '当前未开放，可预先配置' : '连接后读取活动状态，可预先配置')
     : row.kind === 'permanent' ? '长期开放' : '开始 ' + activityDate(row.startTime) + ' · 结束 ' + activityDate(row.endTime) + '（北京时间）';
   if (row.rewardEndTime > row.endTime && row.endTime > 0) $('activity-end').textContent += ' · 奖励展示截至 ' + activityDate(row.rewardEndTime);
-  $('activity-pirates').hidden = row.id !== 'pirates';
   if (!keepSettings) {
     if (row.weekType === 5) renderMerchantSettings(box);
     if (isHeroRaidActivity(row)) renderHeroRaidSettings(box);
@@ -321,11 +316,6 @@ function renderActivityDetail() {
     const lottery = activitiesData.lottery;
     box.appendChild(el('p', null, lottery ? '累计抽奖 ' + lottery.times + ' 次 · ' + (lottery.required == null ? '全部档位已领完' : '下一档 ' + lottery.required + ' 次' + (lottery.ready ? '（可领取）' : '')) : activitiesData.lotteryError ? '抽奖进度读取失败，详情见运行日志' : '暂无抽奖进度'));
   }
-  if (row.id === 'fish') {
-    const fish = activitiesData.fish;
-    box.appendChild(el('p', null, fish ? '已收集 ' + fish.names.length + '/' + fish.total + ' 种 · ' + (fish.next ? '下一档 ' + fish.score + '/' + fish.required + ' 分' : '档位已领完') : '钓鱼图鉴读取失败，详情见运行日志'));
-    if (fish?.names.length) box.appendChild(el('p', 'dim', fish.names.join('、')));
-  }
   if (row.taskKeys?.includes('newbieLogin')) {
     const newbie = activitiesData.newbie;
     if (newbie) box.appendChild(el('p', null, '已登录 ' + newbie.loginDays + ' 天 · ' + (newbie.available.length ? '可领第 ' + newbie.available.join('、') + ' 天奖励' : '当前奖励已领完')));
@@ -336,7 +326,7 @@ function renderActivityDetail() {
     if (row.weekType === 5 && task.key === 'weekOrderSubmit') continue;
     renderActivityTask(box, row, task);
   }
-  if (!tasks.length && row.weekType !== 5 && row.id !== 'pirates' && !isHeroRaidActivity(row) && !isSeaMerchantActivity(row) && !isGuildShipActivity(row) && !row.automation) box.appendChild(el('p', 'dim', '当前活动暂未接入单次操作，可在游戏内参与。'));
+  if (!tasks.length && row.weekType !== 5 && !isHeroRaidActivity(row) && !isSeaMerchantActivity(row) && !isGuildShipActivity(row) && !row.automation) box.appendChild(el('p', 'dim', '当前活动暂未接入单次操作，可在游戏内参与。'));
   if (row.weekType === 5) renderActivityOrder();
 }
 
@@ -352,7 +342,6 @@ function renderActivityTask(box, row, task) {
     weekPass: '领取已完成任务的积分和已达标的战令奖励。',
     weekGift: '领取本期可用的免费礼包。',
     weekTimes: '领取已达标的累计抽奖次数奖励，不进行抽奖。',
-    fishBook: '领取当前已达标的钓鱼图鉴奖励。',
     newbieLogin: '领取当前已解锁的登录奖励。',
     festivalSign: '只签当天，免费。错过的日子要花钻石补签，本工具不会补签。',
     festivalActive: '领取活跃积分已达标的档位。',
@@ -369,8 +358,6 @@ function renderActivityTask(box, row, task) {
     weekUniqueFree: '领取本期免费礼包，翻牌需要手动选择目标，不自动进行。',
     weekOrderFinal: '全部档位完成后领取最终奖励。',
     weekOrderSubmit: '材料备齐后提交一次商人订单。',
-    vipDaily: '领取已达到 VIP 等级的每日免费奖励。',
-    campaignReports: '领取海盗战斗等战报奖励。',
     openRankRewards: '领取各个开服冲榜已达标的积分奖励。排名奖励由游戏在活动结束后发放。',
   };
   if (descriptions[task.key]) item.appendChild(el('p', 'dim', descriptions[task.key]));
@@ -756,7 +743,7 @@ function renderGuildShipSettings(box) {
   renderActivitySettingsFields(box, { data: guildShipSettingsData, fields: guildShipActivityFields,
     saving: savingGuildShipSettings.has(account), statusText: guildShipSettingsStatus,
     prefix: 'guild-ship', dataset: 'guildShipSetting', save: saveGuildShipSetting, title: '联盟商船',
-    note: '红船缺料备料需开启工厂生产，不购买材料。' });
+    note: '钻石补货需开启全局自动钻石消耗，并设置商船每日上限。' });
 }
 
 function renderActivitySettingsFields(box, { data, fields, saving, statusText, prefix, dataset, save, title, note }) {
@@ -998,7 +985,7 @@ async function refreshActivities() {
     setConsoleValue('activities', 'selectedActivity', activitySelections.get(account) || null);
     clear($('activity-tabs'));
     $('activity-panel').hidden = true;
-    for (const id of ['activities-list', 'activities-order', 'pirate-board-view']) clear($(id));
+    for (const id of ['activities-list', 'activities-order']) clear($(id));
     setConsoleValue('activities', 'merchantSettingsOwner', account);
     setConsoleValue('activities', 'merchantSettingsData', null);
     setConsoleValue('activities', 'merchantSettingsStatus', '');
@@ -1093,7 +1080,6 @@ async function refreshActivities() {
     status.textContent = [data.catalogError, ...(data.notes || [])].filter(Boolean).join(' ')
       || (data.activities.length ? '' : '当前没有已下发的限时或周期活动');
     render(false);
-    if (selectedActivity === 'pirates') refreshProgression('pirate-board');
     const boundaries = data.activities.flatMap(row => [row.startTime, row.endTime]).filter(time => time > activityNow());
     if (boundaries.length) activityExpiryTimer = setTimeout(() => {
       renderActivityTabs();
@@ -1110,7 +1096,6 @@ async function refreshActivities() {
     }
     status.textContent = activitiesData?.activities.length ? '活动同步失败，当前展示已保存的活动时间。请刷新重试。' : '活动读取失败，请刷新重试。详情见运行日志';
     render(true);
-    if (selectedActivity === 'pirates') refreshProgression('pirate-board');
   } finally {
     await settingsReady;
   }

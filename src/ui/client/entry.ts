@@ -1,6 +1,33 @@
 import { getConsoleStore } from "./lib/console-store";
 import type { LoginSettingsMount } from "./pages/login-settings";
 
+customElements.define(
+  "cw-select",
+  class extends HTMLElement {
+    private unmount?: () => void;
+
+    async connectedCallback() {
+      const source = this.querySelector("select");
+      if (!source) return;
+      try {
+        const { mountChoiceSelect } = await import(
+          "./components/choice-select"
+        );
+        if (this.isConnected && !this.unmount)
+          this.unmount = mountChoiceSelect(this, source);
+      } catch {
+        // The original form control stays usable if a client chunk cannot load.
+        source.hidden = false;
+      }
+    }
+
+    disconnectedCallback() {
+      this.unmount?.();
+      this.unmount = undefined;
+    }
+  },
+);
+
 const dailyHost = document.getElementById("daily-tasks-root");
 if (dailyHost) {
   const host = dailyHost;

@@ -320,6 +320,17 @@ summary.plan-material-label::after { width:12px; height:12px }
 .factory-slot > [data-production-speed-until] { justify-self:start }
 .production-speed-controls { display:flex; flex-wrap:wrap; align-items:center; gap:4px 8px }
 .factory-empty { border-style:dashed; background:transparent }
+button.factory-empty { text-align:start; cursor:pointer }
+button.factory-empty:is(:hover,:focus-visible) { border-color:var(--ring); background:var(--accent) }
+button.factory-empty:disabled { cursor:wait; opacity:.6 }
+.factory-start-status { margin:6px 0 0; font-size:12px }
+.factory-start-status:empty { margin:0 }
+.factory-product-choices { display:grid; grid-template-columns:repeat(auto-fit,minmax(min(100%,8rem),1fr)); gap:6px }
+.factory-product-choice { display:flex; align-items:center; gap:6px; padding:8px; border:1px solid var(--border); border-radius:6px; cursor:pointer }
+.factory-product-choice:has(:checked) { border-color:var(--ring); background:var(--accent) }
+.factory-recipe-detail { display:grid; gap:4px; padding-top:10px; border-top:1px solid var(--border) }
+.factory-recipe-costs { margin:0; padding:0; list-style:none }
+.factory-recipe-costs li { display:flex; justify-content:space-between; gap:12px }
 .factory-current,.factory-current-product { display:flex; align-items:center; flex-wrap:wrap; gap:2px 8px; min-width:0 }
 .factory-current-product { align-items:baseline; column-gap:4px }
 .production-time { color:var(--muted-foreground); font-variant-numeric:tabular-nums; overflow-wrap:anywhere }

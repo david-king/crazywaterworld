@@ -80,7 +80,7 @@ import { iconThumb } from './art-thumbs.mjs';
 import { listWorlds, enterWorld, describeRole } from './worlds.mjs';
 import { collectState, summarize, formatState, ENTRY_QUERIES } from './game.mjs';
 import { claimRewards } from './claim-rewards.mjs';
-import { fishView, newbieView } from './collections.mjs';
+import { newbieView } from './collections.mjs';
 import { normalize } from './worlds.mjs';
 import { pirateTracker, pirateHuntOptions, startPirateHunt } from './pirates.mjs';
 import { activityEntries, activityView, runActivity, runWeekOrder } from './activities.mjs';
@@ -91,7 +91,7 @@ import { appointments } from './appointments.mjs';
 import { surveyDailies, runDailies, formatSurvey, canClaimDailyReward } from './dailies.mjs';
 import { dailySingleState, addDailyOptions, runDailySingle } from './daily-single.mjs';
 import { surveyTasks, runTasks, formatTaskPlan, selectTaskSettings } from './tasks.mjs';
-import { makeTypeResolver, displayBuilding, weekFactoryInfo, surveyWorld, inventoryStockRows, planWorld, runWorldRound, speedUpProduction, SPEED_UP_ITEM, submitResidentOrder, rerollResidentOrder, watchResidentRefreshes, formatWorldPlan, formatFieldReport, loadMapAsset } from './world.mjs';
+import { makeTypeResolver, displayBuilding, weekFactoryInfo, surveyWorld, inventoryStockRows, factoryIncomingStock, manualFactoryProducts, startManualFactoryProduction, planWorld, runWorldRound, speedUpProduction, SPEED_UP_ITEM, submitResidentOrder, rerollResidentOrder, watchResidentRefreshes, formatWorldPlan, formatFieldReport, loadMapAsset } from './world.mjs';
 import { runLoop, formatLoopRound, formatLoopStep } from './loop.mjs';
 import { foldBusinessEntry, createOperationJournal } from './business-journal.mjs';
 import { upgradeChanges } from './building-upgrade-log.mjs';
@@ -868,6 +868,7 @@ export function createConsole({ host = '127.0.0.1', port = 17321, onLog, recover
   function assertSettingsReady(session) {
     const entry = refreshSessionSettings(session);
     if (entry.recovery?.required) throw Object.assign(new Error(entry.recovery.message), { code: 'SETTINGS_RECOVERY_REQUIRED' });
+    return entry;
   }
 
   function settingsFileChanged() {
@@ -878,11 +879,15 @@ export function createConsole({ host = '127.0.0.1', port = 17321, onLog, recover
     }
   }
 
-  function settingsView(session) {
-    const saved = refreshSessionSettings(session, true);
-    const settings = saved.revision ? saved.settings : session.preferences ?? settingsFromNative(session.loop.tasks, {
+  function effectiveSettings(session, saved = refreshSessionSettings(session)) {
+    return saved.settings ?? settingsFromNative(session.loop.tasks, {
       rounds: session.loop.rounds, everySeconds: session.loop.everyMs / 1000,
     });
+  }
+
+  function settingsView(session) {
+    const saved = refreshSessionSettings(session, true);
+    const settings = effectiveSettings(session, saved);
     const baseRevision = createHash('sha256').update(JSON.stringify([session.loop.tasks, session.loop.rounds, session.loop.everyMs])).digest('hex');
     const availability = activityAvailability(session.client);
     // Keep the editor available while execution is blocked so obsolete choices can be repaired.
@@ -1084,7 +1089,7 @@ export function createConsole({ host = '127.0.0.1', port = 17321, onLog, recover
 
   function activityCatalogView(session, activities, catalogOnly = false) {
     const current = settingsView(session);
-    const keys = new Set(['fishBook', 'vipDaily', 'campaignReports', 'openRankRewards', ...activities.flatMap(row => row.taskKeys ?? [])]);
+    const keys = new Set(['campaignReports', 'openRankRewards', ...activities.flatMap(row => row.taskKeys ?? [])]);
     return {
       activities: activities.map(row => {
         const control = activityAutomationControl(row);
@@ -1315,7 +1320,7 @@ export function createConsole({ host = '127.0.0.1', port = 17321, onLog, recover
 
   function reconnectPolicy(session) {
     try {
-      const configured = settingsView(session).settings.login;
+      const configured = effectiveSettings(session).login;
       return { autoReconnect: configured?.autoReconnect === true, intervalSeconds: Number(configured?.intervalSeconds) || 900,
         jitterSeconds: Number(configured?.jitterSeconds) || 0, quietHours: configured?.quietHours === true,
         quietStart: configured?.quietStart ?? '02:00', quietEnd: configured?.quietEnd ?? '07:00',
@@ -1887,6 +1892,7 @@ export function createConsole({ host = '127.0.0.1', port = 17321, onLog, recover
     fields.totals=resourceFieldTotals(survey.resFields,fields.rows);
     const typeNames = new Map(config?.tables?.BuildingCfg?.data.map(row => [row.buildingType, row.name]));
     const timing = createProductionTiming({ config, ...survey.productionTiming, serverNow: survey.serverNow });
+    const incoming = factoryIncomingStock(survey.factories);
     const now = Date.now() / 1000;
     const result = {
       serverNow:survey.serverNow,
@@ -1942,6 +1948,7 @@ export function createConsole({ host = '127.0.0.1', port = 17321, onLog, recover
         return {
           buildingId: b.buildingId, displayName: displayBuilding(config, b), type: b.type, typeName: typeNames.get(b.type), level: b.level,
           queue: jobs.length, queueKnown, jobs, plannedJobs,
+          manualProducts: manualFactoryProducts(b, survey, config, incoming).map(product => ({ ...product, icon: materialIcon(product.productId) })),
           capacity: Number.isSafeInteger(survey.factorySlots) && survey.factorySlots > 0 ? survey.factorySlots : null,
           auto: b.factory.autoProductId ? displayMaterial(config, b.factory.autoProductId) : null,
           autoEnabled: !!b.factory.autoProductId && (survey.autoProduceForever || survey.autoProduceEndTime > survey.serverNow),
@@ -3702,12 +3709,9 @@ export function createConsole({ host = '127.0.0.1', port = 17321, onLog, recover
         const { account, session } = scoped_(parsed);
         const client = await ensureConnected(session, account);
         const view = await activityView(client, client.festivals, loadConfigSafe(), session.player);
-        view.vipLevel = session.player?.vip?.vipLevel ?? 0;
         view.compassSpinCount = session.preferences?.eventActions.compassDrawCount ?? session.loop.compassSpinCount;
         view.compassSpinEditable = !session.preferences;
         view.newbie = newbieView(client);
-        try { view.fish = await fishView(client, loadConfigSafe()); }
-        catch (error) { emit(session, 'error', '读取钓鱼图鉴失败：' + error.message); }
         if (view.order?.materials.length && !view.order.finished) {
           const config = loadConfigSafe();
           const typeOf = makeTypeResolver(config);
@@ -4091,7 +4095,9 @@ export function createConsole({ host = '127.0.0.1', port = 17321, onLog, recover
         json(await session.worldRead);
         return;
       }
-      if (route === 'POST /api/world/production-speed') {
+      if (route === 'POST /api/world/production-speed' || route === 'POST /api/world/production-start') {
+        const start = route.endsWith('/production-start');
+        const label = start ? '手动工厂排产' : '手动生产加速';
         const payload = jsonBody();
         needConfirm(payload);
         const { session } = scoped_(parsed);
@@ -4099,12 +4105,14 @@ export function createConsole({ host = '127.0.0.1', port = 17321, onLog, recover
         const enabled = () => client?.connected && session.client === client && session.player === player
           && session.generation === generation && !session.paused && !session.productionSyncRequired;
         const result = await enqueue(session, async () => {
-          if (!enabled()) throw new Error('请先连接并同步当前账号，再使用加速器');
-          const result = await speedUpProduction(client, protocolFor(client), payload, { player, enabled });
+          if (!enabled()) throw new Error('请先连接并同步当前账号，再' + (start ? '手动排产' : '使用加速器'));
+          const result = start
+            ? await startManualFactoryProduction(client, protocolFor(client), payload, { player, enabled, config: loadConfigSafe(), settings: session.preferences })
+            : await speedUpProduction(client, protocolFor(client), payload, { player, enabled });
           session.worldRead = null;
           emit(session, result.confirmed ? 'info' : 'warn', result.label, { worldUpdated: true });
           return result;
-        }, '手动生产加速');
+        }, label);
         json(result);
         return;
       }
@@ -4748,17 +4756,20 @@ export function createConsole({ host = '127.0.0.1', port = 17321, onLog, recover
   }
 
   function validateLoopStart(session, options = {}) {
-    assertSettingsReady(session);
-    const current = settingsView(session);
-    validateRuntimeSettings(current.settings, loadConfigSafe());
+    const settings = effectiveSettings(session, assertSettingsReady(session));
+    validateRuntimeSettings(settings, loadConfigSafe());
+    // 启动前确认该账号的额度账本可读，再更新托管状态。
+    const ledger = usageFor(session);
+    ledger.snapshot();
+    ledger.pendingCounters();
     // 网页开始/恢复挂机一律持续循环；兼容旧配置时不再继承有限轮数。
     // 显式 API 调用仍可指定轮数，供命令行和离线验收使用。
     const rounds = options.rounds ?? 0;
-    const everySeconds = options.everySeconds ?? current.settings.loop.everySeconds;
+    const everySeconds = options.everySeconds ?? settings.loop.everySeconds;
     if (!Number.isSafeInteger(rounds) || rounds < 0 || rounds > 100000) throw new Error('轮数必须是 0–100000 的整数');
     if (!Number.isSafeInteger(everySeconds) || everySeconds < 1 || everySeconds > 86400) throw new Error('间隔秒数需要为 1–86400 的整数');
     if (!Object.values(session.loop.tasks).some(Boolean) && !hasExtraWork(session.preferences) && !(session.preferences?.radar?.runEnabled !== false && session.preferences?.radar?.enabled) && !session.preferences?.worldBoss?.enabled && !treasureAutomationEnabled(session.preferences) && !cityWarEnabled(session.preferences) && !forgeEnabled(session.preferences) && !antiqueEnabled(session.preferences)) throw new Error('请至少启用一个自动项目');
-    return { current, rounds, everySeconds };
+    return { settings, rounds, everySeconds };
   }
 
   function startLoop(session, account, options = {}) {
@@ -4766,13 +4777,13 @@ export function createConsole({ host = '127.0.0.1', port = 17321, onLog, recover
     if (session.loginBlocked && !options.explicitLogin && !loginRecoveryActive(session)) throw new Error('账号在别处登录，请先恢复托管或重新开始挂机');
     const loop = session.loop;
     if (loop.running) throw new Error('这个账号的挂机已在运行');
-    const { current, rounds, everySeconds } = validateLoopStart(session, options);
+    const { settings, rounds, everySeconds } = validateLoopStart(session, options);
     // Persist only continuous runs for restart. Reserve this account before login awaits.
-    if (current.revision && (current.settings.loop.rounds !== rounds || current.settings.loop.everySeconds !== everySeconds)) {
-      const next = structuredClone(current.settings);
+    if (session.preferencesRevision && (settings.loop.rounds !== rounds || settings.loop.everySeconds !== everySeconds)) {
+      const next = structuredClone(settings);
       next.loop.rounds = rounds;
       next.loop.everySeconds = everySeconds;
-      adoptPreferences(session, saveAutomationSettings(session.id, next, { revision: current.revision }));
+      adoptPreferences(session, saveAutomationSettings(session.id, next, { revision: session.preferencesRevision }));
     }
     if (!loginRecoveryActive(session)) {
       if (options.explicitLogin || session.loginRecovery?.status !== 'connected') saveLoginRecovery(session, null);
@@ -4784,7 +4795,7 @@ export function createConsole({ host = '127.0.0.1', port = 17321, onLog, recover
     const { signal } = loop.controller;
     emit(session, 'info', `自动挂机开始，${rounds === 0 ? '持续运行' : '共 ' + rounds + ' 轮'}，每 ${everySeconds} 秒检查一次；关闭网页后继续运行，请保留启动窗口`);
     trace(session, 'automation-run', { startedAt: RUN_VERSION, settingsRevision: session.preferencesRevision,
-      rounds, everySeconds, tasks: loop.tasks, reconnect: reconnectPolicy(session), settings: settingsView(session).settings });
+      rounds, everySeconds, tasks: loop.tasks, reconnect: reconnectPolicy(session), settings: effectiveSettings(session) });
     let credentialFailed = false, recoveryAttempts = 0;
     loop.job = (async () => {
       try {
@@ -4993,7 +5004,7 @@ export function createConsole({ host = '127.0.0.1', port = 17321, onLog, recover
     const displayUsage=usageFor(session).snapshot();
     const observedReward = session.client?.connected ? treasureRewards.get(session.client) : null;
     const treasureReward = observedReward && observedReward.day === displayUsage.day ? observedReward.text : '今日奖励未同步';
-    const settings = settingsView(session).settings;
+    const settings = effectiveSettings(session);
     const connected = !!session.client?.connected;
     const maintenanceConfigured = fleetMaintenanceEnabled(settings);
     return {

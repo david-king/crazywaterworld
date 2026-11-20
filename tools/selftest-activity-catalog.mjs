@@ -40,7 +40,6 @@ function activityReadFixture() {
       if (name === 'WeekInfoRequest') return { activityTime: [4, 5].map(type => ({ type, period: 1, ...window() })) };
       if (name === 'AllItemRequest') return { items: [{ itemId: '周转盘币', num: state.coins }, { itemId: '木板', num: state.wood }] };
       if (name === 'WeekOrderInfoRequest') return { order: [{ id: '木板', num: 3 }], gotRwdId: state.gotRwdId, isGotFinal: state.isGotFinal };
-      if (name === 'CampaignReportsRequest') return { reports: [] };
       if (name === 'OpenRankInfoRequest') return { endTime: now + 60, progress: body.type * 10 };
       if (name === 'WeekLotteryInfoRequest') return { gotInfo: { times: 4 } };
       throw Error('未预期请求：' + name);
@@ -293,21 +292,22 @@ try {
     assert.equal(view.order, null);
   });
 
-  await test('单次活动快照复用订单、库存及剿匪冲榜，下一次刷新重新读取', async () => {
+  await test('活动快照复用订单和库存，刷新冲榜时只读一次剿匪榜并跳过战报', async () => {
     const fixture = activityReadFixture();
     const view = await fixture.read();
-    assert.equal(fixture.calls.length, 9, '转盘及商人快照从 13 次减少到 9 次游戏请求');
+    assert.equal(fixture.calls.length, 8);
+    assert.equal(fixture.count('CampaignReportsRequest'), 0);
     assert.equal(fixture.count('WeekOrderInfoRequest'), 1);
     assert.equal(fixture.count('AllItemRequest'), 1);
     assert.equal(fixture.count('OpenRankInfoRequest', 3), 1);
     assert.equal(view.order.ready, true);
     assert.equal(view.order.materials[0].owned, 3);
-    assert.match(view.status.pirates.lines[1], /剿匪冲榜 30 分/);
+    assert.equal(view.status.pirates, undefined);
     assert(view.status.openrank.lines.some(line => /剿匪冲榜 30 分/.test(line)));
     fixture.state.coins = 0;
     fixture.state.wood = 1;
     const refreshed = await fixture.read();
-    assert.equal(fixture.calls.length, 18);
+    assert.equal(fixture.calls.length, 16);
     assert.equal(fixture.count('WeekOrderInfoRequest'), 2);
     assert.equal(fixture.count('AllItemRequest'), 2);
     assert.equal(fixture.count('OpenRankInfoRequest', 3), 2);
@@ -325,7 +325,6 @@ try {
       const [name, type] = failure.split(':');
       assert.equal(fixture.count(name, type === undefined ? undefined : Number(type)), 1);
       if (name === 'OpenRankInfoRequest') {
-        assert.match(view.status.pirates.lines[0], /模拟读取失败/);
         assert.match(view.status.openrank.lines[0], /模拟读取失败/);
         assert.equal(view.order.ready, true);
       } else {
@@ -338,7 +337,7 @@ try {
       assert.equal(fixture.count(name, type === undefined ? undefined : Number(type)), 2);
       assert.equal(refreshed.order.ready, true);
       assert.equal(refreshed.orderError, undefined);
-      assert.match(refreshed.status.pirates.lines[1], /剿匪冲榜 30 分/);
+      assert(refreshed.status.openrank.lines.some(line => /剿匪冲榜 30 分/.test(line)));
     }
   });
 

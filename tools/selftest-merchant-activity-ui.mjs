@@ -351,7 +351,7 @@ await test('完整活动先返回时迟到目录不能降级实时状态', async
   f.state.respond = request => request.route === '/api/activities/catalog' ? catalog.promise : undefined;
   await f.api.refresh();
   assert.equal(f.node('activity-tabs').querySelector('[aria-selected=true]').dataset.activity, f.activities.activities[0].id,
-    '首次载入应选第一项当前活动，不沿用静态入口临时选中的海盗');
+    '首次载入应选第一项当前活动');
   const title = f.node('activity-title').textContent;
   catalog.resolve({ ...f.catalog, activities: [{ ...f.activities.activities[0], name: '迟到旧目录' }] });
   await flushAsync();
@@ -370,7 +370,8 @@ await test('不完整目录不覆盖记忆选择，加载中主动改选仍以�
     f.state.respond = request => request.route === '/api/activities' ? live.promise : undefined;
     const pending = f.api.refresh();
     await flushAsync();
-    assert.equal(f.node('activity-tabs').querySelector('[aria-selected=true]').dataset.activity, 'pirates');
+    assert.equal(f.node('activity-tabs').querySelector('[aria-selected=true]'), null);
+    assert.equal(f.node('activity-panel').hidden, true);
     if (changeSelection) f.api.selectHero();
     live.resolve(f.activities); await pending;
     assert.equal(f.node('activity-tabs').querySelector('[aria-selected=true]').dataset.activity,
@@ -844,6 +845,8 @@ await test('未开放配置入口默认收起，展开后可编辑且按账号�
   for (const state of ['connected', 'paused', 'notConnected', 'readFailed']) {
     const f = fixture();
     f.activities.activities = [];
+    Object.assign(f.activities, { vipLevel: 3, fish: { names: ['金枪鱼'] } });
+    Object.assign(f.catalog, { vipLevel: 3, fish: { names: [] } });
     if (state === 'paused') f.context.snapshot.paused = true;
     if (state === 'notConnected') f.context.snapshot.connected = false;
     if (state === 'readFailed') f.state.respond = request => {
@@ -861,8 +864,9 @@ await test('未开放配置入口默认收起，展开后可编辑且按账号�
       assert(group.querySelector('[data-activity=' + id + ']'));
       assert(!tabs.querySelector('.activity-current-tabs').querySelector('[data-activity=' + id + ']'));
     }
-    tabs.querySelector('[aria-selected=true]').onkeydown({ key: 'Home', preventDefault() {} });
-    assert.notEqual(tabs.querySelector('[aria-selected=true]').dataset.activity, 'hero-raid');
+    assert(!f.api.rows().some(row => ['fish', 'vip'].includes(row.id)));
+    assert.equal(tabs.querySelector('[aria-selected=true]'), null);
+    assert.equal(f.node('activity-panel').hidden, true);
     toggle.onclick();
     tabs.querySelector('[data-activity=hero-raid]').onclick();
     assert.equal(f.heroControls().length, 6);
@@ -870,7 +874,7 @@ await test('未开放配置入口默认收起，展开后可编辑且按账号�
     assert.equal(f.heroSaved.get('merchant-a').settings.enabled, true);
     tabs.querySelector('[data-activity-group=upcoming]').onclick();
     assert.equal(tabs.querySelector('#activity-group-upcoming').hidden, true);
-    assert.notEqual(tabs.querySelector('[aria-selected=true]').dataset.activity, 'hero-raid');
+    assert.equal(tabs.querySelector('[aria-selected=true]'), null);
     assert(!f.state.calls.some(call => call.route === '/api/activities/run'));
   }
 });
@@ -1350,12 +1354,8 @@ await test('活动元数据可定位无任务列表的已接入开关，纯展�
   assert(f.automationInput('activityAutomation.beauty'));
   f.api.select('magicOcean');
   assert.equal(f.automationControls().length, 0);
-  f.activities.status.pirates = { rankOpen: true };
-  await f.api.refresh(); f.api.select('pirates');
-  assert.deepEqual(f.automationControls().map(control => control.dataset.activityAutomation),
-    ['activityAutomation.pirates', 'activityAutomation.openRank']);
-  assert(f.automationInput('activityAutomation.pirates').getAttribute('aria-label').includes('海盗战报奖励'));
-  assert(f.automationInput('activityAutomation.openRank').getAttribute('aria-label').includes('开服冲榜'));
+  assert(!f.api.rows().some(row => row.id === 'pirates'));
+  assert(!f.node('activity-tabs').textContent.includes('海盗首杀'));
 });
 
 await test('风采大赛随期次展示三个开关，历史与离线可改细项且不触发投票', async () => {
@@ -1407,7 +1407,7 @@ await test('联盟商船在活动页独立配置，离线及暂停可编辑且�
     assert.equal(f.node('activity-kind').textContent, '限时');
     assert.doesNotMatch(f.node('activities-list').textContent, /联盟自动化总开关|前往开启联盟自动化/);
     assert.doesNotMatch(f.node('activities-list').textContent, /当前活动暂未接入/);
-    assert.match(f.node('activities-list').textContent, /红船缺料备料需开启工厂生产/);
+    assert.doesNotMatch(f.node('activities-list').textContent, /红船缺料备料需开启工厂生产/);
     await f.shipInput('guildShip.crew').onclick();
     await f.api.saveShip('guildShip.enabled', true);
     await f.api.saveShip('guildShip.enabled', false);
@@ -1424,6 +1424,13 @@ await test('商船策略、条件参数和材料多选沿用原字段，未知�
   await f.api.refresh(); f.api.selectShip();
   const mode = f.shipInput('guildShip.mode');
   mode.value = 'full'; await mode.onchange();
+  await f.shipInput('guildShip.allowDiamonds').onclick();
+  const budget = f.shipInput('guildShip.diamondDailyLimit');
+  budget.value = '150'; await budget.onchange();
+  assert.equal(f.shipSaved.get('merchant-a').settings.guildShip.diamondDailyLimit, 150);
+  await f.shipInput('guildShip.allowDiamonds').onclick();
+  assert.equal(f.shipSaved.get('merchant-a').settings.guildShip.allowDiamonds, false);
+  assert.equal(f.shipSaved.get('merchant-b').settings.guildShip.diamondDailyLimit, 0);
   await f.shipInput('guildShip.rewardFilter').onclick();
   await f.shipInput('guildShip.redStartEnabled').onclick();
   assert(f.shipInput('guildShip.rewardItems'));

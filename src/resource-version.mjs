@@ -43,8 +43,9 @@ export function readWechatResourceBootstrap(options) {
     const root = path.join(users, user, 'applet', 'packages', APPID);
     for (const version of directories(root).filter(name => /^\d+$/.test(name))) {
       const directory = path.join(root, version), file = path.join(directory, '__APP__.wxapkg');
-      if (fs.existsSync(file) || fs.existsSync(path.join(directory, '_src_chunks_.wxapkg')))
-        candidates.push({ directory, file, version: Number(version), modified: fs.existsSync(file) ? fs.statSync(file).mtimeMs : 0 });
+      const stat = fs.statSync(file, { throwIfNoEntry: false });
+      if (stat || fs.existsSync(path.join(directory, '_src_chunks_.wxapkg')))
+        candidates.push({ directory, file, version: Number(version), modified: stat?.mtimeMs ?? 0 });
     }
   }
   const candidate = candidates.sort((a, b) => b.version - a.version || b.modified - a.modified)[0];
@@ -119,29 +120,32 @@ export function parseResourceAppVersion(raw) {
   return found[0].config.version;
 }
 
-function readCached(bootstrap, url) {
-  const cacheFile = path.join(bootstrap.cacheDirectory, 'cacheList.json');
-  if (!fs.existsSync(cacheFile)) return null;
-  const uri = readJson(cacheFile).files?.[url]?.url;
+function readCached(root, files, url) {
+  const uri = files?.[url]?.url;
   if (typeof uri !== 'string' || !uri.startsWith('wxfile://usr/gamecaches/')) return null;
   const relative = uri.slice('wxfile://usr/gamecaches/'.length);
   if (!relative || relative.split(/[\\/]/).some(part => part === '..' || part === '.') || /[:\0]/.test(relative))
     throw new Error('微信资源缓存路径无效');
-  const file = path.resolve(bootstrap.cacheDirectory, relative);
-  if (!fs.existsSync(file)) return null;
-  const root = fs.realpathSync(bootstrap.cacheDirectory), resolved = fs.realpathSync(file);
+  const resolved = fs.realpathSync.native(path.resolve(root, relative));
   const within = path.relative(root, resolved);
   if (within.startsWith('..' + path.sep) || within === '..' || path.isAbsolute(within)) throw new Error('微信资源缓存路径越界');
-  return readJson(file);
+  return readJson(resolved);
 }
 
 function cachedVersion(bootstrap) {
-  const index = readCached(bootstrap, bootstrap.indexUrl);
-  if (!index) return null;
-  const raw = readCached(bootstrap, resourceAppConfigUrl(index));
-  if (!raw) return null;
-  return { appVersion: parseResourceAppVersion(raw), source: 'wechat-cache',
-    packageVersion: bootstrap.packageVersion, resourcesVersion: bootstrap.resourcesVersion };
+  try {
+    const root = fs.realpathSync.native(bootstrap.cacheDirectory);
+    const { files } = readJson(path.join(root, 'cacheList.json'));
+    const index = readCached(root, files, bootstrap.indexUrl);
+    if (!index) return null;
+    const raw = readCached(root, files, resourceAppConfigUrl(index));
+    if (!raw) return null;
+    return { appVersion: parseResourceAppVersion(raw), source: 'wechat-cache',
+      packageVersion: bootstrap.packageVersion, resourcesVersion: bootstrap.resourcesVersion };
+  } catch (error) {
+    if (error.code === 'ENOENT' || error.code === 'ENOTDIR') return null;
+    throw error;
+  }
 }
 
 export function discoverResourceVersion(options) {

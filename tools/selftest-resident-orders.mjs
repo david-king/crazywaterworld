@@ -56,6 +56,21 @@ async function plan(client, withCargo = false, produce = false) {
 }
 
 export async function testResidentOrders() {
+  const town = mock();
+  town.buildings = [1, 2, 3].map(id => ({ buildingId: id + '食品厂', level: 1, buildFinishTime: now - 1 }));
+  const buildings = await surveyWorld(town, protocol, { config, player: town.player });
+  let allowFinish = true, checks = 0;
+  const enabled = kind => {
+    if (kind !== 'finishUpgrade') return false;
+    checks++;
+    return allowFinish;
+  };
+  const finishes = () => planWorld(buildings, { config, enabled }).actions.filter(step => step.kind === 'finishUpgrade');
+  assert.equal(finishes().length, 3);
+  assert.equal(checks, 1, '同一轮规划只需复核一次同类动作');
+  allowFinish = false;
+  assert.equal(finishes().length, 0);
+  assert.equal(checks, 2, '下一轮规划必须重新读取动作开关');
   await testManualResidentOrder();
   await testActualShortages();
   await testWeeklyPriority();

@@ -579,8 +579,31 @@ try {
     assert.deepEqual(saveAutomationSettings('old', old, { file, revision: 1 }).settings, expected);
     assert(!Object.hasOwn(nativeTaskValues(expected, old.schedule), 'ticketRecruit'));
   });
+  test('旧商船配置只补齐缺失的钻石选项，原文件、显式值和校验保持有效', () => {
+    const settings = defaultSettings();
+    settings.guildShip.enabled = true;
+    const old = structuredClone(settings);
+    delete old.guildShip.allowDiamonds;
+    delete old.guildShip.diamondDailyLimit;
+    for (const version of [32, 35]) {
+      const bytes = JSON.stringify({ version, accounts: { old: { settingsVersion: version, revision: 180, settings: old } } });
+      fs.writeFileSync(file, bytes);
+      const loaded = loadAutomationSettings('old', { file });
+      assert.deepEqual(loaded.settings, settings);
+      assert.equal(loaded.revision, 180);
+      assert.equal(fs.readFileSync(file, 'utf8'), bytes);
+      assert.deepEqual(importAutomationSettings({ format: SETTINGS_FORMAT, version, settings: old }), settings);
+    }
+    const document = { format: SETTINGS_FORMAT, version: 35, settings: old };
+    old.guildShip.diamondDailyLimit = 17;
+    assert.equal(importAutomationSettings(document).guildShip.diamondDailyLimit, 17);
+    old.guildShip.allowDiamonds = true;
+    assert.deepEqual(importAutomationSettings(document).guildShip, old.guildShip);
+    old.guildShip.diamondDailyLimit = -1;
+    assert.throws(() => importAutomationSettings(document), error => !!error.fields['guildShip.diamondDailyLimit']);
+  });
   test('版本1升级后重复迁移保持一致，保留有效的用户值', () => {
-    assert.equal(SETTINGS_SCHEMA_VERSION, 35);
+    assert.equal(SETTINGS_SCHEMA_VERSION, 36);
     const settings = legacySettings();
     settings.factory.checkEverySeconds = 270;
     settings.resources.diamondDailyLimit = 1234;

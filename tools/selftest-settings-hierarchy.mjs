@@ -650,6 +650,28 @@ test('模块主控单独置顶后子项回到组级，各字段只渲染一次',
   }
 });
 
+test('任务与领奖沿用图鉴和 VIP 的偏好，旧总开关可在挂机配置启停', () => {
+  const f = fixture({ navigation: true });
+  const { draft } = f.editor;
+  draft.schedule.fishBook = draft.schedule.vipDaily = true;
+  f.renderPage();
+  const rewards = f.editor.groups.get('rewards');
+  for (const key of ['schedule.fishBook', 'activityAutomation.vip', 'schedule.vipDaily', 'schedule.vipDailyGift']) {
+    assert.equal(rewards.fields.filter(field => field.key === key).length, 1);
+  }
+  assert.equal(f.widget('schedule.fishBook').control.getAttribute('aria-checked'), 'false');
+  f.set('schedule.fishBook', true);
+  assert.equal(f.editor.draft.activityAutomation.fish, true);
+  assert.equal(f.editor.draft.schedule.fishBook, true);
+  f.set('schedule.fishBook', false);
+  assert.equal(f.editor.draft.schedule.fishBook, false);
+  f.set('activityAutomation.vip', true);
+  assert.equal(f.widget('schedule.vipDaily').control.getAttribute('aria-checked'), 'true');
+  assert.equal(f.widget('schedule.vipDailyGift').control.getAttribute('aria-checked'), 'false');
+  f.set('activityAutomation.vip', false);
+  assert.equal(f.editor.draft.schedule.vipDaily, true);
+});
+
 test('世界Boss领奖只在世界分组出现，首战派遣与领奖独立控制', () => {
   const f = fixture({ navigation: true }); f.renderPage();
   f.env.hash = '#config-group-worldBoss'; f.applyHash();

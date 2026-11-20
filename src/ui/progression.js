@@ -4,7 +4,7 @@ const progressionViews = [
   { id: 'trial', tab: 'stages', path: '/api/trials', render: renderTrialProgress },
   { id: 'pirate-manual', tab: 'stages', path: '/api/pirates/hunt', render: renderManualPirateChoices },
   { id: 'crafting', tab: 'heroes', path: '/api/equipment/crafting', render: renderCrafting },
-  { id: 'pirate-board', tab: 'activities', path: '/api/pirates/board', render: renderPirateBoard },
+  { id: 'pirate-board', tab: 'stages', refreshWith: 'pirate-manual', detailsId: 'pirate-details', path: '/api/pirates/board', render: renderPirateBoard },
   { id: 'guild', tab: 'guild', boxId: 'guild-aid-view', path: '/api/guild', render: renderGuild },
 ];
 const pendingProgression = new Set();
@@ -13,7 +13,8 @@ const viewVersions = new Map();
 let trialTaskVersion = 0;
 async function refreshProgression(only) {
   const account=current;
-  const views=progressionViews.filter(v=>(!only||only===v.id)&&!$('tab-'+v.tab).classList.contains('hidden'));
+  const views = progressionViews.filter(view => (!only || only === view.id || only === view.refreshWith)
+    && !$('tab-' + view.tab).classList.contains('hidden') && (!view.detailsId || $(view.detailsId).open));
   await Promise.all(views.map(async view=>{
     const box=$(view.boxId||view.id+'-view'),version=(viewVersions.get(view.id)||0)+1;
     viewVersions.set(view.id,version);
@@ -53,6 +54,7 @@ async function refreshProgression(only) {
   }));
 }
 for(const id of ['trial','guild','guild-tech','crafting','pirate-manual'])$(id+'-refresh').onclick=()=>refreshProgression(id);
+$('pirate-details').ontoggle=()=>{ if ($('pirate-details').open) refreshProgression('pirate-board'); };
 
 function progressionAction(label, path, payload, account, reason, group) {
   const key = JSON.stringify(group ? [account, group] : [account, path, payload]);
@@ -61,6 +63,7 @@ function progressionAction(label, path, payload, account, reason, group) {
   if (reason) button.title = reason;
   button.onclick = async () => {
     if (current !== account || snapshot.paused || disconnected.has(account) || button.disabled || pendingProgression.has(key)) return;
+    const view = progressionViews.find(item => $(item.boxId || item.id + '-view').contains(button));
     pendingProgression.add(key);
     button.disabled = true;
     button.textContent = '执行中…';
@@ -72,8 +75,9 @@ function progressionAction(label, path, payload, account, reason, group) {
     finally {
       pendingProgression.delete(key);
       if (account === current) {
-        const view=path.includes('/crafting/')?'crafting':path.includes('/pirates/')||path.includes('/fleets/')?'pirate-board':path.includes('/guild/')?'guild':'trial';
-        button.disabled=Boolean(reason);button.textContent=label;await refreshProgression(view);
+        button.disabled = Boolean(reason);
+        button.textContent = label;
+        if (view) await refreshProgression(view.refreshWith || view.id);
       }
     }
   };
@@ -791,7 +795,7 @@ function renderPirateTargets(box, data, account) {
   section.appendChild(cards);
 }
 
-function renderPirateProgress(box, data) {
+function renderPirateProgress(box, data, account) {
   const section = pirateSection(box, '3. 战况与排行');
   const list = el('ul', 'pirate-list');
   for (const flight of data.flights ?? []) list.appendChild(el('li', null, flight.label));
@@ -801,6 +805,8 @@ function renderPirateProgress(box, data) {
   }
   if (list.childElementCount) section.appendChild(list);
   else section.appendChild(el('p', 'dim', data.reports.error ? '战报读取失败，详情见运行日志' : '还没有海盗战报'));
+  section.appendChild(progressionAction('领取战报奖励',
+    '/api/activities/run', { activityId: 'pirates', taskKey: 'campaignReports' }, account));
   section.appendChild(el('p', 'dim', '地图上的海盗和其他玩家共享，可能先被别人打掉，刷新后再选其他地点。'));
   const rank = data.rank;
   if (rank.error) section.appendChild(el('p', 'dim', '排行读取失败，详情见运行日志'));
@@ -816,7 +822,7 @@ function renderPirateProgress(box, data) {
 function renderPirateBoard(box, data, account) {
   renderPirateFleets(box, data, account);
   renderPirateTargets(box, data, account);
-  renderPirateProgress(box, data);
+  renderPirateProgress(box, data, account);
 }
 
 setInterval(() => { if (!document.hidden && !$('tab-heroes').classList.contains('hidden')) void refreshProgression('crafting'); }, 15000);

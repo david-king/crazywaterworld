@@ -113,6 +113,7 @@ function fixture() {
     const renderInventory = () => {}, fmt = value => String(value);
     const resetInventory = () => {};
     const call = (...args) => env.call ? env.call(...args) : new Promise(() => {});
+    const openConfirm = (title, body, confirm, label) => { env.dialog = { title, body, confirm, label }; };
     const snapshot = { paused: false }, disconnected = new Set();
     let current = 'account-a';
     let orderClockOffset = 0;
@@ -122,6 +123,7 @@ function fixture() {
     ${script.slice(start, end)}
     ${script.slice(end, refreshEnd)}
     env.render = renderWorld;
+    env.refresh = refreshManualWorld;
     env.updateTimers = updateWorldProductionTimers;
     env.refreshUnavailable = mode => {
       if (mode === 'account') current = 'account-b';
@@ -428,6 +430,66 @@ test('未同步队列和缺少成熟时间明确显示未知状态', () => {
   assert.doesNotMatch(env.tables[1].node.textContent, /已成熟/);
   assert.equal(env.document.querySelectorAll('[data-production-finish-at]').length, 0);
 });
+
+{
+  const env = fixture();
+  const products = [
+    { productId: '小麦种子', name: '小麦种子', productionKey: 'first', seconds: 1800, reason: '原料不足',
+      inputs: [{ name: '种子', num: 1700, owned: 50 }] },
+    { productId: '玉米种子', name: '玉米种子', productionKey: 'second', seconds: 60, reason: '', inputs: [] },
+  ];
+  const b = factory([{ productId: '土豆种子' }], { buildingId: '1种子厂', displayName: '选种厂-1', manualProducts: products });
+  const data = worldData(env, { factories: [b] });
+  env.call = async () => data;
+  await env.refresh(true);
+  productionButton(env, b.buildingId).onclick();
+  const buttons = () => env.document.querySelectorAll('[data-factory-start]');
+  assert.equal(buttons().length, 5);
+  buttons().at(-1).onclick();
+  const { title, body, confirm, label } = env.dialog;
+  assert.match(title, /选种厂-1/);
+  assert.equal(label, '加入队列 ×1');
+  const [first, second] = descendants(body[0]).filter(node => node.type === 'radio');
+  assert(second.focused);
+  first.checked = true; first.onchange();
+  assert.match(body[1].textContent, /30分.*种子 ×1700.*持有 50.*原料不足/);
+  assert(env.node('m-ok').disabled);
+  second.checked = true; second.onchange();
+  assert(!env.node('m-ok').disabled);
+  const writes = [];
+  let finish;
+  env.call = (url, options) => {
+    if (url === '/api/world') return Promise.resolve(data);
+    assert.equal(url, '/api/world/production-start');
+    writes.push(JSON.parse(options.body));
+    return new Promise(resolve => { finish = resolve; });
+  };
+  const click = confirm();
+  assert(buttons().every(button => button.disabled));
+  await assert.rejects(confirm(), /状态已变化/);
+  assert.deepEqual(writes, [{ buildingId: '1种子厂', productId: '玉米种子', productionKey: 'second', confirm: true }]);
+  b.jobs.push({ productId: '玉米种子' });
+  finish({ label: '已安排生产玉米种子 ×1' });
+  await click;
+  assert.equal(buttons().length, 4);
+  assert(buttons().every(button => !button.disabled));
+  assert.match(env.document.querySelector('[data-factory-start-status]').textContent, /已安排生产玉米种子/);
+  b.autoEnabled = true;
+  env.render(data);
+  assert.equal(buttons().length, 0);
+  b.autoEnabled = false;
+  b.queueKnown = false;
+  env.render(data);
+  assert.equal(buttons().length, 0);
+  b.queueKnown = true;
+  env.render(data);
+  buttons()[0].onclick();
+  env.refreshUnavailable('account');
+  await assert.rejects(env.dialog.confirm(), /状态已变化/);
+  assert.equal(writes.length, 1);
+  passed++;
+  console.log('通过：点击空格选择当前工厂产物，显示耗材与工时，防止缺料、重复点击和切号后投产');
+}
 
 {
   const env = fixture(), now = env.now / 1000 + 5;

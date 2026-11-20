@@ -116,6 +116,38 @@ async function test(name, work) {
 }
 
 try {
+  await test('多账号共享只读账本，换日、外部替换和读失败立即生效', () => {
+    const file = path.join(directory, 'snapshots.json');
+    const today = Date.parse('2026-08-01T12:00:00+08:00');
+    const reader = (id, offset = 0) => createUsageLedger(id, { file, now: () => today + offset });
+    const first = reader('one'), second = reader('two');
+    first.confirm(first.reserve({ fuel: 7 }, {}, {}, { uniqueKey: 'dispatch' }));
+    second.confirm(second.reserve({ fuel: 5 }));
+    const originalRead = fs.readFileSync;
+    let reads = 0;
+    fs.readFileSync = function (target, ...args) {
+      if (target === file) reads++;
+      return originalRead.call(this, target, ...args);
+    };
+    try {
+      assert.equal(first.snapshot().counters.fuel, 7);
+      assert.equal(second.snapshot().counters.fuel, 5);
+      first.keyRecords().dispatch.confirmed = false;
+      assert.equal(first.keyRecords().dispatch.confirmed, true);
+      assert.deepEqual(reader('one', 86400000).snapshot().counters, {});
+      assert.equal(first.snapshot().counters.fuel, 7);
+      assert.equal(reads, 1, '同一版本在所有账号和读取器之间只解析一次');
+    } finally { fs.readFileSync = originalRead; }
+    const stored = readJson(file);
+    stored.accounts.two.counters.fuel = 9;
+    atomicJson(file, stored);
+    assert.equal(second.snapshot().counters.fuel, 9, '同大小原子替换后强制重读');
+    fs.writeFileSync(file, '{invalid');
+    assert.throws(() => first.snapshot(), /无法读取/);
+    assert.throws(() => first.reserve({ fuel: 1 }), /无法读取/);
+    fs.unlinkSync(file);
+    assert.deepEqual(first.snapshot().counters, {});
+  });
   await test('同进程嵌套复用互斥，异常后释放锁', () => {
     const file = path.join(directory, 'nested.json');
     withFileLock(file, () => withFileLock(file, () => atomicJson(file, { value: 1 })));

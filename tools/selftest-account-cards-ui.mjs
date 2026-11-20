@@ -396,8 +396,14 @@ await test('两张卡片刷新期间切号，乱序返回的余额仍各归原�
   const pending = rows.map(row => env.action(row.id, 'refresh'));
   await env.action(rows[1].id, 'select');
   for (const index of [1, 0]) {
+    const sibling = env.card(rows[1 - index].id);
+    const query = sibling.querySelector;
+    let siblingReads = 0;
+    sibling.querySelector = function (selector) { siblingReads++; return query.call(this, selector); };
     reads[index].resolve({ readAt: 123456, resources: [{ name: '金币', amount: index ? 0 : 2400 }] });
     await pending[index];
+    sibling.querySelector = query;
+    assert.equal(siblingReads, 0, '单张卡片资料返回时不遍历其他账号的 DOM');
   }
   assert.equal(env.field(rows[0].id, 'resources').textContent, '金币 2,400');
   assert.equal(env.field(rows[1].id, 'resources').textContent, '金币 0');

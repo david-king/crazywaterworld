@@ -2,6 +2,7 @@
 export const operationLabels = {
   '/api/world/production-plan': '生成排产计划',
   '/api/world/production-speed': '手动生产加速',
+  '/api/world/production-start': '手动工厂排产',
   '/api/world/fleet-speed/preview': '核对舰队加速费用',
   '/api/world/fleet-speed/action': '加速舰队至完成',
   '/api/merchant': '查看海商王实况', '/api/merchant/history': '查看海商王成交记录', '/api/merchant/step': '海商王单步验证',

@@ -100,6 +100,8 @@
 .config-order-tools .config-option:hover { background:transparent }
 .config-add { display:flex; gap:8px; align-items:center; padding:8px 0 4px }
 .config-add select { flex:1; min-width:0; width:auto }
+.config-trial-lineup { display:grid; grid-template-columns:minmax(max-content,1fr) minmax(0,420px); align-items:center; column-gap:8px; padding:2px 0 }
+.config-trial-lineup select { min-width:0; text-overflow:ellipsis }
 .config-fleet-lineup { display:grid; grid-template-columns:max-content minmax(0,300px) max-content; align-items:center; gap:8px; padding:2px 0 }
 .config-fleet-lineup select { min-width:0 }
 .config-crop-quantity { display:flex; align-items:center; gap:8px }
@@ -143,7 +145,7 @@
   .config-tabs>button { min-width:0; padding-inline:3px }
   .config-toolbar { flex-wrap:wrap }
   .config-actions { max-width:100%; flex-wrap:wrap }
-  .config-owner { flex:1 }
+  .config-owner { flex:1 1 15rem }
   .config-owner strong { font-size:14px }
   .config-families { padding-inline:12px }
   .config-sheet>.config-subtabs,#config-fields .config-subtabs { margin:10px 12px 0; max-width:calc(100% - 24px) }

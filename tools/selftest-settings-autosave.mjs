@@ -1004,7 +1004,7 @@ await test('世界Boss逐队阵容跟随舰队勾选显隐，保存刷新与切�
   assert.equal(f.editor.draft.worldBoss.fleetPresets.length, 2);
 });
 
-await test('推关与试炼逐项选择阵容并查看，合并自动保存保留预设、其他副本和普通配置', async () => {
+await test('试炼每行一个副本和阵容选择，合并自动保存保留预设、其他副本和普通配置', async () => {
   const f = fixture({ catalog: lineupCatalog });
   const initial = f.view('a');
   initial.settings.lineups = { presets: structuredClone(lineupPresets), mainlinePresetId: '',
@@ -1016,17 +1016,23 @@ await test('推关与试炼逐项选择阵容并查看，合并自动保存保�
   assert.equal(controls.button('mainline').disabled, true);
   controls.button('mainline').onclick();
   assert.deepEqual(controls.viewed, []);
+  const rows = controls.roots[1].children;
+  assert.equal(rows.length, lineupCatalog.trialRaids.length);
+  for (const [index, raid] of lineupCatalog.trialRaids.entries()) {
+    const [label, select] = rows[index].children;
+    assert.deepEqual(rows[index].children.map(node => node.tag), ['label', 'select']);
+    assert.equal(label.textContent, raid.label);
+    assert.equal(label.htmlFor, select.id);
+    assert.equal(select.dataset.lineupBinding, 'trial:' + raid.value);
+  }
   assert.equal(controls.select('trial:2').value, 'second');
   assert.equal(controls.select('trial:3').value, 'first');
-  assert.equal(controls.button('trial:1').disabled, true);
   controls.choose('mainline', 'first');
   controls.choose('trial:1', 'second');
   controls.choose('trial:2', '');
   assert.equal(controls.button('mainline').disabled, false);
-  assert.equal(controls.button('trial:2').disabled, true);
   controls.button('mainline').onclick();
-  controls.button('trial:1').onclick();
-  assert.deepEqual(controls.viewed, [{ account: 'a', id: 'first' }, { account: 'a', id: 'second' }]);
+  assert.deepEqual(controls.viewed, [{ account: 'a', id: 'first' }]);
   f.set('factory.keepStock', 123);
   await f.tick(600);
   assert.equal(f.posts().length, 1);
@@ -1046,7 +1052,7 @@ await test('推关与试炼逐项选择阵容并查看，合并自动保存保�
   controls = lineupPickerFixture(f);
   assert.equal(controls.select('mainline').children.length, 1);
   assert.equal(controls.button('mainline').disabled, true);
-  assert.equal(controls.button('trial:1').disabled, true);
+  assert.equal(controls.select('trial:1').children.length, 1);
   assert.deepEqual(f.editor.draft.lineups.presets, []);
 });
 
@@ -1147,7 +1153,7 @@ await test('配置曾打开后经真实管理保存流程新增、改名和删�
   assert.equal(controls.select('mainline').value, '');
   assert.equal(controls.select('trial:1').value, '');
   assert.equal(controls.button('mainline').disabled, true);
-  assert.equal(controls.button('trial:1').disabled, true);
+  assert.equal(controls.select('trial:1').children.length, 1);
   f.set('factory.keepStock', 126); await f.tick(600);
   assert.deepEqual(f.view('a').settings.lineups, { presets: [], mainlinePresetId: '', trialPresets: [] });
   assert.equal(f.view('a').settings.factory.keepStock, 126);

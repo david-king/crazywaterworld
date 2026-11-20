@@ -1,4 +1,5 @@
 import crypto from 'node:crypto';
+import fs from 'node:fs';
 import path from 'node:path';
 import { atomicJson, readJson, withFileLock } from './json-store.mjs';
 
@@ -34,6 +35,35 @@ import { atomicJson, readJson, withFileLock } from './json-store.mjs';
 
 export const dataDirectory = () => process.env.CW_DATA_DIR ? path.resolve(process.env.CW_DATA_DIR) : path.resolve(import.meta.dirname, '../data');
 export const usageFile = () => path.join(dataDirectory(), 'automation-usage.json');
+
+/** @param {string} file @returns {LedgerStore} */
+function readStore(file) {
+  return readJson(file, { version: 1, accounts: {} });
+}
+
+/** @param {string} file */
+function fileStamp(file) {
+  try {
+    const stat = fs.statSync(file, { bigint: true, throwIfNoEntry: false });
+    if (!stat) return null;
+    return [stat.dev, stat.ino, stat.size, stat.mtimeNs, stat.ctimeNs].join(':');
+  } catch { return null; }
+}
+
+// 一份只读快照供同进程的账号共享。实际写入在锁内独立读盘，换日也只处理本次读取的账号。
+/** @type {{file: string, stamp: string, store: LedgerStore} | undefined} */
+let cached;
+/** @param {string} file */
+function readSnapshot(file) {
+  file = path.resolve(file);
+  const stamp = fileStamp(file);
+  if (cached?.file === file && cached.stamp === stamp) return cached.store;
+  cached = undefined;
+  const store = readStore(file);
+  if (stamp !== null && stamp === fileStamp(file)) cached = { file, stamp, store };
+  return store;
+}
+
 /** @param {unknown} value @returns {value is Record<string, unknown>} */
 const plain = value => value !== null && typeof value === 'object' && !Array.isArray(value) && Object.getPrototypeOf(value) === Object.prototype;
 /** @template T @param {T} value @returns {T} */
@@ -69,9 +99,8 @@ function confirmReservation(entry, id, day) {
  */
 export function createUsageLedger(accountId, { file = usageFile(), now = Date.now } = {}) {
   const key = accountKey(accountId);
-  const read = () => {
-    /** @type {LedgerStore} */
-    const store = readJson(file, { version: 1, accounts: {} });
+  /** @param {LedgerStore} store */
+  const accountEntry = store => {
     if (store.version !== 1 || !plain(store.accounts)) throw new Error('额度账本格式异常，已停止消费动作');
     const day = beijingDay(now());
     let entry = Object.hasOwn(store.accounts, key) ? store.accounts[key] : null;
@@ -87,26 +116,31 @@ export function createUsageLedger(accountId, { file = usageFile(), now = Date.no
       entry = { day, counters: {}, pending, confirmed: {}, keys: entry?.keys ?? {}, fieldHistory: entry?.fieldHistory };
     }
     if (!plain(entry.counters) || !plain(entry.pending) || !plain(entry.confirmed) || (entry.keys != null && !plain(entry.keys))) throw new Error('额度账本损坏，已停止消费动作');
-    entry.keys ??= {};
+    return entry.keys == null ? { ...entry, keys: {} } : entry;
+  };
+  const read = () => accountEntry(readSnapshot(file));
+  const forUpdate = () => {
+    const store = readStore(file);
+    const entry = accountEntry(store);
     Object.defineProperty(store.accounts, key, { value: entry, enumerable: true, writable: true, configurable: true });
     return { store, entry };
   };
   return {
     snapshot() {
-      const { entry } = read();
+      const entry = read();
       return { day: entry.day, counters: { ...entry.counters }, uncertain: Object.keys(entry.pending).length,
         ...(hasPendingPaidGold(entry) ? { pendingPaidGold: /** @type {const} */ (true) } : {}) };
     },
-    confirmedCounters() { return { ...read().entry.confirmed }; },
-    hasKey(uniqueKey) { return Object.hasOwn(read().entry.keys, uniqueKey); },
-    keyRecords() { return copy(read().entry.keys); },
+    confirmedCounters() { return { ...read().confirmed }; },
+    hasKey(uniqueKey) { return Object.hasOwn(read().keys, uniqueKey); },
+    keyRecords() { return copy(read().keys); },
     resourceFieldHistory(scope) {
-      return copy(read().entry.fieldHistory?.[scope] ?? { revision: 0, owned: {}, lost: {} });
+      return copy(read().fieldHistory?.[scope] ?? { revision: 0, owned: {}, lost: {} });
     },
     saveResourceFieldHistory(scope, history) {
       if (!/^\d+:\d+$/.test(scope)) throw Error('资源田记录缺少区服或角色身份');
       return withFileLock(file, () => {
-        const { store, entry } = read();
+        const { store, entry } = forUpdate();
         if ((entry.fieldHistory?.[scope]?.revision ?? 0) !== history.revision) return false;
         entry.fieldHistory ??= {};
         entry.fieldHistory[scope] = { ...copy(history), revision: history.revision + 1 };
@@ -115,18 +149,18 @@ export function createUsageLedger(accountId, { file = usageFile(), now = Date.no
       });
     },
     reservationTime(uniqueKey) {
-      const { entry } = read();
+      const entry = read();
       return entry.pending[entry.keys[uniqueKey]?.id]?.at ?? null;
     },
     pendingCounters() {
       /** @type {Counters} */
       const totals = {};
-      for (const reservation of Object.values(read().entry.pending)) for (const [name, amount] of Object.entries(reservation.counters)) totals[name] = (totals[name] ?? 0) + amount;
+      for (const reservation of Object.values(read().pending)) for (const [name, amount] of Object.entries(reservation.counters)) totals[name] = (totals[name] ?? 0) + amount;
       return totals;
     },
     resolveKey(uniqueKey, confirmed, details) {
       return withFileLock(file, () => {
-        const { store, entry } = read();
+        const { store, entry } = forUpdate();
         if (!Object.hasOwn(entry.keys, uniqueKey)) return;
         const record = entry.keys[uniqueKey];
         if (details !== undefined) {
@@ -146,7 +180,7 @@ export function createUsageLedger(accountId, { file = usageFile(), now = Date.no
     },
     reserve(counters, limits = {}, minimums = {}, { uniqueKey = null, details = null, paidGold } = {}) {
       return withFileLock(file, () => {
-        const { store, entry } = read();
+        const { store, entry } = forUpdate();
         if (uniqueKey !== null) {
           if (typeof uniqueKey !== 'string' || !/^[A-Za-z0-9:_-]{1,160}$/.test(uniqueKey) || ['__proto__', 'constructor', 'prototype'].includes(uniqueKey)) throw new Error('派遣记录标识不合法');
           if (Object.hasOwn(entry.keys, uniqueKey)) throw new Error('该目标已有派遣记录，已阻止重复发送');
@@ -182,7 +216,7 @@ export function createUsageLedger(accountId, { file = usageFile(), now = Date.no
     },
     markPaidGoldReward(ticket) {
       return withFileLock(file, () => {
-        const { store, entry } = read();
+        const { store, entry } = forUpdate();
         const pending = entry.pending[ticket.id]?.paidGold;
         if (!pending || ticket.day !== entry.day) return false;
         if (!pending.rewardReceived) {
@@ -196,7 +230,7 @@ export function createUsageLedger(accountId, { file = usageFile(), now = Date.no
       const paidTimes = info?.paidTimes;
       if (paidTimes === undefined || !Number.isSafeInteger(paidTimes) || paidTimes < 1) return false;
       return withFileLock(file, () => {
-        const { store, entry } = read();
+        const { store, entry } = forUpdate();
         for (const [id, reservation] of Object.entries(entry.pending)) {
           const gold = reservation.paidGold;
           if (reservation.day !== entry.day || gold?.rewardReceived !== true || gold.account !== account ||
@@ -212,7 +246,7 @@ export function createUsageLedger(accountId, { file = usageFile(), now = Date.no
     updateKeyDetails(uniqueKey, details) {
       return withFileLock(file, () => {
         if (!plain(details)) throw new Error('任务记录内容不合法');
-        const { store, entry } = read();
+        const { store, entry } = forUpdate();
         if (!Object.hasOwn(entry.keys, uniqueKey)) throw new Error('任务记录已不存在');
         entry.keys[uniqueKey].details = copy(details);
         atomicJson(file, store);
@@ -220,7 +254,7 @@ export function createUsageLedger(accountId, { file = usageFile(), now = Date.no
     },
     releaseCompletedKey(uniqueKey) {
       return withFileLock(file, () => {
-        const { store, entry } = read();
+        const { store, entry } = forUpdate();
         const record = Object.hasOwn(entry.keys, uniqueKey) ? entry.keys[uniqueKey] : null;
         if (!record) return;
         if (!record.confirmed || Object.hasOwn(entry.pending, record.id)) throw new Error('待确认任务不可释放');
@@ -231,7 +265,7 @@ export function createUsageLedger(accountId, { file = usageFile(), now = Date.no
     archiveManualForge(records) {
       return withFileLock(file, () => {
         if (!plain(records)) throw new Error('锻造交接记录不合法');
-        const { store, entry } = read();
+        const { store, entry } = forUpdate();
         const archived = [];
         let released = 0;
         for (const [uniqueKey, expected] of Object.entries(records)) {
@@ -269,7 +303,7 @@ export function createUsageLedger(accountId, { file = usageFile(), now = Date.no
     confirm(ticket) {
       if (!ticket) return;
       return withFileLock(file, () => {
-        const { store, entry } = read();
+        const { store, entry } = forUpdate();
         if (entry.keys['forgeHistory:' + ticket.id]?.details?.disposition === 'manual-handoff-sync') return;
         if (!Object.hasOwn(entry.pending, ticket.id)) {
           const record = Object.values(entry.keys).find(value => value.id === ticket.id);
@@ -283,7 +317,7 @@ export function createUsageLedger(accountId, { file = usageFile(), now = Date.no
     cancel(ticket) {
       if (!ticket) return;
       return withFileLock(file, () => {
-        const { store, entry } = read();
+        const { store, entry } = forUpdate();
         if (entry.keys['forgeHistory:' + ticket.id]?.details?.disposition === 'manual-handoff-sync') return;
         if (!Object.hasOwn(entry.pending, ticket.id)) {
           const uniqueKey = Object.keys(entry.keys).find(value => entry.keys[value].id === ticket.id);

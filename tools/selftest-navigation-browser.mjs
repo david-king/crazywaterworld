@@ -354,6 +354,7 @@ try {
     // 活动独立为顶级页面，返回杂项继续显示原子页。
     await main('activities');
     await tab('activities');
+    assert.equal(await page.locator('#tab-activities [data-activity="pirates"], #tab-activities #pirate-board-view').count(), 0);
     assert.equal(await page.locator('#resource-tabs').isVisible(), false);
     await main('resources');
     await tab('resources', 'heroes');
@@ -398,6 +399,10 @@ try {
     assert.equal(new URL(page.url()).hash, '');
     await reloadFrom(null, '#pirate-first-kill');
     await tab('stages');
+    const pirateDetails = page.locator('#tab-stages #pirate-details');
+    assert.equal(await pirateDetails.evaluate(panel => panel.open), false);
+    await pirateDetails.locator('summary').click();
+    await pirateDetails.locator('#pirate-board-view').getByText('账号已暂停').waitFor();
     await main('overview');
     await page.reload();
     await tab('overview');

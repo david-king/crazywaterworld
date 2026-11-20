@@ -135,10 +135,39 @@ html[data-theme="dark"] {
     background-size: 1rem;
   }
 
+  /* Radix Select 供旧页面的单选控件渐进接入。 */
+  cw-select { display: block; min-width: 0; }
+  cw-select > select { width: 100%; }
+  .choice-trigger {
+    @apply flex h-9 w-full min-w-0 cursor-pointer items-center justify-between gap-2 rounded-md border border-input bg-background px-3 text-sm font-normal text-foreground shadow-xs disabled:cursor-not-allowed disabled:opacity-50;
+  }
+  .choice-trigger > span { @apply truncate; }
+  .choice-trigger > svg { @apply shrink-0 text-muted-foreground; }
+  .choice-trigger:focus-visible { outline: 2px solid var(--primary); outline-offset: -2px; }
+  .choice-trigger[aria-invalid=true] { @apply border-destructive; }
+  .choice-menu {
+    @apply z-50 overflow-hidden rounded-md border bg-popover p-1 text-popover-foreground shadow-md;
+    min-width: var(--radix-select-trigger-width);
+    max-width: var(--radix-select-content-available-width);
+    max-height: var(--radix-select-content-available-height);
+  }
+  .choice-option {
+    @apply flex cursor-pointer items-center justify-between gap-2 rounded-sm px-2 py-1.5 text-sm outline-none select-none;
+    overflow-wrap: anywhere;
+  }
+  .choice-option[data-highlighted] { @apply bg-accent text-accent-foreground; }
+  .choice-option[data-state=checked] { @apply bg-primary font-medium text-primary-foreground; }
+  .choice-option[data-disabled] { @apply pointer-events-none opacity-50; }
+  @media (pointer: coarse) {
+    .choice-trigger { @apply h-10 text-base; }
+    .choice-option { min-height: 44px; }
+  }
+
   /* 表单控件共用的焦点与校验状态 */
-  :is(input:not([type=checkbox], [type=radio], [type=range], [type=file], [type=hidden]), textarea, select):focus-visible {
+  :is(input:not([type=checkbox], [type=radio], [type=range], [type=file], [type=hidden]), textarea):focus-visible {
     @apply border-ring ring-[3px] ring-ring/50;
   }
+  select:focus-visible { outline: 2px solid var(--primary); outline-offset: -2px; }
   :is(input, textarea, select)[aria-invalid=true] { @apply border-destructive ring-destructive/20; }
 
   /* Checkbox */
@@ -325,26 +354,31 @@ html[data-theme="dark"] {
   .nav-tab svg { @apply pointer-events-none size-4 shrink-0; }
 }
 
-/* 下拉面板：支持的浏览器用 Select 样式，其余浏览器和手机保留系统弹层。 */
+/* 单选菜单共用浏览器顶层弹层，触屏选项留足点击空间。 */
 @supports (appearance: base-select) {
-  @media (pointer: fine) {
-    @layer components {
-      select:not([multiple], [size]), select:not([multiple], [size])::picker(select) { appearance: base-select; }
-      select:not([multiple], [size]) { display: inline-flex; align-items: center; white-space: nowrap; overflow: clip; overflow-clip-margin: content-box; }
-      select:not([multiple], [size])::picker-icon { display: none; }
-      select:not([multiple], [size])::picker(select) {
-        @apply rounded-md border border-border bg-popover p-1 text-popover-foreground shadow-md;
-        min-width: anchor-size(width);
-        margin-block: 0.25rem;
-      }
-      select:not([multiple], [size]) option {
-        @apply flex cursor-default items-center gap-2 rounded-sm py-1.5 pr-2 pl-2 text-sm outline-hidden select-none;
-      }
-      select:not([multiple], [size]) option:is(:hover, :focus) { @apply bg-accent text-accent-foreground; }
-      select:not([multiple], [size]) option:disabled { @apply pointer-events-none opacity-50; }
-      select:not([multiple], [size]) option::checkmark { order: 1; margin-left: auto; content: "✓"; }
-      select:not([multiple], [size]) optgroup { @apply text-sm; }
-      select:not([multiple], [size]) optgroup::before { @apply px-2 py-1.5 text-xs font-normal text-muted-foreground; }
+  @layer components {
+    select:not([multiple], [size]), select:not([multiple], [size])::picker(select) { appearance: base-select; }
+    select:not([multiple], [size]) { display: inline-flex; align-items: center; white-space: nowrap; overflow: clip; overflow-clip-margin: content-box; }
+    select:not([multiple], [size])::picker-icon { display: none; }
+    select:not([multiple], [size])::picker(select) {
+      @apply rounded-md border border-border bg-popover p-1 text-popover-foreground shadow-md;
+      min-width: anchor-size(width);
+      max-width: calc(100vw - 1rem);
+      margin-block: 0.25rem;
+    }
+    select:not([multiple], [size]) option {
+      @apply flex cursor-default items-center gap-2 rounded-sm px-2 py-1.5 text-sm outline-hidden select-none hover:bg-accent hover:text-accent-foreground;
+      white-space: normal;
+      overflow-wrap: anywhere;
+    }
+    select:not([multiple], [size]) option:checked:enabled { @apply bg-primary text-primary-foreground; }
+    select:not([multiple], [size]) option:focus-visible { outline: 2px solid currentColor; outline-offset: -2px; }
+    select:not([multiple], [size]) option:disabled { @apply pointer-events-none opacity-50; }
+    select:not([multiple], [size]) option::checkmark { order: 1; margin-left: auto; content: "✓"; }
+    select:not([multiple], [size]) optgroup { @apply text-sm; }
+    select:not([multiple], [size]) optgroup::before { @apply px-2 py-1.5 text-xs font-normal text-muted-foreground; }
+    @media (pointer: coarse) {
+      select:not([multiple], [size]) option { min-height: 44px; }
     }
   }
 }

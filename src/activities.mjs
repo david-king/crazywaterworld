@@ -4,7 +4,8 @@ import { displayMaterial } from './config.mjs';
 import { normalize } from './worlds.mjs';
 import { claimCollection, newbieView } from './collections.mjs';
 import { toNumber } from './client.mjs';
-import { campaignReportState, claimOpenRanks, openRankState, openRanks } from './pirate-board.mjs';
+import { goodsRubyPrice, readGoodsPurchaseBalances } from './goods-purchase.mjs';
+import { claimOpenRanks, openRankState, openRanks } from './pirate-board.mjs';
 import { claimReportRewards } from './missing-rewards.mjs';
 import { beginOrderMaterialSpend, cancelOrderMaterialSpend, confirmOrderMaterialSpends, confirmOrderMaterialOperation, readOrderMaterialState, settleOrderMaterialState } from './order-reservations.mjs';
 import { riverActivity, edictPassActivity } from './seasonal-activities.mjs';
@@ -12,7 +13,7 @@ import { activityTimestamp, catalogEntry, pushedActivityEntries } from './activi
 import { festivalTaskWindow } from './activity-availability.mjs';
 import { watchHeroRaidPushes } from './hero-raid-automation.mjs';
 import { claimFestivalRewards, claimWeeklyRewards, claimVipDaily, festivalRewardKeys, weeklyRewardKeys, festivalRewardState, snowballState,
-  compassState, weekChargeState, weekHeroStarState, weekFreePackState, vipDailyState, syncFestivalDay } from './free-rewards.mjs';
+  compassState, weekChargeState, weekHeroStarState, weekFreePackState, syncFestivalDay } from './free-rewards.mjs';
 
 const weekNames = { 1: '勇士战令', 2: '累计充值', 3: '英雄升星', 4: '幸运转盘', 5: '不差钱商人', 6: '芯片活动', 7: '周翻牌' };
 const serverNow = client => (Date.now() + (client.serverClockOffsetMs || 0)) / 1000;
@@ -292,11 +293,6 @@ const text = (config, rows = []) => rows.map(([id, num]) => displayMaterial(conf
 // One line per reward so each tab says what can be collected before anything is clicked.
 async function rewardStatus(client, config, activities, week, player, { readOrder, readInventory }) {
   const status = {};
-  const rankStates = new Map();
-  const readRank = rank => {
-    if (!rankStates.has(rank.type)) rankStates.set(rank.type, openRankState(client, config, player, rank));
-    return rankStates.get(rank.type);
-  };
   const put = (id, lines, ready, badge = '可领') => { status[id] = { lines, ready, badge }; };
   const safely = async (id, work) => {
     try { await work(); } catch (error) { put(id, ['状态读取失败：' + error.message], false); }
@@ -352,19 +348,9 @@ async function rewardStatus(client, config, activities, week, player, { readOrde
       put(id, [(view.name ?? '免费礼包') + '：' + (view.done ? '已领' : '可领 ' + text(config, view.reward))], !view.done);
     });
   }
-  const vip = vipDailyState(player, config, Math.floor((serverNow(client) + 8 * 3600) / 86400));
-  await safely('pirates', async () => {
-    const reports = await campaignReportState(client, config, player);
-    const rank = await readRank(openRanks[2]);
-    put('pirates', [
-      reports.pending ? '战报奖励 ' + reports.pending + ' 份待领：' + reports.rewards : '战报奖励已领完',
-      rank.open ? '剿匪冲榜 ' + rank.progress + ' 分' + (rank.me?.rank ? ' · 排名第 ' + rank.me.rank + ' 名' : ' · 未上榜') + ' · 已领 ' + rank.got + '/' + rank.total + ' 档' + (rank.next ? ' · 下一档 ' + rank.next.score + ' 分' : '') + (rank.ready.length ? '（可领 ' + rank.ready.length + ' 档）' : '') : '剿匪冲榜已结束',
-    ], reports.pending > 0 || (rank.open && rank.ready.length > 0));
-    status.pirates.rankOpen = rank.open;
-  });
   await safely('openrank', async () => {
     const ranks = [];
-    for (const rank of openRanks) ranks.push(await readRank(rank));
+    for (const rank of openRanks) ranks.push(await openRankState(client, config, player, rank));
     const open = ranks.filter(rank => rank.open);
     if (!open.length) return;
     const windows = (client.openRankActivity?.activityTime ?? []).filter(row => row.startTime <= serverNow(client) && serverNow(client) < row.endTime);
@@ -372,7 +358,6 @@ async function rewardStatus(client, config, activities, week, player, { readOrde
       startTime: windows.length ? Math.min(...windows.map(row => row.startTime)) : null, endTime: Math.max(...open.map(rank => rank.endTime)) });
     put('openrank', open.map(rank => rank.name + ' ' + rank.progress + ' 分' + (rank.me?.rank ? ' · 第 ' + rank.me.rank + ' 名' : '') + ' · 已领 ' + rank.got + '/' + rank.total + ' 档' + (rank.ready.length ? '（可领 ' + rank.ready.length + ' 档）' : '')), open.some(rank => rank.ready.length > 0));
   });
-  if (vip.level > 0) put('vip', ['VIP ' + vip.level + ' · ' + (vip.available.length ? '可领 ' + vip.available.map(row => 'VIP ' + row.level + '：' + text(config, row.reward)).join('；') : '今日已领完')], vip.available.length > 0);
   return status;
 }
 
@@ -429,8 +414,7 @@ async function activityDetails(client, config, week, activities, {
       const owned = stock.get(id) ?? 0;
       const crop = config?.tables.FarmlandPlantCfg?.data.find(r => r.id === id);
       const seed = crop ? { name: displayMaterial(config, crop.material[0]), count: stock.get(crop.material[0]) ?? 0 } : null;
-      const price = config?.tables.ItemPriceCfg?.data.find(row => row.itemId === id)?.rubyPrice;
-      return { id, seed, price: Number.isSafeInteger(price) && price > 0 ? price : null,
+      return { id, seed, price: goodsRubyPrice(config, id),
         sources: config?.materialSources?.(id) ?? [], name: displayMaterial(config, id), required, owned,
         missing: Math.max(0, required - owned) };
     });
@@ -577,27 +561,6 @@ export async function readWeekOrderStock(client,player,enabled=()=>true) {
   return stock;
 }
 
-async function readWeekPurchaseBalances(client,check) {
-  check();
-  const bag=await client.request('AllItemRequest',{},'AllItemResponse');
-  check();
-  const resources=await client.request('AllResourceRequest',{},'AllResourceResponse');
-  check();
-  if(!Array.isArray(bag?.items)||!Array.isArray(resources?.list))throw Error('购买后完整库存或资源尚未确认');
-  const items=new Set(),ids=new Set();
-  for(const row of bag.items){
-    const count=row?.num==null?NaN:toNumber(row.num);
-    if(typeof row.itemId!=='string'||!row.itemId||items.has(row.itemId)||!Number.isSafeInteger(count)||count<0)throw Error('购买后完整库存尚未确认');
-    items.add(row.itemId);
-  }
-  for(const row of resources.list){
-    const count=row?.amount==null?NaN:toNumber(row.amount);
-    if(!Number.isSafeInteger(row.res)||ids.has(row.res)||!Number.isSafeInteger(count)||count<0)throw Error('购买后完整资源尚未确认');
-    ids.add(row.res);
-  }
-  if(!ids.has(4))throw Error('购买后钻石余额尚未确认');
-}
-
 async function reconcileWeekOrderOperations(client,ledger,player,check,action,requestedKey) {
   const actor=weekOrderActor(player);
   for(const [savedKey,record] of Object.entries(ledger.keyRecords())){
@@ -605,7 +568,7 @@ async function reconcileWeekOrderOperations(client,ledger,player,check,action,re
     if(record.confirmed||!['weekOrderBuy','weekOrderSubmit'].includes(details?.kind)||details.playerId!==actor.playerId||details.worldId!==actor.worldId)continue;
     if(details.kind==='weekOrderBuy'){
       if(!details.acknowledged){if(action==='buy'||action==='auto')throw Error('上次商人订单购买结果待确认，暂不重复购买');continue;}
-      await readWeekPurchaseBalances(client,check);
+      await readGoodsPurchaseBalances(client,check);
     }else{
       if(!details.acknowledged&&!await verifyWeekOrderOperation(client,details.evidence)){
         if(action==='submit'||action==='auto')throw Error('该操作已提交，结果待确认，请核对订单记录');
@@ -682,7 +645,7 @@ export async function runWeekOrder(client,config,settings,ledger,enabled,action,
     if(buy){
       if(!Array.isArray(result?.reward?.asset)||!result.reward.asset.some(row=>row.id===item.id&&toNumber(row.num)===item.missing))throw Error('购买奖励回执尚未确认，保留预算和防重记录');
       ledger.updateKeyDetails(key,{...ledger.keyRecords()[key].details,acknowledged:true});
-      await readWeekPurchaseBalances(client,check);
+      await readGoodsPurchaseBalances(client,check);
     }else{
       if(!Number.isSafeInteger(result?.randomRwdId)||result.randomRwdId<=0||view.evidence.rewards.includes(result.randomRwdId))throw Error('提交奖励回执未确认');
       ledger.updateKeyDetails(key,{...ledger.keyRecords()[key].details,acknowledged:true,rewardId:result.randomRwdId});

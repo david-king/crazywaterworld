@@ -44,8 +44,8 @@
 .silicon-slot[data-relation=self] { background:var(--success-muted); color:var(--success); border-color:var(--success-border) }
 .silicon-slot[data-relation=ally] { color:var(--mine-color); background:color-mix(in srgb,var(--mine-color) 9%,var(--card)) }
 .silicon-slot[data-relation=other] { background:var(--muted); color:var(--foreground) }
-.silicon-slot[aria-pressed=true] { outline:2px solid var(--mine-color); outline-offset:1px }
-.silicon-slot:focus-visible { outline:2px solid var(--ring); outline-offset:3px }
+.silicon-slot[aria-pressed=true] { background:var(--mine-color); color:var(--background); border:1px solid var(--mine-color) }
+.silicon-slot:focus-visible { outline:2px solid var(--mine-color); outline-offset:2px }
 .silicon-position-detail { display:grid; grid-template-rows:auto 5.25rem 2.25rem; gap:4px; flex:none; margin-top:8px; padding-top:8px; border-top:1px solid var(--border); font-size:13px; overflow-wrap:anywhere }
 .silicon-detail-heading,.silicon-detail-footer { display:flex; align-items:center; gap:8px }
 .silicon-detail-heading { justify-content:space-between }
@@ -56,7 +56,7 @@
 .silicon-detail-footer { justify-content:flex-end }
 .silicon-detail-footer button { min-width:5em }
 .silicon-fleet-choice { display:flex; align-items:center; gap:8px }
-.silicon-fleet-choice select { flex:1; min-width:0; max-width:100%; font:inherit; border:1px solid var(--border); border-radius:6px; background:var(--card); color:inherit; padding:5px }
+.silicon-fleet-choice cw-select { flex:1 }
 .silicon-rewards { margin-top:auto; padding-top:14px; font-size:11px }
 .silicon-rewards ul { display:flex; flex-wrap:wrap; gap:5px; margin-top:6px }
 .silicon-rewards li { background:var(--muted); padding:3px 6px; border-radius:4px }

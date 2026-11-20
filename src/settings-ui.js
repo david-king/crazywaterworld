@@ -112,7 +112,9 @@ const guildShipActivityFields = [
     configField('guildShip.rewardFilter','按奖励物品筛选'),
     configField('guildShip.rewardItems','期望奖励物品','multi',{ parent: 'guildShip.rewardFilter',catalog:'materials',when:d=>d.guildShip.rewardFilter}),
     configField('guildShip.disabledMaterials','禁止消耗物料','multi',{catalog:'materials'}),
-    configField('guildShip.produceMissing','红船缺料自动备料','switch',{help:'与工厂开关联动；只为符合当前策略的红船备料，不购买材料。'}),
+    configField('guildShip.allowDiamonds','允许钻石补齐货物','switch',{help:'按上船策略优先选船型。同船型先选库存能装满的舱位，其次选整舱补货总价最低的。同价按船号、舱号从小到大选。需同时开启全局自动钻石消耗。'}),
+    configField('guildShip.diamondDailyLimit','商船补货每日钻石上限','number',{parent:'guildShip.allowDiamonds',when:d=>d.guildShip.allowDiamonds,unit:'钻石',help:'按账号在北京时间零点重置。0 表示只用库存，同时受全局每日钻石预算和钻石保留量限制。'}),
+    configField('guildShip.produceMissing','红船缺料自动备料','switch',{help:'由工厂为符合当前策略的红船生产缺料。'}),
     configField('guildShip.redStartEnabled','指定红船申请船长时间'),
     configField('guildShip.redStartTime','红船申请船长时间','time',{ parent: 'guildShip.redStartEnabled',when:d=>d.guildShip.redStartEnabled,help:'北京时间。只控制申请船长的最早时间，满员或准备结束后由游戏服务器开船。'}),
 ];
@@ -169,8 +171,8 @@ const configGroups = [
   ]},
   {id:'guildFort',title:'联盟 · 工事捐赠',category:'world',fields:[
     configField('guildFort.enabled','自动捐赠工事','switch',{gates:['alliance.enabled'],help:'同时需要联盟自动化总开关。只捐现有库存；不购买、不兑换，不创建或拆除工事。'}),
-    configField('guildFort.materials','捐赠物料','multi',{catalog:'materials',fortNeeds:true,empty:'任意可捐物料',help:'留空时可捐任意工事所需物料，选择后只捐所选物料。'}),
-    configField('guildFort.blockedMaterials','排除物料','multi',{catalog:'materials',fortNeeds:true,empty:'未排除物料',help:'即使同时选为捐赠物料，也会跳过这里选中的物料。'}),
+    configField('guildFort.materials','捐赠物料','multi',{catalog:'materials',empty:'任意可捐物料',help:'留空时可捐任意工事所需物料，选择后只捐所选物料。'}),
+    configField('guildFort.blockedMaterials','排除物料','multi',{catalog:'materials',empty:'未排除物料',help:'即使同时选为捐赠物料，也会跳过这里选中的物料。'}),
     configField('guildFort.reserve','捐赠后库存保留','number'),configField('guildFort.dailyLimit','每日捐赠上限','number',{help:'0 表示不额外限制，仍遵守游戏日上限。'}),
   ]},
   {id:'resourceFields',title:'资源田',category:'world',fields:[
@@ -226,7 +228,7 @@ const configGroups = [
   ]},
   {id:'league',title:'积分赛',category:'daily',fields:[
     configField('schedule.leagueChallenge','积分赛每日挑战','switch',{help:'使用已有编队和挑战券，每轮最多挑战一次，达到每日战斗次数后停止。'}),
-    configField('league.target','选对手策略','choice',{options:[['weakest','优先战力最低'],['score','优先积分最高']]}),
+    configField('league.target','选对手策略','choice',{componentSelect:true,options:[['weakest','优先战力最低'],['score','优先积分最高']]}),
     configField('league.maxPowerRatio','对手战力上限（相对己方）','number',{unit:'%',help:'填 70 表示优先选战力不超过本人积分赛战力 70% 的对手，再按所选策略排序。0 表示不限。'}),
     configField('league.fallbackWeakest','免费刷新后兜底挑战','switch',{help:'当前名单无人符合上限时使用免费刷新次数。刷到符合条件的对手就打，免费次数用完仍无人符合时，挑战当前名单中战力最低者。'}),
     configField('league.dailyBattleLimit','每日战斗次数','number',{unit:'次',help:'每场用 1 张券。填 0 暂停战斗并留券，领奖仍按各自开关执行。'}),
@@ -236,7 +238,7 @@ const configGroups = [
   ]},
   {id:'arena',title:'竞技场',category:'daily',fields:[
     configField('schedule.arena','竞技场每日挑战','switch',{help:'使用已有挑战券，每轮最多挑战一次，达到每日战斗次数后停止。需开启「日常行动」和「每日任务与奖励」总开关。'}),
-    configField('arena.target','选对手策略','choice',{options:[['weakest','优先战力最低'],['rank','优先排名最高']],help:'从排名在自己之前、当前可以挑战的对手中选择。'}),
+    configField('arena.target','选对手策略','choice',{componentSelect:true,options:[['weakest','优先战力最低'],['rank','优先排名最高']],help:'从排名在自己之前、当前可以挑战的对手中选择。'}),
     configField('arena.maxPowerRatio','对手战力上限（相对己方）','number',{unit:'%',help:'填 70 表示优先选战力不超过本人竞技场战力 70% 的对手，再按所选策略排序。0 表示不限。'}),
     configField('arena.fallbackLowerRank','兜底扫荡低排名对手','switch',{help:'排名靠前的可挑战对手中无人符合条件时，消耗 1 张券扫荡排名在自己之后的对手，计入每日战斗次数。'}),
     configField('arena.dailyBattleLimit','每日战斗次数','number',{unit:'次',help:'包含今天已打的场次。每场用 1 张券，填 0 暂停战斗并留券。'}),
@@ -435,9 +437,9 @@ const configGroups = [
     configField('progression.enabled','推关与试炼总开关'),
     configField('progression.mainline','主线 / 闯关自动挑战','switch',{help:'主线推关与闯关是同一个玩法。随挂机每轮挑战当前关卡一次，胜利后下一轮继续推进。'}),
     configField('lineups.mainlinePresetId','自动主线挑战阵容','lineup',{parent:'progression.mainline',help:'与挑战页共用此阵容选择，按账号保存。挑战时临时使用所选阵容，每场结束后恢复挑战前的游戏阵容。'}),
-    configField('progression.trials','试炼自动推关','switch',{help:'每轮依次挑战所选副本的下一关，无需每轮手动开始。达到停止上限只暂停对应副本，其他玩法继续。'}),
+    configField('progression.trials','试炼自动推关','switch',{help:'每轮依次挑战所选副本的下一关。各副本的阵容按账号保存，与挑战页共用，每场结束后恢复原阵容。达到停止上限只暂停对应副本，其他玩法继续。'}),
     configField('progression.raidIds','自动推关副本','multi',{ parent: 'progression.trials',catalog:'trialRaids',empty:'请选择自动推关副本'}),
-    configField('lineups.trialPresets','各副本自动挑战阵容','trialLineups',{parent:'progression.trials',help:'与挑战页共用各副本的阵容选择，按账号保存。自动挑战只在已开启自动推关的副本中生效，每场结束后恢复挑战前的游戏阵容。'}),
+    configField('lineups.trialPresets','各副本自动挑战阵容','trialLineups',{parent:'progression.trials',wide:true}),
     configField('progression.maxFailures','失败停止次数','number',{unit:'次',help:'主线与每个试炼分别累计同一关的连续战败，通关清零。跨挂机轮次和断线重连保留；达到上限后本次挂机不再重试，暂停后重新开始挂机可重试。不是挑战总次数，也不统计网络错误。仅用于挂机，挑战页手动参数独立。'}),
     configField('schedule.trialSweep','试炼首轮免费扫荡','switch',{help:'只使用免费档位，扫荡与自动推关分别控制，不计入失败停止次数。'}),
   ] },
@@ -526,6 +528,11 @@ const configGroups = [
     configField('tasks.main', '领取主线奖励'), configField('tasks.branch', '领取支线奖励'), configField('tasks.achievements', '领取成就奖励'),
     configField('dailies.enabled', '日常总开关', 'switch', { help: '控制本组每日任务与奖励。基地页的付费点金独立设置。' }), configField('dailies.claimTasks', '领取其他每日任务奖励', 'switch', {help:'竞技场和积分赛的每日任务奖励在各自页签设置。'}),
     configField('dailies.claimDailyChest', '领取每日活跃宝箱'), configField('dailies.claimWeeklyChest', '领取每周活跃宝箱'), configField('dailies.claimGift', '领取每日免费赠礼'),
+    configField('schedule.fishBook', '钓鱼图鉴奖励', 'switch', { controlFields: ['schedule.fishBook', 'activityAutomation.fish'], help: '挂机时领取已达标的图鉴奖励。' }),
+    configField('activityAutomation.vip', 'VIP 每日自动领奖', 'switch', { collapsible: false, help: '开启后按所选档位领取免费奖励。' }),
+    configField('schedule.vipDailyGift', '领取当前 VIP 等级礼包', 'switch', { parent: 'activityAutomation.vip' }),
+    configField('schedule.vipDaily', '领取所有已解锁 VIP 档位奖励', 'switch', { parent: 'activityAutomation.vip', help: '包含当前等级，两项同时开启时只检查一次。' }),
+    configField('activityAutomation.pirates', '战报自动领奖总开关', 'switch', { help: '开启后，挂机按已勾选的战报奖励项目领取。' }),
     configField('schedule.comicDrama','漫剧观看与每日奖励','switch',{help:'默认关闭。已解锁的集数每轮最多处理 10 集，并在每天领取 1 次每日奖励；当天没有新集时重看最后一集以满足领取条件。'}),
     configField('schedule.tournamentDailyGift','擂台赛每日礼包','switch',{help:'默认关闭。只在擂台赛进行阶段按服务器记录每天领取 1 次，不参与投注和布阵。'}),
     configField('schedule.seasonChest','赛季宝箱用钥匙开启','switch',{help:'默认关闭。每箱消耗服务器指定的 3 把钥匙，每轮最多 5 箱，钥匙不足时等待，不花钻石，也不发起钥匙交换。钥匙在进入新赛季时清零，建议赛季内开启。'}),
@@ -1152,7 +1159,7 @@ function configRenderField(spec) {
   if (spec.moduleControl) row.classList.add('config-module-control');
   const id = 'config-field-' + spec.key.replaceAll('.', '-');
   const name = el('div', 'config-label-line'); const label = el('label', 'config-label', spec.label); label.htmlFor = id; name.append(label);
-  name.hidden = spec.kind === 'cityWarRoles' || spec.kind === 'fleetLineups';
+  name.hidden = ['cityWarRoles', 'fleetLineups', 'trialLineups'].includes(spec.kind);
   label.id = id + '-label';
   if (spec.help) { const help = el('span', '', spec.help); help.id = id + '-help'; help.hidden = true; name.append(makeHelpTip(spec.label, spec.help), help); }
   const box = el('div', 'config-control'); const error = el('div', 'config-field-error'); error.id = id + '-error'; error.hidden = true;
@@ -1179,7 +1186,10 @@ function configRenderField(spec) {
   } else if (spec.kind === 'choice') {
     control = el('select', 'config-select'); control.id = id;
     for (const [value, text] of spec.options) { const option = el('option', '', text); option.value = value; control.append(option); }
-    control.value = configGet(spec.key); control.onchange = () => configSet(spec.key, spec.numeric ? Number(control.value) : control.value); box.append(control);
+    control.value = configGet(spec.key); control.onchange = () => configSet(spec.key, spec.numeric ? Number(control.value) : control.value);
+    if (spec.componentSelect) {
+      const picker = el('cw-select'); picker.append(control); box.append(picker);
+    } else box.append(control);
   } else if (['lineup', 'trialLineups', 'fleetLineups'].includes(spec.kind)) {
     control = configLineupPicker(spec, id); box.append(control);
   } else if (spec.kind === 'radio') {
@@ -1313,13 +1323,14 @@ function configLineupPicker(spec, id) {
   root.setAttribute('role', 'group'); root.setAttribute('aria-label', spec.label);
   const presets = configGet('lineups.presets') ?? [];
   const fleetPicker = spec.kind === 'fleetLineups', bindingField = fleetPicker ? 'buildingId' : 'raidId';
-  const entries = spec.kind === 'trialLineups'
+  const trialPicker = spec.kind === 'trialLineups';
+  const entries = trialPicker
     ? (configEditor.data.catalog?.trialRaids ?? []).map(raid => ({ raidId: String(raid.value), label: raid.label }))
     : fleetPicker ? (configEditor.data.catalog?.expeditionFleets ?? []).map(fleet => ({ raidId: String(fleet.value), label: fleet.label }))
     : [{ raidId: null, label: spec.label }];
   const controls = [];
   for (const entry of entries) {
-    const line = el('div', fleetPicker ? 'config-fleet-lineup' : 'config-add');
+    const line = el('div', trialPicker ? 'config-trial-lineup' : fleetPicker ? 'config-fleet-lineup' : 'config-add');
     const select = el('select', 'config-select'); select.id = id + (entry.raidId ? '-' + entry.raidId : '-select');
     select.dataset.lineupBinding = entry.raidId ? (fleetPicker ? 'fleet:' : 'trial:') + entry.raidId : 'mainline';
     select.setAttribute('aria-label', entry.label + (fleetPicker ? '世界Boss出战阵容' : entry.raidId ? '自动挑战阵容' : ''));
@@ -1327,12 +1338,6 @@ function configLineupPicker(spec, id) {
     for (const preset of presets) {
       const option = el('option', '', preset.name); option.value = preset.id; select.append(option);
     }
-    const view = configButton('查看', () => {
-      if (select.value) void openSavedLineupViewer(current, select.value);
-      else if (fleetPicker) void openLineupViewer(current, { buildingId: entry.raidId, fleetName: entry.label });
-    });
-    view.dataset.lineupView = select.dataset.lineupBinding;
-    view.setAttribute('aria-label', '查看' + entry.label + (entry.raidId ? '阵容' : ''));
     select.onchange = () => {
       if (entry.raidId === null) configSet(spec.key, select.value);
       else {
@@ -1344,9 +1349,20 @@ function configLineupPicker(spec, id) {
     };
     if (entry.raidId) {
       const label = el('label', 'config-label', entry.label); label.htmlFor = select.id;
-      (fleetPicker ? line : root).append(label);
+      line.append(label);
     }
-    line.append(select, view); root.append(line);
+    line.append(select);
+    let view;
+    if (!trialPicker) {
+      view = configButton('查看', () => {
+        if (select.value) void openSavedLineupViewer(current, select.value);
+        else if (fleetPicker) void openLineupViewer(current, { buildingId: entry.raidId, fleetName: entry.label });
+      });
+      view.dataset.lineupView = select.dataset.lineupBinding;
+      view.setAttribute('aria-label', '查看' + entry.label + (entry.raidId ? '阵容' : ''));
+      line.append(view);
+    }
+    root.append(line);
     controls.push({ ...entry, select, view, line });
   }
   const hint = el('p', 'config-help', fleetPicker ? '请先勾选参与舰队以逐队指定阵容。' : '副本列表暂未载入，请刷新挂机配置。');
@@ -1355,7 +1371,7 @@ function configLineupPicker(spec, id) {
     let visible = 0;
     for (const { raidId, select, view, line } of controls) {
       select.value = raidId === null ? configGet(spec.key) : configGet(spec.key).find(binding => binding[bindingField] === raidId)?.presetId ?? '';
-      view.disabled = !fleetPicker && !select.value;
+      if (view) view.disabled = !fleetPicker && !select.value;
       if (fleetPicker) { line.hidden = !configGet('worldBoss.fleetIds').includes(raidId); if (!line.hidden) visible++; }
     }
     if (fleetPicker) hint.hidden = visible > 0;
@@ -1574,7 +1590,11 @@ function configErrors(error, { focus = true } = {}) {
     widget.row.hidden = false; widget.error.textContent = text; widget.error.hidden = false; widget.control?.setAttribute('aria-invalid', 'true');configRevealSection(widget); first ??= widget;
   }
   configUpdateVisibility();
-  if (focus && first) { configActivate(first.spec.category); configActivateGroup(first.spec.groupId); first.control?.focus?.(); first.row.scrollIntoView({ block: 'center', behavior: 'smooth' }); }
+  if (focus && first) {
+    configActivate(first.spec.category); configActivateGroup(first.spec.groupId);
+    const input = first.spec.componentSelect ? first.row.querySelector('.choice-trigger') ?? first.control : first.control;
+    input?.focus?.(); first.row.scrollIntoView({ block: 'center', behavior: 'smooth' });
+  }
   else if (focus) $('config-message').scrollIntoView({ block: 'nearest' });
 }
 
@@ -1811,12 +1831,11 @@ function configMultiselect(spec, id, options = {}) {
   const search = el('input', 'config-input'); search.type = 'search'; search.placeholder = '搜索' + spec.label; search.setAttribute('aria-label', '搜索' + spec.label);
   const list = el('div', 'config-option-list'); const foot = el('div', 'config-select-foot');
   const count = el('span'); let limit = 120;
-  let fortItemIds = null, fortNotice = '', requestNumber = 0;
   const more = configButton('显示更多选项', () => { limit += 120; paintList(); });
   const all = () => {
     const options = (catalog[spec.catalog] ?? []).filter(item =>
       spec.key !== 'heroes.heroIds' || !item.hidden || read().includes(item.value));
-    if (spec.catalog!=='expeditionFleets' && !spec.fortNeeds) for (const value of read()) if (!options.some(item => item.value === value)) options.unshift({ value, label: value + '（当前配置中未找到）' });
+    if (spec.catalog!=='expeditionFleets') for (const value of read()) if (!options.some(item => item.value === value)) options.unshift({ value, label: value + '（当前配置中未找到）' });
     return options;
   };
   function paintSummary() {
@@ -1828,57 +1847,34 @@ function configMultiselect(spec, id, options = {}) {
   }
   function paintFooter(available, matchCount, selected) {
     const selectedCount = available.filter(item => selected.has(item.value)).length;
-    count.textContent = '已选 ' + (spec.fortNeeds ? selected.size : selectedCount) + ' 项 · 匹配 ' + matchCount + ' 项';
+    count.textContent = '已选 ' + selectedCount + ' 项 · 匹配 ' + matchCount + ' 项';
     reset.disabled = disabled || selected.size === 0;
     if (selectAll) selectAll.disabled = disabled || selectedCount === available.length;
   }
   function paintList() {
     const oldScroll = list.scrollTop; clear(list);
     const query = search.value.trim().toLocaleLowerCase();
-    const materialOptions = all();
-    const available = fortItemIds ? materialOptions.filter(item => fortItemIds.has(item.value)) : materialOptions;
+    const available = all();
     const matches = available.filter(item => (item.label + ' ' + item.value).toLocaleLowerCase().includes(query));
     const selected = new Set(read());
-    if (fortNotice) list.append(el('p', 'config-help', fortNotice));
     for (const item of matches.slice(0, limit)) {
       const label = el('label', 'config-option'); const input = el('input'); input.type = 'checkbox'; input.checked = selected.has(item.value); input.disabled = disabled;
       input.onchange = () => {
         if (disabled) return;
-        const values = spec.fortNeeds ? read().filter(value => materialOptions.some(item => item.value === value)) : read();
+        const values = read();
         write(input.checked ? [...values, item.value] : values.filter(value => value !== item.value));
         if (spec.key === 'heroes.heroIds' && item.hidden && !input.checked) { paintSummary(); paintList(); return; }
         paintSummary(); paintFooter(available, matches.length, new Set(read()));
       };
       label.append(input, el('span', '', item.label)); list.append(label);
     }
-    if (!matches.length && (!fortNotice || available.length)) list.append(el('p', 'config-help', '没有匹配项，试试其他名称。'));
+    if (!matches.length) list.append(el('p', 'config-help', '没有匹配项，试试其他名称。'));
     paintFooter(available, matches.length, selected);
     more.hidden = matches.length <= limit; list.scrollTop = oldScroll;
   }
   search.oninput = () => { limit = 120; paintList(); };
-  async function loadFortNeeds(request) {
-    const account = configEditor.owner;
-    let result;
-    try { result = await call('/api/settings/guild-fort-materials?account=' + encodeURIComponent(account)); }
-    catch (error) { result = { reason: error.message }; }
-    if (request !== requestNumber || !root.open || !root.isConnected || account !== current || account !== configEditor.owner) return;
-    if (Array.isArray(result.itemIds)) {
-      fortItemIds = new Set(result.itemIds);
-      fortNotice = fortItemIds.size ? '' : result.reason || '当前没有待捐物料。';
-    } else {
-      fortItemIds = null;
-      fortNotice = (result.reason || '暂时无法读取工事进度') + '，显示全部物资。';
-    }
-    paintList();
-  }
   root.ontoggle = () => {
-    requestNumber++;
     if (!root.open) { root.classList.remove('open-up'); return; }
-    if (spec.fortNeeds) {
-      fortItemIds = new Set();
-      fortNotice = '正在读取当前联盟的工事进度…';
-      void loadFortNeeds(requestNumber);
-    }
     paintList(); configOpenSearchPanel(root, panel, search);
   };
   root.onkeydown = event => { if (event.key === 'Escape') { root.open = false; summary.focus(); event.stopPropagation(); } };
@@ -2170,7 +2166,7 @@ async function configPreview() {
       if(data.fields.length){
         const fields = el('details', 'runtime-other');
         fields.append(el('summary', '', '查看草稿参数'),table(['参数','草稿值'],data.fields.map(f=>{
-          const value=configGet(f.key);
+          const value=f.kind==='switch'?configSwitchValue(f):configGet(f.key);
           return [f.label,typeof value==='boolean'?(value?'开':'关'):Array.isArray(value)?value.map(v=>typeof v==='object'?JSON.stringify(v):String(v)).join('、')||'未选':String(value??'未配置')];
         })));
         result.append(fields);

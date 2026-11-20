@@ -15,6 +15,8 @@ saveStore({ activeId: 'ship-a', accounts: ['ship-a', 'ship-b'].map(id => ({
   id, label: id, url: 'ws://invalid.invalid', login: {}, automation: { enabled: false },
 })) });
 const legacy = defaultSettings();
+delete legacy.guildShip.allowDiamonds;
+delete legacy.guildShip.diamondDailyLimit;
 Object.assign(legacy.guildShip, { crew: true, captain: false, mode: 'small', disabledMaterials: ['木板'] });
 fs.writeFileSync(path.join(directory, 'automation-settings.json'), JSON.stringify({ version: 1, accounts: {
   'ship-a': { settings: legacy, revision: 4, savedAt: 'legacy' },
@@ -36,7 +38,7 @@ const change = (view, key, value) => ({ key, value, revision: view.revision, bas
 try {
   await test('离线读取沿用已有商船配置及材料选择，独立于联盟设置', async () => {
     const view = ok(await api());
-    assert.deepEqual(view.settings.guildShip, legacy.guildShip);
+    assert.deepEqual(view.settings.guildShip, { ...legacy.guildShip, allowDiamonds:false, diamondDailyLimit:0 });
     assert.equal(view.settings.alliance, undefined);
     assert.equal(view.revision, 4);
     assert(Array.isArray(view.catalog.materials));
@@ -51,6 +53,7 @@ try {
     let view = ok(await api());
     for (const [key, value] of [['enabled', true], ['captain', true], ['mode', 'full'],
       ['minCoinsLarge', 70], ['rewardItems', ['木板', '橡胶圈']], ['disabledMaterials', ['木板']],
+      ['allowDiamonds', true], ['diamondDailyLimit', 150], ['allowDiamonds', false],
       ['redStartEnabled', true], ['redStartTime', '23:25'], ['enabled', false]]) {
       view = ok(await api('guild-ship/settings', change(view, 'guildShip.' + key, value)));
       expected.guildShip[key] = value;
@@ -67,6 +70,7 @@ try {
     for (const [key, value] of [['alliance.enabled', true], ['guildShip.__proto__', {}],
       ['guildShip.unknown', true], ['guildShip.enabled', 'true'], ['guildShip.mode', 'invalid'],
       ['guildShip.redStartTime', '24:00'], ['guildShip.disabledMaterials', '木板'],
+      ['guildShip.diamondDailyLimit', -1], ['guildShip.diamondDailyLimit', 1.5], ['guildShip.allowDiamonds', 'true'],
       ['guildShip.minCoinsSmall', -1], ['guildShip.minCoinsSmall', 1.5]]) {
       assert.equal((await api('guild-ship/settings', change(before, key, value))).status, 400, key);
     }

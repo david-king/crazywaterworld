@@ -10,7 +10,7 @@ process.env.CW_DATA_DIR = directory;
 process.env.CW_CONFIG_PACK = path.join(directory, 'config.json');
 process.env.CW_PROTO_BUNDLE = path.join(directory, 'intentionally-missing-protocol.js');
 const config = {
-  ItemCfg: [{ id: '金属', show_name: '废金属', type: '原料' }],
+  ItemCfg: [{ id: '金属', show_name: '废金属', type: '原料' }, { id: '面包', show_name: '面包' }, { id: '小麦', show_name: '小麦' }],
   ResourceRecoverCfg: [{ id: 'ARENA_POINT', recoverMax: 10 }, { id: 'LEAGUE_POINT', recoverMax: 12 }],
   BuildingCfg: [{ buildingType: '食品厂' }, { buildingType: '农田' }, { buildingType: '民居' }, { buildingType: '宠物培育室' }],
   BuildingUpgradeCfg: [{ buildingType: '民居', level: 1, effect: [] },
@@ -19,7 +19,7 @@ const config = {
   FarmlandPlantCfg: [{ id: '小麦', time: 30, produceNum: 5, material: ['小麦种子', 1] }],
   BuildingProduceParamCfg: [{ paramName: '制造位上限', paramValue: 6 }],
   GameParamCfg: [{ paramName: '初始人口', paramValue: 3 }, { paramName: '初始人口上限', paramValue: 100 }, { paramName: '产品存量初始上限', paramValue: 50 }],
-  CargoUnlockCfg: [{ playerLevel: 9 }],
+  CargoUnlockCfg: [{ index: 1, playerLevel: 9 }],
   ModuleOpenCfg: [{ moduleId: '联盟情报', playerLevel: 18 }, { moduleId: '联盟商船', playerLevel: 18 }],
   HeroRaidOrderCfg: [{ raidId: 1, orderId: 2, unlockDay: 1, orderList: [['面包', 1]] }],
 };
@@ -34,7 +34,7 @@ const { captureSpendOperation } = await import('../src/spend-evidence.mjs');
 const { beginOrderMaterialSpend, pendingOrderMaterialSpends } = await import('../src/order-reservations.mjs');
 const requests = ['OnWater', 'AllItem', 'AllResource', 'GameEffect', 'MonthCard', 'AllHero', 'WeekInfo', 'WeekOrderInfo', 'CargoShips', 'GuildOrder', 'RadarInfo'];
 const protocol = createDeclaredProtocol([...requests.flatMap(name => [name + 'Request', name + 'Response']),
-  'SpeedUpFactoryProduceRequest', 'FarmSpeedUpRequest', 'GainFactoryProduceRequest', 'GainFactoryProduceResponse']);
+  'StartFactoryProduceRequest', 'SpeedUpFactoryProduceRequest', 'FarmSpeedUpRequest', 'GainFactoryProduceRequest', 'GainFactoryProduceResponse']);
 const states = new Map(), live = new Set(), apps = new Set();
 let sequence = 0, passed = 0;
 
@@ -188,6 +188,69 @@ try {
       assert.equal(missing.get('金属').cap, undefined);
       assert.equal(missing.get('金属').num, 5860);
       assert.equal(missing.get('ARENA_POINT').cap, 10);
+    } finally { await f.close(); }
+  });
+  await test('空闲格独立手动排产一件，复核队列、库存、订单预留与未确认请求', async () => {
+    const f = await fixture();
+    try {
+      const start = target => f.response('world/production-start', { confirm: true, ...target });
+      assert.equal((await start({})).status, 400);
+      assert.equal(f.state.logins, 0);
+      await f.api('connect', {});
+      const { client, preferences } = f.session();
+      preferences.loop.world = preferences.factory.enabled = false;
+      const { OnWaterRequest: water, AllItemRequest: bag } = f.state.responses;
+      const building = water.building[0], factory = building.factory, queue = factory.factoryQ;
+      const ingredient = bag.items.find(item => item.itemId === '小麦');
+      water.workerOrder = [{ index: 1, requirements: [{ type: 0, id: '小麦', num: 2 }] }];
+      f.state.responses.CargoShipsRequest.ship = [];
+      const factoryView = async () => (await f.api('world')).factories[0];
+      const view = await factoryView();
+      const [product] = view.manualProducts;
+      assert.deepEqual(product.inputs, [{ id: '小麦', name: '小麦', num: 5, owned: 100 }]);
+      assert.equal(product.seconds, 60);
+      const target = { buildingId: building.buildingId, productId: product.productId, productionKey: product.productionKey };
+      let writes = 0, apply = true;
+      client.sendWatch = async (name, body, options) => {
+        options.beforeSend();
+        assert.equal(name, 'StartFactoryProduceRequest');
+        assert.deepEqual(body, { buildingId: '1食品厂', productId: '面包' });
+        writes++;
+        if (apply) {
+          ingredient.num -= 5;
+          queue.push({ idx: 7, productId: '面包', finishTime: f.state.now + 60 });
+        }
+      };
+      assert.equal((await start({ ...target, confirm: false })).status, 400);
+      assert.equal((await start({ ...target, productId: '小麦' })).status, 400);
+      factory.autoProductId = '面包'; water.autoProduceForever = true;
+      assert.match((await start(target)).data.error, /自动生产/);
+      delete factory.autoProductId;
+      ingredient.num = 6;
+      assert.match((await start(target)).data.error, /预留后可用 4/);
+      ingredient.num = 3;
+      assert.equal((await factoryView()).manualProducts[0].reason, '原料不足');
+      ingredient.num = 100;
+      const bread = bag.items.find(item => item.itemId === '面包');
+      bread.num = 50;
+      assert.equal((await factoryView()).manualProducts[0].reason, '成品已达存量上限');
+      assert.match((await start(target)).data.error, /上限/);
+      assert.equal(writes, 0);
+      bread.num = 20;
+      const pair = await Promise.all([start(target), start(target)]);
+      assert.deepEqual(pair.map(r => r.status).sort(), [200, 400], JSON.stringify(pair));
+      assert.equal(pair.find(r => r.status === 200).data.confirmed, true);
+      assert.match(pair.find(r => r.status === 400).data.error, /已变化/);
+      assert.equal(writes, 1);
+      assert.equal(ingredient.num, 95);
+      const updated = await factoryView();
+      assert.equal(updated.jobs[0].index, 7);
+      apply = false;
+      const fresh = { ...target, productionKey: updated.manualProducts[0].productionKey };
+      const unknown = await start(fresh);
+      assert.equal(unknown.data.confirmed, false, JSON.stringify(unknown.data));
+      assert.match((await start(fresh)).data.error, /待确认/);
+      assert.equal(writes, 2);
     } finally { await f.close(); }
   });
   await test('手动加速使用所点格的协议编号，农田可耗尽库存，重复点击、过期目标和未确认扣款均不会重发', async () => {

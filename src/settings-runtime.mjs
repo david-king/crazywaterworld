@@ -47,10 +47,12 @@ export function validateRuntimeSettings(settings, config) {
   if (!settings || !config?.tables) return;
   const tables = config.tables;
   const has = name => Array.isArray(tables[name]?.data);
-  let catalog = catalogCache.get(config);
-  if (!catalog) {
-    catalog = settingsCatalog(config);
-    catalogCache.set(config, catalog);
+  let allowedValues = catalogCache.get(config);
+  if (!allowedValues) {
+    const catalog = settingsCatalog(config);
+    allowedValues = Object.fromEntries([...Object.keys(collections), 'crops'].map(name =>
+      [name, new Set(catalog[name].map(row => String(row.value)))]));
+    catalogCache.set(config, allowedValues);
   }
   const errors = {};
   function check(field, values, allowed) {
@@ -60,7 +62,7 @@ export function validateRuntimeSettings(settings, config) {
   }
   for (const [name, rule] of Object.entries(collections)) {
     if (!rule.tables.every(has)) continue;
-    const allowed = new Set(catalog[name].map(row => String(row.value)));
+    const allowed = allowedValues[name];
     for (const field of rule.fields) check(field, at(settings, field), allowed);
     if (name === 'expeditionFleets') {
       for (const [index, fleet] of (settings.silicon?.fleets ?? []).entries()) {
@@ -68,7 +70,7 @@ export function validateRuntimeSettings(settings, config) {
       }
     }
   }
-  if (has('FarmlandPlantCfg')) check('farm.crops', settings.farm?.crops?.map(row => row.id), new Set(catalog.crops.map(row => row.value)));
+  if (has('FarmlandPlantCfg')) check('farm.crops', settings.farm?.crops?.map(row => row.id), allowedValues.crops);
   function cities(field, refs) {
     if (!Array.isArray(refs)) return;
     const scenarios = has('WorldScenarioCfg') ? new Set(tables.WorldScenarioCfg.data.map(row => String(row.id))) : null;

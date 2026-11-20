@@ -28,6 +28,21 @@ const forgeRead = f => readEquipmentForge(f.client, f.protocol, f.config, f.play
 const forgePlan = async (f, s, usage = ledger()) => planEquipmentForge(await forgeRead(f), f.config, s, { keys: usage.keyRecords() });
 const forgeRun = (f, s, usage = ledger(), options = {}) => runEquipmentForge(f.client, f.protocol, f.config, f.player, { getSettings: () => s, ledger: usage, ...options });
 
+await check('无关历史账本记录不会增加锻造的运行时检查次数', async () => {
+  async function checksWith(history) {
+    const fixture = warForgeFixture(), usage = ledger();
+    const keys = usage.keyRecords.bind(usage);
+    const records = { ...usage, keyRecords: () => ({ ...history, ...keys() }) };
+    let checks = 0;
+    await forgeRun(fixture, warForgeSettings(), records, { nativeOnly: true, enabled: () => { checks++; return true; } });
+    return checks;
+  }
+  const base = await checksWith({});
+  assert(base > 0);
+  const unrelated = Object.fromEntries(Array.from({ length: 300 }, (_, index) => ['past-' + index, { confirmed: true, details: {} }]));
+  assert.equal(await checksWith(unrelated), base);
+});
+
 await check('场景2独立读取主城和费用，不回退场景1或通用表', async () => {
   const f=warForgeFixture(),s=warForgeSettings();f.player.scenarioId=2;
   f.config.tables['2_CityCfg']=structuredClone(f.config.tables['1_CityCfg']);

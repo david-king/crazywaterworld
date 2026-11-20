@@ -36,7 +36,7 @@ export function planPirateSweeps({ task, probe, player, config, now, client, dai
   if (player.level < gate) return blocked('角色 ' + gate + ' 级开放世界海盗');
   const records = probe('PirateKillRecordRequest')?.records;
   if (!Array.isArray(records)) return blocked('未能读取个人海盗首杀记录');
-  if (!records.some(r => r.maxKilledLevel > 0)) return blocked('还没有个人海盗首杀，请在「活动 → 海盗首杀」选择目标和舰队手动出征');
+  if (!records.some(r => r.maxKilledLevel > 0)) return blocked('还没有个人海盗首杀，请在「挑战 → 海盗首杀」选择目标和舰队手动出征');
   const map = probe('AllPirateRequest');
   if (!Array.isArray(map?.pirates) || !Number.isSafeInteger(map.sweepTimes) || map.sweepTimes < 0) return blocked('未能确认地图目标或今日已用扫荡次数');
   const base = tables.PirateParamCfg?.data?.find(r => r.paramName === '每日野怪扫荡次数')?.paramValue;
@@ -318,7 +318,7 @@ export async function inspectHunt(client, config, player, enterMap = false, allo
     const key = huntKey(session, ['fleet', world, fleet.buildingId, positions.map(p => [p.heroId, normalize(p.pos)]), formation?.presetId, normalize(formation?.petUid)]);
     const held = [...session.pending.values()].some(f => f.buildingId === fleet.buildingId);
     const reason = held ? '已派出或尚待确认' : !/^\d+远征船$/.test(fleet.buildingId) ? '无法确认远征舰队建筑' : !(building?.level > 0) ? '舰队建筑尚未建成' :
-      !ids.length && !(allowPreset && formation?.presetId > 0 && !fleet.autoFight?.isOn) ? '请先在「活动 → 海盗首杀」查看并保存这支舰队的首次编队' : fleet.state !== 1 ? '舰队未闲置' :
+      !ids.length && !(allowPreset && formation?.presetId > 0 && !fleet.autoFight?.isOn) ? '请先在「挑战 → 海盗首杀」展开舰队编队，保存这支舰队的首次编队' : fleet.state !== 1 ? '舰队未闲置' :
       fleet.treasureLootUid || fleet.chipWar?.rewardTs || fleet.curGridIdx > 0 ? '舰队正在驻守地块或执行其他任务' :
       !(fleet.durability > 0) ? '舰队没有耐久，请先修理' : '';
     const number = /^([1-9]\d*)远征船$/.exec(fleet.buildingId)?.[1];
@@ -329,7 +329,7 @@ export async function inspectHunt(client, config, player, enterMap = false, allo
   }
   if (!view.targets.length) view.reason ||= '地图上暂无可首杀的下一等级海盗';
   if (!view.fleets.length) view.reason ||= buildings.some(b => b.level > 0 && /^\d+远征船$/.test(b.buildingId))
-    ? '远征舰队已建成，世界地图尚未列出出征队伍，请在「活动 → 海盗首杀」查看首次编队' : '尚无出征舰队，请先建成远征舰队并编入英雄';
+    ? '远征舰队已建成，世界地图尚未列出出征队伍，请在「挑战 → 海盗首杀」展开舰队编队，查看首次编队' : '尚无出征舰队，请先建成远征舰队并编入英雄';
   return snapshot;
 }
 

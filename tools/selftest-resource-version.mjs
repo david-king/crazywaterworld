@@ -54,7 +54,9 @@ try {
     assert.equal(await resolveResourceVersion({ env, fetchJson: () => assert.fail('no request') }), null);
   });
   await test('跟随最新主包对应的 appConfig，不把出厂配置表哈希当热更新版本', async () => {
-    packageFile(76, 'r76'); cacheFiles('r76', '1.14.5');
+    packageFile(76, 'r76');
+    assert.equal(discoverResourceVersion({ env }), null, '首次启动可能还没有缓存目录');
+    cacheFiles('r76', '1.14.5');
     const found = discoverResourceVersion({ env });
     assert.deepEqual(found, { appVersion: '1.14.5', source: 'wechat-cache', packageVersion: 76, resourcesVersion: 'r76' });
     assert.equal(await resolveResourceVersion({ env, fetchJson: () => assert.fail('already cached') }).then(row => row.appVersion), '1.14.5');
@@ -76,6 +78,8 @@ try {
   await test('缓存随后补齐或被更新时能重新发现，不长期缓存失败和旧值', () => {
     cacheFiles('r77', '1.15.0');
     assert.equal(discoverResourceVersion({ env }).appVersion, '1.15.0');
+    fs.unlinkSync(path.join(cache, 'app-config.json'));
+    assert.equal(discoverResourceVersion({ env }), null, '缓存清单仍在但导入文件已被清理');
     cacheFiles('r77', '1.16.20');
     assert.equal(discoverResourceVersion({ env }).appVersion, '1.16.20');
   });
@@ -124,6 +128,13 @@ try {
       assert.deepEqual(requested, [server + 'remote/resources/config.r78.json', assetUrl]);
       await assert.rejects(resolveResourceVersion({ env, fetchJson: async () => { throw Error('remote unavailable'); } }), /remote unavailable/);
     }
+  });
+  await test('只下载了子包的更新仍阻止回退旧主包', () => {
+    cacheFiles('r78', '1.16.20');
+    const partial = path.join(packages, '79');
+    fs.mkdirSync(partial);
+    fs.writeFileSync(path.join(partial, '_src_chunks_.wxapkg'), 'partial');
+    assert.throws(() => discoverResourceVersion({ env }), error => error.code === 'ENOENT');
   });
   console.log('客户端资源版本发现通过 ' + passed + ' 项。');
 } finally {

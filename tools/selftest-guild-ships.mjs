@@ -6,13 +6,20 @@ const dir=fs.mkdtempSync(path.join(os.tmpdir(),'cw-guild-ships-'));process.env.C
 const {loadProtocol}=await import('../src/proto.mjs');
 const {readGuildShips,serviceGuildShips,guildShipBatch,guildShipDemands,watchGuildShipPushes,guildShipDiagnostics}=await import('../src/guild-ships.mjs');
 const {createUsageLedger,hasExtraWork}=await import('../src/automation-settings.mjs');
-const {guildShipFixture,config}=await import('./fixtures/guild-ships.mjs');
+const {guildShipFixture,config,asset}=await import('./fixtures/guild-ships.mjs');
 const {pendingOrderMaterialSpends}=await import('../src/order-reservations.mjs');
 const protocol=loadProtocol();let passed=0;
 const check=async(name,work)=>{await work();passed++;console.log('通过：'+name);};
 const fixture=options=>guildShipFixture(protocol,dir,options);
 const read=f=>readGuildShips(f.client,protocol,config,f.options);
 const run=f=>serviceGuildShips(f.client,protocol,config,f.options);
+const paidFixture = (limit=100) => {
+ const f=fixture();
+ Object.assign(f.settings.guildShip,{allowDiamonds:true,diamondDailyLimit:limit});
+ f.settings.resources.allowDiamonds=true;
+ f.state.stock.橡胶圈=2;
+ return f;
+};
 const publishPeriod=(f,period)=>{
  watchGuildShipPushes(f.client);
  f.client.emit('message',{name:'SCGuildShipActivity',body:{period:{period:f.state.period,startTime:f.state.now-3600,...period}}});
@@ -251,6 +258,149 @@ try{
     assert.equal(pendingOrderMaterialSpends(f.player).length,succeeded?0:1);
    });
   }
+ });
+ await check('跨红船和船舱先用库存，复核时新到货也直接装船',async()=>{
+  for(const late of [false,true]){
+   const f=paidFixture();
+   const second=f.ship({id:2});
+   second.cabin[4].order=[asset('耐火砖',4)];
+   f.state.ships.push(second);
+   if(late){
+    f.state.stock.耐火砖=0;
+    f.state.hook=async name=>{if(name==='AllResourceRequest')f.state.stock.耐火砖=4;};
+   }
+   assert.equal((await run(f)).ok,true);
+   assert.deepEqual(f.state.writes,[{name:'GuildShipOrderRequest',body:{shipId:2,crewId:5}}]);
+   assert.equal(f.state.ruby,1000);
+   if(!late)assert(!f.state.calls.some(row=>row.name==='AllResourceRequest'));
+  }
+ });
+ await check('同级红船选补齐最便宜的舱，一次购买全部实际缺口并保留其他订单库存',async()=>{
+  const f=paidFixture(35);
+  const red=f.ship({num:10});
+  red.cabin[3].order=[asset('橡胶圈',2),asset('橡胶圈',1),asset('耐火砖',2)];
+  f.state.workerOrder=[{index:1,requirements:[asset('橡胶圈',1)]}];
+  f.state.stock.耐火砖=1;
+  f.state.ships=[f.ship({id:2,type:2,material:'高温合金'}),red];
+  const {previewExtended}=await import('../src/extended-preview.mjs');
+  const preview=await previewExtended('guildShip',f.client,protocol,config,f.player,f.settings,f.ledger);
+  assert(preview.notes.some(note=>note.includes('4号舱可用 35 钻石补齐')));
+  assert.equal(f.state.writes.length,0);
+  const result=await run(f);
+  assert.equal(result.ok,true,result.error??result.reason);
+  assert.deepEqual(f.state.writes,[
+   {name:'CommonBuyGoodsRequest',body:{goods:[{itemId:'橡胶圈',num:2},{itemId:'耐火砖',num:1}]}},
+   {name:'GuildShipOrderRequest',body:{shipId:1,crewId:4}},
+  ]);
+  assert.equal(f.state.stock.橡胶圈,1);assert.equal(f.state.stock.耐火砖,0);
+  assert.equal(f.state.ruby,965);
+  assert.deepEqual(f.ledger.confirmedCounters(),{diamonds:35,guildShipDiamonds:35});
+ });
+ await check('跨红船比较整舱报价，乱序回读和同价按船号、舱号稳定选位',async()=>{
+  for (const cost of [0,30]) {
+   const f=paidFixture();
+   const red=f.ship({id:2,num:9});
+   const need=f.state.stock.橡胶圈+cost/10;
+   for (const cabin of red.cabin.filter(row=>[2,6].includes(row.crewId))) cabin.order=[asset('橡胶圈',need)];
+   // 橙船只需 10 钻。三艘红船中，第二、三艘都有最低报价。
+   f.state.ships=[f.ship({id:4,type:2,num:3}),f.ship({id:3,num:need}),red,f.ship({id:1,num:10})];
+   f.state.hook=async name=>{
+    if(name==='GuildShipRequest'){
+     f.state.ships.reverse();
+     for(const ship of f.state.ships)ship.cabin.reverse();
+    }
+   };
+   const result=await run(f);
+   assert.equal(result.ok,true,result.error??result.reason);
+   assert.equal(f.state.ruby,1000-cost);
+   assert.deepEqual(f.state.writes.at(-1),{name:'GuildShipOrderRequest',body:{shipId:2,crewId:2}});
+  }
+ });
+ await check('商船日累计额度跨船、重启有效，北京时间次日重新计数',async()=>{
+  const f=paidFixture(50);
+  f.state.ships.push(f.ship({id:2}));
+  assert.equal((await run(f)).ok,true);
+  f.options.ledger=createUsageLedger('qa',{file:f.file,now:()=>f.state.now*1000});
+  assert.match((await run(f)).reason,/每日钻石/);
+  assert.equal(f.state.ruby,970);
+  f.advance(86400);f.state.ships=[f.ship({id:3})];
+  assert.equal((await run(f)).ok,true);assert.equal(f.state.ruby,920);
+  assert.equal(f.options.ledger.confirmedCounters().guildShipDiamonds,50);
+ });
+ await check('商船和全局开关、两级预算、余额、预留、价格和禁用材料分别限制补货',async()=>{
+  for(const change of [
+   f=>{f.settings.guildShip.allowDiamonds=false;}, f=>{f.settings.resources.allowDiamonds=false;},
+   f=>{f.settings.guildShip.diamondDailyLimit=0;}, f=>{f.settings.guildShip.diamondDailyLimit=29;},
+   f=>{f.settings.resources.diamondDailyLimit=29;}, f=>{f.state.ruby=29;},
+   f=>{f.settings.resources.diamondThreshold=971;},
+   f=>{f.ledger.reserve({diamonds:971},{},{},{uniqueKey:'other'});},
+   f=>{f.state.ships=[f.ship({material:'未知物料'})];},
+   f=>{f.state.workerOrder=[{index:1,requirements:[asset('橡胶圈',6)]}];},
+   f=>{f.settings.guildShip.disabledMaterials=['橡胶圈'];},
+  ]){
+   const f=paidFixture();change(f);assert((await run(f)).skipped);
+   assert.equal(f.state.writes.length,0);
+  }
+ });
+ await check('发送补货前预占后关闭开关、调低上限、收到船位推送或进入结算均释放预算',async()=>{
+  for(const change of [
+   f=>{f.settings.resources.allowDiamonds=false;}, f=>{f.settings.guildShip.allowDiamonds=false;},
+   f=>{f.settings.guildShip.diamondDailyLimit=5;}, f=>{publishPeriod(f,{endTime:f.state.now+600});},
+   f=>{f.client.emit('message',{name:'SCGuildShipOrder',body:{shipId:1,crewId:1}});},
+  ]){
+   const f=paidFixture();
+   const reserve=f.ledger.reserve;
+   let reserved=false;
+   f.options.ledger={...f.ledger,reserve(...args){const ticket=reserve(...args);reserved=true;change(f);return ticket;}};
+   assert((await run(f)).skipped);assert(reserved);
+   assert.equal(f.state.writes.length,0);assert.equal(f.ledger.snapshot().counters.diamonds,0);
+   assert.deepEqual(f.ledger.keyRecords(),{});
+  }
+ });
+ await check('已购货物保留在库存，船舱被占或期次变化不提交过期订单',async()=>{
+  for(const change of [f=>{f.state.ships[0].cabin[0].player={playerId:'666'};},f=>{f.state.period++;}]){
+   const f=paidFixture();
+   f.state.writeHook=async name=>{if(name==='CommonBuyGoodsRequest')change(f);};
+   assert((await run(f)).skipped);
+   assert.deepEqual(f.state.writes.map(row=>row.name),['CommonBuyGoodsRequest']);
+   assert.equal(f.state.stock.橡胶圈,5);assert.equal(f.ledger.confirmedCounters().guildShipDiamonds,30);
+  }
+ });
+ await check('购买回包丢失跨日不重买，仍可用库存上船，明确拒绝或未发送则释放额度',async()=>{
+  for(const error of [new Error('超时'),Object.assign(new Error('拒绝'),{prompt:true,request:'CommonBuyGoodsRequest'}),Object.assign(new Error('未发送'),{notSent:true})]){
+   const f=paidFixture();
+   f.state.writeHook=async()=>{throw error;};const pending=!error.prompt&&!error.notSent;
+   assert.equal((await run(f)).pending,pending);assert.equal(f.ledger.pendingCounters().diamonds??0,pending?30:0);
+   f.state.writeHook=async()=>{};f.advance(86400);f.state.ships=[f.ship({id:2})];
+   f.options.ledger=createUsageLedger('qa',{file:f.file,now:()=>f.state.now*1000});
+   if(pending){
+    assert((await run(f)).pending);assert.equal(f.state.writes.length,1);
+    f.state.stock.橡胶圈=5;assert((await run(f)).ok);
+    assert.equal(f.options.ledger.pendingCounters().diamonds,30,'本人船位不能核销未知购买');
+   }else assert((await run(f)).ok);
+  }
+ });
+ await check('购买回执后余额回读失败，重启核销一次并从库存提交',async()=>{
+  const f=paidFixture();
+  f.state.hook=async name=>{if(name==='AllResourceRequest'&&f.state.writes.length)throw Object.assign(new Error('回读未发送'),{notSent:true});};
+  assert((await run(f)).pending);assert.equal(f.ledger.pendingCounters().guildShipDiamonds,30);
+  f.state.hook=async()=>{};f.options.ledger=createUsageLedger('qa',{file:f.file,now:()=>f.state.now*1000});
+  assert((await run(f)).ok);
+  assert.deepEqual(f.state.writes.map(row=>row.name),['CommonBuyGoodsRequest','GuildShipOrderRequest']);
+  assert.equal(f.options.ledger.snapshot().uncertain,0);assert.equal(f.options.ledger.confirmedCounters().diamonds,30);
+ });
+ await check('购买回执先于库存到账时，其他缺同种货物的红船也不会重复购买',async()=>{
+  const f=paidFixture();f.state.ships.push(f.ship({id:2}));
+  const request=f.client.request;let delayed=true;
+  f.client.request=async(...args)=>{
+   const reply=await request(...args);
+   if(args[0]==='AllItemRequest'&&f.state.writes.length&&delayed)reply.items.find(row=>row.itemId==='橡胶圈').num=2;
+   return reply;
+  };
+  assert((await run(f)).pending);assert((await run(f)).pending);
+  assert.equal(f.state.writes.length,1);assert.equal(f.ledger.pendingCounters().guildShipDiamonds,30);
+  delayed=false;assert((await run(f)).ok);
+  assert.deepEqual(f.state.writes.map(row=>row.name),['CommonBuyGoodsRequest','GuildShipOrderRequest']);
  });
  console.log(`联盟商船 ${passed} 项测试通过。`);
 }finally{fs.rmSync(dir,{recursive:true,force:true});}
