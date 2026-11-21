@@ -6,10 +6,14 @@
       "src/ui/client/**",
       "src/ui-assets.mjs",
       "tools/selftest-react-client*.mjs",
+      "tools/selftest-shops-http.mjs",
+      "tools/selftest-shops-browser.mjs",
+      "tools/fixtures/shop-console.mjs",
       "vite.config.ts",
       "tsconfig.ui.json",
       "biome.json",
-      "!!output"
+      "!!output",
+      "!!work"
     ]
   },
   "formatter": { "indentStyle": "space", "indentWidth": 2 },

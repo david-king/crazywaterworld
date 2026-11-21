@@ -1,0 +1,77 @@
+@layer page {
+  .content {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr);
+    gap: 12px;
+    min-width: 0;
+  }
+  .content > fieldset {
+    min-inline-size: 0;
+  }
+  .toolbar,
+  .balances,
+  .purchaseRow,
+  .productHeading {
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 8px;
+    min-width: 0;
+  }
+  .toolbar {
+    justify-content: space-between;
+  }
+  .productHeading {
+    flex-wrap: nowrap;
+    overflow-wrap: anywhere;
+  }
+  .purchaseRow input {
+    width: 4.5rem;
+    min-width: 0;
+    height: 2rem;
+  }
+  .icon {
+    display: grid;
+    flex: none;
+    place-items: center;
+    width: 32px;
+    height: 32px;
+  }
+  .icon img {
+    width: 100%;
+    height: 100%;
+    object-fit: contain;
+  }
+  .facts {
+    display: grid;
+    grid-template-columns: auto minmax(0, 1fr);
+    gap: 8px 12px;
+    margin: 0;
+  }
+  .facts dt {
+    color: var(--muted-foreground);
+    font-size: 13px;
+  }
+  .facts dd {
+    margin: 0;
+    text-align: right;
+    overflow-wrap: anywhere;
+    font-variant-numeric: tabular-nums;
+  }
+  .result {
+    display: grid;
+    gap: 4px;
+    padding: 10px 12px;
+    border-radius: var(--radius);
+    background: var(--muted);
+    overflow-wrap: anywhere;
+  }
+  .notice {
+    overflow-wrap: anywhere;
+  }
+  @media (max-width: 640px) {
+    .purchaseRow {
+      justify-content: flex-end;
+    }
+  }
+}

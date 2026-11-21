@@ -1,5 +1,8 @@
 // Operation names shared by the server journal and the browser's network errors.
 export const operationLabels = {
+  '/api/shops': '读取商店商品',
+  '/api/shops/purchase': '购买商店商品',
+  '/api/shops/game-refresh': '刷新折扣商店',
   '/api/chat': '读取游戏聊天',
   '/api/chat/emojis': '读取聊天表情',
   '/api/chat/send': '发送游戏聊天',

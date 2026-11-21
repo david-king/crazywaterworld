@@ -97,18 +97,18 @@ export function nativePreferenceEnabled(settings, key) {
     freeRecruit: () => settings.loop.dailies && settings.dailies.enabled,
     arena: () => settings.loop.dailies && settings.dailies.enabled,
     pirate: () => settings.pirate?.enabled && settings.schedule.pirate,
-    shop: () => settings.loop.dailies && settings.dailies.enabled,
+    shop: () => settings.schedule.shop,
   };
   if (map[key]) return !!map[key]();
   return worldPreferenceEnabled(settings, key);
 }
 
-export function resourceReserve(settings, id) {
+export function resourceReserve(settings, id, step = null) {
   if (!settings) return 0;
   if (id === '建筑蓝图') return settings.building.keepBlueprints;
   if (id === '加速器') return settings.resources.keepAccelerators;
   if (id === '英雄经验') return settings.heroes.keepExp;
-  if (id === 'RUBY') return settings.resources.diamondThreshold;
+  if (id === 'RUBY') return isManualShopSpend(step) || isDiscountShopPurchase(step) ? 0 : settings.resources.diamondThreshold;
   return 0;
 }
 
@@ -150,6 +150,17 @@ export function residentFilter(order, survey, settings, usage = {}) {
   return null;
 }
 
+function isDiscountShopPurchase(step) {
+  return step?.scope === 'discountShop' && step.kind === 'shopPurchase' && step.request === 'DiscountShopBuyRequest';
+}
+
+function automaticDiamondsAllowed(settings, step) {
+  if (step?.scope === 'discountShop') {
+    return settings.schedule?.shop === true && isDiscountShopPurchase(step);
+  }
+  return settings.resources.allowDiamonds;
+}
+
 export function usageLimits(settings) {
   return {
     diamonds: settings.resources.allowDiamonds ? settings.resources.diamondDailyLimit : 0,
@@ -170,10 +181,23 @@ function actionCosts(step) {
   return costs;
 }
 
+const manualShopRequests = new Map([['BuyShopProductRequest', 'shopPurchase'], ['DiscountShopBuyRequest', 'shopPurchase'],
+  ['DiscountShopRefreshRequest', 'shopRefresh']]);
+// Only confirmed manual shop purchases/refreshes set this matching scope/kind;
+// automatic dailies and other manual actions keep the existing diamond policy.
+const isManualShopSpend = step => step?.scope === 'manual' && manualShopRequests.get(step.request) === step.kind
+  && typeof step.kind === 'string';
+
 export function actionCounters(step) {
   const result = { ...step.counters };
   const diamonds = actionCosts(step).get('RUBY') ?? 0;
-  if (diamonds) result.diamonds = diamonds;
+  if (diamonds) {
+    if (isManualShopSpend(step) || isDiscountShopPurchase(step)) {
+      delete result.diamonds;
+      const counter = step.scope === 'manual' ? 'manualShopDiamonds' : 'discountShopDiamonds';
+      result[counter] = diamonds;
+    } else result.diamonds = diamonds;
+  }
   return result;
 }
 
@@ -268,8 +292,8 @@ export function createActionGuard(client, getSettings, ledger, { enabled = () =>
         for (const [id, cost] of costs) {
           const actual = balances.get(id);
           const balance = Math.min(actual, remaining.get(id) ?? actual);
-          if (!Number.isSafeInteger(balance) || balance < 0 || balance - cost < resourceReserve(settings, id)) throw new AutomationSkip(`${({ GOLD: '金币', RUBY: '钻石', EXP: '经验' })[id] ?? id}不足或会低于保留数量`);
-          if (id === 'RUBY' && settings && !settings.resources.allowDiamonds) throw new AutomationSkip('钻石消耗总开关已关闭');
+          if (!Number.isSafeInteger(balance) || balance < 0 || balance - cost < resourceReserve(settings, id, step)) throw new AutomationSkip(`${({ GOLD: '金币', RUBY: '钻石', EXP: '经验' })[id] ?? id}不足或会低于保留数量`);
+          if (id === 'RUBY' && settings && !automaticDiamondsAllowed(settings, step) && !isManualShopSpend(step)) throw new AutomationSkip('对应的钻石消耗总开关已关闭');
           balances.set(id, balance);
         }
         if (!enabled()) throw new AutomationSkip('操作已暂停');
@@ -433,15 +457,15 @@ export function budgetPreview(actions, stock, settings, usage = {}) {
   if (!settings) return { actions, notes: [], notesBySetting: {} };
   const balances = new Map(stock);
   const used = { ...usage.counters };
-  const limits = usageLimits(settings);
   const kept = [], notes = [], notesBySetting = {};
+  const limits = usageLimits(settings);
   for (const step of actions) {
     const costs = actionCosts(step);
     const counters = actionCounters(step);
     let reason;
     for (const [id, cost] of costs) {
-      if (id === 'RUBY' && !settings.resources.allowDiamonds) reason = '钻石消耗总开关已关闭';
-      else if ((balances.get(id) ?? 0) - cost < resourceReserve(settings, id)) reason = `${id}不足或会低于保留数量`;
+      if (id === 'RUBY' && !automaticDiamondsAllowed(settings, step) && !isManualShopSpend(step)) reason = '对应的钻石消耗总开关已关闭';
+      else if ((balances.get(id) ?? 0) - cost < resourceReserve(settings, id, step)) reason = `${id}不足或会低于保留数量`;
     }
     for (const [key, amount] of Object.entries(counters)) if (limits[key] != null && Math.max(used[key] ?? 0, step.counterMinimums?.[key] ?? 0) + amount > limits[key]) reason = '会超过今日使用上限';
     if (reason) {

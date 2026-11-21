@@ -1,5 +1,7 @@
 import { createSettingsHistory } from './settings-history.mjs';
 import { createGameChat } from './chat.mjs';
+import { planDiscountShop } from './discount-shop-automation.mjs';
+import { SHOP_CATALOG, createShopState, readShop, buyShopProduct, refreshDiscountShop } from './shops.mjs';
 import { serveClientAsset } from './ui-assets.mjs';
 import { normalizeConsoleHost, consoleAccessHints, consoleUrl } from './console-address.mjs';
 import { createConsoleVersion, renderVersionedPage, consoleVersionError } from './console-version.mjs';
@@ -743,6 +745,7 @@ export function createConsole({ host = '127.0.0.1', port = 17321, onLog, recover
       logClearBefore: 0,
       logClearAt: 0,
       dailySingle: dailySingleState(),
+      shops: createShopState(),
       loop: {
         running: false,
         autoStart: detailed.recovery ? false : saved?.autoStart ?? saved?.enabled ?? false,
@@ -2470,7 +2473,7 @@ export function createConsole({ host = '127.0.0.1', port = 17321, onLog, recover
         if (!config) throw new Error('缺少游戏配置表，暂时不能预览');
         const settings = validateSettings(payload.settings ?? settingsView(session).settings, { catalog: settingsCatalog(config) });
         const category = payload.category ?? 'base';
-        if (!['base', 'world', 'heroes', 'daily', 'arena', 'league', 'runtime', 'cityWar', 'forge', 'antique', 'equipmentGrowth', 'activity', 'radar', 'pirateHunt', 'fleetDispatch','fleetSpeed','worldBoss','pirateSweep','alliance','guildShip','guildFort','silicon','heroRaid','resourceFields'].includes(category)) throw new Error('不支持的预览分类');
+        if (!['base', 'world', 'heroes', 'daily', 'arena', 'league', 'discountShop', 'runtime', 'cityWar', 'forge', 'antique', 'equipmentGrowth', 'activity', 'radar', 'pirateHunt', 'fleetDispatch','fleetSpeed','worldBoss','pirateSweep','alliance','guildShip','guildFort','silicon','heroRaid','resourceFields'].includes(category)) throw new Error('不支持的预览分类');
 
         if (category === 'runtime') {
           json({ checkedAt: new Date().toISOString(), usage: usageFor(session).snapshot(), actions: [], counts: {}, viewOnly: true, scopeLabel: '运行安排（仅查看，不执行）',
@@ -2487,6 +2490,12 @@ export function createConsole({ host = '127.0.0.1', port = 17321, onLog, recover
             actions: plan.actions.map(step => ({ label: step.label, kind: step.kind, costs: (step.costs ?? []).map(item => ({ name: displayMaterial(config, item.id), num: item.num })) })),
             notes: [...new Set(plan.notes ?? [])],
           });
+          if (category === 'discountShop') {
+            const view = await readShop(client, config, { shop: 'discount', player: session.player, state: createShopState(),
+              ledger: usageFor(session), protocol: protocolFor(client) });
+            const plan = planDiscountShop(view, settings, usage);
+            return output(plan, { products: view.products.length }, '折扣商店');
+          }
           if (category === 'resourceFields') {
             const player = session.player, generation = session.generation;
             const plan = await previewResourceFieldPlan(client, protocolFor(client), config, player, {
@@ -2669,7 +2678,7 @@ export function createConsole({ host = '127.0.0.1', port = 17321, onLog, recover
           }
           if (category === 'daily') {
             const flags = nativeTaskValues(settings, session.loop.tasks);
-            const daily = await surveyDailies(client, protocolFor(client), { config, player: session.player, settings, allowRecruitTickets: false, ledger: usageFor(session) });
+            const daily = await surveyDailies(client, protocolFor(client), { config, player: session.player, settings, includeTask: id => id !== 1007, allowRecruitTickets: false, ledger: usageFor(session) });
             const tasks = selectTaskSettings(await surveyTasks(client, protocolFor(client), { config, player: session.player }), settings);
             const actions = [...tasks.plan];
             const trialNotes = [];
@@ -3445,6 +3454,60 @@ export function createConsole({ host = '127.0.0.1', port = 17321, onLog, recover
         }
         const result=await progressionJob(session,account,route+':'+(parsed.searchParams.get('key')||'catalog')+':'+(parsed.searchParams.get('page')||1),null,client=>route.endsWith('/view')?readActivityRanking(client,loadConfigSafe(),session.player,parsed.searchParams.get('key'),Number(parsed.searchParams.get('page')||1)):{tabs:activityRankCatalog(client,loadConfigSafe(),session.player).map(({key,label})=>({key,label}))},{read:true});
         json(result);return;
+      }
+      if (route === 'GET /api/shops' || route === 'POST /api/shops/purchase' || route === 'POST /api/shops/game-refresh') {
+        const id = parsed.searchParams.get('account');
+        if (!id) throw Error('请选择商店账号');
+        const payload = req.method === 'POST' ? jsonBody() : null;
+        const gameRefresh = route === 'POST /api/shops/game-refresh';
+        if (req.method === 'POST') {
+          if (!payload || typeof payload !== 'object' || Array.isArray(payload)) throw Error('商店操作参数无效，请重新获取商品后重试');
+          needConfirm(payload);
+          if (typeof payload.shop !== 'string' || typeof payload.token !== 'string' || !payload.token || payload.token.length > 128
+            || typeof payload.paid !== 'boolean') throw Error('商店操作参数无效，请重新获取商品后重试');
+          if (gameRefresh) {
+            if (payload.shop !== 'discount') throw Error('仅折扣商店支持刷新');
+          } else if (!Number.isSafeInteger(payload.id) || payload.id <= 0
+            || !Number.isSafeInteger(payload.quantity) || payload.quantity <= 0 || payload.quantity > 2147483647) {
+            throw Error('购买参数无效，请重新获取商品后重试');
+          }
+        }
+        const shop = payload?.shop ?? parsed.searchParams.get('shop') ?? 'vip';
+        if (!SHOP_CATALOG.some(entry => entry.id === shop)) throw Error('商店不存在，请重新选择');
+        const { account, session } = scoped_(parsed);
+        if (id !== session.id) throw Error('商店账号不匹配');
+        const client = session.client, player = session.player, generation = session.generation;
+        const enabled = () => Boolean(client?.connected && player && session.client === client && session.player === player
+          && !session.paused && !session.loginBlocked && session.generation === generation && !closing && !session.connectionDrain);
+        const current = () => { if (!enabled()) throw Error('请先连接当前账号，再使用商店'); };
+        current();
+        const state = session.shops ??= createShopState();
+        const options = () => ({ shop, player, clientInfo: account.login?.eworldClientInfo, protocol: protocolFor(client),
+          settings: session.preferences, getSettings: () => session.preferences, ledger: usageFor(session), state, enabled,
+          icon: itemId => materialIcon(itemId)?.thumb });
+        res.setHeader('cache-control', 'no-store');
+        if (!payload) {
+          json(await readJob(session, async () => {
+            current();
+            const value = await readShop(client, loadConfigSafe(), options());
+            current();
+            return value;
+          }, { recoverFormation: false }));
+          return;
+        }
+        json(await enqueue(session, async () => {
+          current();
+          const config = loadConfigSafe();
+          const shared = { ...options(), token: payload.token, paid: payload.paid, guard: actionGuard(session, client, config) };
+          const result = gameRefresh ? await refreshDiscountShop(client, config, shared)
+            : await buyShopProduct(client, config, { ...shared, id: payload.id, quantity: payload.quantity });
+          emit(session, result.status === 'completed' ? 'info' : 'warn', result.message, {
+            request: gameRefresh ? 'DiscountShopRefreshRequest' : shop === 'ad' ? 'GotAdvRewardRequest' : shop === 'discount' ? 'DiscountShopBuyRequest' : 'BuyShopProductRequest',
+            shopId: shop, ...(gameRefresh ? { action: 'game-refresh' } : { productId: payload.id, quantity: payload.quantity }), status: result.status,
+          });
+          return result;
+        }, gameRefresh ? '刷新折扣商店' : '商店购买', { recoverFormation: false }));
+        return;
       }
       if (['GET /api/chat', 'GET /api/chat/profile', 'GET /api/chat/emojis', 'POST /api/chat/send'].includes(route)) {
         const id = parsed.searchParams.get('account');

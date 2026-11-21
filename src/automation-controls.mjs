@@ -5,11 +5,11 @@ import { activityTaskBlocker } from './activity-automation.mjs';
 const controls = [];
 const add = (key, label, group, options = {}) => controls.push({ key, label, group, fields: [key], ...options });
 add('loop.world', '基地执行总开关', '总控制');
-add('loop.dailies', '日常行动与点金总开关', '总控制', { help: '控制英雄免费/券招募、点金、竞技场和折扣店。免费领奖等独立项目不由本项控制。' });
+add('loop.dailies', '日常行动与点金总开关', '总控制', { help: '控制英雄免费/券招募、点金和竞技场。免费领奖等独立项目不由本项控制。' });
 add('loop.tasks', '主线、支线与成就总开关', '总控制');
 add('dailies.enabled', '每日任务与奖励总开关', '总控制', { help: '控制日常行动和每日任务、活跃宝箱、免费赠礼。钻石点金独立受点金和钻石开关限制。' });
 add('heroes.enabled', '英雄自动养成', '总控制', { fields: ['heroes.enabled','loop.heroes'], help: '控制英雄随挂机自动养成；养成动作、目标和资源保留在游戏配置中设置。' });
-add('resources.allowDiamonds', '自动钻石消耗总开关', '总控制', { help: '仅授权已开启项目在保存的保留量、次数和预算内消费。不会开启任何其他项目。' });
+add('resources.allowDiamonds', '自动钻石消耗总开关', '总控制', { help: '折扣商店由「日常 → 折扣商店」独立控制，按实际余额购买。这里的开关、每日钻石使用量和钻石保留阈值均不适用于折扣商店。' });
 for (const [key,label] of [
  ['building.enabled','建筑总开关'],['building.collect','收取建筑产出'],['building.build','自动建造'],['building.upgrade','自动升级建筑'],['building.finish','自动完工'],['building.supply','缺料时为建筑备料'],['building.speedUp','建筑自动加速'],
  ['factory.enabled','工厂总开关'],['factory.gain','领取工厂产品'],['factory.produce','工厂自动生产'],['factory.cooperateNative','按需调整原生自动生产'],['factory.speedUp','工厂自动加速'],
@@ -62,7 +62,7 @@ for (const task of automationTasks) {
  if (nativeKeys.has(task.key)) continue;
  const group = ['freeRecruit','heroRecruitRewards','heroAdRecruit'].includes(task.key) ? '英雄' : ['freeAntiqueRecruit','antiqueRecruitRewards','antiqueAdRecruit'].includes(task.key) ? '藏品' : ['周期活动','限时活动'].includes(task.group) ? '活动' : ['联盟','挑战'].includes(task.group) ? '世界与挑战' : task.group === '日常' ? '日常行动' : task.group === '海面' ? '基地' : '任务与领奖';
  const gates = task.key==='pirate' ? ['pirate.enabled'] : task.group==='日常' ? ['loop.dailies','dailies.enabled'] : task.key==='adSpeedUpBuilding'?['loop.world','building.enabled']:task.key==='adSpeedUpProduce'?['loop.world','factory.enabled']:task.key==='adSpeedUpMuseum'?['loop.world']:[];
- add('schedule.'+task.key,task.label,combatGroups[task.key] ?? group,{gates,taskKey:task.key,...(task.key==='pirate'?{configLabel:'每日免费扫荡',help:'使用当天剩余的免费次数，无需派舰。三种海盗共用次数。'}:{}),...(task.key==='guildTitleReward'?{help:'默认关闭，每天只领取服务器确认可领的职级礼包；结果未知时保留记录，不重复提交。'}:{}),...(task.key==='seasonChest'?{help:'默认关闭。每箱消耗服务器指定的 3 把赛季钥匙，钥匙不足时等待，不花钻石。钥匙在进入新赛季时清零。'}:{})});
+ add('schedule.'+task.key,task.label,task.key === 'shop' ? '折扣商店' : combatGroups[task.key] ?? group,{gates,taskKey:task.key,...(task.key==='pirate'?{configLabel:'每日免费扫荡',help:'使用当天剩余的免费次数，无需派舰。三种海盗共用次数。'}:{}),...(task.key==='guildTitleReward'?{help:'默认关闭，每天只领取服务器确认可领的职级礼包；结果未知时保留记录，不重复提交。'}:{}),...(task.key==='seasonChest'?{help:'默认关闭。每箱消耗服务器指定的 3 把赛季钥匙，钥匙不足时等待，不花钻石。钥匙在进入新赛季时清零。'}:{})});
 }
 // 模块主控与细项在同一配置分组编辑；主控仍保留独立的保存字段。
 const idleModules = {
@@ -79,17 +79,20 @@ const idleModules = {
  'worldBoss.enabled':['世界','worldBoss','世界Boss首战'], 'radar.runEnabled':['世界','radar','联盟情报'],
  'treasure.enabled':['世界','treasure','万吨巨轮'], 'cityWar.enabled':['世界','cityWar','联盟城战'],
  'pirate.enabled':['世界','pirate-hunt','海盗'],
+ 'schedule.shop':['日常','discount-shop','折扣商店'],
  'schedule.pirate':['世界','pirate-hunt','海盗日常扫荡'],
  'progression.enabled':['世界','progression','推关与试炼'],
  'pirateHunt.enabled':['世界','pirate-hunt','海盗首杀'],
  'heroes.enabled':['英雄','heroes','英雄养成'],
  'appointments.enabled':['英雄','appointments','英雄任命'],
  'antique.enabled':['藏品','antique','藏品养成'],
- 'dailies.enabled':['日常与活动','rewards','每日任务与奖励'],
- 'loop.tasks':['日常与活动','rewards','主线、支线与成就'],
- 'loop.dailies':['日常与活动','daily-actions','日常行动'],
+ 'dailies.enabled':['日常','rewards','每日任务与奖励'],
+ 'loop.tasks':['日常','rewards','主线、支线与成就'],
+ 'loop.dailies':['日常','daily-actions','日常行动'],
 };
 for(const control of controls){const module=idleModules[control.key];if(module)Object.assign(control,{idleGroup:module[0],configTarget:module[1],idleLabel:module[2]});}
+Object.assign(controls.find(c=>c.key==='schedule.shop'),{configLabel:'折扣商店总开关',
+  help:'开启后，商品符合购买规则且实际钻石余额足够就会购买。普通购买和兜底购买均不受全局钻石开关、每日预算和钻石保留量限制，也不占用全局预算。挂机只使用免费刷新。'});
 Object.assign(controls.find(c=>c.key==='museum.runEnabled'),{help:'统一暂停或恢复博物馆升级、领奖、藏品上架和探宝，保留细项选择。自动探宝同时领取探险奖励和派遣探险。',configuredFields:['museum.upgrade','museum.revenue','museum.achievements','museum.display','museum.enabled']});
 Object.assign(controls.find(c=>c.key==='museum.enabled'),{help:'自动领取已完成探险的奖励，并按配置继续派遣探险。'});
 Object.assign(controls.find(c=>c.key==='radar.runEnabled'),{configuredFields:['radar.enabled','radar.repairIdle']});

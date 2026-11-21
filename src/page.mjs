@@ -52,6 +52,7 @@ ${chrome()}
   <nav id="resource-tabs" class="resource-tabs" aria-label="杂项分类" hidden>
     <button type="button" data-resource-tab="guild">联盟</button><button type="button" data-resource-tab="inventory">仓库</button><button type="button" data-resource-tab="heroes">英雄与装备</button><button type="button" data-resource-tab="giftcodes">礼包兑换</button>
     <button type="button" data-resource-tab="dailies">日常任务</button>
+    <button type="button" data-resource-tab="shops">商店</button>
   </nav>
   <section id="tab-overview">
     ${overviewPage()}
@@ -87,6 +88,7 @@ ${chrome()}
 
   <section id="tab-guild" class="hidden">${guildPage()}</section>
   <section id="tab-dailies" class="hidden" aria-label="日常任务"><div id="daily-tasks-root"></div></section>
+  <section id="tab-shops" class="hidden" aria-label="商店"><div id="shops-root"></div></section>
   <section id="tab-chat" class="hidden" aria-label="聊天"><div id="chat-root"></div></section>
 
   <section id="tab-giftcodes" class="hidden">
@@ -2691,7 +2693,8 @@ async function boot() {
     : savedView?.tab === 'resources' && savedView.resource === 'activities' ? 'activities' : savedView?.tab;
   try {
     // 恢复账号页时先显示保存的角色资料，由该页按连接状态决定是否读取资源。
-    await loadAccounts(true, initialTab !== 'account' && initialTab !== 'chat');
+    await loadAccounts(true, initialTab !== 'account' && initialTab !== 'chat'
+      && !(initialTab === 'resources' && savedView?.resource === 'shops'));
   } catch (error) {
     $('hint').textContent = '';
     reportError(error);

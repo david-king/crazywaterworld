@@ -24,7 +24,7 @@ export function settingsPage() {
     </dialog>
     <div className="config-message" id="config-message" role="alert" hidden />
     <div className="config-tabs" role="tablist" aria-label="配置分类">
-      {[["base", "基地"], ["world", "世界"], ["heroes", "英雄"], ["antique", "藏品"], ["equipment", "装备"], ["daily", "日常与活动"]].map(([key, title], index) =>
+      {[["base", "基地"], ["world", "世界"], ["heroes", "英雄"], ["antique", "藏品"], ["equipment", "装备"], ["daily", "日常"]].map(([key, title], index) =>
         <button key={key} type="button" role="tab" id={"config-tab-" + key} data-config-tab={key} aria-controls={"config-panel-" + key} aria-selected={index === 0} tabIndex={index === 0 ? 0 : -1}>{title}</button>
       )}
     </div>

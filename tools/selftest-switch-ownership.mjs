@@ -37,16 +37,16 @@ let passed = 0;
 const check = async (name, run) => { await run(); passed++; console.log('通过：' + name); };
 
 try {
-  await check('30个模块启停集中在所属配置，全部字段有唯一编辑位置', () => {
+  await check('31个模块启停集中在所属配置，全部字段有唯一编辑位置', () => {
     const rendered = configFields.filter(field => field.moduleControl).map(field => field.key);
     const idleKeys = idleAutomationControls.map(control => control.key), movedFields = idleAutomationControls.flatMap(control => control.fields);
-    assert.equal(idleKeys.length, 30);
+    assert.equal(idleKeys.length, 31);
     assert.equal(rendered.length, new Set(rendered).size, '每个入口只显示一次');
     assert.deepEqual(new Set(rendered), new Set(idleKeys));
     assert.deepEqual(new Set(settingsUiRules().controlFields), new Set(movedFields));
     assert.equal(configFields.length, configKeys.size, '配置字段不重复');
     for (const control of idleAutomationControls) {
-      const categoryNames = { base: '基地', world: '世界', heroes: '英雄', antique: '藏品', equipment: '装备', daily: '日常与活动' };
+      const categoryNames = { base: '基地', world: '世界', heroes: '英雄', antique: '藏品', equipment: '装备', daily: '日常' };
       assert(configGroups.some(group => group.id === control.configTarget), control.key + ' 配置入口存在');
       const group = configGroups.find(group => group.id === control.configTarget);
       assert.equal(control.idleGroup, categoryNames[group.category], control.key + ' 与所属分类一致');

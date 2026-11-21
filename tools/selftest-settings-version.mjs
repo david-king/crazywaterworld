@@ -653,8 +653,23 @@ try {
     upgraded.factory.blockedCollectionTypes = ['精铁厂', '训练营'];
     assert.deepEqual(importAutomationSettings(exportAutomationSettings(upgraded)), upgraded);
   });
+  test('版本41折扣商店移除刷新限制，保留总开关和既有购买规则', () => {
+    const expected = defaultSettings();
+    expected.schedule.shop = true;
+    expected.discountShop.rules = [{ id: '建筑蓝图', maxPercent: 50, maxDiamonds: 30 }];
+    const old = structuredClone(expected);
+    delete old.discountShop.fallbackCheapest;
+    Object.assign(old.discountShop, { refreshLimit: 3, maxRefreshCost: 50 });
+    assert.deepEqual(importAutomationSettings({ format: SETTINGS_FORMAT, version: 41, settings: old }), expected);
+    assert.deepEqual(validateSettings(old), expected);
+    const shopFile = path.join(directory, 'discount-shop.json');
+    fs.writeFileSync(shopFile, JSON.stringify({ version: 41, accounts: { shop: { settingsVersion: 41, revision: 1, settings: old } } }));
+    assert.deepEqual(loadAutomationSettings('shop', { file: shopFile }).settings, expected);
+    old.discountShop.extra = true;
+    assert.throws(() => validateSettings(old), error => !!error.fields?.['discountShop.extra']);
+  });
   test('版本1升级后重复迁移保持一致，保留有效的用户值', () => {
-    assert.equal(SETTINGS_SCHEMA_VERSION, 40);
+    assert.equal(SETTINGS_SCHEMA_VERSION, 43);
     const settings = legacySettings();
     settings.factory.checkEverySeconds = 270;
     settings.resources.diamondDailyLimit = 1234;

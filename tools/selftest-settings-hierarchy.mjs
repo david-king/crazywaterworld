@@ -155,7 +155,7 @@ test('军备竞赛主项平铺且参数可展开收起，全天参与与积分�
   assert(!group.fields.some(field => /(?:Start|End)$/.test(field.key) || field.kind === 'time'));
   assert.deepEqual(f.widget('weeklyActivity.petStop').spec.options, [['allDay','全天参与'],['score','达到积分值时']]);
   const ids = [...f.editor.groups.values()].filter(item => item.category === 'daily').map(item => item.id);
-  assert.equal(ids.indexOf('ad-rewards'), ids.indexOf('daily-actions') + 1);
+  assert.equal(ids.indexOf('ad-rewards'), ids.indexOf('discount-shop') + 1);
   const panel = f.env.node('config-group-weekly-activities');
   assert.equal(panel.querySelectorAll('details').length, 0);
   assert.equal(panel.querySelectorAll('.config-field-section').length, 0);
@@ -693,7 +693,7 @@ test('世界Boss领奖只在世界分组出现，首战派遣与领奖独立控�
   assert(visible(reward.node), '关闭首战后领奖仍可编辑');
   const ids = [...f.editor.groups.values()].filter(item => item.category === 'daily').map(item => item.id);
   const daily = ids.indexOf('daily-actions');
-  assert.deepEqual(ids.slice(daily - 2, daily + 2), ['league', 'arena', 'daily-actions', 'ad-rewards']);
+  assert.deepEqual(ids.slice(daily - 2, daily + 3), ['league', 'arena', 'daily-actions', 'discount-shop', 'ad-rewards']);
   assert.deepEqual(f.editor.groups.get('arena').fields.map(field => field.key), ['schedule.arena', 'arena.challengeHigher', 'arena.challengeLimit', 'arena.target', 'arena.maxPowerRatio', 'arena.fallbackWeakest', 'arena.sweepLower', 'arena.sweepLimit', 'arena.claimTask']);
   assert.deepEqual(f.editor.groups.get('league').fields.map(field => field.key),
     ['schedule.leagueChallenge', 'league.target', 'league.maxPowerRatio', 'league.fallbackWeakest', 'league.dailyBattleLimit', 'league.claimTask', 'schedule.leagueCollect', 'schedule.leaguePassRewards']);

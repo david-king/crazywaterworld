@@ -106,7 +106,7 @@ export const automationTasks = [
   ['trialAdSweep', '试炼免广告扫荡', '挑战', false],
   ['pirate', '海盗日常扫荡', '日常', false],
   ['paidGold', '钻石点金', '日常', false],
-  ['shop', '折扣店购买', '日常', false],
+  ['shop', '折扣商店', '折扣商店', false],
   ['collect', '收取产物', '海面', false],
   ['finishUpgrade', '建筑竣工', '海面', false],
   ['build', '空位建造', '海面', false],
@@ -139,7 +139,6 @@ export function dailyTaskKey(id, action) {
     case 1002: return action.body.way === 1 ? 'freeRecruit' : null;
     case 1005: return 'arena';
     case 1006: return action.body.free ? 'freeGold' : 'paidGold';
-    case 1007: return 'shop';
     case 1010: return 'pirate';
     default: return null;
   }

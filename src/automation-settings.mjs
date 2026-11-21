@@ -22,7 +22,7 @@ export const settingsFile = () => path.join(dataDirectory(), 'automation-setting
 export const SETTINGS_FORMAT = 'crazywaterworld-automation';
 // 文件 version / 账号 settingsVersion 是格式编号，只随结构迁移调整；
 // revision 是每次保存递增的修订号，仅用于并发冲突检查，不能用作格式版本。
-export const SETTINGS_SCHEMA_VERSION = 40;
+export const SETTINGS_SCHEMA_VERSION = 43;
 const LEGACY_SETTINGS_FORMAT = 'crazywaterword-automation';
 const treasureQualityLabels = { ORANGE: '万吨货轮', PURPLE: '中型货轮', BLUE: '小型货轮' };
 const treasureChaseDefaults = {
@@ -49,6 +49,7 @@ export const DEFAULT_SETTINGS = {
   // 时间使用北京时间（HH:mm）；深夜窗口支持跨午夜配置。
   login: { autoReconnect: false, intervalSeconds: 900, jitterSeconds: 0, quietHours: false, quietStart: '02:00', quietEnd: '07:00', quietIntervalSeconds: 60, maxRetries: 5 },
   schedule: taskSettings(),
+  discountShop: { rules: [], fallbackCheapest: false },
   eventActions: { compassThreshold: 10, compassDrawCount: 10 },
   activityAutomation: activityAutomationDefaults,
   weeklyActivity: WEEKLY_ACTIVITY_DEFAULTS,
@@ -161,6 +162,7 @@ const constraints = {
   'museum.maxDispatches': int(100), 'museum.factor': int(3, 1), 'museum.factorMaterials': strings(), 'museum.stockThreshold': int(), 'museum.matchedFactor': int(3, 1),
   'museum.maps': strings(), 'museum.dailyGuideLimit': int(), 'resources.keepAccelerators': int(), 'resources.diamondThreshold': int(),
   'resources.diamondDailyLimit': int(), 'gold.times': int(1000), 'heroes.heroIds': strings(), 'heroes.keepExp': int(),
+  'discountShop.rules': { kind: 'discountRules' },
   'heroes.targetLevel': int(10000), 'heroes.targetStar': int(1000),
   'appointments.priorities': { ...strings(7), values: DEFAULT_APPOINTMENT_PRIORITIES },
   'trials.raidIds': { ...strings(3), values: ['1','2','3'] }, 'trials.paidPerRaidLimit': int(100),
@@ -272,8 +274,8 @@ export function settingsFromLegacyNative(tasks, options) {
     'building.enabled': ['collect', 'finishUpgrade', 'build', 'buildSupply', 'upgrade', 'speedUp', 'adSpeedUpBuilding'],
     'factory.enabled': ['collect', 'startProduce', 'buildSupply', 'speedUp', 'adSpeedUpProduce'],
     'gather.enabled': ['autoFish', 'fishEnhance', 'floaters', 'antiqueFloaters', 'autoDive', 'diveEnhance', 'autoSalvage', 'salvageEnhance'],
-    'dailies.enabled': ['dailyRewards', 'chests', 'gift', 'freeGold', 'freeRecruit', 'arena', 'shop'],
-    'loop.dailies': ['freeGold', 'freeRecruit', 'arena', 'paidGold', 'shop'],
+    'dailies.enabled': ['dailyRewards', 'chests', 'gift', 'freeGold', 'freeRecruit', 'arena'],
+    'loop.dailies': ['freeGold', 'freeRecruit', 'arena', 'paidGold'],
     'museum.runEnabled': ['museumCollect', 'museumExplore', 'museumRevenue', 'museumAchievements'],
     'radar.runEnabled': ['radarAuto', 'radarRepair'],
     'progression.enabled': ['stageAuto'],
@@ -350,6 +352,9 @@ function validateCurrentSettings(input, { partial = false, catalog = null } = {}
   if (plain(input?.arena) && (Object.hasOwn(input.arena, 'dailyBattleLimit') || Object.hasOwn(input.arena, 'fallbackLowerRank'))) input = migrateVersion37Settings(input);
   input = migrateVersion38Settings(input);
   input = migrateVersion39Settings(input);
+  input = migrateVersion40Settings(input);
+  input = migrateVersion41Settings(input);
+  input = migrateVersion42Settings(input);
   if (plain(input?.resourceFields) && !Object.hasOwn(input.resourceFields, 'refillAfterLoss')) {
     input = { ...input, resourceFields: { ...input.resourceFields, refillAfterLoss: false } };
   }
@@ -408,6 +413,20 @@ function validateCurrentSettings(input, { partial = false, catalog = null } = {}
         if (!Array.isArray(value) || value.length > rule.max || value.some(v => typeof v !== 'string' || !v.trim() || v.length > 120) || new Set(value).size !== value.length) errors[name] = '选项必须为不重复的有效列表';
         else if (rule.values && value.some(v => !rule.values.includes(v))) errors[name] = '列表中含有不支持的选项';
         else output[group][key] = [...value];
+      } else if (rule?.kind === 'discountRules') {
+        const ids = new Set();
+        if (!Array.isArray(value) || value.length > 500) errors[name] = '购买规则最多可设置 500 项';
+        else for (const row of value) {
+          if (!plain(row) || typeof row.id !== 'string' || !row.id.trim() || row.id.length > 120 || ids.has(row.id)
+            || Object.keys(row).some(k => !['id', 'maxPercent', 'maxDiamonds'].includes(k))
+            || (row.maxPercent !== null && (!Number.isSafeInteger(row.maxPercent) || row.maxPercent < 0 || row.maxPercent > 100))
+            || (row.maxDiamonds !== null && (!Number.isSafeInteger(row.maxDiamonds) || row.maxDiamonds < 0))
+            || (row.maxPercent === null && row.maxDiamonds === null)) {
+            errors[name] = '每种物品只能添加一次，请至少填写折扣或钻石上限'; break;
+          }
+          ids.add(row.id);
+        }
+        if (!errors[name]) output[group][key] = copy(value);
       } else if (rule?.kind === 'fleetLineups') {
         try { output[group][key] = validateFleetLineupBindings(value, output.lineups.presets); }
         catch (error) { errors[name] = error.message; }
@@ -527,11 +546,16 @@ export function settingsCatalog(config) {
   const collectionTypes = new Set([...factoryTypes, '农田']);
   for (const row of rows('BuildingUpgradeCfg')) if (row.product?.length) collectionTypes.add(row.buildingType);
   const materials = unique([...rows('ItemCfg').map(r => option(r.id, r.show_name || r.showName || r.name || r.id)), ...rows('ResourceCfg').map(r => option(r.id, r.show_name || r.id))]);
+  // These two rewards appeared in DiscountShopResponse without a shop link in ItemJumpCfg.
+  const shopIds = new Set(['原料自选包', '玉米']);
+  for (const row of rows('ItemJumpCfg')) if (row.accessList?.includes('折扣商店')) shopIds.add(row.id);
+  const materialLabels = new Map(materials.map(item => [item.value, item.label]));
   return {
     buildings, factories: buildings.filter(r => factoryTypes.has(r.value)),
     collectionBuildings: buildings.filter(r => collectionTypes.has(r.value)),
     guildTech: unique(rows('GuildTechCfg').map(r => option(r.techId, r.name || '科技 ' + r.techId))),
     materials, treasureRewards: treasureRewardOptions(config, materials),
+    discountItems: [...shopIds].map(id => option(id, materialLabels.get(id) ?? id)),
     treasureQualities: Object.entries(treasureQualityLabels).map(([value, label]) => option(value, label)),
     siliconTiers: Object.entries(siliconTierLabels).map(([value, label]) => option(value, label)),
     crops: rows('FarmlandPlantCfg').map(r => option(r.id)),
@@ -687,7 +711,7 @@ export function importAutomationSettings(document, options) {
   return validateSettings(migrateSettingsVersion(document.settings, document.version), { ...options, partial: false });
 }
 
-const settingsMigrations = new Map([[1, migrateVersion1Settings], [2, migrateVersion2Settings], [3, migrateVersion3Settings], [4, migrateVersion4Settings], [5, migrateVersion5Settings], [6, migrateVersion6Settings], [7, migrateVersion7Settings], [8, migrateVersion8Settings], [9, migrateVersion9Settings], [10, migrateVersion10Settings], [11, migrateVersion11Settings], [12, migrateVersion12Settings], [13, migrateVersion13Settings], [14, migrateVersion14Settings], [15, migrateVersion15Settings], [16, migrateVersion16Settings], [17, migrateVersion17Settings], [18, migrateVersion18Settings], [19, migrateVersion19Settings], [20, migrateVersion20Settings], [21, migrateVersion21Settings], [22, migrateVersion22Settings], [23, migrateVersion23Settings], [24, migrateVersion24Settings], [25, migrateVersion25Settings], [26, migrateVersion26Settings], [27, migrateVersion27Settings], [28, migrateVersion28Settings], [29, migrateVersion29Settings], [30, migrateVersion30Settings], [31, migrateVersion31Settings], [32, migrateVersion32Settings], [33, migrateVersion33Settings], [34, migrateVersion34Settings], [35, migrateVersion35Settings], [36, migrateVersion36Settings], [37, migrateVersion37Settings], [38, migrateVersion38Settings], [39, migrateVersion39Settings]]);
+const settingsMigrations = new Map([[1, migrateVersion1Settings], [2, migrateVersion2Settings], [3, migrateVersion3Settings], [4, migrateVersion4Settings], [5, migrateVersion5Settings], [6, migrateVersion6Settings], [7, migrateVersion7Settings], [8, migrateVersion8Settings], [9, migrateVersion9Settings], [10, migrateVersion10Settings], [11, migrateVersion11Settings], [12, migrateVersion12Settings], [13, migrateVersion13Settings], [14, migrateVersion14Settings], [15, migrateVersion15Settings], [16, migrateVersion16Settings], [17, migrateVersion17Settings], [18, migrateVersion18Settings], [19, migrateVersion19Settings], [20, migrateVersion20Settings], [21, migrateVersion21Settings], [22, migrateVersion22Settings], [23, migrateVersion23Settings], [24, migrateVersion24Settings], [25, migrateVersion25Settings], [26, migrateVersion26Settings], [27, migrateVersion27Settings], [28, migrateVersion28Settings], [29, migrateVersion29Settings], [30, migrateVersion30Settings], [31, migrateVersion31Settings], [32, migrateVersion32Settings], [33, migrateVersion33Settings], [34, migrateVersion34Settings], [35, migrateVersion35Settings], [36, migrateVersion36Settings], [37, migrateVersion37Settings], [38, migrateVersion38Settings], [39, migrateVersion39Settings], [40, migrateVersion40Settings], [41, migrateVersion41Settings], [42, migrateVersion42Settings]]);
 const supportedSettingsVersion = version => Number.isSafeInteger(version) && version >= 1;
 const entrySettingsVersion = entry => Object.hasOwn(entry, 'settingsVersion') ? entry.settingsVersion : 1;
 function newestSettingsVersion(store) {
@@ -1100,6 +1124,23 @@ function migrateVersion22Settings(settings) {
     if (plain(next[group])) next[group] = { maxPowerRatio: 0, ...next[group] };
   }
   return next;
+}
+
+function migrateVersion42Settings(settings) {
+  if (!plain(settings?.discountShop) || Object.hasOwn(settings.discountShop, 'fallbackCheapest')) return settings;
+  return { ...settings, discountShop: { ...settings.discountShop, fallbackCheapest: false } };
+}
+
+function migrateVersion41Settings(settings) {
+  const shop = settings?.discountShop;
+  if (!plain(shop) || (!Object.hasOwn(shop, 'refreshLimit') && !Object.hasOwn(shop, 'maxRefreshCost'))) return settings;
+  const { refreshLimit, maxRefreshCost, ...discountShop } = shop;
+  return { ...settings, discountShop };
+}
+
+function migrateVersion40Settings(settings) {
+  if (!plain(settings) || Object.hasOwn(settings, 'discountShop')) return settings;
+  return { ...settings, discountShop: copy(DEFAULT_SETTINGS.discountShop) };
 }
 
 function migrateVersion39Settings(settings) {

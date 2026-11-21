@@ -3,7 +3,7 @@ const configEditor = { owner: null, data: null, draft: null, baseline: null, rec
 // 排行是独立的只读视图，不参与配置草稿、版本和自动保存。
 const configWeeklyRanking = { owner: null, serial: 0, data: null, error: '', pending: null, at: 0 };
 bindConsoleObject('configuration', configEditor, ['owner', 'data', 'draft', 'baseline', 'category', 'busy', 'loading', 'saving', 'saveError', 'saveRetries', 'selectedGroups', 'errors', 'playerData', 'playerError', 'previewSummary']);
-const configCategories = { base: '基地', world: '世界', heroes: '英雄', antique: '藏品', equipment: '装备', daily: '日常与活动' };
+const configCategories = { base: '基地', world: '世界', heroes: '英雄', antique: '藏品', equipment: '装备', daily: '日常' };
 const activityOwnedSettings = new Set(['weekOrder.enabled', 'schedule.weekOrderSubmit', 'weekOrder.allowDiamonds', 'schedule.weekOrderFinal',
   'schedule.beautyVotes', 'schedule.beautyGift',
   'heroRaid.enabled', 'heroRaid.challenge', 'heroRaid.retryTimes', 'heroRaid.orders', 'heroRaid.lottery', 'heroRaid.rewards']);
@@ -248,6 +248,11 @@ const configGroups = [
     configField('arena.claimTask','领取竞技场每日任务奖励','switch',{help:'任务达标后领取，需开启「每日任务与奖励」总开关。'}),
   ]},
   {id:'daily-actions',title:'日常行动',category:'daily',fields:[]},
+  {id:'discount-shop',title:'折扣商店',category:'daily',fields:[
+    configField('schedule.shop','折扣商店总开关','switch'),
+    configField('discountShop.fallbackCheapest','兜底购买','switch',{help:'需先添加购买规则。如果当天挂机检查的货架一直没有符合规则的商品，最后一次免费刷新后的货架也没有命中，就从该货架可购买的商品中选折后整份钻石价最低的买 1 份。同价按货架顺序选第一件，每天最多兜底一次。'}),
+    configField('discountShop.rules','购买清单','discountRules',{wide:true,help:'每种物品至少设置一项上限。折数或整份钻石价满足任意一项（含等于）即可购买。'}),
+  ]},
   {id:'ad-rewards',title:'广告奖励',category:'daily',fields:[
     configField('ads.waitSeconds','广告申请后等待','number',{unit:'秒',help:'无免广告权益时默认申请并等待后领取；有权益时立即领取。默认15秒，是挂机收益、英雄招募、工厂加速、藏品招募、广告商店、节庆礼包和雪球礼包都实测成功过的时长。5秒只在藏品招募上测通，广告商店3秒被拒。等待会占用账号操作队列，挂机每轮最多处理1次；服务器返回未完成时跳过该入口并冷却5分钟。'}),
     configField('schedule.afkAd','闯关挂机广告收益','switch',{help:'每天1次。游戏只在普通领取后的60秒内提供此入口，因此需同时开启“闯关挂机收益”，普通领取后立即执行。无免广告权益时按设置的等待时间领取。'}),
@@ -372,9 +377,10 @@ const configGroups = [
   ] },
   { id: 'resources', title: '加速与钻石', category: 'base', fields: [
     configField('resources.keepAccelerators', '保留加速器数量', 'number', { unit: '个', help: '所有自动加速共用保留量，消耗后不得低于此值。' }),
-    configField('resources.allowDiamonds', '自动钻石消耗总开关'),
-    configField('resources.diamondThreshold', '钻石保留阈值', 'number', { parent: 'resources.allowDiamonds', unit: '钻石', help: '本工具消费后余额不得低于此值。游戏内手动消费不受此开关限制。' }),
-    configField('resources.diamondDailyLimit', '每日钻石使用量', 'number', { parent: 'resources.allowDiamonds', unit: '钻石', help: '0 表示禁止自动花钻石。统计启用本版本后的自动消费，升级前与游戏内手动消费不计入。北京时间零点重置；结果不明的已发送消费仍占额度。' }),
+    configField('resources.allowDiamonds', '自动钻石消耗总开关', 'switch', { editChildrenWhenOff:true,
+      help:'折扣商店由「日常 → 折扣商店」独立控制，按实际余额购买。这里的开关、每日钻石使用量和钻石保留阈值均不适用于折扣商店。' }),
+    configField('resources.diamondThreshold', '钻石保留阈值', 'number', { parent: 'resources.allowDiamonds', unit: '钻石', help: '由全局钻石开关控制的自动消费，扣款后至少要剩余这么多钻石。' }),
+    configField('resources.diamondDailyLimit', '每日钻石使用量', 'number', { parent: 'resources.allowDiamonds', unit: '钻石', help: '填 0 会停用由全局钻石开关控制的自动消费。额度按北京时间零点重置，已发送且结果待确认的消费仍占用额度。' }),
   ] },
   { id: 'gold', title: '每日点金', category: 'base', fields: [
     configField('gold.enabled', '每日付费点金'), configField('gold.times', '点金次数', 'number', { unit: '次 / 天', help: '请先用完当天的免费点金，可手动使用或开启免费点金挂机。这个目标只统计付费次数，包含手动付费。上笔结果待确认时会保留额度，暂停追加。' }),
@@ -1072,11 +1078,6 @@ function configRender() {
     configLegacyGroups.set('daily-challenges', 'league');
     for (const [key, id] of configLegacyGroups) if (id === 'daily-challenges') configLegacyGroups.set(key, 'league');
   }
-  const adIndex = groups.findIndex(group => group.id === 'ad-rewards');
-  if (adIndex >= 0 && groups.some(group => group.id === 'daily-actions')) {
-    const [ads] = groups.splice(adIndex, 1);
-    groups.splice(groups.findIndex(group => group.id === 'daily-actions') + 1, 0, ads);
-  }
   const firstDaily = groups.findIndex(group => group.category === 'daily');
   for (const id of ['daily-weekly', 'rewards']) {
     const index = groups.findIndex(group => group.id === id);
@@ -1175,6 +1176,8 @@ function configRenderField(spec) {
     control.setAttribute('aria-label', spec.label); configPaintSwitch(control, configSwitchValue(spec));
     control.onclick = () => { configSet(spec.key, !configSwitchValue(spec)); };
     box.append(control);
+  } else if (spec.kind === 'discountRules') {
+    control = configDiscountRules(spec, id, name); box.append(control);
   } else if (spec.kind === 'number') {
     const line = el('div', 'config-number'); control = el('input'); control.type = 'number'; control.required = true; control.step = '1';
     const rule = configEditor.data.rules?.numbers?.[spec.key] ?? { min: 0, max: 1000000000 };
@@ -1606,6 +1609,8 @@ function configErrors(error, { focus = true } = {}) {
 
 function configCheckForm({ focus = true } = {}) {
   for (const [key, widget] of configEditor.widgets) {
+    // These editors validate their local input when the user applies it.
+    if (widget.spec?.kind === 'discountRules') continue;
     for (const input of widget.row.querySelectorAll('input[type=number], input[type=time]')) {
       if (!input.checkValidity()) {
         configEditor.errors[key] = input.type === 'time' ? '请填写有效的北京时间。' : '请填写有效整数，并遵守输入范围。'; widget.row.hidden = false;
@@ -1954,6 +1959,161 @@ function configPriorityEditor(spec, id) {
   paint(); return root;
 }
 
+function configDiscountRules(spec, id, heading) {
+  const root = el('div', 'config-discount-rules'); root.id = id; root.setAttribute('role', 'group'); root.setAttribute('aria-labelledby', id + '-label');
+  const count = el('span', 'config-discount-count');
+  const { discountItems = [], materials = [] } = configEditor.data.catalog ?? {};
+  const knownIds = new Set(discountItems.map(item => item.value));
+  const names = new Map([...discountItems, ...materials].map(item => [item.value, item.label]));
+  const labelCounts = new Map();
+  for (const label of names.values()) labelCounts.set(label, (labelCounts.get(label) ?? 0) + 1);
+  const list = el('div');
+  const form = el('div', 'config-discount-form');
+  form.id = id + '-editor'; form.hidden = true;
+  const picker = el('details', 'config-multi config-discount-picker');
+  const summary = el('summary');
+  const search = el('input', 'config-input'); search.type = 'search'; search.placeholder = '搜索物品名称或 ID';
+  const results = el('div', 'config-discount-results'); results.id = id + '-results';
+  results.setAttribute('role', 'listbox'); results.setAttribute('aria-label', '可选折扣商品');
+  search.autocomplete = 'off'; search.setAttribute('aria-label', '搜索折扣商品');
+  search.setAttribute('role', 'combobox'); search.setAttribute('aria-autocomplete', 'list');
+  search.setAttribute('aria-controls', results.id); search.setAttribute('aria-expanded', 'false');
+  const empty = el('p', 'config-help', '没有匹配的可选物品，试试其他名称或 ID。'); empty.setAttribute('role', 'status');
+  const body = el('div', 'config-discount-picker-body');
+  body.append(search, results, empty); picker.append(summary, body);
+  const editingName = el('strong');
+  const number = (label, max, step) => {
+    const field = el('label', 'config-discount-limit', label);
+    const node = el('input'); node.type = 'number'; node.min = '0'; node.step = step;
+    if (max) node.max = max;
+    node.placeholder = '可留空'; node.setAttribute('aria-label', label); field.append(node); limits.append(field);
+    return node;
+  };
+  const itemField = el('div', 'config-discount-item-field'); itemField.append(picker, editingName); form.append(itemField);
+  const limits = el('div', 'config-discount-limits'); form.append(limits);
+  const percent = number('最高折数', '10', '0.1'), diamonds = number('整份最高钻石价', '', '1');
+  function nameOf(key) {
+    const label = names.get(key) || key;
+    return labelCounts.get(label) > 1 ? label + '（' + key + '）' : label;
+  }
+  let editing = null, selected = '', activeOption = null;
+  const add = configButton('增加', () => {
+    form.hidden = false; add.hidden = true; picker.open = true;
+  }, 'config-discount-add');
+  const plus = el('span', '', '+'); plus.setAttribute('aria-hidden', 'true'); add.prepend(plus);
+  add.setAttribute('aria-controls', form.id);
+  const apply = configButton('保存', () => {
+    if (!selected || (!percent.value && !diamonds.value) || !percent.reportValidity() || !diamonds.reportValidity()) return;
+    const rule = { id: selected, maxPercent: percent.value ? Math.round(Number(percent.value) * 10) : null,
+      maxDiamonds: diamonds.value ? Number(diamonds.value) : null };
+    const old = configGet(spec.key);
+    configSet(spec.key, editing ? old.map(row => row.id === editing ? rule : row) : [...old, rule]);
+    finish();
+  }, 'config-discount-save');
+  const cancel = configButton('取消', () => finish());
+  function buttons() {
+    apply.disabled = !selected || (!percent.value && !diamonds.value);
+    summary.textContent = selected ? nameOf(selected) : '选择或搜索物品';
+    editingName.textContent = editing ? nameOf(editing) : '';
+    editingName.hidden = !editing; picker.hidden = !!editing;
+  }
+  function activate(option) {
+    activeOption?.removeAttribute('data-active'); activeOption = option;
+    if (!option) { search.removeAttribute('aria-activedescendant'); return; }
+    option.dataset.active = 'true'; search.setAttribute('aria-activedescendant', option.id);
+  }
+  function populate() {
+    if (!picker.open) return;
+    const used = new Set(configGet(spec.key).map(rule => rule.id));
+    const query = search.value.trim().toLowerCase();
+    clear(results); activate(null);
+    let index = 0;
+    for (const [isKnown, title] of [[true, '已知折扣商品'], [false, '其他游戏物品（上架时匹配）']]) {
+      const group = el('div'); group.setAttribute('role', 'group'); group.setAttribute('aria-label', title);
+      group.append(el('div', 'config-discount-group-title', title));
+      for (const [key, label] of names) {
+        if (knownIds.has(key) !== isKnown || used.has(key) || !(label + ' ' + key).toLowerCase().includes(query)) continue;
+        const option = el('div', 'config-discount-option', nameOf(key)); option.id = results.id + '-' + index++;
+        option.dataset.item = key; option.setAttribute('role', 'option');
+        option.setAttribute('aria-selected', String(key === selected)); group.append(option);
+      }
+      if (group.children.length > 1) results.append(group);
+    }
+    empty.hidden = !!index; results.scrollTop = 0;
+    if (query) activate(results.querySelector('[role=option]'));
+  }
+  function choose(option) {
+    selected = option.dataset.item; picker.open = false; buttons(); summary.focus({ preventScroll: true });
+  }
+  function finish() {
+    editing = null; selected = ''; picker.open = false; percent.value = ''; diamonds.value = '';
+    form.hidden = true; add.hidden = false;
+    buttons(); draw(); add.focus({ preventScroll: true });
+  }
+  function draw() {
+    const rules = configGet(spec.key);
+    count.textContent = rules.length + ' 项';
+    list.hidden = rules.length === 0;
+    const rows = rules.map(rule => {
+      const edit = configButton('编辑', () => {
+        form.hidden = false; add.hidden = true;
+        selected = editing = rule.id; picker.open = false; percent.value = rule.maxPercent === null ? '' : String(rule.maxPercent / 10);
+        diamonds.value = rule.maxDiamonds === null ? '' : String(rule.maxDiamonds); buttons(); percent.focus();
+      });
+      const remove = configButton('移除', () => {
+        configSet(spec.key, configGet(spec.key).filter(item => item.id !== rule.id));
+        if (editing === rule.id) finish();
+        else { draw(); populate(); }
+      }, 'remove');
+      const actions = el('div', 'config-discount-actions'); actions.append(edit, remove);
+      const discount = rule.maxPercent === null ? '' : rule.maxPercent / 10 + ' 折';
+      const price = rule.maxDiamonds === null ? '' : rule.maxDiamonds + ' 钻石';
+      const item = el('div', 'config-discount-item', nameOf(rule.id));
+      const conditions = [discount && discount + '以内', price && '整份 ≤ ' + price].filter(Boolean);
+      item.append(el('span', 'config-discount-condition', conditions.join(' 或 ')));
+      return [item, discount || '—', price || '—', actions];
+    });
+    const grid = table(['物品', '最高折数', '整份最高钻石价', '操作'], rows, 'config-discount-table');
+    grid.querySelector('table').setAttribute('aria-label', '购买清单');
+    list.replaceChildren(grid);
+  }
+  percent.oninput = diamonds.oninput = buttons;
+  picker.ontoggle = () => {
+    search.setAttribute('aria-expanded', String(picker.open));
+    search.value = '';
+    if (picker.open) {
+      populate(); search.focus({ preventScroll: true });
+      picker.scrollIntoView({ block: 'nearest' });
+    }
+    else { activate(null); clear(results); }
+  };
+  picker.onfocusout = event => { if (event.relatedTarget && !picker.contains(event.relatedTarget)) picker.open = false; };
+  results.onclick = event => {
+    const option = event.target.closest('[role=option]');
+    if (option) choose(option);
+  };
+  search.oninput = populate;
+  search.onkeydown = event => {
+    if (event.isComposing || event.keyCode === 229) return;
+    if (event.key === 'Escape') {
+      event.preventDefault(); picker.open = false; summary.focus(); return;
+    }
+    if (event.key === 'Enter') {
+      event.preventDefault(); if (activeOption) choose(activeOption); return;
+    }
+    if (!['ArrowUp', 'ArrowDown'].includes(event.key)) return;
+    event.preventDefault();
+    const options = [...results.querySelectorAll('[role=option]')];
+    const position = options.indexOf(activeOption);
+    const next = event.key === 'ArrowDown' ? Math.min(position + 1, options.length - 1) : Math.max(0, position - 1);
+    activate(options[next]); activeOption?.scrollIntoView({ block: 'nearest' });
+  };
+  const formActions = el('div', 'config-discount-actions'); formActions.append(cancel, apply); form.append(formActions);
+  heading.append(count, add);
+  root.append(form, list);
+  buttons(); draw(); return root;
+}
+
 function configCropEditor(spec, id) {
   const root = el('div'); root.id = id; root.tabIndex = -1; root.setAttribute('role', 'group'); root.setAttribute('aria-label', spec.label);
   const options = configEditor.data.catalog.crops ?? [];
@@ -2109,7 +2269,7 @@ async function configPreview() {
   clear($('config-preview-result'));
   configRenderUsage();
   try {
-    const dedicated={arena:'arena',league:'league',alliance:'alliance',guildShip:'guildShip',guildFort:'guildFort',silicon:'silicon',resourceFields:'resourceFields','hero-raid':'heroRaid',treasure:'world',radar:'radar','fleet-dispatch':'fleetDispatch','pirate-hunt':'pirateHunt',worldBoss:'worldBoss',cityWar:'cityWar',forge:'forge',antique:'antique',heroes:'heroes'};
+    const dedicated={'discount-shop':'discountShop',arena:'arena',league:'league',alliance:'alliance',guildShip:'guildShip',guildFort:'guildFort',silicon:'silicon',resourceFields:'resourceFields','hero-raid':'heroRaid',treasure:'world',radar:'radar','fleet-dispatch':'fleetDispatch','pirate-hunt':'pirateHunt',worldBoss:'worldBoss',cityWar:'cityWar',forge:'forge',antique:'antique',heroes:'heroes'};
     const source=dedicated[selected.id];
     let data;
     if(selected.id==='pirate-hunt'){

@@ -9,6 +9,8 @@ const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'cw-unified-config-'));
 process.env.CW_DATA_DIR = directory;
 process.env.CW_CONFIG_PACK = path.join(directory, 'config.json');
 process.env.CW_RESOURCE_AUTO_UPDATE = '0';
+const items = [...['耐火砖','高温合金','木板'].map(id => ({ id })),
+  { id: '礼包A', show_name: '材料礼包' }, { id: '礼包B', show_name: '材料礼包' }];
 fs.writeFileSync(process.env.CW_CONFIG_PACK, JSON.stringify([[1, 'HeroCfg', { data: [
   { id: '瑞文', name: '骑士瑞文', quality: 'PURPLE', type: '英雄' },
   { id: '波奇', name: '波奇', quality: 'PURPLE', type: '英雄' },
@@ -17,9 +19,10 @@ fs.writeFileSync(process.env.CW_CONFIG_PACK, JSON.stringify([[1, 'HeroCfg', { da
   ...[1, 2, 3].map(id => ({ buildingType: '远征船', buildingId: id + '远征船' })),
   ...[1, 2].map(id => ({ buildingType: '精铁厂', buildingId: id + '精铁厂' })),
 ] }],
-  [3, 'ItemCfg', { data: ['耐火砖','高温合金','木板'].map(id => ({ id })) }],
+  [3, 'ItemCfg', { data: items }],
   [4, 'BuildingCfg', { data: [{ buildingType: '精铁厂', name: '冶炼厂' }] }],
   [5, 'BuildingUpgradeCfg', { data: [{ buildingType: '精铁厂', product: [['精铁', 1]] }] }],
+  [6, 'ItemJumpCfg', { data: [{ id: '耐火砖', accessList: ['折扣商店'] }] }],
 ]));
 const { saveStore } = await import('../src/accounts.mjs');
 const { defaultSettings, saveAutomationSettings, loadAutomationSettings, settingsUiRules } = await import('../src/automation-settings.mjs');
@@ -81,6 +84,128 @@ try {
     await page.locator('#config-group-' + id).waitFor();
   };
   await page.goto(base); await openConfig();
+  const desktopTabs = page.locator('.config-tabs');
+  const tabBounds = await desktopTabs.boundingBox();
+  const toolbarBounds = await page.locator('.config-toolbar').boundingBox();
+  assert(tabBounds.width < toolbarBounds.width / 2, '桌面分类标签按内容占宽');
+  assert(Math.abs(tabBounds.x - toolbarBounds.x) < 1, '桌面分类标签与账号信息左对齐');
+  await page.screenshot({ path: path.join(output, 'config-navigation-desktop.png'), animations: 'disabled',
+    clip: { x: toolbarBounds.x, y: toolbarBounds.y, width: toolbarBounds.width, height: tabBounds.y + tabBounds.height - toolbarBounds.y + 8 } });
+  {
+    await page.getByRole('tab', { name: '日常', exact: true }).click();
+    const tabs = await page.locator('#config-panel-daily [data-config-group]').allTextContents();
+    assert.deepEqual(tabs.slice(tabs.indexOf('日常行动'), tabs.indexOf('日常行动') + 3), ['日常行动', '折扣商店', '广告奖励']);
+    await page.getByRole('tab', { name: '折扣商店', exact: true }).click();
+    const panel = page.locator('#config-group-discount-shop');
+    const shopSwitch = panel.getByRole('switch', { name: '折扣商店总开关', exact: true });
+    await shopSwitch.waitFor();
+    assert.equal(await panel.getByText(/实际钻石余额足够就会购买/).isVisible(), false);
+    await panel.getByRole('button', { name: '折扣商店总开关说明', exact: true }).click();
+    const help = page.locator('#ui-help-body');
+    await help.waitFor();
+    assert.match(await help.textContent(), /实际钻石余额足够就会购买.*普通购买和兜底购买均不受全局钻石开关、每日预算和钻石保留量限制.*不占用全局预算.*挂机只使用免费刷新/);
+    await page.keyboard.press('Escape');
+    assert.equal(await help.isVisible(), false);
+    assert.equal(await shopSwitch.getAttribute('aria-checked'), 'false');
+    await group('resources');
+    assert.equal(await page.getByRole('switch', { name: '自动钻石消耗总开关', exact: true }).getAttribute('aria-checked'), 'false');
+    await page.getByRole('button', { name: '自动钻石消耗总开关说明', exact: true }).click();
+    assert.match(await help.textContent(), /折扣商店.*独立控制.*每日钻石使用量和钻石保留阈值均不适用于折扣商店/);
+    await page.keyboard.press('Escape');
+    await group('discount-shop');
+    const add = panel.getByRole('button', { name: '增加', exact: true });
+    const grid = panel.getByRole('table', { name: '购买清单' });
+    assert.equal(await grid.isVisible(), false);
+    assert.equal(await panel.locator('.config-discount-count').innerText(), '0 项');
+    assert(await add.evaluate(button => button.parentElement.contains(document.getElementById('config-field-discountShop-rules-label'))));
+    assert.equal(await panel.getByLabel('最高折数', { exact: true }).isVisible(), false);
+    assert.equal(await panel.getByRole('button', { name: '读取当前货架' }).count(), 0);
+    const picker = panel.getByRole('listbox', { name: '可选折扣商品' }), search = panel.getByRole('combobox', { name: '搜索折扣商品' });
+    await add.click(); await search.waitFor();
+    assert(await search.evaluate(node => node === document.activeElement));
+    const known = picker.getByRole('group', { name: '已知折扣商品' });
+    for (const id of ['原料自选包', '玉米', '耐火砖']) assert.equal(await known.getByRole('option', { name: id }).count(), 1);
+    await search.fill('不存在的折扣商品');
+    await panel.getByText('没有匹配的可选物品，试试其他名称或 ID。').waitFor();
+    await search.fill('材料礼包');
+    assert.deepEqual(await picker.getByRole('option').allTextContents(), ['材料礼包（礼包A）', '材料礼包（礼包B）']);
+    await search.press('ArrowDown'); await search.press('Enter');
+    await panel.locator('summary').filter({ hasText: '材料礼包（礼包B）' }).waitFor();
+    assert.equal(await picker.isVisible(), false);
+    await panel.getByLabel('最高折数').fill('4.5');
+    await panel.getByLabel('整份最高钻石价').fill('25');
+    const save = panel.getByRole('button', { name: '保存', exact: true });
+    await save.click(); await saved();
+    const row = grid.getByRole('row').filter({ hasText: '礼包B' });
+    assert.deepEqual(await grid.getByRole('columnheader').allTextContents(), ['物品', '最高折数', '整份最高钻石价', '操作']);
+    assert.deepEqual((await row.getByRole('cell').allInnerTexts()).slice(0, 3), ['材料礼包（礼包B）', '4.5 折', '25 钻石']);
+    assert.equal(await panel.getByLabel('每日刷新上限', { exact: true }).count(), 0);
+    assert.equal(await panel.getByLabel('单次刷新钻石上限', { exact: true }).count(), 0);
+    assert.equal(await panel.getByRole('button', { name: '确认次数' }).count(), 0);
+    await shopSwitch.click(); await saved();
+    const fallbackSwitch = panel.getByRole('switch', { name: '兜底购买', exact: true });
+    assert.equal(await fallbackSwitch.getAttribute('aria-checked'), 'false');
+    await panel.getByRole('button', { name: '兜底购买说明' }).click();
+    assert.match(await help.textContent(), /最后一次免费刷新.*折后整份钻石价最低.*买 1 份/);
+    await page.keyboard.press('Escape');
+    await fallbackSwitch.click(); await saved();
+    const stored = () => loadAutomationSettings('config-a').settings.discountShop;
+    assert.deepEqual(stored(), { rules: [{ id: '礼包B', maxPercent: 45, maxDiamonds: 25 }], fallbackCheapest: true });
+    for (const [item, field, limit] of [['玉米', '整份最高钻石价', '20'], ['原料自选包', '最高折数', '6']]) {
+      await add.click(); await search.fill(item); await picker.getByRole('option', { name: item, exact: true }).click();
+      await panel.getByLabel(field, { exact: true }).fill(limit); await save.click(); await saved();
+    }
+    await panel.screenshot({ path: path.join(output, 'discount-shop-desktop.png') });
+    const phone = await browser.newPage({ viewport: { width: 390, height: 844 }, isMobile: true, hasTouch: true });
+    try {
+      await phone.goto(base); await phone.locator('#tabs [data-tab=settings]').tap();
+      await phone.getByRole('tab', { name: '日常', exact: true }).tap();
+      await phone.getByRole('tab', { name: '折扣商店', exact: true }).tap();
+      const shop = phone.locator('#config-group-discount-shop');
+      assert.deepEqual(await shop.locator('.config-discount-condition:visible').allTextContents(),
+        ['4.5 折以内 或 整份 ≤ 25 钻石', '整份 ≤ 20 钻石', '6 折以内']);
+      await phone.evaluate(() => window.scrollTo(0, 0));
+      await phone.screenshot({ path: path.join(output, 'discount-shop-mobile.png') });
+      await phone.setViewportSize({ width: 320, height: 760 });
+      const widths = await shop.evaluate(node => ({
+        page:document.documentElement.scrollWidth, viewport:innerWidth,
+        list:node.querySelector('.config-discount-table').scrollWidth, available:node.querySelector('.config-discount-table').clientWidth,
+      }));
+      assert(widths.page <= widths.viewport && widths.list <= widths.available + 1, JSON.stringify(widths));
+      const sizes = await phone.locator('.hosting-controls > button, .config-actions > button:visible, #config-group-discount-shop .config-small-button:visible').evaluateAll(nodes => nodes.map(node => {
+        const style = getComputedStyle(node);
+        return [node.offsetHeight, style.fontSize, style.paddingInline, style.borderRadius];
+      }));
+      assert.equal(sizes[0][0], 32);
+      for (const size of sizes) assert.deepEqual(size, sizes[0]);
+    } finally { await phone.close(); }
+    for (const item of ['玉米', '原料自选包']) {
+      await grid.getByRole('row').filter({ hasText: item }).getByRole('button', { name: '移除' }).click(); await saved();
+    }
+    await add.click(); await search.fill('礼包');
+    assert.deepEqual(await picker.getByRole('option').allTextContents(), ['材料礼包（礼包A）']);
+    await search.press('Escape'); assert.equal(await picker.isVisible(), false);
+    await panel.getByRole('button', { name: '取消', exact: true }).click();
+    await page.setViewportSize({ width: 360, height: 800 });
+    await add.click(); await search.waitFor();
+    assert.equal(await picker.getByRole('option', { name: '高温合金' }).count(), 1);
+    assert(await panel.evaluate(node => node.scrollWidth <= node.clientWidth + 1), '折扣商店在手机宽度可完整显示');
+    assert(await picker.evaluate(node => node.scrollHeight > node.clientHeight), '可单独滚动候选列表');
+    assert(await picker.evaluate(node => node.getBoundingClientRect().bottom <= document.getElementById('tabs').getBoundingClientRect().top), '选择器展开后位于手机底栏上方');
+    await search.fill('高温'); await picker.getByRole('option', { name: '高温合金' }).click();
+    await panel.getByRole('button', { name: '取消', exact: true }).click();
+    assert.equal(stored().rules.length, 1);
+    await page.setViewportSize({ width: 1440, height: 1000 });
+    await panel.getByRole('button', { name: '编辑', exact: true }).click();
+    await panel.getByLabel('最高折数').fill('');
+    await save.click(); await saved();
+    assert.equal(stored().rules[0].maxPercent, null);
+    assert.equal(await row.getByRole('cell').nth(1).textContent(), '—');
+    await panel.getByRole('button', { name: '移除', exact: true }).click(); await saved();
+    assert.deepEqual(stored().rules, []);
+    await group('building');
+    console.log('通过：折扣商店购买清单、搜索增改删、独立购买和免费刷新说明');
+  }
   {
     const history = page.locator('#config-history-dialog');
     const action = name => history.getByRole('button', { name, exact: true });
@@ -193,7 +318,7 @@ try {
     assert.equal(await picker.locator('summary').textContent(), empty);
     await picker.locator('summary').click();
     await picker.getByRole('checkbox', { name: '耐火砖' }).waitFor();
-    assert.deepEqual(await picker.locator('.config-option').allTextContents(), ['耐火砖','高温合金','木板']);
+    assert.deepEqual(await picker.locator('.config-option').allTextContents(), items.map(item => item.show_name ?? item.id));
     await picker.getByRole('searchbox').fill(material);
     assert.deepEqual(await picker.locator('.config-option').allTextContents(), [material]);
     await picker.getByRole('checkbox', { name: material }).check();
@@ -615,7 +740,7 @@ try {
   console.log('通过：藏品总开关可单独保存，暂停时四个养成动作可见可编辑');
 
   assert.equal(await page.locator('[data-config-tab=runtime], #config-field-loop-rounds, #config-group-runtime').count(), 0);
-  assert.deepEqual(await page.locator('[data-config-tab]').allTextContents(), ['基地', '世界', '英雄', '藏品', '装备', '日常与活动']);
+  assert.deepEqual(await page.locator('[data-config-tab]').allTextContents(), ['基地', '世界', '英雄', '藏品', '装备', '日常']);
   await page.locator('#account-picker-trigger').click();
   await page.locator('#account-picker-list [role=option]').filter({ hasText: '配置验收账号2' }).click();
   await page.locator('#config-account-name').filter({ hasText: '配置验收账号2' }).waitFor(); await saved();

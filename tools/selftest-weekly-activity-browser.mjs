@@ -132,7 +132,7 @@ try {
   assert.equal(await page.locator('#config-subtab-military-week, #config-group-military-week').count(), 0);
   assert.equal(await page.getByRole('tab', { name: '周（每日）活动', exact: true }).count(), 0);
   const dailyTabs = await page.locator('#config-panel-daily [data-config-group]').evaluateAll(tabs => tabs.map(tab => tab.dataset.configGroup));
-  assert.equal(dailyTabs.indexOf('ad-rewards'), dailyTabs.indexOf('daily-actions') + 1);
+  assert.equal(dailyTabs.indexOf('ad-rewards'), dailyTabs.indexOf('discount-shop') + 1);
   const military = page.locator('#config-group-weekly-activities');
   assert.equal(await military.locator('details, .config-field-section').count(), 0, '每日主题直接平铺');
   assert.equal(await military.locator('.config-disclosure').count(), 6, '每个主题只有一个参数展开入口');

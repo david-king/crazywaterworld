@@ -38,6 +38,7 @@ import { fishOnce } from './fishing.mjs';
 import { upgradeFishingOnce } from './fishing-upgrade.mjs';
 import { serviceHeroRecruitRewards } from './hero-recruit-rewards.mjs';
 import { serviceAntiqueRecruit } from './antique-recruit.mjs';
+import { runDiscountShop } from './discount-shop-automation.mjs';
 import { claimAdShop, beginAdRound } from './ad-shop.mjs';
 import { claimAfkAd, claimAdSpeedUps } from './ad-rewards.mjs';
 import { rewardSchedule } from './reward-schedule.mjs';
@@ -82,7 +83,7 @@ import { runWeeklyActivity } from './weekly-activity-runner.mjs';
 const automationControlLabels = new Map(automationControls.map(control => [control.key, control.label]));
 const defaultSleep = (ms, signal) => pause(ms, undefined, { signal });
 const dailyActionKeys = {
-  1002: ['freeRecruit'], 1005: ['arena'], 1006: ['freeGold'], 1007: ['shop'],
+  1002: ['freeRecruit'], 1005: ['arena'], 1006: ['freeGold'],
 };
 
 export async function runLoop(client, protocol, {
@@ -843,7 +844,7 @@ export async function runLoop(client, protocol, {
       const dailyKeys = settings ? dailyActionKeys : { ...dailyActionKeys, 1006: ['freeGold', 'paidGold'], 1010: ['pirate'] };
       if (Object.values(dailyKeys).some(keys => keys.some(enabled))) {
         try {
-           const includeTask = id => id === 1010 && settings
+           const includeTask = id => id === 1007 || (id === 1010 && settings)
              ? false : !isEnabled || dailyKeys[id]?.some(enabled);
           const survey = await surveyDailies(client, protocol, { config, player, includeTask, probeGift: !isEnabled, idle: !!isEnabled, allowRecruitTickets: false, settings, ledger: usageLedger });
           for (const entry of survey.tasks) for (const key of dailyKeys[entry.task.id]??[]) rewards?.observe(key, entry.reason || (Number.isFinite(entry.task.progress)&&Number.isFinite(entry.task.targetProgress)?entry.task.progress+'/'+entry.task.targetProgress+(entry.task.progress>=entry.task.targetProgress?' · 今日目标已完成':' · 等待执行'):'已读取任务状态'));
@@ -883,6 +884,17 @@ export async function runLoop(client, protocol, {
             }
           }
         } catch (error) { phaseFailure('dailies', '日常检查', error); }
+      }
+      yield;
+      if (settings && enabled('shop')) {
+        try {
+          await runDiscountShop(client, config, { player, protocol, getSettings, guard, ledger: usageLedger,
+            enabled: () => enabled('shop'), report(entry) {
+              summary.dailies.results.push(entry);
+              if (!entry.skipped) summary.dailies.planned++;
+              stepLog('dailies')({ ...entry, title: entry.label || '折扣商店', taskKey: 'shop' });
+            } });
+        } catch (error) { phaseFailure('dailies', '折扣商店', error, 'shop'); }
       }
       yield;
       if(isEnabled&&settings&&enabled('pirate')){

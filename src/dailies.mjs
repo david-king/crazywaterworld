@@ -331,7 +331,7 @@ export const DAILY_DRIVERS = {
   1014: { id: 1014, title: '累计请求帮助', probes: [], evaluate: lockedReason('联盟求助') },
   1015: { id: 1015, title: '城战获得功勋', probes: [], evaluate: automationReason('城战接续（20:00-21:00 限时）', '世界与挑战') },
   1016: { id: 1016, title: '博物馆探险', probes: [], evaluate: automationReason('派遣博物馆探险队', '博物馆') },
-  1017: { id: 1017, title: '参与积分赛', probes: [], evaluate: automationReason('积分赛每日挑战', '日常与活动 → 积分赛') },
+  1017: { id: 1017, title: '参与积分赛', probes: [], evaluate: automationReason('积分赛每日挑战', '日常 → 积分赛') },
 };
 
 function automationReason(label, group = '联盟') {
