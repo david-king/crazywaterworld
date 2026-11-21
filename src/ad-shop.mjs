@@ -2,7 +2,6 @@ import { displayMaterial } from './config.mjs';
 import { normalize } from './worlds.mjs';
 import { emitDiagnostic } from './trace-log.mjs';
 
-const waitingApps = new Map([['1400', '14021170'], ['1422', '14021167']]);
 const task = 'adShop';
 const title = '广告商店免广告领奖';
 const inProgress = new WeakSet();
@@ -12,23 +11,10 @@ export const AD_PAUSED_REASON = '广告等待期间任务已暂停或目标已�
 const REJECT_COOLDOWN_MS = 300_000;
 const adStates = new WeakMap();
 
-function versionAtLeast(version, minimum) {
-  if (!minimum) return true;
-  if (![version, minimum].every(v => typeof v === 'string' && /^\d+(\.\d+)*$/.test(v))) return false;
-  const actual = version.split('.').map(Number), required = minimum.split('.').map(Number);
-  for (let i = 0; i < Math.max(actual.length, required.length); i++) {
-    const diff = (actual[i] ?? 0) - (required[i] ?? 0);
-    if (diff !== 0) return diff > 0;
-  }
-  return true;
-}
-
 export function channelUnavailable(tables, player, clientInfo) {
   const channel = String(clientInfo?.channelId ?? '');
   const settings = tables?.AdvChannelCfg?.data?.find(r => String(r.key) === channel);
   if (settings?.isOpen !== true) return '当前客户端渠道未开放广告功能';
-  if (!versionAtLeast(clientInfo?.originVersion, settings.minAppVersion))
-    return '广告功能要求应用版本 ' + settings.minAppVersion + ' 或更高，当前为 ' + (clientInfo?.originVersion || '未知');
   const level = tables?.ModuleOpenCfg?.data?.find(r => r.moduleId === '广告')?.playerLevel;
   if (!Number.isSafeInteger(level) || !Number.isSafeInteger(player?.level)) return '未能确认广告商店开放等级';
   if (player.level < level) return '角色达到 ' + level + ' 级开放';
@@ -51,17 +37,12 @@ export function adWaitMs(settings) {
   return seconds * 1000;
 }
 
-export async function adAccess(client, tables, { player, clientInfo, language, settings }) {
+export async function adAccess(client, tables, { player, clientInfo, settings }) {
   const reason = channelUnavailable(tables, player, clientInfo);
   if (reason) return { reason };
   const privilege = await hasSkipPrivilege(client, tables, player);
   if (privilege === null) return { reason: '尚未读取到首充记录，免广告权益未确认' };
   if (privilege) return { waitMs: 0 };
-  const channel = String(clientInfo?.channelId ?? '');
-  const app = waitingApps.get(channel);
-  if (!app || String(clientInfo?.appId) !== app || language !== 'zh_CN'
-    || (player?.channelId && String(player.channelId) !== channel)
-    || (player?.appId && String(player.appId) !== app)) return { reason: '当前账号没有免广告权益，请在游戏内观看广告领取' };
   return { waitMs: adWaitMs(settings) };
 }
 
@@ -115,14 +96,14 @@ async function readShop(client) {
   return products;
 }
 
-export async function claimAdShop(client, config, { player, clientInfo, language, enabled, schedule, report, getSettings }) {
+export async function claimAdShop(client, config, { player, clientInfo, enabled, schedule, report, getSettings }) {
   if (!enabled() || !schedule.due(task) || inProgress.has(client)) return;
   inProgress.add(client);
   const todayEnds = schedule.nextDay();
   const allowed = () => enabled() && schedule.now() < todayEnds;
   const retryIn = seconds => schedule.defer(task, Math.min(todayEnds, schedule.now() + seconds));
   try {
-    const access = await adAccess(client, config?.tables, { player, clientInfo, language, settings: getSettings?.() });
+    const access = await adAccess(client, config?.tables, { player, clientInfo, settings: getSettings?.() });
     if (access.reason) {
       report({ label: title, skipped: true, reason: access.reason });
       retryIn(1800);

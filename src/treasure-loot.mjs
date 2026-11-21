@@ -12,6 +12,7 @@ import { displayMaterial } from './config.mjs';
 import {watchTreasureTravel,matchesFollowDeparture,matchesChaseDeparture,treasureChaseActive} from './treasure-follow.mjs';
 import { matchesTreasureRewards, treasureRewardMissReason, treasureRewardPriority } from './treasure-reward-filter.mjs';
 import { emitDiagnostic } from './trace-log.mjs';
+import { inDailyWindows, nextDailyWindowStart } from './daily-time-windows.mjs';
 
 const rows = (config, name) => config?.tables?.[name]?.data ?? [];
 const integer = (value, min = 0, max = Number.MAX_SAFE_INTEGER) => Number.isSafeInteger(value) && value >= min && value <= max;
@@ -36,6 +37,8 @@ function exactQuantity(value) {
 }
 
 export const treasureAutomationEnabled = settings => !!settings?.treasure?.enabled && (settings.treasure.autoJoin || settings.treasure.follow || settings.treasure.chase);
+const participationWait = (preferences, time) => inDailyWindows(preferences?.windows, time) ? '' :
+  '当前不在巨轮参与时段（北京时间 ' + preferences.windows.join('、') + '）';
 export const treasureDispatchKey = (worldId, uid, buildingId) => `treasure:${worldId}:${uid}:${fleetNumber(buildingId)}`;
 export const treasureFollowKey = (worldId, uid, buildingId) => `treasureFollow:${worldId}:${uid}:${fleetNumber(buildingId)}`;
 export const treasureRepairKey = (worldId, buildingId) => `treasureRepair:${worldId}:${fleetNumber(buildingId)}`;
@@ -114,6 +117,7 @@ function openingReason(config, player, now) {
 
 export async function readTreasureLoot(client, protocol, config, player, { targetUid = null, preferences = null } = {}) {
   const now = serverNow(client);
+  const participating = inDailyWindows(preferences?.windows, now);
   const chaseActive = treasureChaseActive(preferences, now);
   const snapshot = { now, worldId: exactQuantity(player?.worldId), playerId: exactAutomationId(player?.playerId), nickname: player?.nickname,
     guildId: exactAutomationId(player?.guildId), guildIdx: 0, followMembers: [], targets: [], fleets: [], buildings: [], allUids: [],
@@ -133,7 +137,7 @@ export async function readTreasureLoot(client, protocol, config, player, { targe
       preferences?.chase ? get('TreasureLootStatsRequest').catch(() => null) : get('TreasureLootStatsRequest'),
       get('TreasureLootListRequest'), get('MyFleetsRequest'),
       get('OnWaterRequest'), get('AllItemRequest'), get('GuildInfoRequest'), get('UniteWorldsPlanRequest'),
-      preferences?.follow || chaseActive ? get('WorldInfoRequest',{screenCenter:{x:0,y:0}}).catch(()=>{snapshot.notes.push('出发行军状态未同步');return null;}):null,
+      participating && (preferences?.follow || chaseActive) ? get('WorldInfoRequest',{screenCenter:{x:0,y:0}}).catch(()=>{snapshot.notes.push('出发行军状态未同步');return null;}):null,
     ]);
   } catch (error) { snapshot.reason = '巨轮状态读取未完成：' + error.message; return snapshot; }
   if (world?.fleets) travel.ingest(world.fleets);
@@ -172,7 +176,7 @@ export async function readTreasureLoot(client, protocol, config, player, { targe
       snapshot.diamonds = exactQuantity(ruby[0].amount);
     } catch (error) { snapshot.marchSpeedReason = '行军加速暂不可用：' + error.message; }
   }
-  if(preferences?.follow && preferences.followPlayerIds?.length) {
+  if(participating && preferences?.follow && preferences.followPlayerIds?.length) {
     try { const roster=await readGuildMembers(client,config,player);if(roster.state==='member')snapshot.followMembers=roster.members; }
     catch(error){snapshot.notes.push('跟随名单身份补充读取未完成：'+error.message);}
     if(exactAutomationId(player.guildId)!==snapshot.guildId){snapshot.reason='读取跟随名单时联盟已变化';return snapshot;}
@@ -203,6 +207,7 @@ export async function readTreasureLoot(client, protocol, config, player, { targe
       reward: Array.isArray(target.reward?.asset) ? target.reward.asset.map(asset => ({ id: asset?.id, num: exactQuantity(asset?.num) })) : null,
       defenders: [], rank: [], fighters: [], personalProgress: null, reason: '' };
     snapshot.targets.push(item);
+    if (!participating) continue;
     if (!integer(item.uid, 1, 2147483647) || duplicates.has(item.uid) || !integer(item.ownerGuildIdx, 0, 999) || !integer(item.ownerFleetNum)) {
       item.reason = '货轮状态不完整或目标重复'; continue;
     }
@@ -232,6 +237,7 @@ export async function readTreasureLoot(client, protocol, config, player, { targe
       item.personalProgress = personal.length ? personal[0].progress : 0;
     } catch (error) { item.reason = '参与者核对未完成：' + error.message; }
   }
+  if (!participating) return snapshot;
   for (const buildingId of preferences?.fleetIds ?? []) {
     const fleet = snapshot.fleets.find(row => row.buildingId === buildingId);
     if (!preferences.autoRepair || !fleet || !homeIdle(fleet) || !integer(fleet.durability) || !integer(fleet.maxDura, 1) || !needsRepair(fleet, preferences)) continue;
@@ -348,8 +354,9 @@ export function planTreasureLoot(snapshot, config, settings, { usage = { counter
   if (!treasureAutomationEnabled(settings)) plan.notes.push('巨轮自动化未开启，不安排派遣');
   if (snapshot.reason) plan.notes.push(snapshot.reason);
   if (!treasureAutomationEnabled(settings) || snapshot.reason) return plan;
+  const windowWait = participationWait(p, snapshot.now);
   const chaseActive = treasureChaseActive(p, snapshot.now);
-  const chaseWait = p.chase && !chaseActive ? '当前不在追杀时间范围（北京时间 ' + p.chaseWindows.join('、') + '）' : '';
+  const chaseWait = windowWait || (p.chase && !chaseActive ? '当前不在追杀时间范围（北京时间 ' + p.chaseWindows.join('、') + '）' : '');
   if (chaseWait) plan.notes.push(chaseWait);
   const rewardBlocked = !!snapshot.rewardStatusReason || (snapshot.todayRewardTimes >= snapshot.rewardLimit && p.participationMode !== 'always');
   if (rewardBlocked) plan.notes.push(snapshot.rewardStatusReason || '已达到游戏今日货轮领奖上限，按“打满就停”停止常规派遣和备战维修');
@@ -358,7 +365,7 @@ export function planTreasureLoot(snapshot, config, settings, { usage = { counter
   if (fallback.reason) plan.notes.push(fallback.reason);
   const candidates = [], speedTargets = new Set(), chaseTargets = new Map();
   for (const target of snapshot.targets) {
-    let reason = target.reason;
+    let reason = windowWait || target.reason;
     if (!reason && !['BLUE', 'PURPLE', 'ORANGE'].includes(target.quality)) reason = '货轮类型未确认，等待重新核对';
     const follow = listedParticipants(target, p, snapshot)[0];
     const opponents = chaseActive && (target.chaseReady || !reason) ? listedParticipants(target, p, snapshot, true) : [];
@@ -429,6 +436,7 @@ export function planTreasureLoot(snapshot, config, settings, { usage = { counter
     if (speedEnabled(p, speedMode) && !acceleratedFleetIds.includes(buildingId) && fleet?.state === 2 && fleet.treasureLootUid > 0) {
       const speed = planTreasureSpeed(snapshot, config, settings, fleet, keys, usage, pendingDiamonds, plannedDiamonds, speedMode);
       const reason = unavailableFleets[buildingId] || (reservedFleetIds.includes(buildingId) ? '城战时段保留给城战接续' : '') ||
+        (speedMode !== 'return' && windowWait) ||
         (speedMode === 'chase' && !chaseTargets.get(fleet.treasureLootUid)?.some(member => sameOpponent(member.name, member.playerId, prior.chaseName, prior.chasePlayerId)) ? chaseWait || '追杀对手已离开或身份未确认，暂停去程加速' : '') ||
         (speedMode === 'outbound' && (rewardBlocked || !speedTargets.has(fleet.treasureLootUid) || !(p.autoJoin || p.follow)) ? '当前货轮已不满足参与条件，暂停行军加速' : '') || speed.reason;
       const view = plan.fleets.find(row => row.name === fleetName(buildingId));
@@ -607,8 +615,12 @@ export async function runTreasureLoot(client, protocol, config, player, { getSet
           settingsChanged: current !== getSettings(), playerId: exactAutomationId(player.playerId), worldId: exactQuantity(player.worldId) });
         break;
       }
-      const chaseClosed = () => step.chaseName && !treasureChaseActive(current.treasure, serverNow(client));
-      const blocked = legacyReason || (!fleetAllowed && '此舰队已预留给其他任务，继续检查其余舰队') || (chaseClosed() && '已离开追杀时间范围');
+      const timeRestriction = () => {
+        if (step.speedMode === 'return') return '';
+        const now = serverNow(client);
+        return participationWait(current.treasure, now) || (step.chaseName && !treasureChaseActive(current.treasure, now) ? '已离开追杀时间范围' : '');
+      };
+      const blocked = legacyReason || (!fleetAllowed && '此舰队已预留给其他任务，继续检查其余舰队') || timeRestriction();
       if (blocked) {
         const entry = { step, skipped: true, reason: blocked };
         emitDiagnostic(client, 'treasure-dispatch-blocked', { step, fleetAllowed, legacyReason });
@@ -631,9 +643,10 @@ export async function runTreasureLoot(client, protocol, config, player, { getSet
           step.chaseName && (!current.treasure.chase || !current.treasure.chaseNames.includes(step.chaseName)) ||
           speed && (!speedEnabled(current.treasure, step.speedMode) || !current.resources.allowDiamonds || !current.treasure.fleetIds.includes(step.buildingId) ||
             step.beforeEnd - serverNow(client) <= speedThreshold(current.treasure, step.speedMode)) || legacyFleetReservationReason(client,step.buildingId)) { ledger.cancel(ticket); break; }
-      if (chaseClosed()) {
+      const closed = timeRestriction();
+      if (closed) {
         ledger.cancel(ticket);
-        const entry = { step, skipped: true, reason: '已离开追杀时间范围' };
+        const entry = { step, skipped: true, reason: closed };
         results.push(entry); onStep?.(entry); continue;
       }
       let entry;
@@ -741,7 +754,13 @@ export async function serviceTreasureLoot(client, config, { player, protocol, ge
   const skip = reason => finish({ skipped: true, reason });
   const later = seconds => scheduler?.defer(key, scheduler.now() + seconds);
   if (!enabled()) return;
-  const now = Math.floor((Date.now() + (client.serverClockOffsetMs || 0)) / 1000);
+  const checkWindow = () => {
+    const p = getSettings()?.treasure, time = serverNow(client), reason = participationWait(p, time);
+    if (reason) { scheduler?.defer(key, nextDailyWindowStart(p.windows, time)); skip(reason); }
+    return !reason;
+  };
+  if (!checkWindow()) return;
+  const now = serverNow(client);
   const required = legacyRows(config, 'ModuleOpenCfg').find(row => row.moduleId === '世界宝藏')?.playerLevel;
   if (!(player?.level >= required)) { later(3600); return skip('世界宝藏 ' + required + ' 级开放'); }
   const openDay = gameplayOpenDay(config, player, '世界宝藏');
@@ -787,7 +806,7 @@ export async function serviceTreasureLoot(client, config, { player, protocol, ge
         !pickTreasure(matches, guildId % 1000, session.refused, now)) {
       later(300); return skip('出征前货轮类型、归属或筛选条件已变化，保持等待');
     }
-    if (!enabled()) return;
+    if (!enabled() || !checkWindow()) return;
     const id = fleet.buildingId;
     session.fleets.set(id, { uid: target.uid, seen: false });
     try {

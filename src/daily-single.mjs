@@ -1,5 +1,6 @@
 // 手动单项日常：报价只在本账号会话内有效，客户端不能提交协议名称或动作体。
 import { createHash, randomUUID } from 'node:crypto';
+import { arenaDailyDriver } from './arena.mjs';
 import { surveyDailies } from './dailies.mjs';
 
 export const dailySingleState = () => ({ quotes: new Map(), attempted: new Set() });
@@ -47,11 +48,11 @@ export function addDailyOptions(survey, state) {
   return { tasks, chests: survey.chests, gift: survey.gift, ruby: survey.ruby };
 }
 
-export async function runDailySingle(client, protocol, { state, token, paid = false, config, player, settings, guard, enabled = () => true, wait = delay } = {}) {
+export async function runDailySingle(client, protocol, { state, token, paid = false, config, player, settings, getSettings = () => settings, ledger, guard, enabled = () => true, wait = delay } = {}) {
   const quote = state.quotes.get(token);
   if (!quote || quote.expires < Date.now()) throw new Error('此项操作已过期，请刷新日常后再试');
   if (quote.used) throw new Error('此项操作已经提交，请刷新查看结果');
-  const read = () => surveyDailies(client, protocol, { config, player, settings, includeTask: id => id === quote.id, probeGift: false });
+  const read = () => surveyDailies(client, protocol, { config, player, settings: getSettings(), ledger, includeTask: id => id === quote.id, probeGift: false });
   let survey = await read();
   let entry = survey.tasks.find(row => row.task.id === quote.id);
   let current = entry && plan(survey, entry);
@@ -82,10 +83,21 @@ export async function runDailySingle(client, protocol, { state, token, paid = fa
       quote.used = true;
       state.attempted.add(current.fingerprint);
       const before = entry.task.progress;
-      dispatched = writePending = true;
-      if (action.response && protocol[action.response]) await client.request(action.request, action.body, action.response, 15000);
-      else await client.sendWatch(action.request, action.body, { window: 400 });
-      writePending = false;
+      const performWrite = async write => {
+        dispatched = writePending = true;
+        const body = await write();
+        writePending = false;
+        return body;
+      };
+      if (quote.id === 1005 && !current.claim) {
+        const result = await arenaDailyDriver.run({ client, protocol, action, timeout: 15000, getSettings,
+          ledger, allowAction: enabled, performWrite });
+        if (result.skipped) throw new Error(result.reason);
+      } else if (action.response && protocol[action.response]) {
+        await performWrite(() => client.request(action.request, action.body, action.response, 15000));
+      } else {
+        await performWrite(() => client.sendWatch(action.request, action.body, { window: 400 }));
+      }
       sent++;
       let confirmed = false;
       for (let attempt = 0; attempt < 3; attempt++) {

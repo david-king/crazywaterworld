@@ -354,11 +354,11 @@ function lowPower(power) {
 }
 
 // 只读调研：跑一遍前置请求，给出每个日常任务能不能做、要发什么。
-export async function surveyDailies(client, protocol, { config = null, player = null, timeout = 8000, includeTask = () => true, probeGift = true, idle = false, allowRecruitTickets = true, settings = null } = {}) {
+export async function surveyDailies(client, protocol, { config = null, player = null, timeout = 8000, includeTask = () => true, probeGift = true, idle = false, allowRecruitTickets = true, settings = null, ledger = null } = {}) {
   const daily = await client.request('DailyTaskInfoRequest', {}, 'DailyTaskInfoResponse', timeout);
   const tasks = (daily.dailyTask ?? []).filter(task => includeTask(task.id)).map((task) => describeDailyTask(task, config));
   const needsAction = task => task.id === 1005 && idle && settings?.arena
-    ? task.progress < settings.arena.dailyBattleLimit : task.progress < task.targetProgress;
+    ? ((settings.arena.challengeHigher && settings.arena.challengeLimit > 0) || (settings.arena.sweepLower && settings.arena.sweepLimit > 0)) : task.progress < task.targetProgress;
   const unfinished = id => tasks.some(task => task.id === id && task.progress < task.targetProgress);
   const itemList = allowRecruitTickets && unfinished(1002) ? await client.request('AllItemRequest', {}, 'AllItemResponse', timeout) : null;
   const items = new Map();
@@ -418,7 +418,7 @@ export async function surveyDailies(client, protocol, { config = null, player = 
     }
     let verdict;
     try {
-      verdict = normalize(driver.evaluate({ task, probe, items, ruby, now, config, player, settings, client, allowRecruitTickets, dailyResetTime: daily.dailyResetTime }));
+      verdict = normalize(driver.evaluate({ task, probe, items, ruby, now, config, player, settings, client, ledger, allowRecruitTickets, dailyResetTime: daily.dailyResetTime }));
     } catch (error) {
       verdict = { status: 'error', reason: error.message };
     }
@@ -455,7 +455,7 @@ async function sendAction(client, protocol, action, timeout) {
 // claimRewards 走的是「收尾」：驱动动作发完服务端才更新完成数，所以这里重新问一次
 // DailyTaskInfoResponse，先把达标任务的奖励领了（奖励里的活跃度会把活跃度顶上去），
 // 再领活跃度宝箱。少了这一步，任务做完了奖励还挂在服务端上。
-export async function runDailies(client, protocol, survey, { allowMutate = false, allowPaid = false, claimRewards = true, config = null, timeout = 15000, onStep, allowAction = () => true, settings = null, getSettings = () => settings, beforeAction, afterAction, cancelAction } = {}) {
+export async function runDailies(client, protocol, survey, { allowMutate = false, allowPaid = false, claimRewards = true, config = null, timeout = 15000, onStep, allowAction = () => true, settings = null, getSettings = () => settings, ledger = null, beforeAction, afterAction, cancelAction } = {}) {
   if (!allowMutate) throw new Error('完成日常会改变账号状态，需要 --yes');
   const results = [];
   if (settings && !settings.dailies.enabled) return results;
@@ -500,7 +500,7 @@ export async function runDailies(client, protocol, survey, { allowMutate = false
           }
           body = sweepResult?.body;
         } else if (entry.task.id === 1005 && typeof arenaDailyDriver.run === 'function') {
-          const arenaResult = await arenaDailyDriver.run({ client, protocol, action, timeout, allowAction, getSettings, performWrite });
+          const arenaResult = await arenaDailyDriver.run({ client, protocol, action, timeout, allowAction, getSettings, ledger, performWrite });
           if (arenaResult?.skipped) {
             await cancelAction?.(action, ticket, { notSent: !writeAttempted, error: new Error(arenaResult.reason) });
             const outcome = { id: entry.task.id, title: entry.task.title, request: action.request, note: action.note, skipped: true, reason: arenaResult.reason };
@@ -513,7 +513,7 @@ export async function runDailies(client, protocol, survey, { allowMutate = false
         const outcome = { id: entry.task.id, title: entry.task.title, request: action.request, note: action.note, ok: true, body };
         results.push(linkOperationResult(outcome, ticket));
         onStep?.(outcome);
-        await afterAction?.(action, ticket, action.response ? outcome : { ...outcome, sent: true });
+        await afterAction?.(action, ticket, action.response || entry.task.id === 1005 ? outcome : { ...outcome, sent: true });
       } catch (error) {
         const notSent = !writeAttempted || (writeFailure === error && error.notSent === true);
         const rejected = writeFailure === error && error.prompt && error.request === action.request;

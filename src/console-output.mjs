@@ -59,7 +59,7 @@ function wrap(text, columns) {
 export function createConsoleOutput({ stdout = process.stdout, env = process.env, platform = process.platform, release = os.release() } = {}) {
   const capable = supportsPinnedHeader(stdout, { env, platform, release });
   let address = null, addressTarget = null, pinned = false, redraw = false, failed = false, closing = false, closed = false;
-  let publicIpLine = '';
+  let accessHints = [];
   let queue = [], queuedBytes = 0, history = [], historyBytes = 0, dropped = 0;
   let scheduled = null, blocked = false, waiter = null;
   const dimensions = () => ({ columns: Math.max(0, Number(stdout.columns) || 0), rows: Math.max(0, Number(stdout.rows) || 0) });
@@ -78,7 +78,7 @@ export function createConsoleOutput({ stdout = process.stdout, env = process.env
       return addressTarget && start < line.length
         ? line.slice(0, start) + addressLink(addressTarget, line.slice(start)) : line;
     });
-    if (publicIpLine) title.push(...wrap(publicIpLine, width));
+    for (const hint of accessHints) title.push(...wrap(hint, width));
     let guidance = wrap(CONSOLE_GUIDANCE, width);
     if (title.length + guidance.length + 3 > rows) guidance = wrap('关闭网页可继续；保留窗口。Ctrl+C/关窗口即停止。', width);
     if (title.length + guidance.length + 3 > rows) return null;
@@ -112,7 +112,7 @@ export function createConsoleOutput({ stdout = process.stdout, env = process.env
     if (!frame) {
       const reset = pinned ? ESC + 'r' + ESC + String(dimensions().rows || 1) + ';1H\r\n' : '';
       const wasPinned = pinned; pinned = false;
-      return reset + (wasPinned ? ['控制台已启动 ' + address, publicIpLine, CONSOLE_GUIDANCE].filter(Boolean).join('\n') + '\n' : '');
+      return reset + (wasPinned ? ['控制台已启动 ' + address, ...accessHints, CONSOLE_GUIDANCE].join('\n') + '\n' : '');
     }
     pinned = true;
     const past = wrap(history.join('\n'), frame.width).slice(-(frame.bottom - frame.top));
@@ -171,16 +171,11 @@ export function createConsoleOutput({ stdout = process.stdout, env = process.env
   return {
     log(entry) { write(formatConsoleLog(entry)); },
     write,
-    showPublicIp(line) {
-      if (closed || closing || failed) return;
-      publicIpLine = plain(line);
-      if (pinned || layout()) { redraw = true; schedule(); }
-      else write(publicIpLine);
-    },
-    start(url) {
+    start(url, hints = []) {
       if (address || closed) return;
       address = plain(url).replace(/\n/g, '');
       addressTarget = linkTarget(url);
+      accessHints = hints.map(plain);
       if (layout()) { redraw = true; schedule(); }
       else write(CONSOLE_GUIDANCE);
     },

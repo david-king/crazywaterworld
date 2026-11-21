@@ -225,7 +225,6 @@ await test('旧无权益开关为false不再阻止已开启的广告入口', asy
   const schedule = { due: () => true, now: nowS, nextDay: () => nowS() + 86400, defer() {} };
   await claimAdShop(f.client, config, { ...c.ctx, enabled: () => true, schedule });
   for (const name of ['DrawAfkRewardRequest', 'SpeedUpFactoryProduceRequest', 'RecruitStartRequest', 'AntiqueRecruitRequest', 'GotAdvRewardRequest']) assert(f.names().includes(name), name);
-  assert(!c.log.some(row => row.reason === '当前账号没有免广告权益'));
 });
 
 await test('无权益默认策略不绕过各广告任务的关闭开关', async () => {

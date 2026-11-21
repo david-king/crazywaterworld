@@ -99,21 +99,22 @@ function fixture(id) {
 
 {
   const f = fixture(1005), settings = defaultSettings();
+  settings.arena.challengeHigher = true;
   settings.arena.target = 'rank';
   settings.dailies.enabled = true;
   f.arena.challenges.push(opponent(65, 811, 1200));
   const survey = await surveyDailies(f, protocol, { config, player, settings, idle: true, probeGift: false });
   assert.equal(survey.tasks[0].actions[0].body.rank, 65, '排名策略选择可挑战的最高名次');
-  settings.arena.dailyBattleLimit = 0;
+  settings.arena.challengeLimit = 0;
   const result = await runDailies(f, protocol, survey, { config, settings, allowMutate: true, claimRewards: false });
-  assert.match(result[0].reason, /每日战斗次数/);
+  assert.match(result[0].reason, /次数为 0/);
   assert.deepEqual(f.writes, []);
 }
 
 {
   const f = fixture(1005), settings = defaultSettings();
   settings.dailies.enabled = true;
-  Object.assign(settings.arena, { target: 'rank', maxPowerRatio: 70 });
+  Object.assign(settings.arena, { challengeHigher: true, target: 'rank', maxPowerRatio: 70 });
   f.arena.myself.power = { low: 1000, high: 0 };
   f.arena.challenges.push(opponent(65, 811, 701), opponent(70, 812, 700));
   const preview = () => surveyDailies(f, protocol, { config, player, settings, idle: true, probeGift: false });
@@ -132,7 +133,37 @@ function fixture(id) {
 {
   const f = fixture(1005), settings = defaultSettings();
   settings.dailies.enabled = true;
-  Object.assign(settings.arena, { maxPowerRatio: 70, fallbackLowerRank: true, dailyBattleLimit: 1 });
+  Object.assign(settings.arena, { maxPowerRatio: 5, challengeHigher: true, challengeLimit: 1, target: 'rank',
+    fallbackWeakest: true, sweepLower: true, sweepLimit: 1 });
+  f.arena.challenges.push(opponent(70, 814, 6), opponent(60, 815, 20), opponent(50, 816, 0));
+  const preview = () => surveyDailies(f, protocol, { config, player, settings, idle: true, probeGift: false });
+  const run = survey => runDailies(f, protocol, survey, { config, settings, allowMutate: true, claimRewards: false });
+  const fallback = await preview();
+  assert.equal(fallback.tasks[0].actions[0].body.rank, 70, '超限时选择高排名中战力最低的有效对手');
+  assert.match(fallback.tasks[0].actions[0].note, /兜底挑战/);
+
+  settings.arena.fallbackWeakest = false;
+  assert((await run(fallback))[0].skipped, '执行前关闭兜底，原挑战计划失效');
+  assert.deepEqual(f.writes, []);
+  assert.equal((await preview()).tasks[0].actions[0].request, 'ArenaSweepRequest');
+  settings.arena.fallbackWeakest = true;
+  f.arena.challenges.push(opponent(40, 817, 5), opponent(45, 818, 1));
+  const normal = (await preview()).tasks[0].actions[0];
+  assert.equal(normal.body.rank, 40, '有符合上限的对手时仍按排名策略选择');
+  assert.doesNotMatch(normal.note, /兜底/);
+  f.arena.challenges.splice(-2);
+  assert((await run(await preview()))[0].ok);
+  assert.equal((await preview()).tasks[0].actions[0].request, 'ArenaSweepRequest', '兜底使用挑战次数，达到上限后可扫荡');
+  settings.arena.challengeLimit = 2;
+  settings.arena.sweepLower = false;
+  delete f.arena.myself.power;
+  assert.match((await preview()).tasks[0].reason, /己方战力/, '无法核对上限时等待战力数据');
+}
+
+{
+  const f = fixture(1005), settings = defaultSettings();
+  settings.dailies.enabled = true;
+  Object.assign(settings.arena, { maxPowerRatio: 70, challengeHigher: true, sweepLower: true, challengeLimit: 1, sweepLimit: 1 });
   f.arena.challenges[2] = opponent(130, bigId, 701);
   f.arena.challenges[0] = opponent(80, 812, 70);
   const preview = () => surveyDailies(f, protocol, { config, player, settings, idle: true, probeGift: false });
@@ -141,28 +172,78 @@ function fixture(id) {
   f.arena.challenges[0].power++;
   const sweep = await preview();
   assert.equal(sweep.tasks[0].actions[0].request, 'ArenaSweepRequest');
-  assert.match(sweep.tasks[0].actions[0].note, /兜底扫荡第 130 名/);
-  settings.arena.fallbackLowerRank = false;
+  assert.match(sweep.tasks[0].actions[0].note, /扫荡第 130 名/);
+  settings.arena.sweepLower = false;
   assert((await run(sweep))[0].skipped);
   assert.deepEqual(f.writes, []);
-  settings.arena.fallbackLowerRank = true;
+  settings.arena.sweepLower = true;
   f.arena.challenges.push(opponent(130, 815, 10));
   assert.ok(!(await preview()).tasks[0].actions?.length, '重复名次的不同对手不能作为扫荡依据');
   f.arena.challenges.pop();
   assert((await run(sweep))[0].ok);
   assert.deepEqual(f.writes, [['ArenaSweepRequest', { rank: 130, challengeId: bigId }]]);
+  assert.equal((await preview()).tasks[0].status, 'waiting');
+  f.arena.challenges[0].power--;
+  assert((await run(await preview()))[0].ok, '扫荡用完后仍有挑战额度');
   assert.equal((await preview()).tasks[0].status, 'done');
 }
 
 {
   const f = fixture(1005), settings = defaultSettings();
   settings.loop.dailies = settings.dailies.enabled = settings.schedule.arena = true;
-  settings.arena.dailyBattleLimit = 3;
+  settings.arena.challengeHigher = true;
+  settings.arena.challengeLimit = 3;
   f.task.progress = f.task.targetProgress = f.arena.dailyChallengeTimes = 1;
   f.task.rewardClaimed = true;
   await runLoop(f, protocol, { config, player, rounds: 3, everyMs: 0, sleep: async () => {},
     getSettings: () => settings, allowMutate: true, isEnabled: key => key === 'arena' });
   assert.equal(f.writes.length, 2, '领取任务奖励后仍按剩余场数挑战，到上限停止');
+}
+
+{
+  const settings = defaultSettings();
+  settings.dailies.enabled = true;
+  Object.assign(settings.arena, { challengeHigher: true, challengeLimit: 1, sweepLower: true, sweepLimit: 2 });
+  const file = path.join(boundaryDirectory, 'arena.json');
+  let ledger = createUsageLedger('arena-test', { file }), client = fixture(1005);
+  const preview = () => surveyDailies(client, protocol, { settings, ledger, idle: true, probeGift: false });
+  async function fight(request) {
+    const survey = await preview();
+    assert.equal(survey.tasks[0].actions[0]?.request, request);
+    const results = await runDailies(client, protocol, survey, { settings, ledger, allowMutate: true, claimRewards: false });
+    assert(results[0]?.ok, results[0]?.reason || results[0]?.error);
+  }
+  await fight('ArenaChallengeRequest');
+  await fight('ArenaSweepRequest');
+  // Recreate both handles as on a reconnect or a console restart.
+  const next = fixture(1005);
+  Object.assign(next, { reset: client.reset, task: client.task, arena: client.arena });
+  client = next;
+  ledger = createUsageLedger('arena-test', { file });
+  await fight('ArenaSweepRequest');
+  assert.equal((await preview()).tasks[0].status, 'done');
+  client.reset += 86400;
+  client.task.progress = client.arena.dailyChallengeTimes = 0;
+  settings.arena.challengeHigher = false;
+  await fight('ArenaSweepRequest');
+  assert.equal(Object.keys(ledger.keyRecords()).length, 1, '新游戏日清理上一日的分类记录');
+  settings.arena.sweepLimit = 0;
+  assert.equal((await preview()).tasks[0].status, 'done', '扫荡的 0 次设置单独生效');
+  settings.arena.challengeHigher = true;
+  await fight('ArenaChallengeRequest');
+  settings.arena.challengeLimit = 2;
+  settings.arena.sweepLimit = 2;
+  client.arena.dailyChallengeTimes++; // 在游戏中完成，服务端只提供总场次。
+  client.tickets = 0;
+  const waiting = (await preview()).tasks[0];
+  assert.equal(waiting.status, 'waiting', '一场未知类型的战斗只抵扣一次');
+  assert.match(waiting.reason, /等待挑战券恢复/);
+  client.tickets = 1;
+  await fight('ArenaChallengeRequest');
+  client.tickets = 0;
+  assert.equal((await preview()).tasks[0].status, 'done', '最后一张券完成目标时直接结束');
+  client.tickets = 10;
+  assert.equal((await preview()).tasks[0].status, 'done', '完成后回满券也不再安排战斗');
 }
 
 {

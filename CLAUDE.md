@@ -32,7 +32,7 @@ npm run sync-resources        # 从游戏发布清单更新配置表和世界地
 npm run sync-art              # 同步素材；缓存缺图可加 -- --fetch
 ```
 
-`CW_HOST` 可改监听 IP/主机名（默认 `127.0.0.1`），`CW_PORT` 可改端口，`CW_NO_BROWSER=1` 禁止自动开浏览器。`console-address.mjs` 统一监听主机校验与本机访问 URL，通配监听使用回环 URL，IPv6 URL 带方括号。测试用 `node:assert/strict`，新文件需加入对应 `package.json` 脚本，核心离线专项同时登记到 `tools/selftest-offline.mjs`。单跑某个测试分组不会触发顶层 `pretest`，涉及界面标记时先构建。`test:offline` 会将协议路径指向缺失文件，依赖真实协议的测试应明确使用自有协议包进行验证。
+`CW_HOST` 可改监听 IP/主机名（一键启动脚本默认 `0.0.0.0`，直接运行 `npm start` 默认 `127.0.0.1`），`CW_PORT` 可改端口，`CW_NO_BROWSER=1` 禁止自动开浏览器。`console-address.mjs` 统一监听主机校验与本机访问 URL，通配监听使用回环 URL，IPv6 URL 带方括号。测试用 `node:assert/strict`，新文件需加入对应 `package.json` 脚本，核心离线专项同时登记到 `tools/selftest-offline.mjs`。单跑某个测试分组不会触发顶层 `pretest`，涉及界面标记时先构建。`test:offline` 会将协议路径指向缺失文件，依赖真实协议的测试应明确使用自有协议包进行验证。
 
 - `selftest-{fishing,fishing-upgrade,antique-recruit,activity-schedule,resident-orders,resident-http}.mjs` 由 `selftest-automation.mjs` 调用，单独执行不会跑测试。
 - `selftest-registry.mjs` 与 `selftest-describe.mjs` 不在 npm 测试脚本内；注册表测试会写测试键并自行清理。

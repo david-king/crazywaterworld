@@ -6,7 +6,7 @@ import { isMiningSilicon,  dispatchReservationReason, fleetRecordReason, reserve
 import { registerFleetReservations, isFleetReserved } from './fleet-reservations.mjs';
 import { pendingPetrol } from './dispatch-preview.mjs';
 import { recordsInWorld } from './fleet-settlement.mjs';
-import { inDailyWindows as siliconInWindow } from './daily-time-windows.mjs';
+import { inDailyWindows } from './daily-time-windows.mjs';
 
 // 硅矿奖励由服务器自动发放；ChipMineRewardRequest 只是读取共享周期次数。
 const integer = (n, min = 0) => Number.isSafeInteger(n) && n >= min;
@@ -46,7 +46,7 @@ function openingReason(config, player, time) {
   return '';
 }
 export { openingReason as siliconOpeningReason, idle as isIdleSiliconFleet };
-export { siliconInWindow };
+export { inDailyWindows as siliconInWindow };
 const pursuitEnabled = fleet => !fleet.huntEnabled && fleet.pursuit && !fleet.emptyOnly && fleet.tiers.some(tier => tier !== 'BLUE');
 export const siliconInterval = settings => settings?.silicon?.fleets?.some(fleet => fleet.enabled && (fleet.huntEnabled || pursuitEnabled(fleet))) ? 120000 : 600000;
 export function watchSiliconMining(client) {
@@ -205,7 +205,7 @@ export function planSiliconMining(snapshot, settings, ledger, client, heldForEve
   const p = settings.silicon, result = { checkedAt: snapshot.checkedAt, dailyRewards: snapshot.dailyRewards, reward: snapshot.reward, actions: [], rows: [], notes: [...snapshot.notes], reason: snapshot.reason };
   if (!p.enabled) { result.reason = '硅矿总开关已关闭'; return result; }
   if (snapshot.reason || !snapshot.reward) return result;
-  const state = rewardDay(snapshot, ledger), cap = capReason(snapshot, p), inWindow = siliconInWindow(p.windows, snapshot.checkedAt);
+  const state = rewardDay(snapshot, ledger), cap = capReason(snapshot, p), inWindow = inDailyWindows(p.windows, snapshot.checkedAt);
   const keys = ledger.keyRecords(), used = ledger.snapshot().counters;
   const returningHunts = Object.values(keys).filter(record => record.details?.kind === 'siliconRetreat' && record.details.worldId === snapshot.worldId && record.details.huntTarget);
   const intendedFuel = returningHunts.length * snapshot.petrolCost;
@@ -542,8 +542,10 @@ export async function runSiliconShortcut(client, protocol, config, player, previ
 }
 
 export function siliconRecallOpensAt(policy, start) {
+  // 按货轮刷新时刻判断是否参加，允许提前窗口从参与时段之前开始。
   return policy?.enabled && policy.recallSilicon && policy.fleetIds?.length &&
-    integer(policy.recallLeadMinutes, 1) && integer(start, 1) ? start - policy.recallLeadMinutes * 60 : null;
+    integer(policy.recallLeadMinutes, 1) && integer(start, 1) && inDailyWindows(policy.windows, start)
+    ? start - policy.recallLeadMinutes * 60 : null;
 }
 
 function eventRecallStep(snapshot, settings, ledger, client, own, id, source) {
@@ -641,7 +643,7 @@ function siliconSpeedMode(snapshot, fleet, records) {
 export async function planSiliconMaintenance(client, protocol, config, settings, ledger, snapshot, heldForEvent = () => false) {
   const p = settings.silicon;
   if (!p.enabled || snapshot.reason || !snapshot.reward) return null;
-  const gathering = !capReason(snapshot, p) && siliconInWindow(p.windows, snapshot.checkedAt);
+  const gathering = !capReason(snapshot, p) && inDailyWindows(p.windows, snapshot.checkedAt);
   const records = ledger.keyRecords(), used = ledger.snapshot().counters;
   for (const policy of p.fleets.filter(fleet => fleet.enabled)) {
     const fleet = snapshot.fleets.find(row => row.buildingId === policy.id);

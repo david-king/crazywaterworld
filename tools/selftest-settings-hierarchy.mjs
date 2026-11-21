@@ -694,7 +694,7 @@ test('世界Boss领奖只在世界分组出现，首战派遣与领奖独立控�
   const ids = [...f.editor.groups.values()].filter(item => item.category === 'daily').map(item => item.id);
   const daily = ids.indexOf('daily-actions');
   assert.deepEqual(ids.slice(daily - 2, daily + 2), ['league', 'arena', 'daily-actions', 'ad-rewards']);
-  assert.deepEqual(f.editor.groups.get('arena').fields.map(field => field.key), ['schedule.arena', 'arena.target', 'arena.maxPowerRatio', 'arena.fallbackLowerRank', 'arena.dailyBattleLimit', 'arena.claimTask']);
+  assert.deepEqual(f.editor.groups.get('arena').fields.map(field => field.key), ['schedule.arena', 'arena.challengeHigher', 'arena.challengeLimit', 'arena.target', 'arena.maxPowerRatio', 'arena.fallbackWeakest', 'arena.sweepLower', 'arena.sweepLimit', 'arena.claimTask']);
   assert.deepEqual(f.editor.groups.get('league').fields.map(field => field.key),
     ['schedule.leagueChallenge', 'league.target', 'league.maxPowerRatio', 'league.fallbackWeakest', 'league.dailyBattleLimit', 'league.claimTask', 'schedule.leagueCollect', 'schedule.leaguePassRewards']);
   for (const [key, owner] of [['dailies.claimTasks', 'rewards'], ['arena.claimTask', 'arena'], ['league.claimTask', 'league'],

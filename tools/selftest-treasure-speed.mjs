@@ -146,6 +146,27 @@ try {
     assert.equal(speeds(f).length, 1);
   });
 
+  await check('普通去程复核跨过参与截止时间时停止花钻，已出征舰队仍可加速回城', async () => {
+    const { f, s } = fixture(), usage = ledger();
+    const start = Math.floor(Date.now() / 86400000) * 86400000;
+    f.client.serverClockOffsetMs = start - Date.now();
+    Object.assign(s.treasure, { windows: ['08:00-08:01'], returnSpeedUp: true });
+    await depart(f, s, usage);
+    assert.equal((await preview(f, s, usage)).actions[0]?.speedMode, 'outbound');
+    let reads = 0;
+    f.beforeRead = name => {
+      if (name === 'MyFleetsRequest' && ++reads === 3) f.client.serverClockOffsetMs = start + 60000 - Date.now();
+    };
+    const result = await run(f, s, usage);
+    assert.match(result.results[0].reason, /巨轮参与时段/);
+    assert.equal(speeds(f).length, 0);
+    assert.equal(usage.snapshot().counters.diamonds ?? 0, 0);
+    const now = nowOf(f);
+    Object.assign(fleetOf(f), { startGridIdx: 500, targetGridIdx: 123, cityId: 7, targetCityId: 7, moveStartTs: now, moveEndTs: now + 180 });
+    assert.equal((await run(f, s, usage)).results[0]?.step.speedMode, 'return');
+    assert.equal(speeds(f).length, 1);
+  });
+
   await check('默认关闭加速与预算，普通出征保持可用', async () => {
     const defaults = defaultSettings();
     assert.equal(defaults.treasure.marchSpeedUp, false);

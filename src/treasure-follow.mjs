@@ -42,4 +42,5 @@ export function matchesChaseDeparture(fleet, preferences, ownId, others = []) {
    !others.some(other => other.name === fleet.name && other.playerId !== fleet.playerId);
 }
 
-export const treasureChaseActive = (preferences, time) => !!preferences?.chase && inDailyWindows(preferences.chaseWindows, time);
+export const treasureChaseActive = (preferences, time) => !!preferences?.chase &&
+  inDailyWindows(preferences.windows, time) && inDailyWindows(preferences.chaseWindows, time);

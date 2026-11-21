@@ -38,6 +38,14 @@ export function consoleUrl(host, port) {
   return `http://${normalized}:${value}`;
 }
 
+function isLanAddress(address) {
+  if (isIP(address) === 6) return /^f[cd][0-9a-f]{2}:/i.test(address) && !address.includes('%');
+  if (isIP(address) !== 4) return false;
+  const [first, second] = address.split('.').map(Number);
+  return first === 10 || (first === 172 && second >= 16 && second <= 31)
+    || (first === 192 && second === 168) || (first === 169 && second === 254);
+}
+
 // Use the bound socket's address at startup so hostnames and port 0 are resolved.
 export function consoleAccessHints(host, port, interfaces = networkInterfaces) {
   const name = normalizeConsoleHost(host);
@@ -45,33 +53,20 @@ export function consoleAccessHints(host, port, interfaces = networkInterfaces) {
   if ((isIP(ip) === 4 && ip.startsWith('127.')) || ip === '::1' || ip.toLowerCase() === 'localhost') {
     return ['监听范围  仅本机可直接访问'];
   }
-  if (ip !== '0.0.0.0' && ip !== '::') return [`监听地址  ${consoleUrl(ip, port)}/`];
+  if (ip !== '0.0.0.0' && ip !== '::') {
+    return [`${isLanAddress(ip) ? '局域网地址' : '监听地址'}  ${consoleUrl(ip, port)}/`];
+  }
   const family = ip === '::' ? 6 : 4;
-  const urls = new Set();
+  const urls = new Map();
   try {
-    for (const entry of Object.values(interfaces()).flat()) {
-      if (!entry || entry.internal || isIP(entry.address) !== family) continue;
-      // Link-local IPv6 addresses require a zone on the connecting device.
-      if (family === 6 && (entry.address.includes('%') || /^fe[89ab]/i.test(entry.address))) continue;
-      urls.add(consoleUrl(entry.address, port) + '/');
+    for (const [adapter, entries] of Object.entries(interfaces())) {
+      for (const entry of entries ?? []) {
+        if (!entry || entry.internal || isIP(entry.address) !== family || !isLanAddress(entry.address)) continue;
+        const url = consoleUrl(entry.address, port) + '/';
+        if (!urls.has(url)) urls.set(url, adapter);
+      }
     }
   } catch { /* Interface enumeration can be unavailable on a restricted host. */ }
-  return urls.size ? Array.from(urls, url => '网卡地址  ' + url)
-    : [`监听地址  ${ip}（未找到可列出的 IPv${family} 网卡地址）`];
-}
-
-export async function reportPublicIp(print, { env = process.env, fetchImpl = fetch } = {}) {
-  if (env.CW_SHOW_PUBLIC_IP === '0') return;
-  for (const endpoint of ['https://api64.ipify.org', 'https://checkip.amazonaws.com']) {
-    try {
-      const response = await fetchImpl(endpoint, { signal: AbortSignal.timeout(2500), redirect: 'error' });
-      if (!response.ok) { await response.body?.cancel(); continue; }
-      const ip = (await response.text()).trim();
-      if (isIP(ip) && !ip.includes('%')) {
-        print('公网出口 IP  ' + ip);
-        return;
-      }
-    } catch { /* Try the other IP service after a timeout or network error. */ }
-  }
-  print('公网出口 IP  查询失败，可稍后重试');
+  return urls.size ? Array.from(urls, ([url, adapter]) => `局域网地址（${adapter}）  ${url}`)
+    : [`未找到可列出的 IPv${family} 局域网地址，请检查电脑的网络连接。`];
 }

@@ -22,7 +22,7 @@ export const settingsFile = () => path.join(dataDirectory(), 'automation-setting
 export const SETTINGS_FORMAT = 'crazywaterworld-automation';
 // 文件 version / 账号 settingsVersion 是格式编号，只随结构迁移调整；
 // revision 是每次保存递增的修订号，仅用于并发冲突检查，不能用作格式版本。
-export const SETTINGS_SCHEMA_VERSION = 36;
+export const SETTINGS_SCHEMA_VERSION = 39;
 const LEGACY_SETTINGS_FORMAT = 'crazywaterword-automation';
 const treasureQualityLabels = { ORANGE: '万吨货轮', PURPLE: '中型货轮', BLUE: '小型货轮' };
 const treasureChaseDefaults = {
@@ -79,7 +79,7 @@ export const DEFAULT_SETTINGS = {
     universal: false, keepExp: 0, targetLevel: 0, targetStar: 0 },
   appointments: { enabled: false, priorities: [...DEFAULT_APPOINTMENT_PRIORITIES] },
   dailies: { enabled: false, claimTasks: false, claimDailyChest: false, claimWeeklyChest: false, claimGift: false },
-  arena: { target: 'weakest', dailyBattleLimit: 3, maxPowerRatio: 0, fallbackLowerRank: false, claimTask: false },
+  arena: { challengeHigher: false, challengeLimit: 3, target: 'weakest', maxPowerRatio: 0, fallbackWeakest: false, sweepLower: false, sweepLimit: 3, claimTask: false },
   league: { target: 'weakest', dailyBattleLimit: 1, maxPowerRatio: 0, fallbackWeakest: false, claimTask: false },
   tasks: { main: false, branch: false, achievements: false },
   progression: { enabled: false, mainline: false, trials: false, raidIds: ['1','2','3'], maxFailures: 3 },
@@ -94,7 +94,7 @@ export const DEFAULT_SETTINGS = {
   pirate: { enabled: false },
   pirateSweep: { type: '1' },
   pirateHunt: { enabled: false, maxFailures: 3, fleetIds: [], types: [], maxLevel: 0, minDurabilityPercent: 80, checkEverySeconds: 15 },
-  treasure: { enabled: false, autoJoin: false, qualities: Object.keys(treasureQualityLabels), follow: false, followMode: 'trigger', fleetIds: [], followNames: [], followPlayerIds: [], avoidPlayerIds: [],
+  treasure: { enabled: false, windows: [], autoJoin: false, qualities: Object.keys(treasureQualityLabels), follow: false, followMode: 'trigger', fleetIds: [], followNames: [], followPlayerIds: [], avoidPlayerIds: [],
     rewardItems: [], ...treasureRewardFilterDefaults, ...treasureChaseDefaults, avoidNames: [], allowHostile: false, minDurabilityPercent: 80,
     maxProgress: 90, personalProgressLimit: 20, dailyDispatchLimit: 0, checkEverySeconds: 15, participationMode: 'untilFull', repeatAttack: false,
     autoRepair: false, recallSilicon: false, recallLeadMinutes: 5,
@@ -164,7 +164,7 @@ const constraints = {
   'appointments.priorities': { ...strings(7), values: DEFAULT_APPOINTMENT_PRIORITIES },
   'trials.raidIds': { ...strings(3), values: ['1','2','3'] }, 'trials.paidPerRaidLimit': int(100),
   'trials.dailyDiamondBudget': int(100000), 'trials.maxSingleCost': int(10000),
-  'arena.target': { kind: 'choice', values: ['weakest', 'rank'] }, 'arena.dailyBattleLimit': int(100000),
+  'arena.target': { kind: 'choice', values: ['weakest', 'rank'] }, 'arena.challengeLimit': int(100000), 'arena.sweepLimit': int(100000),
   'league.target': { kind: 'choice', values: ['weakest', 'score'] }, 'league.dailyBattleLimit': int(100000),
   'arena.maxPowerRatio': int(1000), 'league.maxPowerRatio': int(1000),
   'progression.raidIds': { ...strings(3), values: ['1','2','3'] }, 'progression.maxFailures': int(100, 1),
@@ -174,7 +174,7 @@ const constraints = {
   'pirateHunt.minDurabilityPercent': int(100), 'pirateHunt.checkEverySeconds': int(60, 5),
   'treasure.fleetIds': strings(10), 'treasure.followNames': strings(30), 'treasure.followPlayerIds': strings(30),
   'treasure.chaseNames': strings(30), 'treasure.chaseTargetSeconds': int(3600), 'treasure.chaseDailyDiamondLimit': int(100000000),
-  'treasure.chaseWindows': strings(10),
+  'treasure.windows': strings(10), 'treasure.chaseWindows': strings(10),
   'treasure.qualities': { ...strings(3), values: Object.keys(treasureQualityLabels) },
   'treasure.rewardItems': strings(100), 'treasure.avoidNames': strings(30),
   'treasure.rewardMatchMode': rewardMatchMode, 'treasure.rewardMinHits': int(100, 1),
@@ -250,6 +250,7 @@ export function settingsFromNative(tasks, { rounds = 0, everySeconds = 60 } = {}
   let result = defaultSettings();
   for (const [key, value] of Object.entries(taskSettings(tasks))) result = applyNativeTask(result, key, value);
   result.pirate.enabled = tasks?.pirate === true;
+  result.arena.challengeHigher = tasks?.arena === true;
   if (tasks?.heroGrowth) result.heroes.needsSelection = true;
   result.loop.rounds = rounds;
   result.loop.everySeconds = Math.max(1, Number.isSafeInteger(everySeconds) ? everySeconds : 60);
@@ -342,9 +343,11 @@ function validateCurrentSettings(input, { partial = false, catalog = null } = {}
   if (plain(input?.silicon) && Object.hasOwn(input.silicon, 'dailyDiamondLimit')) input = migrateVersion25Settings(input);
   input = migrateVersion26Settings(input);
   input = migrateVersion28Settings(input);
-  input = migrateVersion29Settings(input);
+  if (plain(input?.league)) input = { ...input, league: { fallbackWeakest: false, ...input.league } };
   input = migrateVersion34Settings(input);
   if (['arena', 'league'].some(group => plain(input?.[group]) && Object.hasOwn(input[group], 'keepTickets'))) input = migrateVersion23Settings(input);
+  if (plain(input?.arena) && (Object.hasOwn(input.arena, 'dailyBattleLimit') || Object.hasOwn(input.arena, 'fallbackLowerRank'))) input = migrateVersion37Settings(input);
+  input = migrateVersion38Settings(input);
   if (plain(input?.resourceFields) && !Object.hasOwn(input.resourceFields, 'refillAfterLoss')) {
     input = { ...input, resourceFields: { ...input.resourceFields, refillAfterLoss: false } };
   }
@@ -441,7 +444,7 @@ function validateCurrentSettings(input, { partial = false, catalog = null } = {}
   for(const key of ['worldBoss','follow','silicon','resourceFields'])if(!output.fleetDispatch.priority.includes(key))output.fleetDispatch.priority.push(key);
   if (output.resourceFields.enabled && !output.resourceFields.fleetIds.length) errors['resourceFields.fleetIds'] = '请选择自动占领资源田的舰队';
   if (output.resourceFields.fleetIds.some(value => !/^[1-9]\d*远征船$/.test(value))) errors['resourceFields.fleetIds'] = '请选择有效的远征舰队';
-  for (const [field, windows] of [['silicon.windows', output.silicon.windows], ['treasure.chaseWindows', output.treasure.chaseWindows]]) {
+  for (const [field, windows] of [['silicon.windows', output.silicon.windows], ['treasure.windows', output.treasure.windows], ['treasure.chaseWindows', output.treasure.chaseWindows]]) {
     if (windows.some(value => !dailyWindowPattern.test(value))) errors[field] = '时段格式为 HH:mm-HH:mm，每行一个，支持跨午夜';
   }
   if (output.pirateHunt.fleetIds.some(value=>! /^[1-9]\d*远征船$/.test(value))) errors['pirateHunt.fleetIds']='请选择有效的海盗首杀舰队';
@@ -678,7 +681,7 @@ export function importAutomationSettings(document, options) {
   return validateSettings(migrateSettingsVersion(document.settings, document.version), { ...options, partial: false });
 }
 
-const settingsMigrations = new Map([[1, migrateVersion1Settings], [2, migrateVersion2Settings], [3, migrateVersion3Settings], [4, migrateVersion4Settings], [5, migrateVersion5Settings], [6, migrateVersion6Settings], [7, migrateVersion7Settings], [8, migrateVersion8Settings], [9, migrateVersion9Settings], [10, migrateVersion10Settings], [11, migrateVersion11Settings], [12, migrateVersion12Settings], [13, migrateVersion13Settings], [14, migrateVersion14Settings], [15, migrateVersion15Settings], [16, migrateVersion16Settings], [17, migrateVersion17Settings], [18, migrateVersion18Settings], [19, migrateVersion19Settings], [20, migrateVersion20Settings], [21, migrateVersion21Settings], [22, migrateVersion22Settings], [23, migrateVersion23Settings], [24, migrateVersion24Settings], [25, migrateVersion25Settings], [26, migrateVersion26Settings], [27, migrateVersion27Settings], [28, migrateVersion28Settings], [29, migrateVersion29Settings], [30, migrateVersion30Settings], [31, migrateVersion31Settings], [32, migrateVersion32Settings], [33, migrateVersion33Settings], [34, migrateVersion34Settings], [35, migrateVersion35Settings]]);
+const settingsMigrations = new Map([[1, migrateVersion1Settings], [2, migrateVersion2Settings], [3, migrateVersion3Settings], [4, migrateVersion4Settings], [5, migrateVersion5Settings], [6, migrateVersion6Settings], [7, migrateVersion7Settings], [8, migrateVersion8Settings], [9, migrateVersion9Settings], [10, migrateVersion10Settings], [11, migrateVersion11Settings], [12, migrateVersion12Settings], [13, migrateVersion13Settings], [14, migrateVersion14Settings], [15, migrateVersion15Settings], [16, migrateVersion16Settings], [17, migrateVersion17Settings], [18, migrateVersion18Settings], [19, migrateVersion19Settings], [20, migrateVersion20Settings], [21, migrateVersion21Settings], [22, migrateVersion22Settings], [23, migrateVersion23Settings], [24, migrateVersion24Settings], [25, migrateVersion25Settings], [26, migrateVersion26Settings], [27, migrateVersion27Settings], [28, migrateVersion28Settings], [29, migrateVersion29Settings], [30, migrateVersion30Settings], [31, migrateVersion31Settings], [32, migrateVersion32Settings], [33, migrateVersion33Settings], [34, migrateVersion34Settings], [35, migrateVersion35Settings], [36, migrateVersion36Settings], [37, migrateVersion37Settings], [38, migrateVersion38Settings]]);
 const supportedSettingsVersion = version => Number.isSafeInteger(version) && version >= 1;
 const entrySettingsVersion = entry => Object.hasOwn(entry, 'settingsVersion') ? entry.settingsVersion : 1;
 function newestSettingsVersion(store) {
@@ -1093,6 +1096,28 @@ function migrateVersion22Settings(settings) {
   return next;
 }
 
+function migrateVersion38Settings(settings) {
+  if (!plain(settings?.arena) || Object.hasOwn(settings.arena, 'fallbackWeakest')) return settings;
+  return { ...settings, arena: { ...settings.arena, fallbackWeakest: false } };
+}
+
+function migrateVersion37Settings(settings) {
+  if (!plain(settings?.arena)) return settings;
+  const { dailyBattleLimit, fallbackLowerRank, ...arena } = settings.arena;
+  const limit = dailyBattleLimit === undefined ? DEFAULT_SETTINGS.arena.challengeLimit : dailyBattleLimit;
+  if (!Number.isSafeInteger(limit) || limit < 0 || limit > 100000) throw new SettingsError({ 'arena.dailyBattleLimit': '每日战斗次数须为 0–100000 之间的整数' });
+  // 旧配置只有一个总额度。启用过兜底时平分额度，奇数多出的一次留给挑战。
+  const sweeps = fallbackLowerRank === true ? Math.floor(limit / 2) : 0;
+  return { ...settings, arena: { challengeHigher: settings.schedule?.arena ?? false, challengeLimit: limit - sweeps,
+    sweepLower: fallbackLowerRank === undefined ? false : fallbackLowerRank,
+    sweepLimit: fallbackLowerRank === true ? sweeps : DEFAULT_SETTINGS.arena.sweepLimit, ...arena } };
+}
+
+function migrateVersion36Settings(settings) {
+  if (!plain(settings?.treasure)) return settings;
+  return { ...settings, treasure: { windows: [], ...settings.treasure } };
+}
+
 // 早期商船配置只有材料补货，新增的钻石选项默认关闭。
 function migrateVersion35Settings(settings) {
   if (!plain(settings?.guildShip)) return settings;
@@ -1211,7 +1236,7 @@ function migrateVersion23Settings(settings) {
     if (!plain(settings[group])) continue;
     const { keepTickets, ...fields } = settings[group];
     next[group] = {
-      dailyBattleLimit: keepTickets > 0 ? 0 : DEFAULT_SETTINGS[group].dailyBattleLimit,
+      dailyBattleLimit: keepTickets > 0 ? 0 : (group === 'arena' ? 3 : DEFAULT_SETTINGS.league.dailyBattleLimit),
       claimTask: settings.dailies?.claimTasks ?? false,
       ...fields,
     };

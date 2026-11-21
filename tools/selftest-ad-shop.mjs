@@ -45,8 +45,9 @@ function fixture({ vip = 3, firstCharge = false, max = [2, 1] } = {}) {
 const names = f => f.calls.map(call => call[0]);
 for (const via of ['VIP', '首充']) {
   const f = fixture({ vip: via === 'VIP' ? 3 : 0, firstCharge: via === '首充' });
-  f.options.clientInfo = { channelId: 'new', appId: 'other', originVersion: '' };
-  f.config.tables.AdvChannelCfg.data.push({ key: 'new', isOpen: true, minAppVersion: '' });
+  f.options.clientInfo = { channelId: 'new', appId: 'other' };
+  if (via === 'VIP') f.options.clientInfo.originVersion = '1.9.4.434';
+  f.config.tables.AdvChannelCfg.data.push({ key: 'new', isOpen: true, minAppVersion: '1.11.6' });
   f.options.language = 'en';
   Object.assign(f.options.player, { channelId: '1422', appId: '14021167' });
   await Promise.all([f.run(), f.run()]);
@@ -73,8 +74,6 @@ for (const change of [
   f => { f.options.player.level = 8; },
   f => { f.options.clientInfo.channelId = 'unknown'; },
   f => { f.config.tables.AdvChannelCfg.data[0].isOpen = false; },
-  f => { f.config.tables.AdvChannelCfg.data[0].minAppVersion = '1.2.0'; },
-  f => { f.config.tables.AdvChannelCfg.data[0].minAppVersion = '1.2.0'; f.options.clientInfo.originVersion = '1.1.99'; },
 ]) {
   const f = fixture();
   change(f);
@@ -86,8 +85,20 @@ for (const change of [
   const f = fixture({ vip: 0 });
   f.options.clientInfo.appId = 'other';
   await f.run();
-  assert.deepEqual(names(f), ['FirstChargeRequest']);
-  assert.equal(f.log[0].skipped, true);
+  assert.deepEqual(f.products.map(p => p.gotTimes), [2, 1], '客户端应用 ID 不在内置名单时仍按等待流程领取');
+  assert(names(f).includes('WatchAdvRequest'));
+}
+for (const change of [
+  f => { f.options.player.channelId = '1422'; f.options.player.appId = '14021167'; },
+  f => { f.options.language = 'en'; },
+]) {
+  const f = fixture({ vip: 0 });
+  change(f);
+  f.options.getSettings = () => ({ ads: { waitSeconds: 0.04 } });
+  const started = Date.now();
+  await f.run();
+  assert(Date.now() - started >= 40, '无免广告权益时仍须等待设定秒数后领取');
+  assert.deepEqual(f.products.map(p => p.gotTimes), [2, 1], '语言或角色渠道身份不在本地限制领取');
 }
 {
   const f = fixture();
@@ -97,8 +108,6 @@ for (const change of [
 }
 {
   const f = fixture({ max: [1] });
-  f.config.tables.AdvChannelCfg.data[0].minAppVersion = '1.2';
-  f.options.clientInfo.originVersion = '1.10';
   f.products[0].gotTimes = 1;
   await f.run();
   assert.deepEqual(names(f), ['AdvShopInfoRequest']);

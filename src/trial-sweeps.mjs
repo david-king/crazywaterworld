@@ -73,10 +73,7 @@ export async function readTrialSweeps(client, protocol, config, player, settings
       else state.paid.allowed = true;
     } catch (error) { state.paid.reason = error.message; }
     try {
-      const info = channel.clientInfo;
-      if (!info?.appId || !info.channelId || (player.channelId && String(player.channelId) !== String(info.channelId))
-        || (player.appId && String(player.appId) !== String(info.appId))) throw new Error('当前角色与登录客户端的渠道身份未确认');
-      const access = await adAccess(client, config.tables, { player, clientInfo: info, language: channel.language, settings });
+      const access = await adAccess(client, config.tables, { player, clientInfo: channel.clientInfo, settings });
       if (access.reason) throw new Error(access.reason);
       state.adWaitMs = access.waitMs;
       const water = await client.request('OnWaterRequest', {}, 'OnWaterResponse');

@@ -59,15 +59,17 @@ try {
   old.schedule.arena = old.schedule.leaguePassRewards = true;
   const migrated = importAutomationSettings({ format: SETTINGS_FORMAT, version: 21, settings: old });
   assert.deepEqual(migrated.schedule, { ...old.schedule, leagueChallenge: false });
-  assert.deepEqual(migrated.arena, defaultSettings().arena);
+  assert.deepEqual(migrated.arena, { ...defaultSettings().arena, challengeHigher: true });
   assert.deepEqual(migrated.league, defaultSettings().league);
 
   const v29 = defaultSettings();
-  delete v29.arena.fallbackLowerRank; delete v29.league.fallbackWeakest;
+  v29.arena = { dailyBattleLimit: 3, maxPowerRatio: 0, target: 'weakest', claimTask: false };
+  delete v29.league.fallbackWeakest;
   assert.deepEqual(importAutomationSettings({ format: SETTINGS_FORMAT, version: 29, settings: v29 }), defaultSettings());
   assert.deepEqual(validateSettings(v29), defaultSettings(), '旧页面仍可保存');
 
   const previous = defaultSettings();
+  previous.arena = { target: 'weakest' };
   delete previous.arena.maxPowerRatio;
   delete previous.league.maxPowerRatio;
   previous.league.target = 'score';
@@ -78,11 +80,11 @@ try {
   previous.league.keepTickets = 0; previous.arena.keepTickets = 2;
   const upgraded = importAutomationSettings({ format: SETTINGS_FORMAT, version: 22, settings: previous });
   assert.deepEqual(upgraded.league, { ...defaultSettings().league, target: 'score', claimTask: true });
-  assert.deepEqual(upgraded.arena, { ...defaultSettings().arena, dailyBattleLimit: 0, claimTask: true });
-  for (const group of ['arena', 'league']) for (const value of [-1, 1.5, '2']) {
+  assert.deepEqual(upgraded.arena, { ...defaultSettings().arena, challengeLimit: 0, claimTask: true });
+  for (const [group, key] of [['arena', 'challengeLimit'], ['arena', 'sweepLimit'], ['league', 'dailyBattleLimit']]) for (const value of [-1, 1.5, '2']) {
     const invalid = defaultSettings();
-    invalid[group].dailyBattleLimit = value;
-    assert.throws(() => validateSettings(invalid), error => !!error.fields?.[group + '.dailyBattleLimit']);
+    invalid[group][key] = value;
+    assert.throws(() => validateSettings(invalid), error => !!error.fields?.[group + '.' + key]);
   }
 
   const capped = fixture();

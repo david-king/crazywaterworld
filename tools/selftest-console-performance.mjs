@@ -185,6 +185,8 @@ await test('主轮跨扫描期限时等待在途回包，并发查货轮和宣�
 
 // ---- 控制台路由 ----
 const live = new Set();
+const gameRequest = GameClient.prototype.request;
+const gameWatch = GameClient.prototype.sendWatch;
 const realConnected = Object.getOwnPropertyDescriptor(GameClient.prototype, 'connected');
 Object.defineProperty(GameClient.prototype, 'connected', { configurable: true, get() { return live.has(this); } });
 GameClient.prototype.connect = async function () {
@@ -262,6 +264,52 @@ await test('挂机占着队列时：页面读取不排在整轮之后，写操�
   finishRound();
   session.queueTail = null;
   await write;
+});
+
+await test('活动页刷新与排产共用连接时，榜单拒绝只交给榜单，同账号并发刷新只读一轮', async () => {
+  const session = app.sessions.get('a'), client = session.client;
+  let finishRound, releaseCalendar, markStarted;
+  session.queueTail = new Promise(resolve => { finishRound = resolve; });
+  const calendar = new Promise(resolve => { releaseCalendar = resolve; });
+  const started = new Promise(resolve => { markStarted = resolve; });
+  let calendars = 0;
+  client.request = async (name, body, response) => {
+    if (name === 'WeekInfoRequest') {
+      calendars++;
+      markStarted();
+      await calendar;
+    }
+    if (name === 'OpenRankInfoRequest') {
+      const reply = gameRequest.call(client, name, body, response, 300);
+      queueMicrotask(() => client.attributePrompt({ args: ['open rank forbidden'] }));
+      return reply;
+    }
+    return {};
+  };
+  const refresh = () => fetch(url('/api/activities?account=a'), { signal: AbortSignal.timeout(4000) }).then(r => r.json());
+  try {
+    const first = refresh();
+    await started;
+    const arrived = new Promise(resolve => app.server.once('request', req => req.once('end', resolve)));
+    const second = refresh();
+    await arrived;
+    const production = gameWatch.call(client, 'StartFactoryProduceRequest', {}, { window: 50 })
+      .then(() => 'ok', error => error.message);
+    releaseCalendar();
+    const [left, right] = await Promise.all([first, second]);
+    assert.equal(await production, 'ok', '未开放的榜单回包不能拒绝排产');
+    assert.ok(Array.isArray(left.activities));
+    assert.equal(left.status.openrank, undefined, '所有榜单均未开放，应当正常完成查询');
+    assert.deepEqual(left, right);
+    assert.equal(calendars, 1);
+    await refresh();
+    assert.equal(calendars, 2, '上一轮结束后的刷新需要读取最新进度');
+  } finally {
+    releaseCalendar();
+    finishRound();
+    session.queueTail = null;
+    delete client.request;
+  }
 });
 
 await test('页面读取在队列空闲时照常走账号队列', async () => {

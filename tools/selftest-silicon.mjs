@@ -182,6 +182,16 @@ try {
       assert.equal(f.state.fuel, fuel - 400);
     }
   });
+  await test('巨轮提前召回按货轮刷新时刻是否落在参与时段判断', async () => {
+    const f = siliconFixture(), s = siliconSettings(), ledger = usage(f);
+    Object.assign(s.treasure, { enabled: true, fleetIds: ['1远征船'], windows: ['08:00-08:01'], recallSilicon: true, recallLeadMinutes: 5 });
+    f.occupy('1远征船', 5000, 0, 1);
+    const start = Math.floor(Date.now() / 86400000) * 86400;
+    f.client.serverClockOffsetMs = (start - 30) * 1000 - Date.now();
+    const preview = refresh => previewSiliconEventRecall(f.client, f.protocol, f.config, f.player, s, ledger, 'treasure', refresh, f.state.fleets);
+    assert.deepEqual((await preview(start + 60)).actions, []);
+    assert.deepEqual((await preview(start)).actions.map(a => a.request), ['ChipMineRetreatRequest']);
+  });
   await test('提前召回只读预览、在途防重与临发送前改期或矿位变化', async () => {
     for (const change of ['unknown', 'rescheduled', 'leftMine', 'disabled']) {
       const f = siliconFixture(), s = siliconSettings(), ledger = usage(f);

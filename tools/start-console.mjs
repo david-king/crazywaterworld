@@ -2,7 +2,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { spawn } from 'node:child_process';
 import { pathToFileURL, fileURLToPath } from 'node:url';
-import { consoleAccessHints, consoleHost, consoleUrl, isConsoleHostOption, reportPublicIp } from '../src/console-address.mjs';
+import { consoleAccessHints, consoleHost, consoleUrl, isConsoleHostOption } from '../src/console-address.mjs';
 
 const ROOT = fileURLToPath(new URL('../', import.meta.url));
 const NODE_REQUIREMENT = '^20.19.0 || >=22.12.0';
@@ -150,6 +150,7 @@ export async function startConsole(args = process.argv.slice(2), dependencies = 
   }
   env.CW_PORT ||= '17323';
   const maintenance = ['status', 'check', 'recover'].includes(command);
+  if (!maintenance && !env.CW_HOST?.trim()) env.CW_HOST = '0.0.0.0';
   // Address helpers only use Node built-ins and work before dependency setup.
   // Recovery must remain available even when the listening settings are invalid.
   const host = maintenance ? null : consoleHost(env, options);
@@ -162,7 +163,6 @@ export async function startConsole(args = process.argv.slice(2), dependencies = 
         print(address);
         for (const hint of consoleAccessHints(host, env.CW_PORT)) print(hint);
       }
-      await reportPublicIp(print, { env, fetchImpl: dependencies.fetchImpl });
     }
     const hold = dependencies.hold ?? (() => new Promise(() => { setInterval(() => {}, 60_000); }));
     await hold();

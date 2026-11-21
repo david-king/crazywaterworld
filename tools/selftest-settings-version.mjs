@@ -602,8 +602,50 @@ try {
     old.guildShip.diamondDailyLimit = -1;
     assert.throws(() => importAutomationSettings(document), error => !!error.fields['guildShip.diamondDailyLimit']);
   });
+  test('版本36巨轮默认全天参与，保留已有追杀时段，校验并保存多段参与时间', () => {
+    const old = defaultSettings();
+    old.treasure.chaseWindows = ['22:00-02:00'];
+    delete old.treasure.windows;
+    const bytes = JSON.stringify({ version: 36, accounts: { old: { settingsVersion: 36, revision: 2, settings: old } } });
+    fs.writeFileSync(file, bytes);
+    const settings = loadAutomationSettings('old', { file }).settings;
+    assert.deepEqual(settings.treasure, { ...old.treasure, windows: [] });
+    assert.deepEqual(importAutomationSettings({ format: SETTINGS_FORMAT, version: 36, settings: old }), settings);
+    assert.equal(fs.readFileSync(file, 'utf8'), bytes);
+    settings.treasure.windows = ['08:00-12:00', '23:00-01:00'];
+    saveAutomationSettings('old', settings, { file, revision: 2 });
+    assert.deepEqual(loadAutomationSettings('old', { file }).settings, settings);
+    assert.deepEqual(importAutomationSettings(exportAutomationSettings(settings)), settings);
+    for (const bad of [['08:00-24:01'], ['8:00-09:00'], ['08:00-09:00', '08:00-09:00'], '08:00-09:00']) {
+      settings.treasure.windows = bad;
+      assert.throws(() => exportAutomationSettings(settings), error => !!error.fields['treasure.windows']);
+    }
+  });
+  test('竞技场旧共享次数按开关分配，单项停用和零次数可往返保存', () => {
+    for (const fallback of [false, true]) for (const limit of [0, 1, 5]) {
+      const old = defaultSettings();
+      old.schedule.arena = true;
+      old.arena = { dailyBattleLimit: limit, fallbackLowerRank: fallback, target: 'rank', maxPowerRatio: 70, claimTask: true };
+      const settings = importAutomationSettings({ format: SETTINGS_FORMAT, version: 37, settings: old });
+      const sweeps = fallback ? Math.floor(limit / 2) : 0;
+      assert.deepEqual(settings.arena, { challengeHigher: true, challengeLimit: limit - sweeps,
+        target: 'rank', maxPowerRatio: 70, fallbackWeakest: false, sweepLower: fallback, sweepLimit: fallback ? sweeps : 3, claimTask: true });
+      assert.deepEqual(validateSettings(old), settings);
+      settings.arena.challengeHigher = false;
+      assert.deepEqual(importAutomationSettings(exportAutomationSettings(settings)), settings);
+    }
+  });
+  test('版本38竞技场默认关闭超限兜底，显式开启后可保存导出', () => {
+    const old = defaultSettings();
+    delete old.arena.fallbackWeakest;
+    const upgraded = importAutomationSettings({ format: SETTINGS_FORMAT, version: 38, settings: old });
+    assert.equal(upgraded.arena.fallbackWeakest, false);
+    assert.deepEqual(validateSettings(old), upgraded);
+    upgraded.arena.fallbackWeakest = true;
+    assert.deepEqual(importAutomationSettings(exportAutomationSettings(upgraded)), upgraded);
+  });
   test('版本1升级后重复迁移保持一致，保留有效的用户值', () => {
-    assert.equal(SETTINGS_SCHEMA_VERSION, 36);
+    assert.equal(SETTINGS_SCHEMA_VERSION, 39);
     const settings = legacySettings();
     settings.factory.checkEverySeconds = 270;
     settings.resources.diamondDailyLimit = 1234;

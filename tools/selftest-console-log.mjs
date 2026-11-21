@@ -3,7 +3,7 @@ import { spawn } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { fileURLToPath, pathToFileURL } from 'node:url';
+import { fileURLToPath } from 'node:url';
 import { formatConsoleLog } from '../src/console-log.mjs';
 import { createLogAccountLabels } from '../src/log-accounts.mjs';
 import { describeLogError } from '../src/log-errors.mjs';
@@ -192,17 +192,10 @@ define('src/chunks/bundle.test.js', function () {
 `);
 fs.writeFileSync(path.join(dir, 'accounts.json'), JSON.stringify({ version: 1, activeId: null, accounts: [] }));
 const repo = fileURLToPath(new URL('../', import.meta.url));
-const ipFixture = path.join(dir, 'ip-fixture.mjs');
-fs.writeFileSync(ipFixture, `
-  const nativeFetch = globalThis.fetch;
-  globalThis.fetch = (url, options) => url === 'https://api64.ipify.org'
-    ? Promise.resolve(new Response('203.0.113.8'))
-    : nativeFetch(url, options);
-`);
 let child;
 let closed;
 try {
-  child = spawn(process.execPath, ['--import', pathToFileURL(ipFixture).href, 'src/app.mjs', '--host=127.0.0.1'], {
+  child = spawn(process.execPath, ['src/app.mjs', '--host=127.0.0.1'], {
     cwd: repo,
     windowsHide: true,
     stdio: ['ignore', 'pipe', 'pipe'],
@@ -211,7 +204,7 @@ try {
       APPDATA: path.join(dir, 'empty-wechat-cache'),
       CW_DATA_DIR: dir, CW_CONFIG_PACK: configFile,
       CW_PROTO_BUNDLE: protocolFile,
-      CW_NO_BROWSER: '1', CW_QUIET_START: '1', CW_SHOW_PUBLIC_IP: '1', CW_HOST: 'invalid://host', CW_PORT: '0',
+      CW_NO_BROWSER: '1', CW_QUIET_START: '1', CW_HOST: 'invalid://host', CW_PORT: '0',
     },
   });
   closed = new Promise(resolve => child.once('close', (code, signal) => resolve({ code, signal })));
@@ -235,7 +228,7 @@ try {
     const onClose = (code, signal) => finish(new Error(`CLI 提前退出：code=${code} signal=${signal}\n${stderr}`));
     const onData = text => {
       stdout += text;
-      if (started.test(stdout) && stdout.includes(guidance) && stdout.includes(artFailure) && stdout.includes('公网出口 IP  203.0.113.8')) finish();
+      if (started.test(stdout) && stdout.includes(guidance) && stdout.includes(artFailure)) finish();
     };
     child.once('error', onError);
     child.once('close', onClose);
@@ -243,6 +236,7 @@ try {
   });
   const match = stdout.match(started);
   assert.ok(match, '真实 CLI 必须将格式化业务日志输出到 stdout');
+  assert.ok(stdout.includes('监听范围  仅本机可直接访问'));
   assert.ok(Number(match[2]) <= 65535, '启动日志必须显示实际监听端口');
   assert.doesNotMatch(stdout, /控制台已启动 http:\/\/127\.0\.0\.1:0\b/);
   assert.ok(stdout.includes(guidance), '启动提示必须区分关闭网页与关闭启动窗口');

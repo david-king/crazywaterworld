@@ -13,11 +13,11 @@ const read=(f,l=ledger(),id=1)=>readTrialSweeps(f.client,f.protocol,f.config,f.p
 const run=(f,l,mode='paid',options={})=>executeTrialSweep(f.client,f.protocol,f.config,f.player,1,mode,{getSettings:()=>f.settings,ledger:l,channel:f.channel,...options});
 const check=async(name,work)=>{try{await work();results.push({name,passed:true});console.log('通过：'+name);}catch(e){results.push({name,passed:false,error:e.stack});console.error('失败：'+name+'\n'+e.stack);}};
 try{
- await check('益世界与小程序在开放版本按同一免广告权益扫荡，回读次数后确认',async()=>{
+ await check('益世界旧版与小程序均可按免广告权益扫荡，回读次数后确认',async()=>{
   for(const channel of ['17001784','1400']) for(const privilege of ['vip','首充']){
    const f=trialModesFixture();
    if(channel==='17001784'){
-    Object.assign(f.channel.clientInfo,{channelId:channel,appId:'14021102',originVersion:'1.11.6'});
+    Object.assign(f.channel.clientInfo,{channelId:channel,appId:'14021102',originVersion:'1.9.4.434'});
     f.config.tables.AdvChannelCfg.data.push({key:channel,isOpen:true,minAppVersion:'1.11.6'});
    }
    Object.assign(f.player,{channelId:channel,appId:f.channel.clientInfo.appId});
@@ -30,24 +30,34 @@ try{
    assert.equal(f.state.ruby,1000);
   }
  });
- await check('益世界应用包版本、每日次数和角色权益分别生效',async()=>{
-  for(const kind of ['安装包版本','无权益','次数用完','角色渠道不符','首充响应不完整']){
+ await check('益世界按每日次数和角色权益判断广告扫荡',async()=>{
+  for(const kind of ['次数用完','首充响应不完整']){
    const f=trialModesFixture();
-   Object.assign(f.channel.clientInfo,{channelId:'17001784',appId:'14021102',clientVersion:'1.12.11',originVersion:'1.11.6'});
+   Object.assign(f.channel.clientInfo,{channelId:'17001784',appId:'14021102',clientVersion:'1.12.11',originVersion:'1.9.4.434'});
    f.config.tables.AdvChannelCfg.data.push({key:'17001784',isOpen:true,minAppVersion:'1.11.6'});
-   if(kind==='安装包版本')f.channel.clientInfo.originVersion='1.9.4.434';
-   if(kind==='无权益'||kind==='首充响应不完整')f.player.vip.vipLevel=1;
+   if(kind==='首充响应不完整')f.player.vip.vipLevel=1;
    if(kind==='次数用完')f.state.adv.find(row=>row.id===4).gotTimes=1;
-   if(kind==='角色渠道不符')f.player.channelId='1400';
    if(kind==='首充响应不完整'){
     const request=f.client.request.bind(f.client);
     f.client.request=(name,...args)=>name==='FirstChargeRequest'?{}:request(name,...args);
    }
    const result=await run(f,ledger(),'ad');
    assert.equal(result.skipped,true,kind);
-   const reason={'安装包版本':/1\.11\.6.*1\.9\.4\.434/,'无权益':/没有免广告权益/,'次数用完':/次数已用完/,'角色渠道不符':/渠道身份/,'首充响应不完整':/权益未确认/};
+   const reason={'次数用完':/次数已用完/,'首充响应不完整':/权益未确认/};
    assert.match(result.reason,reason[kind]);
    assert.deepEqual(f.state.writes,[]);
+  }
+ });
+ await check('无免广告权益账号不受客户端应用 ID、语言和角色渠道限制，按等待流程扫荡',async()=>{
+  for(const mismatch of [false,true]){
+   const f=trialModesFixture();
+   Object.assign(f.channel.clientInfo,{channelId:'17001784',appId:'14021102',clientVersion:'1.12.11',originVersion:'1.9.4.434'});
+   f.config.tables.AdvChannelCfg.data.push({key:'17001784',isOpen:true,minAppVersion:'1.11.6'});
+   f.player.vip.vipLevel=1;f.settings.ads.waitSeconds=0.01;
+   if(mismatch){f.player.channelId='1400';f.player.appId='14021170';f.channel.language='en';}
+   const result=await run(f,ledger(),'ad');
+   assert.equal(result.ok,true,mismatch?'客户端身份不一致':'客户端身份一致');
+   assert.deepEqual(f.state.writes.map(row=>row.name),['WatchAdvRequest','TrialRaidBuySweepRequest']);
   }
  });
  await check('旧设置原值保留，新钻石/广告开关关闭，导入及加载不改旧文件',()=>{
@@ -61,7 +71,17 @@ try{
  await check('已用次数超价格表时按客户端末档，费用仍受单次上限',async()=>{const f=trialModesFixture(),l=ledger();f.player.vip.vipLevel=4;f.state.raids.get(1).buySweepTimes=4;assert.equal((await read(f,l)).paid.cost,50);assert.equal((await read(f,l)).paid.allowed,true);f.settings.trials.maxSingleCost=49;assert.equal((await read(f,l)).paid.allowed,false);});
  await check('钻石扫荡费用及全局/试炼/每副本预算均记录，日上限阻断再扫',async()=>{const f=trialModesFixture(),l=ledger();const e=await run(f,l);assert.equal(e.ok,true);assert.equal(f.state.ruby,950);assert.equal(l.snapshot().counters.diamonds,50);assert.equal(l.snapshot().counters.trialDiamonds,50);assert.equal(l.snapshot().counters.trialPaid1,1);await run(f,l);assert.equal(f.state.writes.length,1);});
  await check('钻石总开关、保留量、两个日预算和游戏次数都独立阻断',async()=>{for(const kind of ['switch','reserve','global','trial','count','cap']){const f=trialModesFixture(),l=ledger();if(kind==='switch')f.settings.resources.allowDiamonds=false;if(kind==='reserve')f.settings.resources.diamondThreshold=951;if(kind==='global')f.settings.resources.diamondDailyLimit=49;if(kind==='trial')f.settings.trials.dailyDiamondBudget=49;if(kind==='count')f.state.raids.get(1).buySweepTimes=3;if(kind==='cap')f.settings.trials.paidPerRaidLimit=0;assert.equal((await run(f,l)).skipped,true,kind);assert.equal(f.state.writes.length,0);}});
- await check('未知渠道/低版本/低等级/次数满不发送广告准备',async()=>{for(const kind of ['channel','version','level','full','missing']){const f=trialModesFixture(),l=ledger();if(kind==='channel')f.channel.clientInfo.channelId='999';if(kind==='version')f.channel.clientInfo.originVersion='0.0.1';if(kind==='level')f.config.tables.ModuleOpenCfg.data[0].playerLevel=50;if(kind==='full')f.state.adv.find(r=>r.id===4).gotTimes=1;if(kind==='missing')f.state.adv=[];assert.equal((await run(f,l,'ad')).skipped,true,kind);assert.equal(f.state.writes.length,0);}});
+ await check('未知渠道、低等级、次数用完或未确认时不发送广告准备',async()=>{
+  for(const kind of ['channel','level','full','missing']){
+   const f=trialModesFixture(),l=ledger();
+   if(kind==='channel')f.channel.clientInfo.channelId='999';
+   if(kind==='level')f.config.tables.ModuleOpenCfg.data[0].playerLevel=50;
+   if(kind==='full')f.state.adv.find(r=>r.id===4).gotTimes=1;
+   if(kind==='missing')f.state.adv=[];
+   assert.equal((await run(f,l,'ad')).skipped,true,kind);
+   assert.equal(f.state.writes.length,0);
+  }
+ });
  await check('首充记录可确认合法免广告权益，普通次数用尽仍可广告扫荡',async()=>{const f=trialModesFixture(),l=ledger();f.player.vip.vipLevel=1;f.state.firstCharge=[{chargedId:'test',gotStage:[]}];f.state.raids.get(1).buySweepTimes=3;const e=await run(f,l,'ad');assert.equal(e.ok,true);assert.deepEqual(f.state.writes.map(x=>x.name),['WatchAdvRequest','TrialRaidBuySweepRequest']);assert.equal(f.state.writes[0].body.id,4);assert.equal(f.state.writes[1].body.useAdvCard,true);assert.equal(f.state.ruby,1000);assert.equal(l.snapshot().counters.diamonds,undefined);await run(f,l,'ad');assert.equal(f.state.writes.length,2);});
  await check('三个副本使用各自广告ID且共享钻石预算',async()=>{const f=trialModesFixture(),l=ledger();f.settings.trials.dailyDiamondBudget=100;await runExtraTrialSweeps(f.client,f.protocol,f.config,f.player,{getSettings:()=>f.settings,ledger:l,channel:f.channel,enabled:()=>true,report:()=>{}});assert.deepEqual(f.state.writes.filter(x=>x.name==='WatchAdvRequest').map(x=>x.body.id),[4,3,5]);assert.equal(f.state.writes.filter(x=>x.name==='TrialRaidBuySweepRequest'&&!x.body.useAdvCard).length,2);assert.equal(l.snapshot().counters.diamonds,100);});
  await check('手动报价过期不会接受变化后的次数、进度或价格',async()=>{const f=trialModesFixture(),l=ledger(),s=await read(f,l);const expected={passedStage:s.passedStage,buyUsed:s.buyUsed,adUsed:s.adUsed,cost:s.paid.cost,day:s.day};f.state.raids.get(1).passedStage=1021;await assert.rejects(run(f,l,'paid',{manual:true,expected}),/已变化/);assert.equal(f.state.writes.length,0);});

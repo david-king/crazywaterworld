@@ -127,10 +127,10 @@ export async function claimLinkageFree(client,config,{player,enabled,ledger,repo
   }
  }
 }
-export async function recruitWithSkipAds(client,config,{player,clientInfo,language,enabled,ledger,report,scheduler,getSettings}){
+export async function recruitWithSkipAds(client,config,{player,clientInfo,enabled,ledger,report,scheduler,getSettings}){
  for(const [key,id,kind,request,response]of [['heroAdRecruit',2,'hero','RecruitStartRequest','RecruitStartResponse'],['antiqueAdRecruit',7,'antique','AntiqueRecruitRequest','AntiqueRecruitResponse']]){
   if(!enabled(key))continue;const title=kind==='hero'?'英雄免广告招募':'藏品免广告招募';
-  const access=await adAccess(client,config.tables,{player,clientInfo,language,settings:getSettings?.()});
+  const access=await adAccess(client,config.tables,{player,clientInfo,settings:getSettings?.()});
   if(access.reason){report({label:title,skipped:true,reason:access.reason});continue;}
   const day=dayOf(nowOf(client)),limit=rows(config,'AdvEffectCfg').find(r=>r.id===id)?.dailyLimit;
   if(!valid(limit)||limit<1||limit>10)throw Error('广告招募每日次数未确认');

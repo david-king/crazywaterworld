@@ -43,6 +43,23 @@ await test('只修所选空闲舰队，驻守/出征/未确认任务不会被抢
  await run(f,l);assert.equal(f.client.writes.length,0);
  f.settings.cityWar.autoRepair=false;f.settings.treasure.autoRepair=false;const calls=f.calls.length;await run(f,l);assert.equal(f.calls.length,calls);
 });
+await test('巨轮参与时段结束后释放待修舰队，城战仍可按自己的设置维修',async()=>{
+ const f=fixture(),l=ledger(),start=Math.floor(Date.now()/86400000)*86400000;
+ f.settings.cityWar.autoRepair=false;
+ Object.assign(f.settings.treasure,{windows:['08:00-08:01'],fleetIds:['1远征船']});
+ f.client.serverClockOffsetMs=start-Date.now();
+ await run(f,l);
+ assert.match(dispatchReservationReason(f.client,f.settings,'treasure','1远征船'),/战后维修/);
+ f.state.fuel=2610;
+ f.client.serverClockOffsetMs=start+60000-Date.now();
+ await run(f,l);
+ assert.equal(f.client.writes.length,0);
+ assert.equal(watchFleetMaintenance(f.client).held().length,0);
+ f.settings.cityWar.autoRepair=true;
+ await run(f,l);
+ assert.equal(f.client.writes.length,1);
+ assert.equal(l.snapshot().counters.cityWarPetrol,2610);
+});
 await test('维修来源仍按优先级选取，旧单次/每日/保留量不限制实际维修',async()=>{
  const f=fixture();f.state.fuel=50000;f.settings.cityWar.maxRepairCost=2000;assert(maintenancePolicies(f.settings).every(p=>p.source==='cityWar'));await run(f,ledger());assert.equal(f.client.writes.length,3);
  for(const alter of [s=>s.cityWar.dailyPetrolLimit=2000,s=>s.cityWar.petrolReserve=49000]){const g=fixture();g.state.fuel=50000;alter(g.settings);await run(g,ledger());assert.equal(g.client.writes.length,3);}

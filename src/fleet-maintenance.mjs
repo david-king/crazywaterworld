@@ -1,5 +1,6 @@
 import {settleFleetSnapshot} from './fleet-settlement.mjs';
 import {sendRepairAndConfirm} from './fleet-repair-confirmation.mjs';
+import {inDailyWindows} from './daily-time-windows.mjs';
 // 战后补满：只维修现有配置所选的空闲舰队，不要求下一次出征目标或城战时段。
 import {exactAutomationId} from './automation-policy.mjs';
 import {rewardData} from './missing-rewards.mjs';
@@ -10,9 +11,11 @@ const now=c=>Math.floor((Date.now()+(c.serverClockOffsetMs||0))/1000);
 const idle=f=>f?.state===1&&!f.curGridIdx&&!f.treasureLootUid&&!(f.chipWar?.rewardTs>0);
 const keyFor=(world,id,source)=>(source==='cityWar'?'cityWar:':'treasureRepair:')+world+':'+id.replace('远征船','');
 const fleetName=id=>'舰队'+id.replace('远征船','');
-export function maintenancePolicies(settings){
+const repairInWindow=(source,settings,time)=>source!=='treasure'||inDailyWindows(settings.treasure.windows,time);
+export function maintenancePolicies(settings,time){
  const order=dispatchOrder(settings??{}),result=new Map();
- const sources=['cityWar','treasure'].filter(name=>settings?.[name]?.enabled&&settings[name].autoRepair).sort((a,b)=>{
+ const sources=['cityWar','treasure'].filter(name=>settings?.[name]?.enabled&&settings[name].autoRepair&&
+  (time===undefined||repairInWindow(name,settings,time))).sort((a,b)=>{
   const rank=name=>order.indexOf(name==='treasure'&&settings.treasure.follow?'follow':name);return rank(a)-rank(b);
  });
  for(const source of sources){const p=settings[source];for(const id of p.fleetIds??[]){if(result.has(id)||!/^\d+远征船$/.test(id))continue;
@@ -39,7 +42,7 @@ export function watchFleetMaintenance(client){
  client.on?.('close',()=>watcher.clear());watchers.set(client,watcher);return watcher;
 }
 export async function readFleetMaintenance(client,player,settings,ledger){
- const policies=maintenancePolicies(settings),snapshot={checkedAt:now(client),worldId:exactAutomationId(player?.worldId),enabled:policies.length>0,fuel:null,pendingFuel:0,rows:[],reason:'',usage:ledger.snapshot(),keys:ledger.keyRecords()};
+ const checkedAt=now(client),policies=maintenancePolicies(settings,checkedAt),snapshot={checkedAt,worldId:exactAutomationId(player?.worldId),enabled:policies.length>0,fuel:null,pendingFuel:0,rows:[],reason:'',usage:ledger.snapshot(),keys:ledger.keyRecords()};
  if(!policies.length)return snapshot;
  const ownId=exactAutomationId(player?.playerId);if(!snapshot.worldId||!ownId){snapshot.reason='角色或区服未同步';return snapshot;}
  const read=async(name,body={})=>rewardData(await client.request(name+'Request',body,name+'Response',8000));
@@ -106,20 +109,24 @@ export async function runFleetMaintenance(client,player,{getSettings,ledger,enab
  try{
   const initial=await readFleetMaintenance(client,player,getSettings(),ledger);reconcile(initial,ledger,onStep);initial.keys=ledger.keyRecords();
   const plan=planFleetMaintenance(initial,getSettings(),client),watch=watchFleetMaintenance(client);watch.setMinimum(plan.minimumFuel);
-  const selected=new Set(maintenancePolicies(getSettings()).map(p=>p.buildingId));
-  watch.hold(plan.reason?[...selected]:plan.rows.filter(r=>selected.has(r.id)&&!['full','busy'].includes(r.state)).map(r=>r.id));let remaining=initial.fuel;
+  function holdForRepairs(){
+   const selected=new Set(maintenancePolicies(getSettings(),now(client)).map(p=>p.buildingId));
+   watch.hold(plan.reason?[...selected]:plan.rows.filter(r=>selected.has(r.id)&&!['full','busy'].includes(r.state)).map(r=>r.id));
+  }
+  holdForRepairs();let remaining=initial.fuel;
   for(const proposed of plan.actions){
    if(!enabled()||!client.connected)break;
    const settings=getSettings(),fresh=await readFleetMaintenance(client,player,settings,ledger);
    if(fresh.reason){const row=plan.rows.find(r=>r.id===proposed.buildingId);row.condition=fresh.reason;row.state='unknown';continue;}
    reconcile(fresh,ledger,onStep);fresh.keys=ledger.keyRecords();fresh.fuel=Math.min(fresh.fuel,remaining);
    const reviewed=planFleetMaintenance(fresh,settings,client),step=reviewed.actions.find(a=>a.uniqueKey===proposed.uniqueKey&&a.cost===proposed.cost&&a.beforeDurability===proposed.beforeDurability);
-   if(!step||settings!==getSettings()||!enabled()||!client.connected)continue;
+   if(!step||settings!==getSettings()||!enabled()||!client.connected||!repairInWindow(step.source,settings,now(client)))continue;
    const signature=JSON.stringify([step.cost,fresh.fuel,step.beforeDurability,step.maxDura,step.policy]),failure=failures.get(step.uniqueKey),view=plan.rows.find(r=>r.id===step.buildingId);
    if(failure&&failure.until>Date.now()&&failure.signature===signature){view.state='error';view.condition='服务端此前拒绝，等待复查：'+failure.reason;continue;}
    const counters=step.source==='cityWar'?{cityWarPetrol:step.cost,cityWarRepairs:1}:{treasurePetrol:step.cost,treasureRepairPetrol:step.cost,treasureRepairs:1};
    const ticket=ledger.reserve(counters,{},{}, {uniqueKey:step.uniqueKey,details:{kind:step.kind,buildingId:step.buildingId,beforeDurability:step.beforeDurability,maxDura:step.maxDura,sentAt:fresh.checkedAt,postBattle:true}});
    if(!enabled()||settings!==getSettings()||!client.connected){ledger.cancel(ticket);break;}
+   if(!repairInWindow(step.source,settings,now(client))){ledger.cancel(ticket);continue;}
    let entry;
    try{
     const owner=exactAutomationId(player.playerId),world=exactAutomationId(player.worldId);
@@ -134,7 +141,7 @@ export async function runFleetMaintenance(client,player,{getSettings,ledger,enab
    if(entry.status!=='rejected')remaining-=step.cost;if(entry.status==='unknown')break;
   }
   if(!enabled()||!client.connected)watch.hold([]);
-  else if(!plan.reason)watch.hold(plan.rows.filter(r=>selected.has(r.id)&&!['full','busy'].includes(r.state)).map(r=>r.id));
+  else holdForRepairs();
   onView?.(plan);return plan;
  }finally{active.delete(client);}
 }

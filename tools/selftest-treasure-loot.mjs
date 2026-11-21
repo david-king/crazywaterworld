@@ -113,6 +113,58 @@ try {
     assert.equal((await preview(f, s)).actions[0]?.mode, 'chase');
   });
 
+  await check('巨轮参与时段包含开始、不含结束，跨午夜时追杀仍须命中自己的时段', async () => {
+    const f = treasureFixture(), s = treasureSettings();
+    Object.assign(s.treasure, { windows: ['22:00-02:00', '08:00-08:01'], chase: true,
+      chaseNames: ['同行者甲'], chaseWindows: ['23:00-03:00'], fleetIds: ['1远征船'] });
+    const midnight = Math.floor((Date.now() / 1000 + 28800) / 86400) * 86400 - 28800;
+    for (const [second, mode] of [[0, 'chase'], [7200, null], [28799, null], [28800, 'auto'],
+      [28860, null], [79199, null], [79200, 'auto'], [82800, 'chase']]) {
+      f.client.serverClockOffsetMs = (midnight + second) * 1000 - Date.now();
+      const plan = await preview(f, s);
+      assert.deepEqual(plan.actions.map(row => row.mode), mode ? [mode] : [], String(second));
+      if (!mode) assert.match(plan.notes[0], /巨轮参与时段/);
+    }
+    s.treasure.chase = false;
+    s.treasure.windows = ['12:00-12:00'];
+    assert.equal((await preview(f, s)).actions[0].mode, 'auto');
+  });
+
+  await check('跟随和中小货轮兜底均在参与时段内派遣，截止后不为目标派舰或维修', async () => {
+    for (const mode of ['follow', 'fallback']) {
+      const f = mode === 'follow' ? treasureFixture() : fallbackFixture(), s = f.settings ?? treasureSettings();
+      Object.assign(s.treasure, { windows: ['08:00-09:00'], fleetIds: ['1远征船'] });
+      if (mode === 'follow') Object.assign(s.treasure, { follow: true, followNames: ['同行者甲'] });
+      const start = Math.floor(Date.now() / 86400000) * 86400000;
+      f.client.serverClockOffsetMs = start - Date.now();
+      assert.equal((await preview(f, s)).actions[0].mode, mode);
+      f.client.serverClockOffsetMs = start + 3600000 - Date.now();
+      for (const durability of [100, 1]) {
+        f.state.fleets[0].durability = durability;
+        assert.deepEqual((await run(f, s)).results, []);
+      }
+      assert.deepEqual(f.client.writes, []);
+    }
+  });
+
+  await check('派舰预约后到达参与截止时间，取消未发送的派遣和汽油预留', async () => {
+    const f = treasureFixture(), s = treasureSettings(), usage = ledger();
+    Object.assign(s.treasure, { windows: ['08:00-08:01'], fleetIds: ['1远征船'] });
+    const start = Math.floor(Date.now() / 86400000) * 86400000;
+    f.client.serverClockOffsetMs = start - Date.now();
+    const reserve = usage.reserve;
+    usage.reserve = (...args) => {
+      const ticket = reserve(...args);
+      f.client.serverClockOffsetMs = start + 60000 - Date.now();
+      return ticket;
+    };
+    const outcome = await run(f, s, usage);
+    assert.match(outcome.results[0].reason, /巨轮参与时段/);
+    assert.deepEqual(f.client.writes, []);
+    assert.equal(usage.snapshot().counters.treasureDispatches ?? 0, 0);
+    assert.equal(usage.pendingCounters().treasurePetrol ?? 0, 0);
+  });
+
   await check('派舰预约后到达追杀截止时间，撤销汽油与派遣次数的预留', async () => {
     const f = treasureFixture(), s = treasureSettings(), usage = ledger();
     Object.assign(s.treasure, { autoJoin: false, chase: true, chaseNames: ['同行者甲'], fleetIds: ['1远征船'], chaseWindows: ['08:00-09:00'] });
@@ -634,6 +686,24 @@ try {
       f.client.onRequest = name => { if (name === 'WorldInfoRequest') { if (kind === 'gone') f.state.targets = []; if (kind === 'left') { f.state.defenders[71] = []; f.state.targets[0].ownerFleetNum = 0; } if (kind === 'guild') f.player.guildId = '9007199254741008'; } };
       await run(f, s); assert.equal(f.client.writes.length, 0, kind);
     }
+  });
+
+  await check('参与时段短于轮询间隔，挂机仍在开始分钟派遣', async () => {
+    const originalNow = Date.now, start = Date.UTC(2026, 10, 20, 0, 16, 50);
+    let clock = start;
+    Date.now = () => clock;
+    try {
+      const f = treasureFixture(), s = treasureSettings(), usage = ledger(), stop = { aborted: false };
+      Object.assign(s.treasure, { windows: ['08:17-08:18'], autoRepair: false, checkEverySeconds: 300, fleetIds: ['1远征船'] });
+      const flags = nativeTaskValues(s, {}), sentAt = [];
+      f.client.onSend = (_, body) => {
+        sentAt.push(clock - start); Object.assign(f.state.fleets[0], { state: 2, treasureLootUid: body.uid }); stop.aborted = true;
+      };
+      await runLoop(f.client, f.protocol, { config: f.config, player: f.player, rounds: 2, everyMs: 300000, allowMutate: true,
+        stop, getSettings: () => s, usageLedger: usage, isEnabled: key => flags[key] === true,
+        sleep: async ms => { clock += ms; assert(clock <= start + 60000, '错过了参与时段'); } });
+      assert.deepEqual(sentAt, [10000]);
+    } finally { Date.now = originalNow; }
   });
 
   await check('轮间按巨轮间隔检查，暂停后不再继续派遣', async () => {

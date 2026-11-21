@@ -100,7 +100,7 @@ export const automationTasks = [
   ['freeRecruit', '英雄免费招募', '日常', false],
   ['heroRecruitRewards', '英雄累计招募档位领奖', '招募', false],
   ['freeGold', '免费点金', '日常', false],
-  ['arena', '竞技场挑战', '日常', false],
+  ['arena', '竞技场挂机', '日常', false],
   ['trialSweep', '试炼每日首轮免费扫荡', '挑战', false],
   ['trialPaidSweep', '试炼钻石扫荡', '挑战', false],
   ['trialAdSweep', '试炼免广告扫荡', '挑战', false],
