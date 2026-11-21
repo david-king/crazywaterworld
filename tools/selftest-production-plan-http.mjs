@@ -325,6 +325,31 @@ try {
       assert.equal(preferences.resources.keepAccelerators, 500);
     } finally { await f.close(); }
   });
+  await test('禁止领取某类工厂后，手动加速仍然生效并保留成品', async () => {
+    const f = await fixture();
+    try {
+      await updateSettings(f, settings => { settings.factory.blockedCollectionTypes = ['食品厂']; });
+      await f.api('connect', {});
+      const factory = f.state.responses.OnWaterRequest.building[0];
+      const finishTime = f.state.now + 58;
+      factory.factory.factoryQ.push({ idx: 0, productId: '面包', finishTime });
+      const stock = { itemId: '加速器', num: 1 };
+      f.state.responses.AllItemRequest.items.push(stock);
+      f.session().client.sendWatch = async (name, body, options) => {
+        options.beforeSend();
+        assert.equal(name, 'SpeedUpFactoryProduceRequest');
+        stock.num -= body.speedUp.useNum;
+        factory.factory.factoryQ = [];
+        factory.factory.finishedProducts.push({ id: '面包', num: 1 });
+      };
+      const result = await f.api('world/production-speed', { confirm: true, kind: 'factory', buildingId: factory.buildingId,
+        index: 0, productId: '面包', finishTime, maxUse: 1 });
+      assert.equal(result.confirmed, true);
+      assert.equal(stock.num, 0);
+      assert(!f.state.requests.includes('GainFactoryProduceRequest'));
+      assert.deepEqual(factory.factory.finishedProducts, [{ id: '面包', num: 1 }]);
+    } finally { await f.close(); }
+  });
   await test('真实HTTP保留全部当前订单与完整库存并保持零游戏写入', async () => {
     const f = await fixture();
     try {

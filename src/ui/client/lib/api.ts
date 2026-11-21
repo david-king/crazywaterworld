@@ -49,7 +49,7 @@ export function createAccountRequest(
 ) {
   if (!accountId) throw new Error("请先选择账号");
   return async (path: string, options: RequestInit): Promise<unknown> => {
-    const url = `${path}?account=${encodeURIComponent(accountId)}`;
+    const url = `${path}${path.includes("?") ? "&" : "?"}account=${encodeURIComponent(accountId)}`;
     // An account is captured when this client is created. Never fall back to
     // the server's active account or retry a write whose result is unknown.
     const writable = !["GET", "HEAD"].includes(

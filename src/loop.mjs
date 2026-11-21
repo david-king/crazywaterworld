@@ -103,7 +103,7 @@ export async function runLoop(client, protocol, {
   isStageBusy = () => false,
   isTrialBusy = () => false, isPirateBusy = () => false,
   challengeRun = createChallengeRun(),
-  getSettings = () => null, getHeroSettings = getSettings, onFishBookComplete,
+  getSettings = () => null, getHeroSettings = getSettings, getBlockedCollectionTypes, onFishBookComplete,
   usageLedger = null, heroUsageLedger = usageLedger,
   getEveryMs = () => everyMs,
   schedule = work => work(),
@@ -280,7 +280,7 @@ export async function runLoop(client, protocol, {
     if (name === 'SCServerTimeChanged') scheduler.wake();
   });
   const factorySchedule = createFactorySchedule(client, {
-    getSettings, getConfig: () => config,
+    getSettings, getBlockedCollectionTypes, getConfig: () => config,
     isEnabled: key => !stop.aborted && client.connected !== false && nativePreferenceEnabled(getSettings(), key)
       && (!isEnabled || isEnabled(key)),
     onWake: scheduler.wake,
@@ -421,7 +421,7 @@ export async function runLoop(client, protocol, {
     const legacyEnabled = key => enabled(key) && !takeoverReason(key);
     const attemptedOrders = new Set();
     const harvestOptions = { config, player, attemptedOrders, cargoEnabled: () => (!!isEnabled && enabled('cargo')) || (needsCargoDemand(getSettings()) && runtimeActive()),
-      finishEnabled: () => allowWorld('finishOrder'), getSettings, getUsage: usage,
+      finishEnabled: () => allowWorld('finishOrder'), getSettings, getBlockedCollectionTypes, getUsage: usage,
       beforeStep: guard.before, afterStep: guard.after, cancelStep: guard.cancel };
     function phaseFailure(phase, title, error, taskKey) {
       if (!client.connected || error.code === 'SETTINGS_STALE' || error.code === 'RESOURCE_STALE') throw error;
@@ -477,7 +477,7 @@ export async function runLoop(client, protocol, {
           if (kind === 'upgrade') return checkUpgrade && enabled('upgrade') && orderRead;
           return ['startProduce', 'nativeProduce'].includes(kind) && canFactory('startProduce') && orderRead;
         };
-        const plan = planWorld(survey, { config, enabled: allow, settings: currentSettings, usage: usage(), extraDemand: demand });
+        const plan = planWorld(survey, { config, enabled: allow, settings: currentSettings, blockedCollectionTypes: getBlockedCollectionTypes?.(), usage: usage(), extraDemand: demand });
         if (currentSettings?.factory?.cooperateNative && allow('startProduce')) observeNativePlan(survey, plan);
         const freshGuard = runtimeGuard(createActionGuard(client, getSettings, usageLedger, { player, enabled: current }));
         const result = await runWorldRound(client, protocol, plan, { ...harvestOptions, allowMutate, enabled: allow, onStep: stepLog('world'),
@@ -1170,7 +1170,7 @@ export async function runLoop(client, protocol, {
         if (factorySchedule.active())
           factorySchedule.checked(survey.factories, { version: factoryReadVersion, slots: survey.factorySlots, progressed: true });
         const plan = planWorld(survey, { config, enabled: allowWorld,
-          settings, usage: usage(), extraDemand,
+          settings, blockedCollectionTypes: getBlockedCollectionTypes?.(), usage: usage(), extraDemand,
           allowSpeedUp: isEnabled ? enabled('speedUp') : allowSpeedUp,
           allowReroll: isEnabled ? enabled('denyOrder') : allowReroll,
           minOrderExp: settings ? settings.resident.minExp : isEnabled && enabled('denyOrder') ? null : 0,

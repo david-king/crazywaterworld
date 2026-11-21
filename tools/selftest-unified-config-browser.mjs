@@ -13,8 +13,13 @@ fs.writeFileSync(process.env.CW_CONFIG_PACK, JSON.stringify([[1, 'HeroCfg', { da
   { id: '瑞文', name: '骑士瑞文', quality: 'PURPLE', type: '英雄' },
   { id: '波奇', name: '波奇', quality: 'PURPLE', type: '英雄' },
   { id: '训练目标', name: '训练木人', quality: 'PURPLE', type: 'NPC' },
-] }], [2, 'BuildingUnlockCfg', { data: [1, 2, 3].map(id => ({ buildingType: '远征船', buildingId: id + '远征船' })) }],
+] }], [2, 'BuildingUnlockCfg', { data: [
+  ...[1, 2, 3].map(id => ({ buildingType: '远征船', buildingId: id + '远征船' })),
+  ...[1, 2].map(id => ({ buildingType: '精铁厂', buildingId: id + '精铁厂' })),
+] }],
   [3, 'ItemCfg', { data: ['耐火砖','高温合金','木板'].map(id => ({ id })) }],
+  [4, 'BuildingCfg', { data: [{ buildingType: '精铁厂', name: '冶炼厂' }] }],
+  [5, 'BuildingUpgradeCfg', { data: [{ buildingType: '精铁厂', product: [['精铁', 1]] }] }],
 ]));
 const { saveStore } = await import('../src/accounts.mjs');
 const { defaultSettings, saveAutomationSettings, loadAutomationSettings, settingsUiRules } = await import('../src/automation-settings.mjs');
@@ -28,6 +33,7 @@ saveStore({ version: 1, activeId: 'config-a', accounts: ['config-a', 'config-b']
   automation: { enabled: false, autoStart: false, paused: true },
 })) });
 const settings = defaultSettings();
+settings.loop.world = true;
 settings.factory.enabled = true; settings.factory.produce = false; settings.factory.keepStock = 321;
 settings.heroes.enabled = true; settings.loop.heroes = false; settings.heroes.level = false; settings.heroes.star = true;
 settings.heroes.needsSelection = true;
@@ -404,6 +410,12 @@ try {
 
   await page.locator('[data-config-family=production]').click();
   const factory = page.locator('#config-field-factory-enabled');
+  const exclusions = page.locator('#config-field-factory-blockedCollectionTypes');
+  await exclusions.locator('summary').click();
+  await exclusions.getByRole('checkbox', { name: '冶炼厂', exact: true }).check();
+  assert.equal(await exclusions.getByRole('checkbox').count(), 1);
+  await exclusions.locator('summary').click(); await saved();
+  assert.deepEqual(loadAutomationSettings('config-a').settings.factory.blockedCollectionTypes, ['精铁厂']);
   await factory.click(); await page.locator('#config-field-factory-keepStock').fill('432'); await saved();
   assert.equal(await factory.getAttribute('aria-checked'), 'false');
   assert.equal(await page.locator('#config-field-factory-produce').getAttribute('aria-checked'), 'false');
@@ -414,6 +426,7 @@ try {
   await page.reload(); await openConfig(); await page.locator('[data-config-family=production]').click();
   assert.equal(await factory.getAttribute('aria-checked'), 'false');
   assert.equal(await page.locator('#config-field-factory-keepStock').inputValue(), '432');
+  assert.equal(await exclusions.locator('summary').textContent(), '冶炼厂');
   await factory.focus(); await page.keyboard.press('Space'); await saved();
   assert.equal(loadAutomationSettings('config-a').settings.factory.enabled, true);
   assert.equal(loadAutomationSettings('config-a').settings.factory.produce, false);

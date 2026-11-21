@@ -28,34 +28,46 @@ customElements.define(
   },
 );
 
-const dailyHost = document.getElementById("daily-tasks-root");
-if (dailyHost) {
-  const host = dailyHost;
+function lazyPage(
+  id: string,
+  page: string,
+  title: string,
+  mount: (host: HTMLElement) => Promise<void>,
+) {
+  const element = document.getElementById(id);
+  if (!element) return;
+  const host = element;
   const store = getConsoleStore();
   let loading = false;
-  const loadDailies = async () => {
-    if (loading || store.getState().view.page !== "dailies") return;
+  const load = async () => {
+    if (loading || store.getState().view.page !== page) return;
     loading = true;
-    host.textContent = "正在载入日常任务…";
+    host.textContent = `正在载入${title}…`;
     try {
-      const { mountDailyTasks } = await import("./pages/daily-tasks");
-      mountDailyTasks(host);
+      await mount(host);
       unsubscribe();
     } catch {
       const retry = document.createElement("button");
       retry.type = "button";
-      retry.textContent = "载入失败，重试日常任务";
-      retry.onclick = loadDailies;
+      retry.textContent = `载入失败，重试${title}`;
+      retry.onclick = load;
       host.replaceChildren(retry);
     } finally {
       loading = false;
     }
   };
   const unsubscribe = store.subscribe((state, previous) => {
-    if (state.view.page !== previous.view.page) void loadDailies();
+    if (state.view.page !== previous.view.page) void load();
   });
-  void loadDailies();
+  void load();
 }
+
+lazyPage("daily-tasks-root", "dailies", "日常任务", async (host) =>
+  (await import("./pages/daily-tasks")).mountDailyTasks(host),
+);
+lazyPage("chat-root", "chat", "聊天", async (host) =>
+  (await import("./pages/chat")).mountChat(host),
+);
 
 const hostElement = document.getElementById("login-settings-root");
 const dialogElement = document.getElementById("account-login-dialog");

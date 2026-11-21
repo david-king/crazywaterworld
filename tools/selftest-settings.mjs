@@ -636,6 +636,38 @@ try {
     }
   });
 
+  await check('按建筑类型保留所有同类产物，发送前名单变化只剔除对应建筑', async () => {
+    const settings = quiet();
+    settings.building.collect = settings.factory.gain = settings.factory.produce = true;
+    settings.farm.enabled = settings.farm.harvest = true;
+    const product = [{ id: '小麦', num: 1 }];
+    const factories = [1, 2].map(i => building('食品厂', { buildingId: i + '食品厂', factory: { factoryQ: [], finishedProducts: product } }));
+    const state = survey({ 木材: 10 }, [...factories, building('食品厂B', { factory: { factoryQ: [], finishedProducts: product } }),
+      building('精铁厂', { product }), building('精铁厂', { buildingId: '2精铁厂', product }),
+      building('训练营', { product }), building('农田', { farm: { productId: '小麦', ripeTime: 1 } })]);
+    const options = { config, settings };
+    const before = planWorld(state, options);
+    const blocked = ['精铁厂', '食品厂', '农田'];
+    settings.factory.blockedCollectionTypes = blocked;
+    const plan = planWorld(state, options);
+    assert.deepEqual(plan.actions.filter(a => a.kind === 'gainFactory').map(a => a.body.buildingId), ['1食品厂B']);
+    assert.deepEqual(plan.actions.find(a => a.kind === 'collectProduct').body.buildingId, ['1训练营']);
+    assert(!plan.actions.some(a => a.request === 'FarmHarvestRequest'));
+    assert(plan.actions.some(a => a.kind === 'startProduce' && a.body.buildingId === '1食品厂'));
+    const actions = before.actions.filter(a => ['gainFactory', 'collectProduct'].includes(a.kind) || a.request === 'FarmHarvestRequest');
+    const protocol = Object.fromEntries(actions.flatMap(a => [[a.request, {}], [a.response, {}]]));
+    const writes = [];
+    const client = { async request(name, body) { writes.push([name, body.buildingId]); return {}; } };
+    settings.factory.blockedCollectionTypes = [];
+    await runWorld(client, protocol, { actions }, { ...options, allowMutate: true,
+      beforeStep() { settings.factory.blockedCollectionTypes = blocked; } });
+    assert.deepEqual(writes, [['GainFactoryProduceRequest', '1食品厂B'], ['CollectBuildingProductRequest', ['1训练营']]]);
+    settings.factory.blockedCollectionTypes = [...blocked, '训练营', '食品厂B'];
+    writes.length = 0;
+    await runWorld(client, protocol, { actions }, { ...options, allowMutate: true });
+    assert.deepEqual(writes, []);
+  });
+
   await check('建筑禁用、蓝图保留、加速器共用保留量', () => {
     const settings = quiet(); settings.building.build = true;
     const plot = building('仓库', { buildingId: '2仓库', level: 0 });

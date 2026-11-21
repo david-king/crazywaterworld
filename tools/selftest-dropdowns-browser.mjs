@@ -61,7 +61,7 @@ try {
   await page.screenshot({ path: path.join(output, 'building-desktop.png'), animations: 'disabled' });
   await assertPanel(page, panel);
   assert.equal(await page.locator(panel + ' input[type=search]').evaluate(node => node === document.activeElement), true);
-  console.log('通过：禁止建筑下拉完整越过配置卡片边界，四角和中心均可操作');
+  console.log('通过：建筑排除名单下拉完整越过配置卡片边界，四角和中心均可操作');
   assert.match(await page.locator('#tabs [data-tab=settings]').textContent(), /挂机配置/);
   assert.match(await page.locator('#config-account-name').textContent(), /的挂机配置$/);
   await page.locator(panel + ' input[type=search]').fill('验收建筑30');

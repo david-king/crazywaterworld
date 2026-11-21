@@ -87,6 +87,7 @@ ${chrome()}
 
   <section id="tab-guild" class="hidden">${guildPage()}</section>
   <section id="tab-dailies" class="hidden" aria-label="日常任务"><div id="daily-tasks-root"></div></section>
+  <section id="tab-chat" class="hidden" aria-label="聊天"><div id="chat-root"></div></section>
 
   <section id="tab-giftcodes" class="hidden">
     ${giftCodesPage()}
@@ -687,6 +688,11 @@ function subscribe() {
   if (stream) return;
   stream = new EventSource('/api/events?scope=all' + (compactLogs ? '&compact=1' : ''));
   stream.addEventListener('logs-cleared', event => clearLogBefore(JSON.parse(event.data)));
+  stream.addEventListener('chat-changed', event => {
+    const detail = JSON.parse(event.data);
+    if (detail.account === current) window.dispatchEvent(new CustomEvent('cw-chat-update', { detail }));
+  });
+  stream.addEventListener('open', () => window.dispatchEvent(new Event('cw-chat-update')));
   stream.addEventListener('lineup-changed', event => {
     const { account } = JSON.parse(event.data);
     if (account === current) void refreshSavedLineups();
@@ -2685,7 +2691,7 @@ async function boot() {
     : savedView?.tab === 'resources' && savedView.resource === 'activities' ? 'activities' : savedView?.tab;
   try {
     // 恢复账号页时先显示保存的角色资料，由该页按连接状态决定是否读取资源。
-    await loadAccounts(true, initialTab !== 'account');
+    await loadAccounts(true, initialTab !== 'account' && initialTab !== 'chat');
   } catch (error) {
     $('hint').textContent = '';
     reportError(error);

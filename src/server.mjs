@@ -1,4 +1,5 @@
 import { createSettingsHistory } from './settings-history.mjs';
+import { createGameChat } from './chat.mjs';
 import { serveClientAsset } from './ui-assets.mjs';
 import { normalizeConsoleHost, consoleAccessHints, consoleUrl } from './console-address.mjs';
 import { createConsoleVersion, renderVersionedPage, consoleVersionError } from './console-version.mjs';
@@ -1269,9 +1270,13 @@ export function createConsole({ host = '127.0.0.1', port = 17321, onLog, recover
     });
     instance.on('frame', ({ dir, name, seq, bytes, body }) => trace(session,
       `${dir === 'out' ? '->' : '<-'} [${name}] seq=${seq} ${bytes.byteLength}B`,
-      dir === 'out' && name !== 'LoginRequest' ? body : undefined));
+      dir === 'out' && !['LoginRequest', 'PrivateChatSendRequest', 'SendChatRequest'].includes(name) ? body : undefined));
     instance.on('message', ({ seq, name, body }) => {
       try {
+        if (['PrivateChatListResponse', 'PrivateChatRecordResponse', 'SCPrivateChatMessage'].includes(name)) {
+          trace(session, `[${name}] seq=${seq}`);
+          return;
+        }
         const data = traceJson(body);
         trace(session, `[${name}] seq=${seq} ${FULL_TRACE_MESSAGE.test(name) || data.length <= 400 ? data : data.slice(0, 400) + ' [正文已截断]'}`);
       } catch { /* 记录失败不影响回包处理。 */ }
@@ -3441,6 +3446,42 @@ export function createConsole({ host = '127.0.0.1', port = 17321, onLog, recover
         const result=await progressionJob(session,account,route+':'+(parsed.searchParams.get('key')||'catalog')+':'+(parsed.searchParams.get('page')||1),null,client=>route.endsWith('/view')?readActivityRanking(client,loadConfigSafe(),session.player,parsed.searchParams.get('key'),Number(parsed.searchParams.get('page')||1)):{tabs:activityRankCatalog(client,loadConfigSafe(),session.player).map(({key,label})=>({key,label}))},{read:true});
         json(result);return;
       }
+      if (['GET /api/chat', 'GET /api/chat/profile', 'GET /api/chat/emojis', 'POST /api/chat/send'].includes(route)) {
+        const id = parsed.searchParams.get('account');
+        if (!id) throw Error('请选择聊天账号');
+        const { session } = scoped_(parsed);
+        if (id !== session.id) throw Error('聊天账号不匹配');
+        const client = session.client, player = session.player, generation = session.generation;
+        const current = () => {
+          if (!client?.connected || !player || session.paused || session.generation !== generation || session.client !== client || session.player !== player)
+            throw Error('请先连接当前账号，再使用聊天');
+        };
+        current();
+        client.chat ??= createGameChat(client, { player, config: loadConfigSafe({ allowStale: true }),
+          changed(keys) {
+            if (session.client !== client) return;
+            const channels = [...new Set(keys.map(key => key.split('/')[0]))];
+            const event = 'event: chat-changed\ndata: ' + JSON.stringify({ account: id, channels }) + '\n\n';
+            for (const stream of streams) if (stream.allAccounts || stream.account === id) writeStream(stream, event);
+          } });
+        if (req.method === 'POST') {
+          const payload = jsonBody();
+          needConfirm(payload);
+          json(await client.chat.send(payload,
+            work => enqueue(session, work, '发送聊天消息', { recoverFormation: false }), current));
+          return;
+        }
+        res.setHeader('cache-control', 'no-store');
+        const schedule = work => readJob(session, work, { recoverFormation: false });
+        if (route === 'GET /api/chat/emojis') {
+          json(await client.chat.emojis(schedule, current));
+          return;
+        }
+        const peerId = parsed.searchParams.get('peer');
+        json(route === 'GET /api/chat/profile' ? await client.chat.profile(peerId, schedule, current)
+          : await client.chat.read(parsed.searchParams.get('channel'), peerId, schedule, current));
+        return;
+      }
       if (route === 'GET /api/accounts/card') {
         const { account, session } = scoped_(parsed);
         const client = session.client;
@@ -4111,7 +4152,7 @@ export function createConsole({ host = '127.0.0.1', port = 17321, onLog, recover
           if (!enabled()) throw new Error('请先连接并同步当前账号，再' + (start ? '手动排产' : '使用加速器'));
           const result = start
             ? await startManualFactoryProduction(client, protocolFor(client), payload, { player, enabled, config: loadConfigSafe(), settings: session.preferences })
-            : await speedUpProduction(client, protocolFor(client), payload, { player, enabled });
+            : await speedUpProduction(client, protocolFor(client), payload, { player, enabled, config: loadConfigSafe(), getSettings: () => session.preferences });
           session.worldRead = null;
           emit(session, result.confirmed ? 'info' : 'warn', result.label, { worldUpdated: true });
           return result;

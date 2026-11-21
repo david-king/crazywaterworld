@@ -13,6 +13,7 @@ const cases = [
   ['selftest-world-boss-lineups.mjs'],
   ['selftest-league-challenge.mjs'],
   ['selftest-react-client.mjs'],
+  ['selftest-chat.mjs'],
   ['selftest-account-backup-http.mjs'],
   ['selftest-account-backup-ui.mjs'],
   ['selftest-fleet-speed.mjs'],

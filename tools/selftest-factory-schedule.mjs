@@ -108,6 +108,20 @@ test('禁用类型或单厂的推送不唤醒，合法int64数量与已读状态
   f.settings.factory.disabledTypes=[]; f.scheduler.checked([factory([],[item(2)])],{progressed:false,slots:6});
   f.push([factory([],[item(2)])]); assert.equal(f.state.wakes,0); f.scheduler.dispose();
 });
+test('禁止领取的工厂保留成品，只按生产需要唤醒', () => {
+  const f = fixture();
+  f.settings.factory.blockedCollectionTypes = ['材料厂'];
+  f.settings.factory.produce = false;
+  f.scheduler.checked([factory([], [item(1)])], { progressed: true, slots: 6 });
+  f.push([factory([], [item(2)], { buildingId: '2材料厂' })]);
+  assert.equal(f.state.wakes, 0);
+  assert.equal(f.scheduler.nextAt(), 1_030_000);
+  f.settings.factory.produce = true;
+  assert.equal(f.scheduler.nextAt(), 1_030_000);
+  f.push([factory([job(0,1100)], [item(2)])]);
+  assert.equal(f.state.wakes, 1);
+  f.scheduler.dispose();
+});
 test('禁用生产仍按领取开关关注完工时间和成品推送', () => {
   const f=fixture(); f.settings.factory.disabledTypes=['材料厂'];
   f.scheduler.checked([factory([job(0,1100)])],{version:0,slots:6});

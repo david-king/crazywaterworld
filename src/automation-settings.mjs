@@ -22,7 +22,7 @@ export const settingsFile = () => path.join(dataDirectory(), 'automation-setting
 export const SETTINGS_FORMAT = 'crazywaterworld-automation';
 // 文件 version / 账号 settingsVersion 是格式编号，只随结构迁移调整；
 // revision 是每次保存递增的修订号，仅用于并发冲突检查，不能用作格式版本。
-export const SETTINGS_SCHEMA_VERSION = 39;
+export const SETTINGS_SCHEMA_VERSION = 40;
 const LEGACY_SETTINGS_FORMAT = 'crazywaterword-automation';
 const treasureQualityLabels = { ORANGE: '万吨货轮', PURPLE: '中型货轮', BLUE: '小型货轮' };
 const treasureChaseDefaults = {
@@ -61,7 +61,7 @@ export const DEFAULT_SETTINGS = {
     autoUpgrade: false, upgradeCoinValuePerDiamond: 100, upgradeMinReturnPercent: 150, upgradeMaxLevel: 2, upgradeDailyDiamondLimit: 300 },
   loop: { rounds: 0, everySeconds: 60, tasks: false, dailies: false, world: false, heroes: false },
   building: { enabled: false, collect: false, build: false, upgrade: false, finish: false, supply: false, disabledTypes: [], speedUp: false, keepBlueprints: 0, maxBuilds: 5, maxUpgrades: 2 },
-  factory: { enabled: false, gain: false, produce: false, cooperateNative: false, disabledTypes: [], keepStock: 50, checkEverySeconds: 30, demandFirst: false, demandPriority: DEMAND_SOURCES.map(([id]) => id), speedUpSources: [], speedUp: false, speedUpItems: [] },
+  factory: { enabled: false, gain: false, blockedCollectionTypes: [], produce: false, cooperateNative: false, disabledTypes: [], keepStock: 50, checkEverySeconds: 30, demandFirst: false, demandPriority: DEMAND_SOURCES.map(([id]) => id), speedUpSources: [], speedUp: false, speedUpItems: [] },
   farm: { enabled: false, harvest: false, autoPlant: false, customPlant: false, crops: [], speedUp: false },
   // 总开关与细项独立保存；开启总开关不会开启任何细项。
   gather: { enabled: false, fishing: false, fishBook: false, floaters: false, antiqueFloaters: false, continueWhenFull: false, diving: false, keyOpen: false, salvage: false, upgradeFishing: false, upgradeDiving: false, upgradeSalvage: false, targetLevel: 2 },
@@ -147,7 +147,8 @@ const constraints = {
   'radar.minDurabilityPercent':int(100), 'radar.checkEverySeconds':int(300,10),
   'loop.rounds': int(100000), 'loop.everySeconds': int(86400, 1),
   'building.keepBlueprints': int(), 'building.maxBuilds': int(100), 'building.maxUpgrades': int(100),
-  'building.disabledTypes': strings(), 'factory.disabledTypes': strings(), 'factory.keepStock': int(100000), 'factory.checkEverySeconds': int(300, 1),
+  'building.disabledTypes': strings(), 'factory.disabledTypes': strings(), 'factory.blockedCollectionTypes': strings(),
+  'factory.keepStock': int(100000), 'factory.checkEverySeconds': int(300, 1),
   'factory.demandPriority': { ...strings(12), values: DEMAND_SOURCES.map(([id]) => id) },
   'factory.speedUpSources': { ...strings(12), values: DEMAND_SOURCES.map(([id]) => id) },
   'factory.speedUpItems': strings(), 'farm.crops': { kind: 'crops' }, 'gather.targetLevel': int(1000, 1),
@@ -348,6 +349,7 @@ function validateCurrentSettings(input, { partial = false, catalog = null } = {}
   if (['arena', 'league'].some(group => plain(input?.[group]) && Object.hasOwn(input[group], 'keepTickets'))) input = migrateVersion23Settings(input);
   if (plain(input?.arena) && (Object.hasOwn(input.arena, 'dailyBattleLimit') || Object.hasOwn(input.arena, 'fallbackLowerRank'))) input = migrateVersion37Settings(input);
   input = migrateVersion38Settings(input);
+  input = migrateVersion39Settings(input);
   if (plain(input?.resourceFields) && !Object.hasOwn(input.resourceFields, 'refillAfterLoss')) {
     input = { ...input, resourceFields: { ...input.resourceFields, refillAfterLoss: false } };
   }
@@ -485,6 +487,7 @@ function validateCurrentSettings(input, { partial = false, catalog = null } = {}
   if (catalog) {
     for (const [name, collection] of Object.entries({
       'building.disabledTypes': 'buildings', 'factory.disabledTypes': 'factories', 'factory.speedUpItems': 'materials',
+      'factory.blockedCollectionTypes': 'collectionBuildings',
       'resident.blockedMaterials': 'materials', 'museum.factorMaterials': 'materials', 'museum.maps': 'maps',
       'heroes.heroIds': 'heroes', 'pet.species': 'petSpecies',
       'treasure.fleetIds': 'expeditionFleets', 'treasure.rewardItems': 'materials',
@@ -521,9 +524,12 @@ export function settingsCatalog(config) {
   for (const item of buildings) counts.set(item.label, (counts.get(item.label) ?? 0) + 1);
   for (const item of buildings) if (counts.get(item.label) > 1) item.label += `（${item.value}）`;
   const factoryTypes = new Set(rows('BuildingProduceCfg').map(r => r.buildType));
+  const collectionTypes = new Set([...factoryTypes, '农田']);
+  for (const row of rows('BuildingUpgradeCfg')) if (row.product?.length) collectionTypes.add(row.buildingType);
   const materials = unique([...rows('ItemCfg').map(r => option(r.id, r.show_name || r.showName || r.name || r.id)), ...rows('ResourceCfg').map(r => option(r.id, r.show_name || r.id))]);
   return {
     buildings, factories: buildings.filter(r => factoryTypes.has(r.value)),
+    collectionBuildings: buildings.filter(r => collectionTypes.has(r.value)),
     guildTech: unique(rows('GuildTechCfg').map(r => option(r.techId, r.name || '科技 ' + r.techId))),
     materials, treasureRewards: treasureRewardOptions(config, materials),
     treasureQualities: Object.entries(treasureQualityLabels).map(([value, label]) => option(value, label)),
@@ -681,7 +687,7 @@ export function importAutomationSettings(document, options) {
   return validateSettings(migrateSettingsVersion(document.settings, document.version), { ...options, partial: false });
 }
 
-const settingsMigrations = new Map([[1, migrateVersion1Settings], [2, migrateVersion2Settings], [3, migrateVersion3Settings], [4, migrateVersion4Settings], [5, migrateVersion5Settings], [6, migrateVersion6Settings], [7, migrateVersion7Settings], [8, migrateVersion8Settings], [9, migrateVersion9Settings], [10, migrateVersion10Settings], [11, migrateVersion11Settings], [12, migrateVersion12Settings], [13, migrateVersion13Settings], [14, migrateVersion14Settings], [15, migrateVersion15Settings], [16, migrateVersion16Settings], [17, migrateVersion17Settings], [18, migrateVersion18Settings], [19, migrateVersion19Settings], [20, migrateVersion20Settings], [21, migrateVersion21Settings], [22, migrateVersion22Settings], [23, migrateVersion23Settings], [24, migrateVersion24Settings], [25, migrateVersion25Settings], [26, migrateVersion26Settings], [27, migrateVersion27Settings], [28, migrateVersion28Settings], [29, migrateVersion29Settings], [30, migrateVersion30Settings], [31, migrateVersion31Settings], [32, migrateVersion32Settings], [33, migrateVersion33Settings], [34, migrateVersion34Settings], [35, migrateVersion35Settings], [36, migrateVersion36Settings], [37, migrateVersion37Settings], [38, migrateVersion38Settings]]);
+const settingsMigrations = new Map([[1, migrateVersion1Settings], [2, migrateVersion2Settings], [3, migrateVersion3Settings], [4, migrateVersion4Settings], [5, migrateVersion5Settings], [6, migrateVersion6Settings], [7, migrateVersion7Settings], [8, migrateVersion8Settings], [9, migrateVersion9Settings], [10, migrateVersion10Settings], [11, migrateVersion11Settings], [12, migrateVersion12Settings], [13, migrateVersion13Settings], [14, migrateVersion14Settings], [15, migrateVersion15Settings], [16, migrateVersion16Settings], [17, migrateVersion17Settings], [18, migrateVersion18Settings], [19, migrateVersion19Settings], [20, migrateVersion20Settings], [21, migrateVersion21Settings], [22, migrateVersion22Settings], [23, migrateVersion23Settings], [24, migrateVersion24Settings], [25, migrateVersion25Settings], [26, migrateVersion26Settings], [27, migrateVersion27Settings], [28, migrateVersion28Settings], [29, migrateVersion29Settings], [30, migrateVersion30Settings], [31, migrateVersion31Settings], [32, migrateVersion32Settings], [33, migrateVersion33Settings], [34, migrateVersion34Settings], [35, migrateVersion35Settings], [36, migrateVersion36Settings], [37, migrateVersion37Settings], [38, migrateVersion38Settings], [39, migrateVersion39Settings]]);
 const supportedSettingsVersion = version => Number.isSafeInteger(version) && version >= 1;
 const entrySettingsVersion = entry => Object.hasOwn(entry, 'settingsVersion') ? entry.settingsVersion : 1;
 function newestSettingsVersion(store) {
@@ -1094,6 +1100,11 @@ function migrateVersion22Settings(settings) {
     if (plain(next[group])) next[group] = { maxPowerRatio: 0, ...next[group] };
   }
   return next;
+}
+
+function migrateVersion39Settings(settings) {
+  if (!plain(settings?.factory) || Object.hasOwn(settings.factory, 'blockedCollectionTypes')) return settings;
+  return { ...settings, factory: { ...settings.factory, blockedCollectionTypes: [] } };
 }
 
 function migrateVersion38Settings(settings) {

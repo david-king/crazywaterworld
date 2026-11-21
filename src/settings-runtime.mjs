@@ -6,6 +6,7 @@ import { cityWarUsesGlobalStrategy } from './city-war-settings.mjs';
 const collections = {
   buildings: { tables: ['BuildingCfg', 'BuildingUnlockCfg'], fields: ['building.disabledTypes'] },
   factories: { tables: ['BuildingCfg', 'BuildingUnlockCfg', 'BuildingProduceCfg'], fields: ['factory.disabledTypes'] },
+  collectionBuildings: { tables: ['BuildingCfg', 'BuildingUnlockCfg', 'BuildingProduceCfg', 'BuildingUpgradeCfg'], fields: ['factory.blockedCollectionTypes'] },
   materials: { tables: ['ItemCfg', 'ResourceCfg'], fields: ['factory.speedUpItems', 'resident.blockedMaterials',
     'museum.factorMaterials', 'treasure.rewardItems', 'treasure.fallbackMediumRewardPriority', 'treasure.fallbackSmallRewardPriority',
     'alliance.allowedMaterials', 'alliance.blockedMaterials', 'alliance.requestMaterials', 'guildShip.rewardItems',

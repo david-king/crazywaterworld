@@ -177,9 +177,10 @@ function sumEffect(effect, name) {
 
 // <序号><可选字母><建筑类型> 里抠出类型：取能匹配上的最长后缀。
 export function makeTypeResolver(config) {
+  const plots = new Map(rowsOf(config, 'BuildingUnlockCfg').map(r => [r.buildingId, r.buildingType]));
   const types = [...new Set(rowsOf(config, 'BuildingCfg').map((r) => r.buildingType))]
     .sort((a, b) => b.length - a.length);
-  return (buildingId) => types.find((type) => buildingId.endsWith(type)) ?? null;
+  return (buildingId) => plots.get(buildingId) ?? types.find((type) => buildingId.endsWith(type)) ?? null;
 }
 
 export function displayBuilding(config, building) {
@@ -568,6 +569,7 @@ export function planWorld(survey, {
   maxUpgrades = Infinity,
   enabled: taskEnabled = () => true,
   settings = null,
+  blockedCollectionTypes = settings?.factory?.blockedCollectionTypes,
   usage = { counters: {} },
   extraDemand = [],
 } = {}) {
@@ -580,6 +582,7 @@ export function planWorld(survey, {
   };
   const blockedBuilding = b => !!settings?.building.disabledTypes.some(id => id === b.type || id === b.buildingId);
   const blockedFactory = b => !!settings?.factory.disabledTypes.some(id => id === b.type || id === b.buildingId);
+  const canCollect = b => !blockedCollectionTypes?.length || !blockedCollectionTypes.includes(b.type ?? b.buildingId.replace(/^\d+/, ''));
   if (settings) maxUpgrades = settings.building.maxUpgrades;
   const name = id => displayMaterial(config, id);
   const buildingName = b => displayBuilding(config, b);
@@ -672,7 +675,7 @@ export function planWorld(survey, {
   }
   // 1. 收成品：工厂走 GainFactoryProduce，非工厂建筑的囤积产物一次性批量收。
   for (const b of survey.factories) {
-    if (enabled('gainFactory') && (b.factory.finishedProducts ?? []).length > 0) {
+    if (enabled('gainFactory') && canCollect(b) && (b.factory.finishedProducts ?? []).length > 0) {
       for (const item of b.factory.finishedProducts) markHarvest(item.id, Number(item.num));
       actions.push({
         kind: 'gainFactory',
@@ -683,7 +686,7 @@ export function planWorld(survey, {
       });
     }
   }
-  const collectible = survey.buildings.filter((b) => !b.factory && b.product.length > 0);
+  const collectible = survey.buildings.filter(b => !b.factory && b.product.length > 0 && canCollect(b));
   if (enabled('collectProduct') && collectible.length > 0) {
     for (const b of collectible) for (const item of b.product) markHarvest(item.id, item.num);
     actions.push({
@@ -816,7 +819,7 @@ export function planWorld(survey, {
     const crops = rowsOf(config, 'FarmlandPlantCfg');
     for (const plot of survey.buildings.filter(b => b.type === '农田' && b.level > 0 && !b.buildStartTime && !b.buildFinishTime)) {
       const crop = crops.find(r => r.id === plot.farm?.productId);
-      if (crop && plot.farm.ripeTime > 0 && plot.farm.ripeTime < (survey.serverNow ?? now)) {
+      if (crop && canCollect(plot) && plot.farm.ripeTime > 0 && plot.farm.ripeTime < (survey.serverNow ?? now)) {
         markHarvest(crop.id, crop.produceNum);
         actions.push({ kind: 'farm', request: 'FarmHarvestRequest', response: 'FarmHarvestResponse',
           body: { buildingId: [plot.buildingId] }, label: '农田收获 ' + name(crop.id) });
@@ -1539,7 +1542,7 @@ export async function startManualFactoryProduction(client, protocol, target, { c
   return { confirmed: true, label: step.displayFactory + '已安排生产' + name + ' ×1' };
 }
 
-export async function speedUpProduction(client, protocol, target, { player, enabled }) {
+export async function speedUpProduction(client, protocol, target, { player, enabled, config, getSettings }) {
   const { kind, buildingId, index, productId, finishTime, maxUse } = target;
   const farm = kind === 'farm';
   if ((!farm && kind !== 'factory') || typeof buildingId !== 'string' || !buildingId
@@ -1568,12 +1571,15 @@ export async function speedUpProduction(client, protocol, target, { player, enab
   const result = { confirmed: true, useNum: spent, label: step.label + '，已使用 ' + spent + ' 个加速器' };
   if (farm || !enabled()) return result;
   // The game's factory button collects this factory's finished products after acceleration.
+  const type = makeTypeResolver(config)(buildingId) ?? buildingId.replace(/^\d+/, '');
+  const canCollect = () => !getSettings?.()?.factory?.blockedCollectionTypes?.includes(type);
+  if (!canCollect()) return result;
   try {
     const water = normalize(await client.request('OnWaterRequest', {}, 'OnWaterResponse'));
     const factory = water.building?.find(b => b.buildingId === buildingId)?.factory;
     if (factory?.finishedProducts?.length && enabled()) {
       await confirmFactoryProductionBeforeHarvest(client, protocol, buildingId, { player, enabled });
-      if (!enabled()) return result;
+      if (!enabled() || !canCollect()) return result;
       const reply = await client.request('GainFactoryProduceRequest', { buildingId }, 'GainFactoryProduceResponse');
       result.label += reply?.products?.asset?.length ? '，已收取成品' : '，成品领取结果待同步';
     }
@@ -1581,6 +1587,26 @@ export async function speedUpProduction(client, protocol, target, { player, enab
     result.label += '，成品领取待核对：' + error.message;
   }
   return result;
+}
+
+// 名单可能在计划生成后变更。批量收取只发送仍允许的建筑，空批次不能发给服务端。
+function checkCollectionTargets(step, blocked, config) {
+  if (!blocked?.length) return step;
+  if (step.request === 'FarmHarvestRequest') {
+    if (blocked.includes('农田')) throw new AutomationSkip('农田已设置禁止自动领取');
+    return step;
+  }
+  const resolveType = makeTypeResolver(config);
+  const typeOf = id => resolveType(id) ?? id.replace(/^\d+/, '');
+  if (step.kind === 'gainFactory') {
+    if (blocked.includes(typeOf(step.body.buildingId))) throw new AutomationSkip('此工厂已设置禁止自动领取');
+    return step;
+  }
+  const ids = step.body.buildingId.filter(id => !blocked.includes(typeOf(id)));
+  if (!ids.length) throw new AutomationSkip('这些建筑已设置禁止自动领取');
+  if (ids.length === step.body.buildingId.length) return step;
+  const names = ids.map(buildingId => displayBuilding(config, { buildingId, type: typeOf(buildingId) }));
+  return { ...step, body: { ...step.body, buildingId: ids }, label: '收取建筑产物：' + names.join('、') };
 }
 
 // 逐条执行。同类动作失败就跳过该类的剩余动作；被服务端拒过的具体动作记进 rejected，
@@ -1593,7 +1619,7 @@ export async function runWorld(client, protocol, plan, {
   onStep,
   enabled = () => true,
   config, player, cargoEnabled = () => false,
-  settings = null, getSettings, usage, getUsage, beforeStep, afterStep, cancelStep,
+  settings = null, getSettings, getBlockedCollectionTypes, usage, getUsage, beforeStep, afterStep, cancelStep,
 } = {}) {
   if (!allowMutate) throw new Error('海面自动化会改变账号状态，需要 --yes');
   const results = [];
@@ -1740,7 +1766,11 @@ export async function runWorld(client, protocol, plan, {
         ticket = await prepareAction?.(actual, { waterSnapshot });
         prepared = true;
         checkSpeedTime?.();
-        if (!enabled(step.kind) || (!step.manualCheck && !worldActionAllowed(getSettings?.() ?? settings, actual, config))) {
+        const latestSettings = getSettings?.() ?? settings;
+        if (!step.manualCheck && (step.kind === 'collectProduct' || step.kind === 'gainFactory' || step.request === 'FarmHarvestRequest')) {
+          actual = checkCollectionTargets(actual, getBlockedCollectionTypes?.() ?? latestSettings?.factory?.blockedCollectionTypes, config);
+        }
+        if (!enabled(step.kind) || (!step.manualCheck && !worldActionAllowed(latestSettings, actual, config))) {
           if (prepared) await cancelAction?.(actual, ticket, { notSent: true });
           if(step.request==='SetFactoryAutoProduceRequest')nativeTargetChecks.get(client)?.delete(step.body.buildingId);
           continue;

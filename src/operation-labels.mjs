@@ -1,5 +1,8 @@
 // Operation names shared by the server journal and the browser's network errors.
 export const operationLabels = {
+  '/api/chat': '读取游戏聊天',
+  '/api/chat/emojis': '读取聊天表情',
+  '/api/chat/send': '发送游戏聊天',
   '/api/world/production-plan': '生成排产计划',
   '/api/world/production-speed': '手动生产加速',
   '/api/world/production-start': '手动工厂排产',

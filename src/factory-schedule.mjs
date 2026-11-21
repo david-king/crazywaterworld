@@ -8,7 +8,7 @@ const table = (config, name) => config?.tables?.[name]?.data ?? [];
 
 export function nextFactoryCheck(buildings, {
   now = Date.now(), offset = 0, collect = true, produce = true, slots,
-  checkEverySeconds = 30, progressed = true, eligible = () => true, produceEligible = () => true,
+  checkEverySeconds = 30, progressed = true, eligible = () => true, collectEligible = () => true, produceEligible = () => true,
 } = {}) {
   if (!collect && !produce) return Infinity;
   const fallback = now + interval(checkEverySeconds) * 1000;
@@ -16,21 +16,23 @@ export function nextFactoryCheck(buildings, {
   for (const building of buildings ?? []) {
     const factory = building?.factory;
     if (!factory || !Number.isSafeInteger(building.level) || building.level < 1 || !eligible(building)) continue;
+    const canCollect = collect && collectEligible(building);
+    const canStart = produce && produceEligible(building);
+    if (!canCollect && !canStart) continue;
     considered = true;
     if (!Array.isArray(factory.factoryQ) || !Array.isArray(factory.finishedProducts)) { deadline = Math.min(deadline, fallback); continue; }
     const queue = factory.factoryQ;
     const finished = factory.finishedProducts.some(row => Number.isSafeInteger(row?.num) && row.num > 0);
-    if (collect && finished) deadline = Math.min(deadline, progressed ? now + MIN_CHECK_MS : fallback);
+    if (canCollect && finished) deadline = Math.min(deadline, progressed ? now + MIN_CHECK_MS : fallback);
     const times = queue.filter(job => positiveTime(job?.finishTime)).map(job => job.finishTime * 1000 - offset + 250);
     // Later waiting slots legitimately omit finishTime. A known active timer
     // is usable on its own; never invent a start time for the waiting slots.
     for (const time of times) deadline = Math.min(deadline, time > now ? time : progressed ? now + MIN_CHECK_MS : fallback);
     if (!times.length) deadline = Math.min(deadline, fallback);
-    const canStart = produce && produceEligible(building);
     if (canStart && (!Number.isSafeInteger(slots) || slots < 1 || queue.length < slots)) deadline = Math.min(deadline, fallback);
     // Existing native automation is never taken over here. A fallback check
     // still notices its expiry or a newly needed cooperative target.
-    if (produce && produceEligible(building) && factory.autoProductId) deadline = Math.min(deadline, fallback);
+    if (canStart && factory.autoProductId) deadline = Math.min(deadline, fallback);
   }
   if (!considered || !Number.isFinite(deadline)) deadline = fallback;
   return Math.max(now + MIN_CHECK_MS, deadline);
@@ -45,7 +47,8 @@ function signature(building) {
 }
 
 export function createFactorySchedule(client, {
-  getSettings = () => null, isEnabled = () => true, getConfig = () => null,
+  getSettings = () => null, getBlockedCollectionTypes = () => getSettings()?.factory?.blockedCollectionTypes,
+  isEnabled = () => true, getConfig = () => null,
   onWake = () => {}, now = Date.now,
 } = {}) {
   let disposed = false, checkedOnce = false, checkedAt = now(), failed = false;
@@ -78,19 +81,22 @@ export function createFactorySchedule(client, {
     // With the config available, normal factories are identified by recipes.
     return recipes.length ? recipes.some(row => row.buildType === typeOf(building)) : !!building?.factory || knownFactories.has(building?.buildingId);
   };
-  const eligible = building => isFactory(building) && (modes().collect || produceEligible(building));
+  const collectEligible = (building, blocked) => !blocked?.length || !blocked.includes(typeOf(building));
   const relevant = building => {
-    if (typeof building?.buildingId !== 'string' || !building.buildingId || !eligible(building)) return false;
-    return isFactory(building);
+    if (typeof building?.buildingId !== 'string' || !building.buildingId || !isFactory(building)) return false;
+    const { collect, produce } = modes();
+    return (collect && collectEligible(building, getBlockedCollectionTypes())) || (produce && produceEligible(building));
   };
   const notify = () => { try { onWake(); } catch { /* A UI callback cannot break protocol delivery. */ } };
   const baseDeadline = () => {
     if (!checkedOnce) return checkedAt;
     if (failed) return checkedAt + interval(preferences()?.checkEverySeconds ?? 30) * 1000;
     const mode = modes();
+    const blocked = mode.collect ? getBlockedCollectionTypes() : null;
     return nextFactoryCheck(buildings, { now: checkedAt, offset: Number(client.serverClockOffsetMs) || 0,
       ...mode, slots: slots ?? Number(table(getConfig(), 'BuildingProduceParamCfg').find(row => row.paramName === '制造位上限')?.paramValue),
-      checkEverySeconds: preferences()?.checkEverySeconds ?? 30, progressed, eligible, produceEligible });
+      checkEverySeconds: preferences()?.checkEverySeconds ?? 30, progressed, eligible: isFactory,
+      collectEligible: building => collectEligible(building, blocked), produceEligible });
   };
   const nextAt = () => active() ? Math.min(baseDeadline(), wakeAt) : Infinity;
   const wake = (immediate = false) => {

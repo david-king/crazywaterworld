@@ -833,6 +833,10 @@ button.factory-empty:disabled { cursor:wait; opacity:.6 }
   .nav-full { display:none }
   .nav-short { display:inline }
   .deck { padding-block:12px calc(68px + env(safe-area-inset-bottom)); gap:12px }
+  body:has(#tab-chat:not(.hidden)) { display:flex; flex-direction:column; height:100dvh }
+  body:has(#tab-chat:not(.hidden)) > header { flex:none }
+  .deck:has(#tab-chat:not(.hidden)) { flex:1; min-height:0; grid-template-rows:minmax(0,1fr); align-items:stretch; padding-top:6px }
+  #tab-chat:not(.hidden),#chat-root { height:100%; min-height:0 }
   .bar { gap:6px; margin-block:8px }
   .bar .k,.dim,.id,.heading-status,.account-card-data dd,#stage-view { font-size:var(--text-sm) }
   .page-heading h2 { font-size:1rem }

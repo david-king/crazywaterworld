@@ -37,11 +37,15 @@ export const BUNDLES = [
   'ui_preset',
   'ui_formation',
   'ui_chat_iframe',
+  'ui_chat',
+  'ui_emoji',
   'ui_iconworker',
 ];
 // These UI packages also contain warehouse item sprites. Only fill configured
 // icon names absent from the primary packages, not similarly named UI widgets.
 const ITEM_BUNDLES = ['ui_iconactivity', 'ui_head_frame', 'ui_skin', 'ui_linkage_lsr', 'ui_iconoldactivity'];
+// The four image overrides on EmojiPop's group buttons, in game display order.
+const chatGroupIcons = new Map([['_0001_图层-4', 4], ['_0000_图层-3', 3], ['_0000_图层-2', 2], ['_0001_图层-1', 1]]);
 
 const BASE64_KEYS = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/';
 const B64 = new Map([...BASE64_KEYS].map((c, i) => [c, i]));
@@ -75,6 +79,7 @@ export function findCacheDir() {
 function bundleVersions(cacheDir) {
   const resources = activeResources();
   if (resources?.bundleVersions) return { versions: resources.bundleVersions, fallback: false };
+  if (!cacheDir) return { versions: {}, fallback: true };
   const root = path.resolve(cacheDir, '../../../../packages', APPID);
   if (!fs.existsSync(root)) return { versions: {}, fallback: true };
   const files = fs.readdirSync(root).filter(v => /^\d+$/.test(v)).sort((a, b) => Number(b) - Number(a));
@@ -105,6 +110,7 @@ export function readCacheList(cacheDir) {
 }
 
 export function readBundleConfig(cacheDir, bundle) {
+  if (!cacheDir) return null;
   const dir = path.join(cacheDir, bundle);
   if (!fs.existsSync(dir)) return null;
   const files = fs.readdirSync(dir).filter(file => file.endsWith('.json'));
@@ -168,12 +174,12 @@ function resourceFile(name, url, ext) {
 async function main() {
   const allowFetch = process.argv.includes('--fetch');
   const cacheDir = findCacheDir();
-  if (!cacheDir) {
+  const { versions, fallback } = bundleVersions(cacheDir);
+  if (!cacheDir && !(allowFetch && Object.keys(versions).length)) {
     console.error('没找到微信小游戏缓存目录，先在电脑上打开过一次游戏再试');
     process.exit(1);
   }
-  const byUrl = readCacheList(cacheDir);
-  const { versions, fallback } = bundleVersions(cacheDir);
+  const byUrl = cacheDir ? readCacheList(cacheDir) : new Map();
   const indexPath = path.join(ART_DIR, 'index.json');
   const previous = fs.existsSync(indexPath) ? JSON.parse(fs.readFileSync(indexPath, 'utf8')).icons : {};
   let itemNames;
@@ -245,6 +251,7 @@ async function main() {
     const pageFiles = new Map();
     for (const item of pkg.items) {
       if (item.type !== ITEM_TYPE.IMAGE || !item.name) continue;
+      if (bundle === 'ui_chat' && !chatGroupIcons.has(item.name)) continue;
       if (bundle === 'ui_formation' && !['bg_formation', 'bg_position', 'bg_pos_2'].includes(item.name)) continue;
       if (ITEM_BUNDLES.includes(bundle) && (!itemNames.has(item.name) || icons[item.name])) continue;
       const sprite = pkg.sprites.get(item.id);
@@ -263,7 +270,9 @@ async function main() {
         incomplete.add(bundle);
         continue;
       }
-      const iconName = bundle === 'ui_formation' ? bundle + '/' + item.name : item.name;
+      let iconName = item.name;
+      if (bundle === 'ui_formation') iconName = bundle + '/' + item.name;
+      if (bundle === 'ui_chat') iconName = 'ui_chat/emoji-group-' + chatGroupIcons.get(item.name);
       icons[iconName] = { bundle, page, x: sprite.rect.x, y: sprite.rect.y, w: sprite.rect.width, h: sprite.rect.height, rotated: sprite.rotated };
       pages[`${bundle}/${page}`] = true;
       withRect += 1;

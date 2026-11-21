@@ -268,10 +268,12 @@ export class GameClient extends EventEmitter {
     return this.readGate !== null && readScope.getStore() !== this;
   }
 
-  request(name, body, responseName = `${name.slice(0, -7)}Response`, timeout = 15000) {
-    if (this.heldByRead()) return this.readGate.then(() => this.request(name, body, responseName, timeout));
+  request(name, body, responseName = `${name.slice(0, -7)}Response`, timeout = 15000, beforeSend) {
+    if (this.heldByRead()) return this.readGate.then(() => this.request(name, body, responseName, timeout, beforeSend));
     return new Promise((resolve, reject) => {
+      beforeSend?.();
       const entry = { name, responseName, resolve, reject, timer: null, order: this.sendOrder };
+      if (name === 'SendChatRequest' && body?.channel === 2) entry.requiresGuild = true;
       entry.timer = setTimeout(() => {
         this.pending = this.pending.filter((item) => item !== entry);
         reject(new Error(`timeout waiting for ${[responseName].flat().join(' or ')} (sent ${name})`));
@@ -319,7 +321,7 @@ export class GameClient extends EventEmitter {
     const error = new Error(`server prompt: ${reason}`);
     error.prompt = body;
     const firstEligible = entries => promptName === 'NO_GUILD'
-      ? entries.find(entry => MEMBER_REQUESTS.has(entry.name)) : entries[0];
+      ? entries.find(entry => entry.requiresGuild || MEMBER_REQUESTS.has(entry.name)) : entries[0];
     const pendingEntry = firstEligible(this.pending);
     const firstWatch = firstEligible(this.watchers);
     const watcher = firstWatch && (!pendingEntry || firstWatch.order < pendingEntry.order) ? firstWatch : null;

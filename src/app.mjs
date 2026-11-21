@@ -522,7 +522,8 @@ async function tasks({ allowMutate, dryRun }) {
 // 海面世界：收成品 / 竣工 / 交单 / 排产 / 余料升级建筑。--dry 只列计划，--yes 才真发请求。
 // --speed-up 才允许花「加速器」（钻石永远不碰）；--reroll 才允许拒绝材料不齐的订单。
 async function world({ allowMutate, dryRun, allowSpeedUp, allowReroll }) {
-  const { url, login } = loadCredentials();
+  const { url, login, account } = loadCredentials();
+  const getBlockedCollectionTypes = () => loadAutomationSettings(account.id).settings.factory.blockedCollectionTypes;
   const protocol = loadProtocol();
   const client = new GameClient({ url, protocol });
   client.on('warn', (message) => console.log(`warn: ${message}`));
@@ -533,7 +534,7 @@ async function world({ allowMutate, dryRun, allowSpeedUp, allowReroll }) {
   try {
     console.log(`login ok: ${describeRole(response.playerInfo)?.nickname} lv${describeRole(response.playerInfo)?.level}`);
     const survey = await surveyWorld(client, protocol, { config, player: response.playerInfo });
-    const plan = planWorld(survey, { config, allowSpeedUp, allowReroll });
+    const plan = planWorld(survey, { config, allowSpeedUp, allowReroll, blockedCollectionTypes: getBlockedCollectionTypes() });
     console.log(`\n${formatWorldPlan(survey, plan)}\n`);
     console.log(`共 ${plan.actions.length} 个动作${allowSpeedUp ? '' : '（未开 --speed-up，不会花' + SPEED_UP_ITEM + '）'}`);
 
@@ -544,7 +545,7 @@ async function world({ allowMutate, dryRun, allowSpeedUp, allowReroll }) {
 
     console.log('\n执行:');
     const { rejected } = await runWorldRound(client, protocol, plan, {
-      config, player: response.playerInfo, allowMutate,
+      config, player: response.playerInfo, allowMutate, getBlockedCollectionTypes,
       onStep: (entry) => {
         if (entry.skipped) console.log(`  - ${entry.step.label} 跳过: ${entry.error}`);
         else console.log(entry.ok ? `  . ${entry.step.label}` : `  x ${entry.step.label} 失败: ${entry.error}`);
@@ -666,6 +667,7 @@ async function loopCli({ allowMutate, rounds, everySeconds, allowSpeedUp, allowR
     await runLoop(client, protocol, {
       config,
       getHeroSettings: () => loadAutomationSettings(account.id).settings,
+      getBlockedCollectionTypes: () => loadAutomationSettings(account.id).settings.factory.blockedCollectionTypes,
       heroUsageLedger: createUsageLedger(account.id),
       refreshConfig: loadConfigSafe,
       player,

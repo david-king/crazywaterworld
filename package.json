@@ -63,7 +63,7 @@
     "check:ui": "biome check .",
     "format:ui": "biome check --write .",
     "test:state": "node tools/selftest-console-state.mjs",
-    "test:client": "npm run test:state && node tools/selftest-react-client.mjs",
+    "test:client": "npm run test:state && node tools/selftest-react-client.mjs && node tools/selftest-chat.mjs",
     "test:client:browser": "npm run build:ui && node tools/selftest-react-client-browser.mjs",
     "test:weekly-activity": "node tools/selftest-weekly-activity-settings.mjs && node tools/selftest-weekly-activity.mjs && node tools/selftest-weekly-activity-runner.mjs && node tools/selftest-weekly-activity-loop.mjs && node tools/selftest-weekly-activity-ranking-http.mjs",
     "test:weekly-activity:browser": "npm run build:ui && node tools/selftest-weekly-activity-browser.mjs",

@@ -128,11 +128,11 @@ try {
       } catch (error) { protocolErrors.push({ name, message: error.message }); throw error; }
       finally { leave(true); }
     };
-    const run = async () => {
+    const run = async (options = {}) => {
       const result = await runLoop(client, protocol, {
         config, player, rounds, everyMs: mainEveryMs, getEveryMs: () => mainEveryMs,
         allowMutate: true, ...(cli ? {} : { isEnabled: key => flags.has(key) }),
-        getSettings: () => currentSettings, usageLedger: ledger, stop, schedule,
+        getSettings: () => currentSettings, usageLedger: ledger, stop, schedule, ...options,
         sleep: async ms => {
           assert(ms > 0, '生产调度不能零毫秒忙轮询');
           sleeps.push(ms); assert(sleeps.length < 100, '调度等待应有界');
@@ -242,6 +242,14 @@ try {
     const f = integration({ cli: true }); stopAfterRefill(f);
     await f.run(); assert.equal(writes(f).length, 2); assert(writes(f)[0].at <= base + 6000);
     assert.equal(f.roundsDone.length, 1); await f.clean();
+  });
+  await test('命令行沿用账号禁止领取的建筑类型，仍可继续排产', async () => {
+    const f = integration({ cli: true, rounds: 1 });
+    f.finish();
+    await f.run({ getBlockedCollectionTypes: () => ['材料厂'] });
+    assert.deepEqual(writes(f).map(row => row.name), ['StartFactoryProduceRequest']);
+    assert(f.state.building.factory.finishedProducts.some(item => item.id === '产品甲'));
+    await f.clean();
   });
   await test('暂停或断线终止连接轮次后不会残留生产检查', async () => {
     for (const disconnected of [false, true]) {

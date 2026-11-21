@@ -644,8 +644,17 @@ try {
     upgraded.arena.fallbackWeakest = true;
     assert.deepEqual(importAutomationSettings(exportAutomationSettings(upgraded)), upgraded);
   });
+  test('版本39生产配置默认允许收取，按类型保存的禁止名单可导出导入', () => {
+    const old = defaultSettings();
+    delete old.factory.blockedCollectionTypes;
+    const upgraded = importAutomationSettings({ format: SETTINGS_FORMAT, version: 39, settings: old });
+    assert.deepEqual(upgraded.factory.blockedCollectionTypes, []);
+    assert.deepEqual(validateSettings(old), upgraded);
+    upgraded.factory.blockedCollectionTypes = ['精铁厂', '训练营'];
+    assert.deepEqual(importAutomationSettings(exportAutomationSettings(upgraded)), upgraded);
+  });
   test('版本1升级后重复迁移保持一致，保留有效的用户值', () => {
-    assert.equal(SETTINGS_SCHEMA_VERSION, 39);
+    assert.equal(SETTINGS_SCHEMA_VERSION, 40);
     const settings = legacySettings();
     settings.factory.checkEverySeconds = 270;
     settings.resources.diamondDailyLimit = 1234;
