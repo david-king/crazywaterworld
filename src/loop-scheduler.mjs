@@ -3,7 +3,7 @@ import { setTimeout as sleep } from 'node:timers/promises';
 // Coordinates wakeups and queued checkpoints. The caller still owns task
 // ordering, and every job uses the existing per-account execution queue.
 export function createLoopScheduler({
-  client, stop = {}, schedule = work => work(),
+  client, stop = {}, schedule = work => work(), shouldYieldQueue = () => false,
   sleep: wait = (ms, signal) => sleep(ms, undefined, { signal }), now = Date.now,
 }) {
   let disposed = false;
@@ -82,7 +82,7 @@ export function createLoopScheduler({
   }
 
   // Each yield ends a complete business operation. Keep the current queue
-  // slot for ordinary steps, and reacquire it for a due scan before resuming.
+  // slot until another queued operation or a due scan needs a turn.
   async function runSteps(steps, { nextAt, runPending, afterStep }) {
     let done = false;
     try {
@@ -100,7 +100,7 @@ export function createLoopScheduler({
               clearTimeout(readTimer);
               await readJob;
             }
-            if (nextAt() <= now()) break;
+            if (shouldYieldQueue() || nextAt() <= now()) break;
           }
         });
       }

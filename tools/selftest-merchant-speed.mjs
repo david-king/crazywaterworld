@@ -24,7 +24,7 @@ const config = { tables: {
 let count = 0, passed = 0;
 function fixture(at = now) {
   const id = ++count;
-  const event = { period: 1001, startTime: at - 86400, endTime: at + 86400 };
+  const event = { period: 1001, startTime: at - 86400, endTime: now + 3 * 3600 };
   const state = { period: event.period,
     cargo: { cargoLv: 1, cityId: 10, moveToCityId: 20, moveStartTime: at - 2700, moveEndTime: at + 4500 },
     player: { coins: 1000, profit: 2000, goods: [{ pid: 1, goodsId: 1001, num: 100, buyPrice: 10, cityId: 10 }] } };
@@ -70,6 +70,98 @@ const sample = (f, changes = {}) => ({ period: f.event.period, startTime: f.even
   observedAt: f.now - 10, turnoverProfitPerSecond: 1, ...changes });
 
 try {
+  await test('同港抢先比较最早的同盟船，并列多用一根，无法领先时留针', () => {
+    const f = fixture(now - 6 * 3600);
+    f.settings.merchant.speedUpMode = 'race';
+    f.settings.merchant.speedUpMinProfit = 1_000_000;
+    const rival = (playerId, eta, dest = 20, guildIdx = 1) => ({ playerId, guildIdx,
+      cargo: { cityId: 30, moveToCityId: dest, moveStartTime: f.now - 10, moveEndTime: f.now + eta } });
+    const plan = () => f.plan({ actor: f.player });
+    f.state.worldCargo = [rival(f.player.playerId, 10), rival('91', 20, 30), rival('92', 30, 20, 2)];
+    assert.equal(plan().kind, 'none');
+    f.state.worldCargo.push(rival('93', 4501));
+    assert.equal(plan().leading, true);
+    f.state.worldCargo.push(rival('94', 4500));
+    assert.equal(plan().useNum, 1);
+    f.state.worldCargo.push(rival('95', 2700));
+    assert.equal(plan().useNum, 2);
+    assert.equal(plan().rivalEta, f.now + 2700);
+    f.stock.set(pointer, 2); // 其中一根必须保留。
+    assert.equal(plan().kind, 'wait');
+  });
+  await test('最后一根按剩余航时独立触发，全程用针受背包和额度约束', async () => {
+    const f = fixture(now - 6 * 3600);
+    f.state.player.goods = [];
+    Object.assign(f.settings.merchant, { speedUpMode: 'race', guardLastPointer: true });
+    f.state.cargo.moveEndTime = f.now + 1801;
+    assert.equal(f.plan().kind, 'none');
+    f.state.cargo.moveEndTime--;
+    assert.equal(f.plan().accelerationReason, 'guard');
+    await f.run();
+    assert.deepEqual(f.sent().map(row => row.body), [{ useNum: 1 }]);
+    assert.equal(f.reports.at(-1).status, 'confirmed');
+    const g = fixture(now - 6 * 3600);
+    g.state.player.goods = [];
+    Object.assign(g.settings.merchant, { speedUpMode: 'full', keepPointers: 0 });
+    for (const [seconds, useNum] of [[7200, 4], [3600, 2], [8, 1]]) {
+      g.state.cargo.moveEndTime = g.now + seconds;
+      assert.equal(g.plan().useNum, useNum);
+    }
+    g.state.cargo.moveEndTime = g.now + 7200;
+    assert.equal(g.plan({ usedPointers: 3 }).useNum, 1);
+    assert.equal(g.plan({ dailyUsed: 28 }).kind, 'wait');
+    g.stock.set(pointer, 2);
+    assert.equal(g.plan().useNum, 2);
+    g.state.player.profit = 50_000_000;
+    assert.equal(g.plan().kind, 'none');
+    g.state.player.profit = 0;
+    g.event.endTime = g.now + 59;
+    assert.equal(g.plan().kind, 'wait');
+  });
+  await test('旧账本的本期选择不能覆盖账号开关，发送前关闭立即生效', async () => {
+    for (const enabled of [false, true]) {
+      const f = fixture();
+      f.settings.merchant.autoSpeedUp = enabled;
+      f.ledger.confirm(f.ledger.reserve({}, {}, {}, { uniqueKey: 'merchant-pointer-mode:' + f.event.startTime + ':' + f.event.period,
+        details: { mode: enabled ? 'save' : 'sprint' } }));
+      await f.run(); assert.equal(f.sent().length, enabled ? 1 : 0);
+    }
+    const g = fixture();
+    g.hook(name => { if (name === 'TradeInfoRequest') g.settings.merchant.autoSpeedUp = false; });
+    await g.run(); assert.equal(g.sent().length, 0);
+  });
+  await test('5000万、较低自设目标、自然可达及次日可售时保留指针', async () => {
+    for (const [profit, profitLimit] of [[50_000_000, 0], [50_000_000, 60_000_000], [12_345, 12_345]]) {
+      const f = fixture();
+      Object.assign(f.state.player, { profit }); Object.assign(f.settings.merchant, { profitLimit });
+      assert.equal(await f.run(), false); assert.deepEqual(f.calls, []);
+    }
+    const f = fixture(now - 6 * 3600);
+    f.state.player.profit = 50_000_000 - 10_000;
+    assert.equal(f.plan({ metrics: sample(f) }).kind, 'none', '本船加两次免费周转足够达标');
+    const overnight = fixture();
+    overnight.event.endTime = now + 86400;
+    await overnight.run(); assert.deepEqual(overnight.sent(), [], '今日收盘后留货，明日可自然出售');
+    const g = fixture();
+    g.state.cargo.moveEndTime = now + 2610;
+    g.state.player.goods.push({ ...g.state.player.goods[0], num: 1, pid: 2 });
+    assert.equal(g.plan().kind, 'wait', '只抢救低价批次达不到最低收益');
+    g.state.player.profit = 50_000_000 - 3500;
+    assert.equal(g.plan().kind, 'none', '自然到港可卖出的高利润批次已够达标');
+  });
+  await test('同样成交次数留针，一根能达标时放弃更高的两根收益', () => {
+    const f = fixture(now - 6 * 3600);
+    f.settings.merchant.speedUpMaxPerLeg = 1;
+    assert.equal(f.plan({ metrics: sample(f) }).kind, 'wait', '半小时没有新增完整航程');
+    const g = fixture();
+    g.state.cargo.moveEndTime = now + 4410;
+    g.state.player.goods.push({ ...g.state.player.goods[0], pid: 2 });
+    g.state.player.profit = 50_000_000 - 3500;
+    assert.equal(g.plan().useNum, 1);
+    assert.equal(g.plan().reachesGoal, true);
+    g.state.player.profit = 50_000_000 - 7000;
+    assert.equal(g.plan().useNum, 2);
+  });
   await test('最少两枚指针保留一分钟成交，收益使用折扣基准价', async () => {
     const f = fixture(), plan = f.plan();
     assert.equal(plan.kind, 'speed');
@@ -100,19 +192,20 @@ try {
     const f = fixture(now - 6 * 3600), metrics = sample(f);
     const plan = f.plan({ metrics });
     assert.equal(plan.kind, 'speed');
-    assert.equal(plan.useNum, 3);
+    assert.equal(plan.useNum, 2);
     assert.equal(plan.accelerationReason, 'turnover');
-    assert.equal(plan.savedSeconds, 4500);
-    assert.equal(plan.estimatedIncrementalProfit, 4500);
-    assert.equal(plan.expected.estimatedIncrementalProfit, 4500);
+    assert.equal(plan.savedSeconds, 3600);
+    assert.equal(plan.extraTrips, 1);
+    assert.equal(plan.estimatedIncrementalProfit, 3605);
+    assert.equal(plan.expected.estimatedIncrementalProfit, 3605);
     assert.match(plan.label, /近期确认成交速率/);
     f.ctx.merchantMetrics = metrics;
     await f.run();
-    assert.deepEqual(f.sent().map(row => row.body), [{ useNum: 3 }]);
+    assert.deepEqual(f.sent().map(row => row.body), [{ useNum: 2 }]);
     assert.equal(f.reports.at(-1).status, 'confirmed');
     const record = Object.values(f.ledger.keyRecords()).find(row => row.details?.expected?.request === 'TradeSpeedRequest');
     assert.equal(record.details.expected.accelerationReason, 'turnover');
-    assert.equal(record.details.expected.savedSeconds, 4500);
+    assert.equal(record.details.expected.savedSeconds, 3600);
     assert.equal(pendingOrderMaterialSpends(f.player).length, 0);
   });
   await test('deadline模式保持最少抢救策略，缺样本或低收益不擅自预估周转', async () => {
@@ -162,11 +255,11 @@ try {
     assert.equal(f.sent().length, 1);
   });
   await test('指针不足时选有证据且可成交的部分加速，不用不足数量抢救截止', async () => {
-    const f = fixture(now - 6 * 3600);
+    const f = fixture(now - 6.5 * 3600);
     f.settings.merchant.keepPointers = 3;
     const plan = f.plan({ metrics: sample(f) });
     assert.equal(plan.useNum, 1);
-    assert.equal(plan.estimatedIncrementalProfit, 1800);
+    assert.equal(plan.estimatedIncrementalProfit, 3605);
     f.ctx.getMerchantMetrics = () => sample(f);
     await f.run();
     assert.deepEqual(f.sent().map(row => row.body), [{ useNum: 1 }]);
@@ -179,7 +272,7 @@ try {
     assert.equal(g.sent().length, 0, '一枚赶不及窗口不能因存在历史速率而盲目加速');
   });
   await test('航程上限扣除本程已确认指针，达到上限后不重复消费', async () => {
-    const f = fixture(now - 6 * 3600);
+    const f = fixture(now - 6.5 * 3600);
     f.settings.merchant.speedUpMaxPerLeg = 3;
     f.ctx.merchantMetrics = sample(f);
     const cargo = f.state.cargo;
@@ -293,6 +386,7 @@ try {
     const f = fixture(); f.state.cargo.moveEndTime = now + 4410;
     assert.equal(f.plan().useNum, 1, '一批到港后可留90秒');
     f.state.player.goods.push({ ...f.state.player.goods[0], pid: 2 });
+    f.state.player.profit = 50_000_000 - 7000;
     const plan = f.plan();
     assert.equal(plan.saleCount, 2); assert.equal(plan.saleSeconds, 120);
     assert.equal(plan.useNum, 2, '一枚仅剩90秒，不足以完成两笔出售');
@@ -303,6 +397,7 @@ try {
     const f = fixture(); f.state.cargo.moveEndTime = now + 2610;
     f.state.player.goods.push({ ...f.state.player.goods[0], pid: 2 });
     assert.equal(f.plan().saleCount, 2); assert.equal(f.plan().useNum, 1);
+    assert.equal(f.plan().estimatedIncrementalProfit, 3605, '自然能卖出的第一批不能计入指针收益');
     await f.run(); assert.deepEqual(f.sent().map(row => row.body), [{ useNum: 1 }]);
     const g = fixture(); g.state.cargo.moveEndTime = now + 2610;
     g.state.player.goods.push({ ...g.state.player.goods[0], pid: 2, cityId: 20 });
@@ -346,6 +441,9 @@ try {
   await test('窗口只能出售一批时不累加两批收益消耗指针', async () => {
     const f = fixture(); f.event.endTime = now + 90;
     f.state.player.goods.push({ ...f.state.player.goods[0], pid: 2 });
+    assert.equal(f.plan().estimatedIncrementalProfit, 3605);
+    assert.equal(f.plan().saleCount, 1);
+    f.settings.merchant.speedUpMinProfit = 2000;
     assert.equal(f.plan().kind, 'wait');
     await f.run(); assert.equal(f.sent().length, 0);
   });
@@ -425,7 +523,7 @@ try {
     assert.equal(Object.values(f.ledger.keyRecords()).filter(row => !row.confirmed).length, 1);
   });
   await test('加速未知记录保留原快照和尝试时间，恢复回调复用同一证据', async () => {
-    const f = fixture(now - 6 * 3600), outcomes = [];
+    const f = fixture(now - 6.5 * 3600), outcomes = [];
     f.settings.merchant.speedUpMaxPerLeg = 1;
     f.ctx.merchantMetrics = sample(f);
     f.ctx.onMerchantOutcome = entry => outcomes.push(structuredClone(entry));

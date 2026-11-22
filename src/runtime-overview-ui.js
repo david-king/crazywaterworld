@@ -309,3 +309,63 @@ function refreshOverviewFilter() {
 }
 $('overview-task-search').oninput = refreshOverviewFilter;
 $('overview-task-filter').onchange = refreshOverviewFilter;
+
+let merchantOverviewTimer;
+function renderMerchantOverview(merchant) {
+  clearTimeout(merchantOverviewTimer);
+  merchantOverviewTimer = null;
+  const card = $('merchant-overview');
+  const section = clear($('merchant-overview-progress'));
+  card.hidden = true;
+  if (!merchant || !(merchant.serverNow < merchant.endTime)) return;
+  const upcoming = merchant.serverNow < merchant.startTime;
+  const boundary = upcoming ? merchant.startTime : merchant.endTime;
+  const delay = Math.ceil((boundary - merchant.serverNow) * 1000);
+  if (delay <= 2147483647) merchantOverviewTimer = setTimeout(() => {
+    merchantOverviewTimer = null;
+    card.hidden = true;
+    clear(section);
+    if (upcoming && !document.hidden && !$('tab-overview').classList.contains('hidden')) void refreshOverview();
+  }, delay);
+  if (upcoming) return;
+  card.hidden = false;
+  const goal = merchant.goal;
+  if (goal) {
+    const fmt = value => value == null ? '未同步' : value.toLocaleString('zh-CN');
+    section.appendChild(el('strong', null, '个人累计利润 ' + fmt(goal.profit) + ' / ' + fmt(goal.target)));
+    const bar = el('progress');
+    bar.max = goal.target;
+    if (goal.profit != null) bar.value = Math.min(goal.profit, goal.target);
+    bar.setAttribute('aria-label', '5000 万利润目标');
+    section.appendChild(bar);
+    const reward = goal.reward.map(([item, count]) => item + ' ×' + count).join('、');
+    const gap = goal.remaining == null ? '进度待同步' : goal.remaining === 0 ? '已达标' : '还差 ' + fmt(goal.remaining);
+    section.appendChild(el('p', null, '5000 万目标' + (reward ? '奖励 ' + reward : '') + ' · ' + gap));
+    if (goal.totalTiers && goal.claimed != null) {
+      const next = goal.nextTier;
+      const claimed = goal.claimed ? '已领至第 ' + goal.claimed + ' 档' : '尚未领取利润奖励';
+      section.appendChild(el('p', null, next ? claimed + ' · 第 ' + next.id + ' 档需 ' + fmt(next.target) +
+        ' 利润' + (goal.ready ? '（可领取）' : '') : '本期利润奖励已全部领取'));
+    } else section.appendChild(el('p', 'dim', '本期利润奖励档位待同步'));
+    if (goal.remaining > 0 && goal.remainingTradingSeconds != null) {
+      section.appendChild(el('p', null, goal.remainingTradingSeconds > 0
+        ? '剩余交易时间 ' + (goal.remainingTradingSeconds / 3600).toLocaleString('zh-CN', { maximumFractionDigits: 2 }) +
+          ' 小时 · 达标需每小时 ' + fmt(goal.requiredPerHour) + ' 利润' +
+          (goal.observedPerHour == null ? '' : ' · 本期已开放时段平均 ' + fmt(goal.observedPerHour) + ' / 小时')
+        : '本期交易时段已结束'));
+    }
+  }
+  for (const line of merchant.lines ?? ['本期商船数据待同步，请刷新']) section.appendChild(el('p', null, line));
+  if (goal?.checkedAt) section.appendChild(el('p', 'dim', '数据更新于 ' + activityDate(goal.checkedAt) + '（北京时间）'));
+}
+
+consoleStore.subscribe((state, previous) => {
+  const account = state.currentAccountId;
+  const status = CWConsoleState.selectCurrentStatus(state);
+  const data = state.gameByAccount[account]?.overview;
+  if (account !== previous.currentAccountId || !status.connected || status.paused || status.loginBlocked || state.disconnected.has(account)) {
+    if (merchantOverviewTimer || !$('merchant-overview').hidden) renderMerchantOverview(null);
+  } else if (data !== previous.gameByAccount[account]?.overview) {
+    renderMerchantOverview(data?.merchant);
+  }
+});

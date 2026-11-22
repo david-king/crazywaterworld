@@ -101,6 +101,9 @@ export function overviewPage() {
         <div id="overview-matches" className="overview-footer" role="status" />
       </div>
     </Panel>
+    <section id="merchant-overview" aria-label="海商王" hidden>
+      <Panel title="海商王"><div id="merchant-overview-progress" className="merchant-progress" /></Panel>
+    </section>
     <Panel title="世界概览" help="点击城池可查看攻守队列、驻防和可用操作。地图刷新间隔可设为 5–300 秒。" titleAfter={<div className="world-refresh-controls"><Button id="world-map-auto-refresh" size="sm" variant="outline" aria-pressed="true">自动刷新：开</Button><label className="world-refresh-setting">每<input id="world-map-refresh-seconds" aria-label="世界概览刷新秒数" type="number" min="5" max="300" step="1" defaultValue="10" />秒</label></div>}>
       <div id="world-map-fleets" className="fleet-summary" aria-label="我的舰队" />
       <p id="world-fleet-speed-feedback" className="dim" role="status" hidden />

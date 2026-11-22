@@ -264,4 +264,26 @@ await test('让出账号队列后暂停会取消待扫描任务和剩余主轮�
   assert.deepEqual(events, ['first', 'closed']);
 });
 
+await test('商店写入在当前挂机步骤结束后执行，随后继续原挂机轮次', async () => {
+  const events = [];
+  let tail = Promise.resolve(), waiting = 0;
+  function schedule(work) {
+    waiting++;
+    tail = tail.then(() => { waiting--; return work(); });
+    return tail;
+  }
+  const scheduler = createLoopScheduler({ client: new EventEmitter(), schedule, shouldYieldQueue: () => waiting > 0 });
+  async function* steps() {
+    events.push('开始挂机步骤');
+    schedule(() => events.push('购买'));
+    await Promise.resolve();
+    events.push('结束挂机步骤');
+    yield;
+    events.push('下个挂机步骤');
+  }
+  await scheduler.runSteps(steps(), { nextAt: () => Infinity, afterStep() {} });
+  assert.deepEqual(events, ['开始挂机步骤', '结束挂机步骤', '购买', '下个挂机步骤']);
+  scheduler.dispose();
+});
+
 console.log('循环调度离线专项 ' + passed + '/' + passed + ' 通过');

@@ -48,6 +48,7 @@ export function seasonalFixture() {
     mode: '',
     onRead: null,
     onWrite: null,
+    diamonds: 0,
     stock: { 活动26捞尸人_抽奖券: 12, 代颜人投票券: 9 },
     shop: { shopItem: [], resetTime: now + 86400 },
     cross: {
@@ -105,6 +106,7 @@ export function seasonalFixture() {
   };
   const reward = { reward: { asset: [{ id: '木材', num: 2 }] } };
   const reads = {
+    AllResource: () => ({ list: [{ res: 4, amount: state.diamonds }] }),
     AllItem: () => ({ items: Object.entries(state.stock).map(([itemId, num]) => ({ itemId, num })) }),
     SnowballDetail: () => state.snow,
     CompassWheelInfo: () => state.wheel,
@@ -195,6 +197,13 @@ export function seasonalFixture() {
       client.emit('message', { name: 'SCTradeCityReport', body });
       return {};
     },
+    TradeCargoUpgrade: () => {
+      const next = config.tables.TradeShipCfg.data.find(ship => ship.lv === state.trade.cargo.cargoLv + 1);
+      if (!next || state.trade.player.profit < next.upMoney || state.diamonds < next.upCost[1]) throw Error('升级条件不足');
+      state.diamonds -= next.upCost[1];
+      state.trade.cargo.cargoLv = next.lv;
+      return { cargo: state.trade.cargo };
+    },
     TradeBuy: (b) => {
       const t = state.trade,
         quote = state.markets[b.cityId].goods.find((r) => r.goodsId === b.goodsId);
@@ -209,6 +218,17 @@ export function seasonalFixture() {
         num: b.buyNum
       });
       return { player: t.player };
+    },
+    TradeSpeed: (b) => {
+      const cargo = state.trade.cargo;
+      state.stock['海商王加速'] -= b.useNum;
+      const now = Math.floor((Date.now() + client.serverClockOffsetMs) / 1000);
+      cargo.moveEndTime = Math.max(now, cargo.moveEndTime - b.useNum * 1800);
+      if (cargo.moveEndTime === now) {
+        cargo.cityId = cargo.moveToCityId;
+        cargo.moveToCityId = 0;
+      }
+      return { moveEndTime: cargo.moveEndTime };
     },
     TradeMove: (b) => {
       const c = state.trade.cargo;

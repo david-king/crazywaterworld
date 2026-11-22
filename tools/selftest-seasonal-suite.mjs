@@ -615,18 +615,31 @@ await test('只读实时诊断不交易、不补确认、不写日志且航行�
   assert.deepEqual(f.state.reads.slice(start), ['TradeInfoRequest']);
   assert.equal(fs.readFileSync(f.store, 'utf8'), before);
 });
-await test('升级开启但预算或总钻石开关不满足时返回false并继续普通采购', async () => {
+await test('累计利润未解锁下一级时继续普通采购', async () => {
   for (const diamondsAllowed of [false, true]) {
     const f = setup();
     f.settings.merchant.autoUpgrade = true;
     f.settings.resources.allowDiamonds = diamondsAllowed;
     f.settings.resources.diamondDailyLimit = 0;
-    f.settings.merchant.upgradeDailyDiamondLimit = 0;
+    f.state.trade.player.profit = 9999;
     await f.run(merchantActivity, 'merchantTrade');
     assert.equal(f.sent('TradeCargoUpgradeRequest').length, 0);
     assert.equal(f.sent('TradeBuyRequest').length, 1);
     assert.equal(f.reports.at(-1).status, 'confirmed');
   }
+});
+await test('贸易入口在采购或出售前先用实际余额升满，下一轮恢复交易', async () => {
+  const f = setup();
+  Object.assign(f.settings.merchant, { autoUpgrade: true, upgradeMaxLevel: 2, upgradeDailyDiamondLimit: 300 });
+  f.state.trade.player.profit = 1000000;
+  f.state.diamonds = 4100;
+  for (const level of [2, 3, 4, 5]) {
+    await f.run(merchantActivity, 'merchantTrade');
+    assert.equal(f.state.trade.cargo.cargoLv, level);
+  }
+  assert.equal(f.state.diamonds, 0);
+  await f.run(merchantActivity, 'merchantTrade');
+  assert.deepEqual(f.state.writes.map(row => row.name), [...Array(4).fill('TradeCargoUpgradeRequest'), 'TradeBuyRequest']);
 });
 await test('自然航程仅够处理一批时按可实现高收益子集选港并到港售出', async () => {
   const f = setup();
@@ -653,6 +666,25 @@ await test('自然航程仅够处理一批时按可实现高收益子集选港�
   await f.run(merchantActivity, 'merchantTrade');
   assert.equal(f.sent('TradeSellRequest').length, 1, '活动截止后不继续处置剩余批次');
 });
+await test('收盘前仅够买卖一种货时，按自然航行完成最高收益批次', async () => {
+  const f = setup();
+  f.client.serverClockOffsetMs += (7 * 3600 + 56 * 60 + 45) * 1000;
+  f.state.radar.radar[1].specGoodsId = 1008;
+  f.state.markets[10].goods = [{ goodsId: 1001, price: 40, stock: 59900 }, { goodsId: 1002, price: 30, stock: 59700 }];
+  f.state.markets[20].goods = [{ goodsId: 1002, price: 45, stock: 0 }];
+  const before = f.state.trade.player.profit;
+  await f.run(merchantActivity, 'merchantTrade');
+  const [buy] = f.sent('TradeBuyRequest');
+  assert.equal(buy.body.goodsId, 1002); assert.equal(buy.body.buyNum, 300);
+  f.client.serverClockOffsetMs += 60000;
+  await f.run(merchantActivity, 'merchantTrade');
+  assert.equal(f.sent('TradeMoveRequest').length, 1);
+  f.client.serverClockOffsetMs += 7200000;
+  Object.assign(f.state.trade.cargo, { cityId: 20, moveEndTime: 0, moveToCityId: 0 });
+  await f.run(merchantActivity, 'merchantTrade');
+  assert.equal(f.state.trade.player.profit - before, 4635);
+  assert.deepEqual(f.state.writes.map(row => row.name), ['TradeBuyRequest', 'TradeMoveRequest', 'TradeSellRequest']);
+});
 await test('买入花完商会币且累计利润为零，协议默认零字段当轮正确确认', async () => {
   const f = setup();
   f.state.trade.player.profit = 0;
@@ -678,6 +710,26 @@ await test('买入花完商会币且累计利润为零，协议默认零字段�
   assert.equal(f.sent('TradeBuyRequest').length, 1);
   await f.run(merchantActivity, 'merchantTrade');
   assert.equal(f.sent('TradeMoveRequest').length, 1, '不应多花一轮补确认零字段');
+});
+await test('平价换货遵守首趟时间，原价回款后按新行情采购，累计利润只计实际盈利', async () => {
+  const f = setup(), trade = f.state.trade;
+  trade.player.coins = 0;
+  trade.player.goods = [{ pid: 701, goodsId: 1001, cityId: 20, buyPrice: 45, num: 100 }];
+  f.state.markets[10].goods = [{ goodsId: 1001, price: 45, stock: 60000 }, { goodsId: 1002, price: 10, stock: 0 }];
+  f.state.radar.radar[1].specGoodsId = 1003;
+  const initialProfit = trade.player.profit;
+  Object.assign(f.settings.merchant, { firstDepartureMode: 'time', firstDepartureTime: '16:00' });
+  await f.run(merchantActivity, 'merchantTrade');
+  assert.equal(f.state.writes.length, 0);
+  f.settings.merchant.firstDepartureMode = 'smart';
+  await f.run(merchantActivity, 'merchantTrade');
+  assert.equal(f.sent('TradeSellRequest').length, 1);
+  assert.match(f.reports.at(-1).label, /平价换货/);
+  assert.equal(trade.player.profit, initialProfit); assert.equal(trade.player.coins, 4500);
+  f.state.markets[10].goods[1].price = 11;
+  await f.run(merchantActivity, 'merchantTrade');
+  assert.equal(f.sent('TradeBuyRequest').length, 1);
+  assert.equal(trade.player.goods[0].goodsId, 1002); assert.equal(trade.player.goods[0].buyPrice, 11);
 });
 await test('期末保本清仓允许零收益成交，累计利润零字段可确认', async () => {
   const f = setup();

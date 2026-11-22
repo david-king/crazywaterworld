@@ -669,7 +669,7 @@ try {
     assert.throws(() => validateSettings(old), error => !!error.fields?.['discountShop.extra']);
   });
   test('版本1升级后重复迁移保持一致，保留有效的用户值', () => {
-    assert.equal(SETTINGS_SCHEMA_VERSION, 43);
+    assert.equal(SETTINGS_SCHEMA_VERSION, 45);
     const settings = legacySettings();
     settings.factory.checkEverySeconds = 270;
     settings.resources.diamondDailyLimit = 1234;
@@ -785,15 +785,17 @@ try {
     assert.equal(JSON.parse(fs.readFileSync(file)).accounts.other.settingsVersion, SETTINGS_SCHEMA_VERSION);
   });
   test('旧配置升级后连续保存只递增revision，格式版本不随保存次数增长', () => {
-    for (const version of [SETTINGS_SCHEMA_VERSION - 1, SETTINGS_SCHEMA_VERSION]) {
+    for (const version of [43, 44, SETTINGS_SCHEMA_VERSION]) {
       const settings = defaultSettings();
-      if (version < SETTINGS_SCHEMA_VERSION) delete settings.treasure.followMode;
+      if (version === 43) Object.assign(settings.merchant, { upgradeMaxLevel: 2, upgradeDailyDiamondLimit: 300 });
+      if (version < 45) delete settings.merchant.guardLastPointer;
       const other = { revision: 901, settingsVersion: version, settings: defaultSettings() };
       fs.writeFileSync(file, JSON.stringify({ version, accounts: {
         account: { revision: 244, settingsVersion: version, settings }, other,
       } }));
       for (let count = 1; count <= 40; count++) {
         const loaded = loadAutomationSettings('account', { file });
+        assert.equal(loaded.settings.merchant.guardLastPointer, false);
         assert.equal(loaded.revision, 244 + count - 1);
         const edited = structuredClone(loaded.settings); edited.loop.everySeconds = 30 + count;
         const saved = saveAutomationSettings('account', edited, { file, revision: loaded.revision });

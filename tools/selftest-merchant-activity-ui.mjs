@@ -1047,11 +1047,15 @@ await test('海商王全部参数沿用类型和约束，父项关闭隐藏后�
     if (field.kind === 'time') assert.equal(input.type, 'time');
   }
   await f.setSea('merchant.autoSpeedUp');
-  assert(!f.seaInput('merchant.autoBuyPointers'));
-  assert(!f.seaInput('merchant.pointerDailyDiamondLimit'));
+  assert.equal(f.seaInput('merchant.autoBuyPointers').getAttribute('aria-checked'), 'true');
+  assert.equal(f.seaInput('merchant.pointerDailyDiamondLimit').valueAsNumber, 300);
   assert.equal(f.seaSaved.get('merchant-a').settings.merchant.autoBuyPointers, true);
   assert.equal(f.seaSaved.get('merchant-a').settings.merchant.pointerDailyDiamondLimit, 300);
+  await f.setSea('merchant.autoBuyPointers');
+  assert(!f.seaInput('merchant.pointerDailyDiamondLimit'));
   await f.setSea('merchant.autoSpeedUp');
+  assert.equal(f.seaInput('merchant.autoBuyPointers').getAttribute('aria-checked'), 'false');
+  await f.setSea('merchant.autoBuyPointers');
   assert.equal(f.seaInput('merchant.pointerDailyDiamondLimit').valueAsNumber, 300);
   await f.setSea('merchant.firstDepartureMode', 'smart');
   assert(f.seaInput('merchant.firstDepartureWaitMinutes'));
@@ -1094,6 +1098,7 @@ await test('海商王读取到真实开放期次自动移上，结束收起并�
   assert(tabs.querySelector('.activity-current-tabs').querySelector('[data-activity=merchant]'));
   f.api.selectSea();
   assert.match(f.node('activity-end').textContent, /开始 .*结束 .*北京时间/);
+  assert.equal(f.node('activities-list').querySelector('.merchant-progress'), null);
   assert.equal(f.seaInput('schedule.merchantTrade').getAttribute('aria-checked'), 'true');
   assert.equal(f.node('activities-list').querySelectorAll('[data-auto-task]').length, 0);
   f.state.now += 60000; f.api.render();
@@ -1103,6 +1108,7 @@ await test('海商王读取到真实开放期次自动移上，结束收起并�
   f.catalog.activities = [{ ...f.activities.activities.at(-1), id: 'archive:merchant', sourceId: 'merchant', observed: false }];
   await f.api.refresh(); f.api.selectSea();
   assert(!f.api.rows().some(row => row.id === 'merchant'));
+  assert.equal(f.node('activities-list').querySelector('.merchant-progress'), null);
   assert.equal(f.seaInput('schedule.merchantTrade').getAttribute('aria-checked'), 'true');
   await f.setSea('merchant.profitLimit', 6789);
   assert.equal(f.seaSaved.get('merchant-a').settings.merchant.profitLimit, 6789);

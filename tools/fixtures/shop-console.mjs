@@ -151,6 +151,7 @@ export function createShopClient(
       },
     ],
     refreshCount,
+    nextDiscountItem: null,
     refreshLimit,
     refreshTiers: clone(refreshTiers),
     ads: [{ id: 9201, max: 2, gotTimes: 0, asset: asset("GOLD", 500) }],
@@ -266,6 +267,10 @@ export function createShopClient(
       item.isBuy = true;
       for (const row of item.reward.asset) inventory(row.id)[row.id] += row.num;
       reward = clone(item.reward);
+      if (state.nextDiscountItem) {
+        Object.assign(item, state.nextDiscountItem);
+        state.nextDiscountItem = null;
+      }
     } else if (name === "GotAdvRewardRequest") {
       const item = state.ads.find((row) => row.id === body.id);
       assert(item && item.gotTimes < item.max, "不能超过广告限次");

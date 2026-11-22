@@ -1,10 +1,29 @@
-import { clock, dayOf, natural, positive, read, table, windowOpen } from './activity-actions.mjs';
+import { clock, dayOf, natural, positive, read, table, waiting, windowOpen } from './activity-actions.mjs';
+import { refreshOrderMaterialSpends } from './order-reservations.mjs';
 import { merchantTiming } from './merchant-planner.mjs';
+import { watchMerchant } from './merchant-monitor.mjs';
+
+export async function reconcileMerchantAction(client, ctx, [key, record], after, matches) {
+  const { expected } = record.details;
+  if (!matches(expected, after, clock(client))) return waiting(ctx, '前次操作结果待确认，等待游戏状态更新');
+  if (expected.request === 'TradeSpeedRequest') await refreshOrderMaterialSpends(client, ctx.player);
+  const details = { ...record.details, after, confirmedAt: clock(client) };
+  ctx.ledger.resolveKey(key, true, details);
+  try {
+    if (ctx.onMerchantOutcome) {
+      await ctx.onMerchantOutcome({ actionKey: key, expected, before: details.before, after,
+        attemptedAt: details.attemptedAt, status: 'confirmed' });
+      ctx.ledger.resolveKey(key, true, { ...details, journalRecorded: true });
+    }
+  } catch (error) { waiting(ctx, '操作已确认，统计将在下次检查补录：' + error.message); }
+  ctx.report({ label: ctx.label, ok: true, status: 'confirmed', reason: '已回读确认前次操作' });
+}
 
 export function merchantStrategyPlan(plan, config, event, state, policy, time, ledger) {
   if (policy.profitLimit > 0 && state.player?.profit >= policy.profitLimit)
     return { kind: 'wait', reason: '已达本期累计利润上限，领奖仍按独立开关执行' };
-  if (!['buy', 'move'].includes(plan.kind)) return plan;
+  const swap = plan.kind === 'sell' && plan.mode === 'SWAP';
+  if (!swap && !['buy', 'move'].includes(plan.kind)) return plan;
   const timing = merchantTiming(config, event, time);
   const moves = Object.values(ledger?.keyRecords() ?? {}).filter(record => record.confirmed &&
     record.details?.scope === 'merchant:' + event.startTime + ':' + event.period &&
@@ -20,7 +39,7 @@ export function merchantStrategyPlan(plan, config, event, state, policy, time, l
       if (time < at) return { kind: 'wait', reason: '首趟等待盈利商品或共享商情，尚未到有限寻价时间', nextCheckAt: at };
     }
   }
-  if (plan.kind === 'move' && policy.speedUpMode === 'arrival' && today.some(record =>
+  if ((plan.kind === 'move' || swap) && policy.speedUpMode === 'arrival' && today.some(record =>
     merchantTiming(config, event, record.details.expected.start).marketEpoch === timing.marketEpoch))
     return { kind: 'wait', reason: '本次刷新周期已经出航，等待下一次刷新', nextCheckAt: timing.nextRefreshAt };
   return plan;
@@ -38,12 +57,12 @@ async function inventory(client) {
   return { count, diamonds };
 }
 export async function buyMerchantPointers(client, config, ctx, event, state, purchasePlan, validPlan) {
-  const complete = settings(ctx), policy = complete.merchant ?? {}, ledger = ctx.ledger;
-  if (!ledger || !policy.autoBuyPointers || !policy.autoSpeedUp) return false;
+  const policy = settings(ctx).merchant ?? {}, ledger = ctx.ledger;
+  if (!ledger || policy.autoSpeedUp !== true || policy.autoBuyPointers !== true || !validPlan()) return false;
   const report = entry => ctx.report({ label: '海商王 · 补足商会指针', ...entry });
   const skip = reason => { report({ skipped: true, reason }); return true; };
-  const stamp = JSON.stringify(complete), actor = JSON.stringify(ctx.player), today = dayOf(clock(client));
-  const allowed = () => ctx.enabled() && client.connected !== false && JSON.stringify(settings(ctx)) === stamp &&
+  const stamp = JSON.stringify(policy), actor = JSON.stringify(ctx.player), today = dayOf(clock(client));
+  const allowed = () => ctx.enabled() && client.connected !== false && JSON.stringify(settings(ctx).merchant) === stamp &&
     JSON.stringify(ctx.player) === actor && dayOf(clock(client)) === today && windowOpen(event, clock(client)) &&
     client.tradeWindow?.period === event.period && client.tradeWindow?.startTime === event.startTime &&
     merchantTiming(config, event, clock(client)).tradingOpen && validPlan();
@@ -58,7 +77,6 @@ export async function buyMerchantPointers(client, config, ctx, event, state, pur
       } else report({ skipped: true, reason: '前次指针购买结果待确认，保留钻石预算，不重复购买' });
       return true;
     }
-    if (complete.resources?.allowDiamonds !== true) return skip('未开启全局钻石消费');
     const max = Number(table(config, 'ActivityTradeCfg').find(row => row.key === '海商王加速日购买上限')?.value);
     const price = table(config, 'ItemPriceCfg').find(row => row.itemId === pointer)?.rubyPrice;
     if (!positive(price) || !natural(max)) return skip('指针价格或游戏购买上限未确认');
@@ -66,9 +84,8 @@ export async function buyMerchantPointers(client, config, ctx, event, state, pur
     const bought = fresh.player?.buySpeedTimes;
     if (fresh.period !== event.period || !natural(bought) || !allowed() ||
       JSON.stringify(fresh.cargo) !== JSON.stringify(state.cargo) || JSON.stringify(fresh.player.goods) !== JSON.stringify(state.player.goods)) return skip('购买前航程、库存或设置已变化');
-    const resources = complete.resources, spent = ledger.snapshot().counters;
-    const budget = Math.min(stock.diamonds - resources.diamondThreshold, resources.diamondDailyLimit - (spent.diamonds ?? 0),
-      (policy.pointerDailyDiamondLimit ?? 0) - (spent.merchantPointerDiamonds ?? 0));
+    const spent = ledger.snapshot().counters.merchantPointerDiamonds ?? 0;
+    const budget = Math.min(stock.diamonds, (policy.pointerDailyDiamondLimit ?? 0) - spent);
     const affordable = Math.min(Math.floor(budget / price), max - bought);
     if (!positive(affordable)) return false;
     const radar = await read(client, 'TradeGuildRadar');
@@ -78,9 +95,15 @@ export async function buyMerchantPointers(client, config, ctx, event, state, pur
     const count = choice.count, cost = count * price;
     const key = scope + ':' + event.startTime + ':' + event.period + ':' + today + ':' + bought;
     const details = { scope, day: today, period: event.period, startTime: event.startTime, buyTimes: bought, count, beforeCount: stock.count };
-    const ticket = ledger.reserve({ diamonds: cost, merchantPointerDiamonds: cost },
-      { diamonds: resources.diamondDailyLimit, merchantPointerDiamonds: policy.pointerDailyDiamondLimit ?? 0 }, {}, { uniqueKey: key, details });
-    if (!allowed() || clock(client) > choice.expiresAt) { ledger.cancel(ticket); return skip('购买前加速方案或开关变化'); }
+    const ticket = ledger.reserve({ merchantPointerDiamonds: cost },
+      { merchantPointerDiamonds: policy.pointerDailyDiamondLimit ?? 0 }, {}, { uniqueKey: key, details });
+    try {
+      if (!allowed() || clock(client) > choice.expiresAt ||
+        purchasePlan(fresh, stock.count, stock.count + affordable, radar)?.count !== count)
+        throw Error('购买前加速方案或开关变化');
+    } catch (error) {
+      ledger.cancel(ticket); return skip(error.message);
+    }
     let reply;
     try { reply = await client.request('TradeBuySpeedItemRequest', { buyNum: count }, 'TradeBuySpeedItemResponse'); }
     catch (error) {
@@ -91,7 +114,9 @@ export async function buyMerchantPointers(client, config, ctx, event, state, pur
       const after = await read(client, 'TradeInfo'), finalStock = await inventory(client);
       if (!natural(reply?.buySpeedTimes) || reply.buySpeedTimes < bought + count || after.period !== event.period ||
         after.player?.buySpeedTimes < bought + count || finalStock.count < stock.count + count || dayOf(clock(client)) !== today) throw Error('指针购买后的次数与库存待确认');
-      ledger.confirm(ticket); report({ ok: true, status: 'confirmed', note: '购买 ' + count + ' 根，消耗 ' + cost + ' 钻石；下一次检查重新评估加速' });
+      ledger.confirm(ticket);
+      if (choice.expedite) watchMerchant(client).observe({ event, state: after, time: clock(client), config, settings: settings(ctx), expedite: true });
+      report({ ok: true, status: 'confirmed', note: '购买 ' + count + ' 根，消耗 ' + cost + ' 钻石；下一次检查重新评估加速' });
     } catch (error) { report({ ok: false, status: 'unknown', error: error.message }); }
     return true;
   } catch (error) { return skip(error.message); }

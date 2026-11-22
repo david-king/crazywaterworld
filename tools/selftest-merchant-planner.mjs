@@ -142,6 +142,14 @@ test('单位容量收益与组合采购取代单商品跌幅优先', () => {
   assert.equal(plan.expectedProfit, 93);
 });
 
+test('采购估值相同优先运往共享紧缺港，实价估算更差时不追紧缺', () => {
+  const f = fixture();
+  f.radar.radar.find(row => row.cityId === 30).rareGoodsId = 1;
+  assert.equal(f.plan().destination, 30);
+  f.markets = [f.history(30, 55)];
+  assert.equal(f.plan().destination, 20);
+});
+
 test('有界组合背包在容量和现金双约束下优于逐件贪心', () => {
   const offers = [
     { goodsId: 1, price: 6, capacity: 6, count: 1, unitProfit: 11 },
@@ -163,22 +171,39 @@ test('小规模组合与穷举比较，库存、余舱和现金均不超限', ()
   let seed = 19;
   const random = max => { seed = (seed * 48271) % 2147483647; return seed % max; };
   for (let sample = 0; sample < 100; sample++) {
+    const maxTypes = sample % 3 + 1;
     const offers = Array.from({ length: 3 }, (_, i) => ({ goodsId: i + 1, price: random(8) + 1,
-      capacity: random(6) + 1, count: random(4) + 1, unitProfit: random(10) + 1 }));
+      capacity: random(6) + 1, count: random(4) + 1, unitProfit: random(40) / 4 + 1 }));
     const capacity = random(15) + 1, cash = random(25) + 1;
     let expected = 0;
     for (let a = 0; a <= offers[0].count; a++) for (let b = 0; b <= offers[1].count; b++) for (let c = 0; c <= offers[2].count; c++) {
       const counts = [a, b, c];
+      if (counts.filter(n => n > 0).length > maxTypes) continue;
       const cost = offers.reduce((sum, item, i) => sum + item.price * counts[i], 0);
       const space = offers.reduce((sum, item, i) => sum + item.capacity * counts[i], 0);
-      if (cost <= cash && space <= capacity) expected = Math.max(expected, offers.reduce((sum, item, i) => sum + item.unitProfit * counts[i], 0));
+      if (cost <= cash && space <= capacity) expected = Math.max(expected, offers.reduce((sum, item, i) => sum + Math.ceil(item.unitProfit * counts[i]), 0));
     }
-    const actual = optimizePurchasePlan(offers, capacity, cash);
+    const actual = optimizePurchasePlan(offers, capacity, cash, { maxTypes });
     assert.equal(actual.profit, expected, '小空间应取得全局最优');
     assert.equal(actual.approximate, false);
     assert(actual.cost <= cash && actual.capacity <= capacity);
     for (const item of actual.purchases) assert(item.count <= offers.find(o => o.goodsId === item.goodsId).count);
   }
+});
+
+test('临近收盘时为高收益新货留出售机会，较低收益的持仓可留到下一程', () => {
+  const f = fixture();
+  f.settings.liquidationMinutes = 0;
+  f.event.endTime = f.now + 7200 + 3 * 60 + 15;
+  f.state.player.goods = [f.batch({ num: 1, buyPrice: 89 })];
+  f.market.goods = [{ goodsId: 2, price: 80, stock: 15 }, { goodsId: 3, price: 100, stock: 18 }];
+  f.radar.radar = [{cityId: 40, specGoodsId: 99}];
+  const plan = f.plan();
+  assert.equal(plan.kind, 'buy'); assert.equal(plan.goodsId, 2);
+  assert.equal(plan.purchases.length, 1); assert.equal(plan.count, 5);
+  assert.equal(plan.expectedProfit, 515);
+  f.now += 16;
+  assert.equal(f.plan().kind, 'move', '窗口只够带现货出航，不再采购');
 });
 
 test('大空间有界近似也遵守两项资源与库存限制', () => {
@@ -306,6 +331,32 @@ test('赶不及执行的换货机会不能诱导提前出售原本应持有的�
   const plan = f.plan();
   assert.equal(plan.kind, 'move');
   assert.equal(plan.destination, 40);
+});
+
+test('同价卖出要能买到其他现货，整船预计利润超过继续持货才换', () => {
+  const f = fixture();
+  f.state.cargo.cityId = 20;
+  f.state.player.goods = [f.batch()];
+  f.state.player.coins = 0;
+  f.market.goods = [{ goodsId: 1, price: 50, stock: 20 }, { goodsId: 2, price: 50, stock: 0 }];
+  f.radar.radar = [{ cityId: 30, specGoodsId: 3 }];
+  const swap = f.plan();
+  assert.equal(swap.kind, 'sell'); assert.equal(swap.gain, 0);
+  assert.match(swap.label, /平价换货/); assert.ok(swap.latestActionAt > f.now);
+  f.state.player.goods = []; f.state.player.coins = 500;
+  assert.equal(f.plan().goodsId, 2); assert.equal(f.plan().kind, 'buy');
+  f.state.player.goods = [f.batch()]; f.state.player.coins = 0;
+  f.market.goods[0].price = 49;
+  assert.notEqual(f.plan().kind, 'sell', '换货仍遵守默认零亏损');
+  f.market.goods[0].price = 50;
+  f.market.goods[1].stock = 20;
+  assert.notEqual(f.plan().kind, 'sell', '新货卖空时不换');
+  f.market.goods[1].stock = 0; f.market.goods[1].price = 150;
+  assert.equal(f.plan().kind, 'move', '保留原货的整船收益更高');
+  f.market.goods[1].price = 50; f.settings.minExpectedProfit = 2000;
+  assert.notEqual(f.plan().kind, 'sell', '遵守账号收益门槛');
+  f.settings.minExpectedProfit = 1; f.now = merchantTiming(f.config, f.event, f.now).nextRefreshAt - 30;
+  assert.notEqual(f.plan().kind, 'sell', '下一轮采购前要刷新旧报价');
 });
 
 test('已持货占用容量，少量库存不会丢弃其他组合机会', () => {
@@ -497,8 +548,16 @@ test('持货寻价和空船调港有边界，不凭过期商情循环往返', ()
   f.state.player.goods = [];
   f.visited = [];
   assert.equal(f.plan().exploration, true);
+  f.state.player.coins = 0;
+  assert.equal(f.plan().kind, 'wait', '没有本金的空船到港后无法采购');
+  f.state.player.coins = 1000;
   f.event.endTime = f.now + 10800;
   assert.equal(f.plan().kind, 'wait', '空船调港后还需一次载货航程');
+  f.event.endTime = f.now + 6 * 3600;
+  f.settings.liquidationMinutes = 240;
+  assert.equal(f.plan().kind, 'wait', '能在收盘前跑两程，但到港时已停止采购');
+  f.event.endTime += 120;
+  assert.equal(f.plan().exploration, true);
 });
 
 test('重复批次、重复报价、过期本港快照和超舱均停止执行', () => {

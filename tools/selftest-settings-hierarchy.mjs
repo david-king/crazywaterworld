@@ -306,7 +306,7 @@ test('所有显式父项位于同组，字段无重复且依赖无环', () => {
   for (const [child, parent] of [
     ['farm.crops', 'farm.customPlant'], ['pet.quality', 'pet.breed'],
     ['forge.universalReserve', 'forge.universal'], ['museum.matchedFactor', 'museum.materialFactor'],
-    ['merchant.autoBuyPointers', 'merchant.autoSpeedUp'], ['merchant.pointerDailyDiamondLimit', 'merchant.autoBuyPointers'],
+    ['merchant.pointerDailyDiamondLimit', 'merchant.autoBuyPointers'],
     ['silicon.fleets.0.huntPlayers', 'silicon.fleets.0.huntEnabled'],
     ['antique.targetStar', 'antique.star'],
     ['cityWar.recallLeadMinutes', 'cityWar.recallSilicon'], ['treasure.recallLeadMinutes', 'treasure.recallSilicon'],
@@ -510,22 +510,24 @@ test('不连续的培育参数跟随所属开关，并保持同级设置顺序',
   assert.equal(f.widget('pet.quality').node.parentElement, breed.childPanel);
 });
 
-test('三级开关关闭隐藏全部后代，重新启用保留子开关与预算', () => {
+test('指南针加速与钻石补购可分别设置，关闭补购保留预算', () => {
   const f = fixture();
   Object.assign(f.editor.draft.merchant, { autoSpeedUp: true, autoBuyPointers: true, pointerDailyDiamondLimit: 300 });
   f.mount(f.merchantFields.filter(field => [
     'merchant.autoSpeedUp', 'merchant.autoBuyPointers', 'merchant.pointerDailyDiamondLimit',
   ].includes(field.key)));
-  const parent = f.widget('merchant.autoSpeedUp'), purchase = f.widget('merchant.autoBuyPointers');
+  const purchase = f.widget('merchant.autoBuyPointers');
   const budget = f.widget('merchant.pointerDailyDiamondLimit');
-  assert(!visible(budget.node),'已开启的配置也默认收起');f.expand('merchant.autoSpeedUp','merchant.autoBuyPointers');
+  assert(!visible(budget.node),'已开启的配置也默认收起');f.expand('merchant.autoBuyPointers');
   assert(visible(budget.node));
   f.set('merchant.autoSpeedUp', false);
-  assert(!visible(purchase.node)); assert(!visible(budget.node));
+  assert(visible(purchase.node)); assert(visible(budget.node));
   assert.equal(f.editor.draft.merchant.autoBuyPointers, true);
   assert.equal(f.editor.draft.merchant.pointerDailyDiamondLimit, 300);
-  f.set('merchant.autoSpeedUp', true);
-  assert(visible(budget.node)); assert.equal(parent.disclosure.getAttribute('aria-expanded'), 'true');
+  f.set('merchant.autoBuyPointers', false);
+  assert(!visible(budget.node)); assert.equal(f.editor.draft.merchant.pointerDailyDiamondLimit, 300);
+  f.set('merchant.autoBuyPointers', true);
+  assert(visible(budget.node)); assert.equal(purchase.disclosure.getAttribute('aria-expanded'), 'true');
 });
 
 test('三支硅矿舰队仅展示去程和回城的加速开关、阈值和预算', () => {
@@ -615,22 +617,22 @@ test('更换已收起的下拉模式保持收起，显式展开后按条件显�
   assert.equal(f.env.saves, 2);
 });
 
-test('收起子组与关闭多层开关时焦点回到仍可见的父控件', () => {
+test('收起预算或关闭钻石补购时焦点回到购买开关', () => {
   const f = fixture();
   Object.assign(f.editor.draft.merchant, { autoSpeedUp: true, autoBuyPointers: true });
   f.mount(f.merchantFields.filter(field => [
     'merchant.autoSpeedUp', 'merchant.autoBuyPointers', 'merchant.pointerDailyDiamondLimit',
   ].includes(field.key)));
-  const parent = f.widget('merchant.autoSpeedUp'), purchase = f.widget('merchant.autoBuyPointers');
+  const purchase = f.widget('merchant.autoBuyPointers');
   const budget = f.widget('merchant.pointerDailyDiamondLimit');
-  f.expand('merchant.autoSpeedUp','merchant.autoBuyPointers');
+  f.expand('merchant.autoBuyPointers');
   budget.control.focus(); purchase.disclosure.onclick();
   assert(!visible(budget.node)); assert.equal(f.env.focused, purchase.control);
   assert.equal(f.env.saves, 0);
   purchase.disclosure.onclick(); budget.control.focus();
-  f.set('merchant.autoSpeedUp', false);
-  assert(!visible(purchase.node)); assert(!visible(budget.node));
-  assert.equal(f.env.focused, parent.control); assert(visible(parent.control));
+  f.set('merchant.autoBuyPointers', false);
+  assert(visible(purchase.node)); assert(!visible(budget.node));
+  assert.equal(f.env.focused, purchase.control); assert(visible(purchase.control));
 });
 
 test('模块主控单独置顶后子项回到组级，各字段只渲染一次', () => {

@@ -93,7 +93,8 @@ export function estimateMerchantRace(config, event, state, radar, time, settings
       const later = modelPurchase(config, event, state, radar, { goods: laterGoods }, natural, settings, actionSeconds);
       if (later.profit === null) return null;
       const gain = initial.profit - later.profit;
-      return gain > 0 ? { gain, expiresAt: Math.min(epoch + before.offset, rival - (initial.readyAt - early) - 1) } : null;
+      return gain > 0 ? { gain, baseline: later.profit,
+        expiresAt: Math.min(epoch + before.offset, rival - (initial.readyAt - early) - 1) } : null;
     }
     return null;
   };

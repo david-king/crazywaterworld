@@ -90,8 +90,8 @@ async function select(account) {
   if (account) await panel().locator(`[data-account='${account}']`).waitFor();
 }
 async function confirmPurchase(id, count) {
-  await quantity(id).fill(String(count));
-  await purchase(id).click();
+  await product(id).getByRole("spinbutton").fill(String(count));
+  await product(id).getByRole("button", { name: /^购买/ }).click();
   await confirmation().waitFor();
   const completed = page.waitForResponse(
     (response) => new URL(response.url()).pathname === "/api/shops/purchase",
@@ -104,8 +104,12 @@ async function confirmPurchase(id, count) {
   assert.equal(response.status(), 200, await response.text());
   const result = await response.json();
   await reread;
-  await receipt(result.status).waitFor();
   await ready(id);
+  if (result.shopId === "discount" && result.status === "completed") {
+    assert.equal(await receipt("completed").count(), 0);
+  } else {
+    await receipt(result.status).waitFor();
+  }
   return result;
 }
 const gamePosts = () =>
@@ -141,9 +145,7 @@ async function confirmGameRefresh(double = false) {
   const result = await response.json();
   await read;
   await ready(a.state.discount[0].id);
-  await panel()
-    .locator(`[data-game-refresh-status='${result.status}']`)
-    .waitFor();
+  assert.equal(await panel().locator("[data-game-refresh-status]").count(), 0);
   return result;
 }
 
@@ -731,8 +733,35 @@ try {
     assert.equal(await updateButton().isDisabled(), true);
     assert.equal(await updateButton().textContent(), "今日刷新次数已耗尽");
     await reenterShop("discount", a.state.discount[0].id);
+    assert.equal(
+      await panel().locator("[data-game-refresh-status]").count(),
+      0,
+    );
     assert.equal(gamePosts().length, count + 1);
     await screenshot("discount-updated-1280.png");
+  });
+  await test("折扣购买成功后原位补货，售罄时显示标记", async () => {
+    const id = a.state.discount[0].id;
+    a.state.nextDiscountItem = {
+      isBuy: false,
+      price: 600,
+      discount: 0.4,
+      reward: { asset: [{ type: 0, id: "紫卡万能碎片", num: 1 }] },
+    };
+    a.state.items.紫卡万能碎片 = 0;
+    assert.equal((await confirmPurchase(id, 1)).status, "completed");
+    assert.match(await product(id).textContent(), /240\s*钻石/);
+    assert.equal(
+      await product(id)
+        .getByRole("button", { name: "购买紫卡万能碎片" })
+        .isEnabled(),
+      true,
+    );
+    assert.equal((await confirmPurchase(id, 1)).status, "completed");
+    await product(id).getByText("已售罄", { exact: true }).waitFor();
+    assert.equal(await product(id).getByRole("button").count(), 0);
+    await reenterShop("discount", id);
+    assert.equal(await receipt("completed").count(), 0);
   });
   await test("刷新按钮仅在折扣商店显示", async () => {
     await choose("arena");

@@ -108,6 +108,7 @@ export async function runLoop(client, protocol, {
   usageLedger = null, heroUsageLedger = usageLedger,
   getEveryMs = () => everyMs,
   schedule = work => work(),
+  shouldYieldQueue,
   executeBattle = work => work(),
   onRound,
   onStep,
@@ -184,7 +185,7 @@ export async function runLoop(client, protocol, {
   let merchantRunAfter = 0;
   const merchantNext = () => merchantSelected()
     ? Math.max(merchantRunAfter, merchantMonitor.nextCheckAt * 1000 - (client.serverClockOffsetMs || 0)) : Infinity;
-  const scheduler = createLoopScheduler({ client, stop, sleep,
+  const scheduler = createLoopScheduler({ client, stop, sleep, shouldYieldQueue,
     schedule: work => schedule(async () => {
       assertRuntime();
       const result = await work();
@@ -528,7 +529,10 @@ export async function runLoop(client, protocol, {
       } catch (error) { report({ label, ok: false, error: error.message }); }
       finally {
         merchantRunAfter = Date.now() + 10_000;
-        if (merchantMonitor.nextCheckAt <= serverNowSeconds()) merchantMonitor.defer(serverNowSeconds() + 10);
+        // 防抢窗口和确认到港后的采购可早于十秒推送节流，仍由同一串行队列执行。
+        const priorityAt = merchantMonitor.priorityAt || Infinity, now = serverNowSeconds();
+        merchantRunAfter = Math.min(merchantRunAfter, priorityAt * 1000 - (client.serverClockOffsetMs || 0));
+        if (merchantMonitor.nextCheckAt <= now && priorityAt > now) merchantMonitor.defer(Math.min(now + 10, priorityAt));
         rewards?.expect('merchantTrade', merchantMonitor.nextCheckAt);
       }
     }

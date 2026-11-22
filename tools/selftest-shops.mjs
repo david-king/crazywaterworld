@@ -283,6 +283,74 @@ test('discount dedicated response and ad per-product claim', async () => {
   const ad = await f.buy('ad'); assert.equal(ad.status, 'completed'); assert.equal(f.adverts[0].gotTimes, 1); assert.equal(f.stock.get('木材'), 5);
   assert.equal(f.calls.filter(([name]) => name === 'WatchAdvRequest').length, 1);
 });
+test('discount receipt grants the purchased reward while the slot already offers a replacement', async () => {
+  const f = fixture(), slot = f.discounts[0];
+  Object.assign(slot, { price: 400, discount: 0.6, reward: { asset: [{ type: 0, id: '抽卡券', num: 1 }] } });
+  f.stock.set('抽卡券', 27);
+  const oldQuote = (await f.read('discount')).products[0];
+  const request = f.client.request.bind(f.client);
+  f.client.request = async (...args) => {
+    const reply = await request(...args);
+    if (args[0] !== 'DiscountShopBuyRequest') return reply;
+    Object.assign(slot, { price: 50, discount: 0.4, isBuy: false, reward: { asset: [{ type: 0, id: '原料自选包', num: 1000 }] } });
+    return { shopItem: clone(slot), reward: { asset: [{ type: 0, id: '抽卡券', num: { low: 1, high: 0, unsigned: false } }] } };
+  };
+  const buy = quote => buyShopProduct(f.client, f.config, { ...f.options, shop: 'discount', id: quote.id, quantity: 1, token: quote.token, paid: true });
+  const quote = (await f.read('discount')).products[0];
+  f.calls.length = 0;
+  const out = await buy(quote);
+  assert.equal(out.status, 'completed');
+  assert.deepEqual(out.rewards, [{ id: '抽卡券', name: '抽卡券', num: 1 }]);
+  assert.equal(out.costs[0].num, 240);
+  assert.equal(f.stock.get('抽卡券'), 28);
+  assert.equal(f.ledger.confirmedCounters().manualShopDiamonds, 240);
+  assert.equal(f.calls.filter(([name]) => name === 'DiscountShopRequest').length, 1);
+  assert.equal(f.calls.at(-1)[0], 'DiscountShopBuyRequest', '完整回执可直接结算');
+  assert.equal((await buy(oldQuote)).status, 'rejected');
+  const next = await f.read('discount');
+  assert.equal(next.products[0].asset.id, '原料自选包');
+  assert(next.products[0].canBuy && next.gameRefresh.canRefresh);
+  assert.equal(sent(f).length, 1);
+});
+test('old pending discount buys reconcile a replacement slot only with original stock changes in the same cycle', async () => {
+  const f = fixture(), slot = f.discounts[0];
+  f.shared.mode = 'unknown';
+  assert.equal((await f.buy('discount')).status, 'unknown');
+  f.shared.mode = 'ok';
+  const original = clone(slot);
+  slot.reward = { asset: [{ type: 0, id: '木材', num: 1 }] };
+  assert.equal((await f.read('discount')).gameRefresh.canRefresh, false, '换货本身不能确认');
+  f.stock.set('RUBY', 950);
+  f.stock.set('建筑蓝图', 3);
+  slot.reward = original.reward;
+  assert.equal((await f.read('discount')).gameRefresh.canRefresh, false, '库存本身不能确认');
+  slot.reward = { asset: [{ type: 0, id: '木材', num: 1 }] };
+  f.shared.refreshCount++;
+  await f.read('discount');
+  assert.equal(f.ledger.pendingCounters().manualShopDiamonds, 50, '其他刷新周期不能核销旧购买');
+  f.shared.refreshCount--;
+  const reopened = await readShop(f.client, f.config, { ...f.options, shop: 'discount', state: createShopState() });
+  assert(reopened.products[0].canBuy && reopened.gameRefresh.canRefresh);
+  assert.equal(f.ledger.confirmedCounters().manualShopDiamonds, 50);
+  assert.equal(f.ledger.snapshot().uncertain, 0);
+  assert.equal(sent(f).length, 1);
+});
+test('an unrelated or incomplete discount receipt alone never confirms a purchase', async () => {
+  for (const malformed of ['slot', 'reward', 'missing']) {
+    const f = fixture(), slot = f.discounts[0];
+    const request = f.client.request.bind(f.client);
+    f.client.request = async (...args) => {
+      if (args[0] !== 'DiscountShopBuyRequest') return request(...args);
+      args[4]?.();
+      return { shopItem: { id: slot.id + (malformed === 'slot' ? 1 : 0) },
+        reward: malformed === 'missing' ? {} : { asset: [{ ...slot.reward.asset[0], num: malformed === 'reward' ? 9 : 3 }] } };
+    };
+    const outcome = await f.buy('discount');
+    assert.equal(outcome.status, 'unknown');
+    assert.equal(f.ledger.pendingCounters().manualShopDiamonds, 50);
+    assert.equal((await f.read('discount')).gameRefresh.canRefresh, false);
+  }
+});
 test('price changes, expiry and same-token concurrent calls never send twice', async () => {
   const f = fixture(), view = await f.read('vip'), item = view.products[0]; f.products.get(3)[0].price.num = 110;
   const opts = { ...f.options, shop: 'vip', id: item.id, token: item.token, quantity: 1, paid: true };
@@ -442,6 +510,19 @@ test('game refresh performs two free updates then one explicitly confirmed paid 
   assert.equal(f.ledger.confirmedCounters().manualShopDiamonds, 50); assert.equal(f.ledger.snapshot().counters.diamonds ?? 0, 0);
   const view = await f.read('discount'); assert.equal(view.gameRefresh.canRefresh, false); assert.match(view.gameRefresh.blockedReason, /今日刷新次数已耗尽/);
   assert(refreshWrites(f).every(([, body, response]) => Object.keys(body).length === 0 && response === 'DiscountShopResponse'));
+});
+test('a complete refresh response only needs a subsequent currency read when paid', async () => {
+  for (const count of [0, 2]) {
+    const f = fixture();
+    f.shared.refreshCount = count;
+    const quote = (await f.read('discount')).gameRefresh;
+    f.calls.length = 0;
+    const result = await refreshDiscountShop(f.client, f.config, { ...f.options, shop: 'discount', token: quote.token, paid: count === 2 });
+    assert.equal(result.status, 'completed');
+    const names = f.calls.map(([name]) => name);
+    assert.equal(names.filter(name => name === 'DiscountShopRequest').length, 1);
+    assert.deepEqual(names.slice(names.indexOf('DiscountShopRefreshRequest') + 1), count === 2 ? ['AllResourceRequest'] : []);
+  }
 });
 test('game refresh fees use the first upper interval and VIP extends the real cap', async () => {
   const f = fixture(); f.config.tables.ShopRefreshCfg.data = [{ times: 1, cost: [] }, { times: 4, cost: ['RUBY', 75] }];

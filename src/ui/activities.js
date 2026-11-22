@@ -280,6 +280,7 @@ function renderActivityDetail() {
   $('activity-end').textContent = row.settingsOnly ? (activitiesData && !activitiesData.catalogOnly ? '当前未开放，可预先配置' : '连接后读取活动状态，可预先配置')
     : row.kind === 'permanent' ? '长期开放' : '开始 ' + activityDate(row.startTime) + ' · 结束 ' + activityDate(row.endTime) + '（北京时间）';
   if (row.rewardEndTime > row.endTime && row.endTime > 0) $('activity-end').textContent += ' · 奖励展示截至 ' + activityDate(row.rewardEndTime);
+  const active = activityLifecycle(row) === 'active' && activitiesData && !activitiesData.catalogOnly;
   if (!keepSettings) {
     if (row.weekType === 5) renderMerchantSettings(box);
     if (isHeroRaidActivity(row)) renderHeroRaidSettings(box);
@@ -300,7 +301,6 @@ function renderActivityDetail() {
   }
   if (row.settingsOnly) return;
   if (!activitiesData) return;
-  const active = activityLifecycle(row) === 'active' && !activitiesData.catalogOnly;
   if (!active) {
     const messages = { upcoming: '活动尚未开放。',
       ended: '本期活动已结束。',
@@ -311,7 +311,9 @@ function renderActivityDetail() {
     }
     return;
   }
-  for (const line of activitiesData.status?.[row.id]?.lines ?? []) box.appendChild(el('p', null, line));
+  if (!isSeaMerchantActivity(row)) {
+    for (const line of activitiesData.status?.[row.id]?.lines ?? []) box.appendChild(el('p', null, line));
+  }
   if (row.weekType === 4) {
     const lottery = activitiesData.lottery;
     box.appendChild(el('p', null, lottery ? '累计抽奖 ' + lottery.times + ' 次 · ' + (lottery.required == null ? '全部档位已领完' : '下一档 ' + lottery.required + ' 次' + (lottery.ready ? '（可领取）' : '')) : activitiesData.lotteryError ? '抽奖进度读取失败，详情见运行日志' : '暂无抽奖进度'));
@@ -731,7 +733,7 @@ function renderSeaMerchantSettings(box) {
   renderActivitySettingsFields(box, { data: seaMerchantSettingsData, fields: merchantActivityFields,
     saving: savingSeaMerchantSettings.has(account), statusText: seaMerchantSettingsStatus,
     prefix: 'sea-merchant', dataset: 'seaMerchantSetting', save: saveSeaMerchantSetting, title: '海商王',
-    note: '购买指针和升级商船受全局钻石开关、每日预算和保留量限制。' });
+    note: '自动升船以本期满级为目标，按实际钻石余额支付。指南针补购使用单独设置的每日预算。' });
 }
 
 function renderGuildShipSettings(box) {

@@ -1,5 +1,6 @@
 // 海商王推送仅使快照失效并唤醒现有串行调度，不在监听器中发送任何协议。
-import { merchantTiming } from './merchant-planner.mjs';
+import { merchantPointerSeconds, merchantTiming } from './merchant-planner.mjs';
+import { exactAutomationId } from './automation-policy.mjs';
 
 const watchers = new WeakMap();
 const valid = value => Number.isSafeInteger(value) && value >= 0;
@@ -16,6 +17,8 @@ export function watchMerchant(client) {
   const listeners = new Set();
   let nextAt = 0, event = null, cityId = null, market = null, ports = new Set(), dirty = false, revision = 0;
   let attached = false, destination = null, fleetRevision = 0;
+  let priorityAt = 0;
+  const inboundShips = new Set();
   const notify = reason => {
     for (const listener of listeners) { try { listener({ reason, revision, nextCheckAt: nextAt }); } catch {} }
   };
@@ -29,7 +32,10 @@ export function watchMerchant(client) {
       if (positive(cityId) && body?.cityId === cityId) invalidate('本港价格或联盟库存已变化');
     } else if (name === 'SCTradeCargoMove' && positive(destination)) {
       const voyage = body?.cargo?.cargo;
-      if (voyage?.moveToCityId === destination || voyage?.cityId === destination) {
+      const shipId = exactAutomationId(body?.cargo?.playerId);
+      const wasInbound = inboundShips.delete(shipId);
+      if (shipId && voyage?.moveToCityId === destination) inboundShips.add(shipId);
+      if (wasInbound || voyage?.moveToCityId === destination || voyage?.cityId === destination) {
         fleetRevision++;
         invalidate('目的港商船航程已变化');
       }
@@ -37,11 +43,11 @@ export function watchMerchant(client) {
       if (positive(body?.cityId) && (body.cityId === cityId || ports.has(body.cityId))) invalidate('已知港口商情已变化');
     } else if (name === 'SCAllActivity' && eventKey(body?.trade) !== eventKey(event)) {
       event = body?.trade ? { period: body.trade.period, startTime: body.trade.startTime, endTime: body.trade.endTime } : null;
-      cityId = null; destination = null; market = null; ports.clear();
+      cityId = null; destination = null; market = null; ports.clear(); inboundShips.clear(); priorityAt = 0;
       invalidate('海商王活动期次或时间已变化');
     }
   };
-  const onClose = () => { event = null; cityId = null; destination = null; market = null; ports.clear(); invalidate('连接已关闭'); };
+  const onClose = () => { event = null; cityId = null; destination = null; market = null; ports.clear(); inboundShips.clear(); priorityAt = 0; invalidate('连接已关闭'); };
   const attach = () => {
     if (attached) return;
     client.on?.('message', onMessage); client.on?.('close', onClose); attached = true;
@@ -58,6 +64,7 @@ export function watchMerchant(client) {
       return () => { listeners.delete(listener); if (!listeners.size) detach(); };
     },
     get nextCheckAt() { return nextAt; },
+    get priorityAt() { return priorityAt; },
     get fleetRevision() { return fleetRevision; },
     due(time = nowOf(client)) { return nextAt <= time; },
     defer(until) {
@@ -67,11 +74,19 @@ export function watchMerchant(client) {
     invalidate,
     observe(input = {}) {
       const time = valid(input.time) ? input.time : nowOf(client);
-      if (eventKey(event) !== eventKey(input.event)) { market = null; destination = null; ports.clear(); }
+      if (eventKey(event) !== eventKey(input.event)) { market = null; destination = null; ports.clear(); inboundShips.clear(); }
       event = input.event ? { period: input.event.period, startTime: input.event.startTime, endTime: input.event.endTime } : null;
       const cargo = input.state?.cargo;
       if (positive(cargo?.cityId)) {
-        destination = cargo.moveEndTime > time ? cargo.moveToCityId : null;
+        const nextDestination = cargo.moveEndTime > time ? cargo.moveToCityId : null;
+        if (destination !== nextDestination || Array.isArray(input.state.worldCargo)) inboundShips.clear();
+        destination = nextDestination;
+        if (positive(destination) && Array.isArray(input.state.worldCargo)) {
+          for (const other of input.state.worldCargo) {
+            const id = exactAutomationId(other?.playerId);
+            if (id && other.cargo?.moveToCityId === destination) inboundShips.add(id);
+          }
+        }
         if (cityId !== cargo.cityId) market = null;
         cityId = cargo.cityId;
       }
@@ -83,6 +98,16 @@ export function watchMerchant(client) {
           && positive(good.price) && valid(good.stock)).map(good => ({ goodsId: good.goodsId, price: good.price, stock: good.stock })) };
       }
       const deadlines = [time + merchantMonitorSeconds(input.settings)];
+      priorityAt = 0;
+      const settings = input.settings?.merchant ?? input.settings;
+      if (settings?.autoSpeedUp && (settings.guardLastPointer || ['race', 'full'].includes(settings.speedUpMode))) {
+        if (positive(destination) && cargo?.moveEndTime > time) {
+          const duration = settings.guardLastPointer && merchantPointerSeconds(input.config);
+          priorityAt = duration && cargo.moveEndTime - duration > time ? cargo.moveEndTime - duration : cargo.moveEndTime;
+        }
+        if (input.expedite) priorityAt = time + 1;
+        if (priorityAt) deadlines.push(priorityAt);
+      }
       if (positive(cargo?.moveEndTime) && cargo.moveEndTime > time) deadlines.push(cargo.moveEndTime);
       if (positive(event?.startTime) && event.startTime > time) deadlines.push(event.startTime);
       if (positive(event?.endTime) && event.endTime > time) deadlines.push(event.endTime);

@@ -62,9 +62,33 @@ function fixture() {
     state:{...state,cargo:{...state.cargo,cityId:20,moveToCityId:0,moveEndTime:0}}});
   return {settings,client,state,event,ctx,calls,reports,radar,marketHistory,run:()=>runMerchantSpeed(client,config,ctx,event,structuredClone(state)),
     writes:()=>calls.filter(c=>['TradeBuySpeedItemRequest','TradeSpeedRequest'].includes(c.name)),
-    mode:v=>{mode=v;},hook:v=>{hook=v;},pause:()=>{active=false;},restart:()=>{ctx.ledger=createUsageLedger('test',{file,now:()=>at*1000});},stock:v=>{stock=v;} };
+    mode:v=>{mode=v;},hook:v=>{hook=v;},pause:()=>{active=false;},restart:()=>{ctx.ledger=createUsageLedger('test',{file,now:()=>at*1000});},
+    stock:v=>{stock=v;},balance:v=>{diamonds=v;} };
 }
 try {
+  await test('到港策略按顺位和航时补缺，改线、补购关闭和余额不足均不花钻', async () => {
+    for (const mode of ['race', 'full', 'guard']) {
+      const f = fixture();
+      Object.assign(f.settings.merchant, { speedUpMode: mode === 'guard' ? 'race' : mode, guardLastPointer: mode === 'guard' });
+      f.state.cargo.moveEndTime = at + (mode === 'guard' ? 1800 : 3600);
+      f.state.worldCargo[0].cargo.moveEndTime = at + 1850;
+      const count = mode === 'full' ? 2 : 1;
+      await f.run();
+      assert.deepEqual(f.writes().map(row => row.body), [{ buyNum: count }]);
+      await f.run();
+      assert.deepEqual(f.writes().map(row => row.body), [{ buyNum: count }, { useNum: count }]);
+    }
+    for (const change of [f => { f.settings.merchant.autoBuyPointers = false; }, f => f.balance(799),
+      f => { f.settings.merchant.pointerDailyDiamondLimit = 799; },
+      f => { f.state.worldCargo[0].cargo.moveEndTime = at + 30; }, // 补购后下一轮已经追不上。
+      f => f.hook(name => { if (name === 'TradeInfoRequest') f.state.worldCargo[0].cargo.moveToCityId = 30; })]) {
+      const f = fixture();
+      f.settings.merchant.speedUpMode = 'race';
+      change(f);
+      await f.run();
+      assert.deepEqual(f.writes(), []);
+    }
+  });
   await test('新增模块消费默认关闭，真实配置目录校验和独立参数持久化',()=>{
     const settings=defaultSettings();validateSettings(settings,{catalog:settingsCatalog(loadConfig())});
     for(const key of ['alliance','guildShip','guildFort','silicon','heroRaid'])assert.equal(settings[key].enabled,false);
@@ -124,6 +148,31 @@ try {
     assert.equal(f.ctx.ledger.snapshot().counters.merchantPointerDiamonds,3200);f.restart();await f.run();
     assert.equal(f.writes().at(-1).name,'TradeSpeedRequest');assert.equal(f.ctx.ledger.snapshot().counters.merchantPointers,4);
   });
+  await test('关闭加速、已达5000万或免费持货够达标时即使开启补购也不花钻石',async()=>{
+    for (const change of [
+      f => { f.settings.merchant.autoSpeedUp = false; },
+      f => { f.state.player.profit = 50_000_000; },
+      f => { f.state.player.profit = 50_000_000 - 500; }
+    ]) {
+      const f = fixture(); change(f); await f.run(); assert.deepEqual(f.writes(), []);
+    }
+  });
+  await test('库存一根足以达标或第二根的边际收益太小时直接用库存', async () => {
+    for (const gap of [3500, 3606]) {
+      const f = fixture(); f.stock(1);
+      f.event.endTime = at + 2700;
+      f.state.cargo.moveEndTime = at + 4410;
+      f.state.worldCargo = [];
+      f.state.player.goods.push({ ...f.state.player.goods[0], pid: 2, num: 1 });
+      f.state.player.profit = 50_000_000 - gap;
+      await f.run();
+      assert.deepEqual(f.writes().map(c => [c.name, c.body]), [['TradeSpeedRequest', { useNum: 1 }]]);
+    }
+    const f = fixture(); f.state.worldCargo = [];
+    f.event.endTime = at + 90;
+    assert.equal(f.writes().length, 0);
+    await f.run(); assert.deepEqual(f.writes(), [], '购针占本轮，下一轮已来不及卖货');
+  });
   await test('自然领先、自己的船、外盟船和异港船都不会触发抢货消费',async()=>{
     for(const alter of [f=>f.state.worldCargo[0].cargo.moveEndTime=f.state.cargo.moveEndTime+120,
       f=>f.state.worldCargo[0].playerId=f.ctx.player.playerId, f=>f.state.worldCargo[0].guildIdx=2,
@@ -179,18 +228,36 @@ try {
       await f.run();assert.deepEqual(f.writes(),[]);assert(monitor.fleetRevision>0);
     } finally { off(); }
   });
-  await test('购买指针遵守总预算、模块预算、钻石保留量和游戏日购买上限',async()=>{
-    for(const alter of [f=>f.settings.resources.allowDiamonds=false,f=>f.settings.merchant.pointerDailyDiamondLimit=0,
-      f=>f.settings.resources.diamondDailyLimit=3000,f=>f.settings.resources.diamondThreshold=9000,f=>f.state.player.buySpeedTimes=49]){
+  await test('购买指针只占补购预算，全局关闭、余额等于所需费用时仍可补齐',async()=>{
+    const f=fixture(), ledger=f.ctx.ledger;
+    ledger.confirm(ledger.reserve({diamonds:10000},{diamonds:10000}));
+    Object.assign(f.settings.resources,{allowDiamonds:false,diamondDailyLimit:0,diamondThreshold:10000});
+    f.settings.merchant.pointerDailyDiamondLimit=3200;
+    f.balance(3200);
+    f.hook(name=>{if(name==='AllResourceRequest')f.settings.resources.diamondThreshold=20000;});
+    await f.run();
+    assert.deepEqual(f.writes(),[{name:'TradeBuySpeedItemRequest',body:{buyNum:4}}]);
+    assert.equal(ledger.confirmedCounters().merchantPointerDiamonds,3200);
+    assert.equal(ledger.snapshot().counters.diamonds,10000);
+  });
+  await test('专项余额、实际余额或游戏日限无法补齐方案时跳过购买',async()=>{
+    for(const alter of [f=>f.settings.merchant.pointerDailyDiamondLimit=0,
+      f=>f.settings.merchant.pointerDailyDiamondLimit=3199,f=>f.balance(3199),f=>f.state.player.buySpeedTimes=49,
+      f=>f.ctx.ledger.confirm(f.ctx.ledger.reserve({merchantPointerDiamonds:801},{merchantPointerDiamonds:4000}))]){
       const f=fixture();alter(f);await f.run();assert.equal(f.writes().length,0);
     }
   });
   await test('购买响应未知跨重启不重发，明确未发送释放预算',async()=>{
-    const f=fixture();f.mode('unknown');await f.run();f.restart();await f.run();assert.equal(f.writes().length,1);assert.equal(f.ctx.ledger.pendingCounters().diamonds,3200);
-    const g=fixture();g.mode('notSent');await g.run();assert.equal(g.ctx.ledger.pendingCounters().diamonds??0,0);
+    const f=fixture();f.mode('unknown');await f.run();f.restart();await f.run();assert.equal(f.writes().length,1);
+    assert.deepEqual(f.ctx.ledger.pendingCounters(),{merchantPointerDiamonds:3200});
+    const g=fixture();g.mode('notSent');await g.run();
+    assert.deepEqual(g.ctx.ledger.pendingCounters(),{});
+    assert.equal(g.ctx.ledger.snapshot().counters.merchantPointerDiamonds,0);
   });
   await test('购买前关闭开关取消写入，零日用量不因购买功能绕过',async()=>{
     const f=fixture();f.hook(name=>{if(name==='AllResourceRequest')f.pause();});await f.run();assert.equal(f.writes().length,0);
+    const h=fixture();h.hook(name=>{if(name==='AllResourceRequest')h.settings.merchant.pointerDailyDiamondLimit=0;});
+    await h.run();assert.equal(h.writes().length,0);
     const g=fixture();g.settings.merchant.dailyPointerLimit=0;await g.run();assert.equal(g.writes().length,0);
   });
   await test('利润达限或读取期间调低上限时，不继续使用或购买指针',async()=>{

@@ -225,16 +225,18 @@ function ProductIcon({ src }: { src: string }) {
 
 function ProductRow({
   product,
-  ad,
+  shop,
   busy,
   choose,
 }: {
   product: ShopProduct;
-  ad: boolean;
+  shop: ShopId;
   busy: boolean;
   choose: (product: ShopProduct, quantity: number) => void;
 }) {
   const [quantity, setQuantity] = useState("1");
+  const ad = shop === "ad";
+  const soldOut = shop === "discount" && product.buyTimes > 0;
   const value = Number(quantity);
   const valid = validQuantity(product, value, ad);
   const available = product.canBuy && Boolean(product.token);
@@ -270,12 +272,12 @@ function ProductRow({
           <span className="tabular-nums">
             {product.remaining === null ? "不限购" : `${product.remaining} 份`}
           </span>
-          {product.buyTimes > 0 && (
+          {!soldOut && product.buyTimes > 0 && (
             <p className="text-xs text-muted-foreground">
               已{ad ? "领取" : "购买"} {product.buyTimes} 份
             </p>
           )}
-          {product.blockedReason ? (
+          {product.blockedReason && !soldOut ? (
             <p className="text-xs text-muted-foreground">
               {product.blockedReason}
             </p>
@@ -290,40 +292,44 @@ function ProductRow({
         </div>
       </TableCell>
       <TableCell data-label="操作">
-        <div>
-          <div className={styles.purchaseRow}>
-            <Input
-              type="number"
-              inputMode="numeric"
-              min={1}
-              max={maximum(product, ad)}
-              step={1}
-              value={quantity}
-              disabled={busy || !available}
-              readOnly={ad}
-              aria-label={`${name}购买份数`}
-              aria-invalid={available && !valid}
-              aria-describedby={available && !valid ? errorId : undefined}
-              onChange={(event) => setQuantity(event.target.value)}
-            />
-            <Button
-              type="button"
-              variant="outline"
-              size="sm"
-              disabled={busy || !available || !valid}
-              aria-label={`${ad ? "领取" : "购买"}${name}`}
-              aria-haspopup="dialog"
-              onClick={() => choose(product, value)}
-            >
-              {ad ? "领取" : "购买"}
-            </Button>
+        {soldOut ? (
+          <Badge variant="secondary">已售罄</Badge>
+        ) : (
+          <div>
+            <div className={styles.purchaseRow}>
+              <Input
+                type="number"
+                inputMode="numeric"
+                min={1}
+                max={maximum(product, ad)}
+                step={1}
+                value={quantity}
+                disabled={busy || !available}
+                readOnly={ad}
+                aria-label={`${name}购买份数`}
+                aria-invalid={available && !valid}
+                aria-describedby={available && !valid ? errorId : undefined}
+                onChange={(event) => setQuantity(event.target.value)}
+              />
+              <Button
+                type="button"
+                variant="outline"
+                size="sm"
+                disabled={busy || !available || !valid}
+                aria-label={`${ad ? "领取" : "购买"}${name}`}
+                aria-haspopup="dialog"
+                onClick={() => choose(product, value)}
+              >
+                {ad ? "领取" : "购买"}
+              </Button>
+            </div>
+            {available && !valid && (
+              <p id={errorId} className="mt-1 text-xs text-destructive">
+                请输入 1 至 {maximum(product, ad)} 的整数份数
+              </p>
+            )}
           </div>
-          {available && !valid && (
-            <p id={errorId} className="mt-1 text-xs text-destructive">
-              请输入 1 至 {maximum(product, ad)} 的整数份数
-            </p>
-          )}
-        </div>
+        )}
       </TableCell>
     </TableRow>
   );
@@ -480,6 +486,8 @@ function GameRefreshDialog({
 }
 
 function PurchaseResult({ result }: { result: ShopPurchaseResult }) {
+  if (result.shopId === "discount" && result.status === "completed")
+    return null;
   const labels = {
     completed: "已完成",
     unknown: "结果待核对",
@@ -517,8 +525,8 @@ function PurchaseResult({ result }: { result: ShopPurchaseResult }) {
 }
 
 function GameRefreshResult({ result }: { result: ShopGameRefreshResult }) {
+  if (result.status === "completed") return null;
   const labels = {
-    completed: "已完成",
     unknown: "结果待确认",
     rejected: "未刷新",
     cancelled: "已取消",
@@ -532,10 +540,7 @@ function GameRefreshResult({ result }: { result: ShopGameRefreshResult }) {
       <p className="font-medium">折扣商店 · 刷新 · {labels[result.status]}</p>
       {result.message && <p>{result.message}</p>}
       {result.costs.length > 0 && (
-        <p>
-          {result.status === "completed" ? "消耗" : "待核对费用"}：
-          {result.costs.map(amountText).join("、")}
-        </p>
+        <p>待核对费用：{result.costs.map(amountText).join("、")}</p>
       )}
       {result.status === "unknown" && (
         <p>可重新进入折扣商店核对刷新次数、商品与余额，勿重复刷新。</p>
@@ -816,7 +821,7 @@ function ShopPanel({
                 <ProductRow
                   key={`${product.id}:${product.token}`}
                   product={product}
-                  ad={ad}
+                  shop={shop}
                   busy={busy}
                   choose={choose}
                 />

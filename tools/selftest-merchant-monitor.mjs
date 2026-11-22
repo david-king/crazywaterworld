@@ -16,7 +16,7 @@ const folder = fs.mkdtempSync(path.join(os.tmpdir(), 'cw-merchant-monitor-'));
 const test = async (name, run) => { wall = base; await run(); passed++; console.log('通过：' + name); };
 const smallConfig = { tables: { ActivityTradeCfg: { data: [
   { key: '海商王贸易时间', value: '10-22' }, { key: '海商王行驶时间', value: '120' },
-  { key: '海商王刷新时间', value: '10,12,14,16,18,20' }
+  { key: '海商王刷新时间', value: '10,12,14,16,18,20' }, { key: '海商王加速时长', value: '30' }
 ] } } };
 const event = () => ({ period: 1001, startTime: base / 1000 - 86400, endTime: base / 1000 + 86400 });
 
@@ -57,6 +57,20 @@ function integration({ mainEveryMs = 3600000 } = {}) {
 }
 
 try {
+  await test('最后一根在窗口边界唤醒，原先同港的船改线使快照失效', () => {
+    const client = new EventEmitter(), monitor = watchMerchant(client), off = monitor.subscribe(() => {});
+    const now = wall / 1000;
+    const state = { cargo: { cityId: 10, moveToCityId: 20, moveEndTime: now + 1803 },
+      worldCargo: [{ playerId: '123', cargo: { cityId: 30, moveToCityId: 20 } }] };
+    const settings = { merchant: { monitorSeconds: 300, autoSpeedUp: true, guardLastPointer: true } };
+    assert.equal(monitor.observe({ event: event(), state, config: smallConfig, time: now, settings }), now + 3);
+    const revision = monitor.fleetRevision;
+    client.emit('message', { name: 'SCTradeCargoMove', body: { cargo: { playerId: '123', cargo: { cityId: 30, moveToCityId: 40 } } } });
+    assert.equal(monitor.fleetRevision, revision + 1);
+    settings.merchant.guardLastPointer = false;
+    assert.equal(monitor.observe({ event: event(), state, config: smallConfig, time: now, settings }), now + 300);
+    off();
+  });
   await test('当前港库存推送仅失效一次，远端推送不注入报价或发送请求', () => {
     const client = new EventEmitter(), monitor = watchMerchant(client), signals = [];
     client.request = () => { throw Error('推送不能发协议'); };
@@ -150,6 +164,20 @@ try {
     assert.deepEqual(f.state.writes.map(row => row.name), ['TradeBuyRequest', 'TradeMoveRequest']);
     assert.equal(wall - base, 10000, '推送提前检查，同时保留10秒节流');
     assert(f.sleeps.length <= 3);
+  });
+  await test('主循环在防抢边界用一根到港，接着按新港口库存采购', async () => {
+    const f = integration(), now = f.now;
+    Object.assign(f.settings.merchant, { autoSpeedUp: true, speedUpMode: 'race', guardLastPointer: true });
+    f.state.stock['海商王加速'] = 2;
+    Object.assign(f.state.trade.cargo, { moveStartTime: now - 5397, moveEndTime: now + 1803, moveToCityId: 20 });
+    Object.assign(f.state.markets[20], { specGoodsId: 1002, rareGoodsId: 1001, goods: [{ goodsId: 1002, stock: 0, price: 20 }] });
+    f.reportHook(() => { if (f.state.writes.length >= 2) f.stop.aborted = true; });
+    await f.run();
+    assert.equal(f.sleeps[0], 3000);
+    assert.equal(wall - base, 4000, '到港后下一秒即按实价采购');
+    assert.deepEqual(f.state.writes.map(row => row.name), ['TradeSpeedRequest', 'TradeBuyRequest']);
+    assert.deepEqual(f.state.writes[0].body, { useNum: 1 });
+    assert.equal(f.state.writes[1].body.cityId, 20);
   });
   await test('到港期限短于监控周期时及时回读并出售', async () => {
     const f = integration(), now = f.now;
