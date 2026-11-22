@@ -309,10 +309,44 @@ try {
     assert.deepEqual(t.f.state.fields.map(f => f.type).sort(), [1, 1, 1, 2]);
     assert.equal(t.f.client.writes.length, 4);
   });
-  await test('出征后归队未占领时暂停当日自动化，不能换格无限撞守军', async () => {
-    const t = setup(); automatic(t); await run(t); t.f.finish(10, false);
+  await test('返航未占先复核，原队可换格一次；两块均未确认时停止该队继续消耗汽油', async () => {
+    const t = setup(); automatic(t);
+    t.f.state.mapFields.push({ gridIdx: 23, cityId: 2, resType: 3 });
+    await run(t); t.f.finish(10, false);
     await run(t); await run(t); assert.equal(t.f.client.writes.length, 1);
     const state = await read(t); assert.equal(state.count, 0); assert.equal(state.pending.length, 0);
+    assert.equal(state.autoStopReason, '');
+    t.options.ledger = t.createLedger(); t.f.client.serverClockOffsetMs += t.settings.resourceFields.checkEverySeconds * 1000;
+    await run(t); assert.deepEqual(t.f.client.writes.map(w => w.body.resFieldGridIdx), [10, 20]);
+    t.f.finish(20, false); await run(t);
+    t.f.client.serverClockOffsetMs += t.settings.resourceFields.checkEverySeconds * 1000;
+    await run(t); assert.equal(t.f.client.writes.length, 2);
+    assert.match((await read(t)).fleets[0].returnReason, /2 块田/);
+    t.f.client.serverClockOffsetMs += 86400000; await run(t);
+    assert.deepEqual(t.f.client.writes.map(w => w.body.resFieldGridIdx), [10, 20, 10]);
+  });
+  await test('晚到的个人占领列表补认已返航记录，预览只读，最后一个名额不会重复派遣', async () => {
+    const t = setup(); automatic(t).fleetIds.push('2远征船'); t.f.state.maxNum = 1;
+    await run(t); t.f.returnFleet('1远征船');
+    await checkFleetSettlement(t.f.client, t.f.player, t.ledger);
+    const key = 'resource-field:1001001:10';
+    assert.equal(t.ledger.keyRecords()[key].details.everOccupied, false);
+    await run(t); assert.equal(t.f.client.writes.length, 1);
+    t.options.ledger = t.createLedger(); t.f.finish(10, true);
+    const plan = await previewResourceFieldPlan(t.f.client, t.f.protocol, t.f.config, t.f.player, t.options);
+    assert.equal(plan.actions.length, 0); assert.equal(t.ledger.keyRecords()[key].details.everOccupied, false);
+    const state = await read(t); assert.equal(state.returnChecks.length, 0);
+    assert.equal(state.fleets[0].returnReason, '');
+    assert.equal(t.ledger.keyRecords()[key].details.everOccupied, true);
+    assert.equal(t.ledger.confirmedCounters().resourceFieldPetrol, 300);
+    await run(t); assert.equal(t.f.client.writes.length, 1);
+  });
+  await test('待复核的田占本类一个配额，其他舰队可以填补另一类空位', async () => {
+    const t = setup(); Object.assign(automatic(t), { fleetIds: ['1远征船', '2远征船'],
+      allocationMode: 'quota', quotas: { fuel: 1, seeds: 1, tech: 0 } });
+    t.f.state.maxNum = 2; await run(t); t.f.returnFleet('1远征船');
+    await run(t);
+    assert.deepEqual(t.f.client.writes.map(w => [w.body.resFieldGridIdx, w.body.fleetBuildingIds]), [[10, ['1远征船']], [11, ['2远征船']]]);
   });
   await test('合服前世界关闭时段停止派遣', async () => {
     const t = setup(); automatic(t); t.f.state.merge.worldIds = [1001001, 1001002];
@@ -526,6 +560,79 @@ try {
     assert(state.notes.some(note => /旧田 20 已放弃.*未继续/.test(note)));
     automatic(t); await run(t); assert.equal(t.f.client.writes.length, 1);
     assert((await preview(t)).fleets.some(row => row.available));
+  });
+  for (const fault of ['旧田列表延迟', '雷达超时']) {
+    await test('自动换田恢复：' + fault + '后重启，原舰队只出征一次', async () => {
+      const t = replacing(); automatic(t);
+      const old = structuredClone(t.f.state.fields);
+      let injected = false;
+      t.f.beforeRead = name => {
+        if (injected || !t.f.client.writes.length) return;
+        if (fault === '旧田列表延迟' && name === 'MyResFieldsRequest') {
+          injected = true; return { info: { maxNum: 1, fields: old } };
+        }
+        if (fault === '雷达超时' && name === 'RadarInfoRequest') { injected = true; throw Error('timeout'); }
+      };
+      assert.equal((await run(t))[0].status, 'pending');
+      t.options.ledger = t.createLedger();
+      await checkFleetSettlement(t.f.client, t.f.player, t.options.ledger);
+      const before = await read(t);
+      assert.equal(before.remaining, 0); assert.equal(before.pendingFuel, 300);
+      assert.equal(before.autoStopReason, ''); assert.equal(before.fleets[0].available, false);
+      const planned = await previewResourceFieldPlan(t.f.client, t.f.protocol, t.f.config, t.f.player, t.options);
+      assert.match(planned.actions[0].label, /继续换田.*10/);
+      assert.equal(t.f.client.writes.length, 1);
+      await Promise.allSettled([run(t), run(t)]); await run(t);
+      assert.deepEqual(t.f.client.writes.map(w => [w.name, w.body.resFieldGridIdx]),
+        [['GiveUpResFieldRequest', 20], ['ChallengeResFieldRequest', 10]]);
+      assert.deepEqual(t.f.client.writes[1].body.fleetBuildingIds, ['1远征船']);
+      assert.equal(t.options.ledger.confirmedCounters().resourceFieldPetrol, 300);
+      assert.equal(pendingPetrol(t.options.ledger), 0);
+    });
+  }
+  await test('原目标出征结果未知时，重启并跨日不会再次放弃或出征', async () => {
+    const t = replacing(); automatic(t); t.f.unknownRequest = 'ChallengeResFieldRequest';
+    assert.equal((await run(t))[0].status, 'unknown');
+    t.options.ledger = t.createLedger(); t.f.client.serverClockOffsetMs += 86400000;
+    await run(t);
+    assert.equal(t.f.client.writes.length, 2); assert.equal(pendingPetrol(t.options.ledger), 300);
+  });
+  await test('待续换田在途切换角色时不发送，切回原角色只续发原目标', async () => {
+    const t = replacing(); automatic(t);
+    const sendWatch = t.f.client.sendWatch, originalId = t.f.player.playerId;
+    t.f.client.sendWatch = (name, body, opts) => {
+      if (name === 'ChallengeResFieldRequest') t.f.player.playerId = '9007199254999999';
+      return sendWatch(name, body, opts);
+    };
+    assert.equal((await run(t))[0].status, 'pending');
+    assert.equal(t.f.client.writes.length, 1);
+    assert.equal(t.ledger.keyRecords()['resource-field:1001001:10'].details.phase, 'released');
+    t.f.player.playerId = originalId; t.f.client.sendWatch = sendWatch;
+    assert.equal((await run(t))[0].status, 'confirmed');
+    assert.deepEqual(t.f.client.writes.map(w => w.body.resFieldGridIdx), [20, 10]);
+  });
+  await test('原舰队暂忙或汽油暂缺时等待恢复，保留同一笔预留', async () => {
+    const t = replacing(); automatic(t);
+    t.f.afterWrite = name => {
+      if (name === 'GiveUpResFieldRequest') { t.f.state.fuel = 0; t.f.state.fleets[0].state = 4; }
+    };
+    assert.equal((await run(t))[0].status, 'pending');
+    t.f.state.fuel = 300;
+    assert.equal((await run(t))[0].status, 'pending');
+    assert.equal(pendingPetrol(t.ledger), 300); assert.equal(t.f.client.writes.length, 1);
+    t.f.returnFleet('1远征船');
+    assert.equal((await run(t))[0].status, 'confirmed');
+    assert.deepEqual(t.f.client.writes.map(w => w.body.resFieldGridIdx), [20, 10]);
+  });
+  await test('待续换田关闭自动占领后释放空位和汽油，可手动选择', async () => {
+    const t = replacing(); automatic(t);
+    t.f.beforeRead = name => { if (t.f.client.writes.length && name === 'RadarInfoRequest') throw Error('timeout'); };
+    assert.equal((await run(t))[0].status, 'pending');
+    t.settings.resourceFields.enabled = false; t.f.beforeRead = null;
+    const state = await read(t);
+    assert.equal(state.remaining, 1); assert.equal(pendingPetrol(t.ledger), 0);
+    assert.equal(t.f.client.writes.length, 1);
+    assert((await preview(t)).fleets.some(f => f.available));
   });
   await test('放弃执行中并发概览与公共结算不能释放事务或误认占领', async () => {
     const t = replacing(), p = await replacePreview(t);

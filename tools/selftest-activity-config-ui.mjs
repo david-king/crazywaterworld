@@ -129,6 +129,7 @@ function loadFixture(initial = dataFor([])) {
     let loopVersion = 0, loopSettingsRevision = 7;
     const setTaskSwitch = (input, value) => { input.checked = value; };
     const refreshLoop = () => {};
+    const configLoopPath = () => '/api/loop';
     const reportError = error => { throw error; };
     const $ = () => ({});
     const call = async route => { state.calls.push(route); return route.split('?')[0] === '/api/settings' ? structuredClone(state.next) : { controls: [] }; };

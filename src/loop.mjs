@@ -12,6 +12,7 @@ import { runHeroRaidAutomation } from './hero-raid-automation.mjs';
 import { merchantMonitorSeconds, watchMerchant } from './merchant-monitor.mjs';
 import {runPirateSweeps} from './pirate-sweeps.mjs';
 import { runLeagueChallenge } from './league-challenge.mjs';
+import { recoverLeagueOrder } from './league-order.mjs';
 import {claimGuildTitleReward} from './guild-title-rewards.mjs';
 import {runWorldBoss,claimWorldBossDamage} from './world-boss.mjs';
 import {recoverFleetLineups} from './fleet-lineups.mjs';
@@ -828,6 +829,9 @@ export async function runLoop(client, protocol, {
       logReward(entry, '领奖');
     } }));
     async function* mainSteps() {
+      try {
+        await recoverLeagueOrder(client, player, usageLedger, () => !stop.aborted && client.connected !== false);
+      } catch (error) { phaseFailure('dailies', '积分赛防守队序恢复', error); }
       beginAdRound(client);
       // 活动有独立开关；先执行当天活动，普通任务随后重读状态并共用预算，避免沿用消费前的快照。
       await checkWeeklyActivity();

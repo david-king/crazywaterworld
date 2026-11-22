@@ -23,6 +23,10 @@ fs.writeFileSync(process.env.CW_CONFIG_PACK, JSON.stringify([[1, 'HeroCfg', { da
   [4, 'BuildingCfg', { data: [{ buildingType: '精铁厂', name: '冶炼厂' }] }],
   [5, 'BuildingUpgradeCfg', { data: [{ buildingType: '精铁厂', product: [['精铁', 1]] }] }],
   [6, 'ItemJumpCfg', { data: [{ id: '耐火砖', accessList: ['折扣商店'] }] }],
+  [7, 'TrialRaidCfg', { data: ['英雄经验副本', '强化石副本', '海兽经验副本'].map((title, i) => ({ raidId: i + 1, title })) }],
+  [8, 'TrialRaidStageCfg', { data: [1, 2, 3].flatMap(raidId => Array.from({ length: 15 }, (_, i) => ({
+    raidId, stageId: raidId * 1000 + i + 1, stageLevel: i + 1, openLevel: raidId === 3 ? 25 : 14,
+  }))) }],
 ]));
 const { saveStore } = await import('../src/accounts.mjs');
 const { defaultSettings, saveAutomationSettings, loadAutomationSettings, settingsUiRules } = await import('../src/automation-settings.mjs');
@@ -91,6 +95,100 @@ try {
   assert(Math.abs(tabBounds.x - toolbarBounds.x) < 1, '桌面分类标签与账号信息左对齐');
   await page.screenshot({ path: path.join(output, 'config-navigation-desktop.png'), animations: 'disabled',
     clip: { x: toolbarBounds.x, y: toolbarBounds.y, width: toolbarBounds.width, height: tabBounds.y + tabBounds.height - toolbarBounds.y + 8 } });
+  {
+    await group('progression');
+    const card = page.getByRole('region', { name: '主线推关进度' });
+    await card.waitFor();
+    assert(await card.evaluate(node => node.parentElement.firstElementChild === node));
+    await card.getByText('关卡待同步').waitFor();
+    const stages = card.getByRole('list', { name: '主线关卡' });
+    const current = card.locator('[aria-current=step]');
+    const trials = page.getByRole('region', { name: '试炼进度' });
+    const trialRow = name => trials.getByRole('row').filter({ has: page.getByRole('rowheader', { name }) });
+    const hero = trialRow('英雄经验副本'), stones = trialRow('强化石副本'), beasts = trialRow('海兽经验副本');
+    const reads = [];
+    const trialClient = new GameClient({ protocol: {} });
+    trialClient.freeRecruitTimes = { hero: 0, antique: 0 };
+    trialClient.request = async (name, { raidId }) => {
+      assert.equal(name, 'TrialRaidInfoRequest');
+      reads.push(raidId);
+      return { raid: { raidId, passedStage: { 1: 1012, 2: 2015, 3: 0 }[raidId] } };
+    };
+    await hero.getByText('待同步').waitFor();
+    try {
+      bossSession.player.mainlineStage = 268;
+      bossSession.loop.challengeRun = { mainline: { stage: 267, wins: 5, failures: 0, reason: '第 267 关已通关' } };
+      await current.getByText('268', { exact: true }).waitFor();
+      assert.deepEqual(await stages.getByRole('listitem').allTextContents(), ['265','266','267','268','269','270','271']);
+      assert.equal(await stages.locator('[data-state=passed]').count(), 3);
+      await stages.getByRole('listitem', { name: '第 269 关，下一关' }).waitFor();
+      await card.getByText('最近同步').waitFor();
+      await card.screenshot({ path: path.join(output, 'mainline-progress.png') });
+      bossSession.player.level = 24;
+      bossSession.paused = false;
+      bossSession.client = trialClient;
+      trialClient.socket = { readyState: 1 };
+      await hero.getByText('第 13 关').waitFor({ timeout: 15000 });
+      assert.deepEqual(await hero.locator('td').allTextContents(), ['第 12 关', '第 13 关']);
+      await stones.getByText('全部通关').waitFor();
+      await beasts.getByText('角色 25 级开放').waitFor();
+      assert.deepEqual(reads, [1, 2], '只补读开放副本');
+      const progressCard = card.locator('..');
+      const [mainWide, trialsWide, desktopCard] = await Promise.all([card, trials, progressCard].map(node => node.boundingBox()));
+      assert(trialsWide.x >= mainWide.x + mainWide.width - 1 && Math.abs(trialsWide.y - mainWide.y) < 1, '宽屏试炼进度排在主线右侧');
+      await progressCard.screenshot({ path: path.join(output, 'mainline-and-trials.png') });
+      await page.setViewportSize({ width: 320, height: 800 });
+      const [mainNarrow, trialsNarrow, mobileCard] = await Promise.all([card, trials, progressCard].map(node => node.boundingBox()));
+      assert(trialsNarrow.y >= mainNarrow.y + mainNarrow.height && Math.abs(mainNarrow.x - trialsNarrow.x) < 1, '窄屏试炼进度排在主线下方');
+      assert(desktopCard.height < mobileCard.height, '并排展示压缩整张卡片的高度');
+      assert(await trials.evaluate(node => node.scrollWidth <= node.clientWidth + 1));
+      assert(await card.evaluate(node => node.scrollWidth <= node.clientWidth + 1));
+      const boxes = await stages.locator('.mainline-stage-number').evaluateAll(nodes => nodes.map(node => node.getBoundingClientRect().toJSON()));
+      assert(boxes.every((box, i) => box.y === boxes[0].y && (!i || box.x >= boxes[i - 1].right)));
+      await card.screenshot({ path: path.join(output, 'mainline-progress-mobile.png') });
+      await card.locator('..').screenshot({ path: path.join(output, 'mainline-and-trials-mobile.png') });
+      assert.deepEqual(reads, [1, 2], '轮询期间复用已确认的副本进度');
+      bossSession.player.level = 25;
+      await beasts.getByText('未首通').waitFor({ timeout: 15000 });
+      assert.deepEqual(await beasts.locator('td').allTextContents(), ['未首通', '第 1 关']);
+      assert.deepEqual(reads, [1, 2, 3]);
+      const other = await (await fetch(base + '/api/loop?account=config-b&trials=1')).json();
+      assert(other.trialProgress.every(raid => raid.passed === null), '切换账号不能读到其他账号的通关记录');
+      bossSession.player.mainlineStage++;
+      await current.getByText('269', { exact: true }).waitFor();
+      assert.deepEqual(await stages.locator('.mainline-stage-number').allTextContents(), ['266','267','268','269','270','271','272']);
+      bossSession.player.mainlineStage = 1;
+      await current.getByText('1', { exact: true }).waitFor();
+      assert.deepEqual(await stages.locator('.mainline-stage-number').allTextContents(), ['1','2','3','4']);
+      const firstStage = await current.boundingBox();
+      assert(Math.abs(firstStage.x - boxes[3].x) < 1, '第一关也保持居中');
+      delete bossSession.player.mainlineStage;
+      await card.getByText('关卡待同步').waitFor();
+      assert.equal(await stages.count(), 0);
+      await group('treasure');
+      assert.equal(await card.isVisible(), false);
+    } finally {
+      trialClient.socket = null;
+      bossSession.client = null;
+      bossSession.paused = true;
+      delete bossSession.player.level;
+      delete bossSession.player.mainlineStage;
+      delete bossSession.loop.challengeRun;
+      await page.setViewportSize({ width: 1440, height: 1000 });
+    }
+  }
+  {
+    await group('pirate-hunt');
+    const picker = page.locator('#config-field-pirateSweep-types');
+    await picker.locator('summary').click();
+    await picker.getByRole('checkbox', { name: '海盗精锐' }).check();
+    await page.keyboard.press('Escape');
+    const eliteTimes = page.locator('#config-field-pirateSweep-times2');
+    await eliteTimes.fill('2');
+    await saved();
+    assert.deepEqual(loadAutomationSettings('config-a').settings.pirateSweep, { types: ['1', '2'], times1: -1, times2: 2, times3: 1 });
+    assert(!await page.locator('#config-field-pirateSweep-times3').isVisible());
+  }
   {
     await page.getByRole('tab', { name: '日常', exact: true }).click();
     const tabs = await page.locator('#config-panel-daily [data-config-group]').allTextContents();

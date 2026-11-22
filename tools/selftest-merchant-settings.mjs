@@ -12,7 +12,7 @@ import { MERCHANT_DEFAULTS, merchantSettings } from '../src/merchant-planner.mjs
 
 const defaults = {
   autoShareIntel: false,
-  quoteMaxAgeSeconds: 300, estimateDiscountPercent: 10, refreshWaitSeconds: 120, liquidationMinutes: 120,
+  quoteMaxAgeSeconds: 300, estimateDiscountPercent: 0, refreshWaitSeconds: 120, liquidationMinutes: 120,
   maxLossPercent: 0, minExpectedProfit: 1, autoSpeedUp: false, speedUpMinProfit: 1000, keepPointers: 0,
   speedUpMode: 'profit', guardLastPointer: false, speedUpMaxPerLeg: 4, monitorSeconds: 60,
   refreshWindowMinutes: 8, dailyPointerLimit: 28, autoBuyPointers: false, pointerDailyDiamondLimit: 0,
@@ -56,6 +56,8 @@ test('旧版导入补齐策略参数，保留走商及领奖的显式开关', ()
   assert.deepEqual(importAutomationSettings(document).merchant, {
     enabled: false, ...defaults, autoSpeedUp: true, maxLossPercent: 5, keepPointers: 3
   });
+  document.settings.merchant.estimateDiscountPercent = 10;
+  assert.equal(importAutomationSettings(document).merchant.estimateDiscountPercent, 10);
 });
 
 test('旧升船限制从导入、已打开的配置页和再次导出中清理，保留开关', () => {

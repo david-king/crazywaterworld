@@ -24,10 +24,10 @@ function setup(){
  return{settings,client,player,config,state,events,calls,ledger,options};
 }
 await test('三个可选种类分别扫荡最高已首杀等级，仅使用每日次数',async()=>{
- for(const type of ['1','2','3']){const f=setup();f.settings.pirateSweep.type=type;await runPirateSweeps(f.client,f.config,f.player,f.options);const writes=f.calls.filter(c=>c.n==='PirateSweepRequest');assert.equal(writes.length,3);assert(writes.every(c=>c.b.uid===Number(type)*100+5));assert(f.calls.every(c=>['AllPirateRequest','PirateKillRecordRequest','MonthCardRequest','PirateSweepRequest'].includes(c.n)));assert.equal(f.ledger.pendingCounters().pirateSweeps??0,0);}
+ for(const type of ['1','2','3']){const f=setup();Object.assign(f.settings.pirateSweep,{types:[type],['times'+type]:-1});await runPirateSweeps(f.client,f.config,f.player,f.options);const writes=f.calls.filter(c=>c.n==='PirateSweepRequest');assert.equal(writes.length,3);assert(writes.every(c=>c.b.uid===Number(type)*100+5));assert(f.calls.every(c=>['AllPirateRequest','PirateKillRecordRequest','MonthCardRequest','PirateSweepRequest'].includes(c.n)));assert.equal(f.ledger.pendingCounters().pirateSweeps??0,0);}
 });
 await test('基础VIP和有效月卡次数合并，过期卡不计，永久卡有效',async()=>{const f=setup();f.state.cards=[{type:p.MonthCardType.MONTH_CARD_NORMAL,endTime:Math.floor(Date.now()/1000)-1}];assert.equal((await readPirateSweeps(f.client,f.config,f.player,f.settings)).limit,3);f.state.cards[0].endTime=-1;assert.equal((await readPirateSweeps(f.client,f.config,f.player,f.settings)).limit,5);});
-await test('每日次数耗尽时不重复发送；切换种类仍共享今日次数',async()=>{const f=setup();await runPirateSweeps(f.client,f.config,f.player,f.options);f.settings.pirateSweep.type='2';await runPirateSweeps(f.client,f.config,f.player,f.options);assert.equal(f.calls.filter(c=>c.n==='PirateSweepRequest').length,3);assert.match(f.events.at(-1).reason,/已用完/);});
+await test('每日次数耗尽时不重复发送；切换种类仍共享今日次数',async()=>{const f=setup();await runPirateSweeps(f.client,f.config,f.player,f.options);f.settings.pirateSweep.types=['2'];await runPirateSweeps(f.client,f.config,f.player,f.options);assert.equal(f.calls.filter(c=>c.n==='PirateSweepRequest').length,3);assert.match(f.events.at(-1).reason,/已用完/);});
 await test('没有首杀记录或最高等级目标时等待，不降级或派遣',async()=>{for(const mode of ['no-kill','no-target']){const f=setup();if(mode==='no-kill')f.state.records=[];else f.state.pirates=f.state.pirates.filter(p=>p.level!==5);await runPirateSweeps(f.client,f.config,f.player,f.options);assert(!f.calls.some(c=>c.n==='PirateSweepRequest'));assert(f.events.at(-1).skipped);}});
 await test('未知回执持久防重，计数确认后从下一次继续',async()=>{const f=setup();f.state.fail='unknown';await runPirateSweeps(f.client,f.config,f.player,f.options);await runPirateSweeps(f.client,f.config,f.player,f.options);assert.equal(f.calls.filter(c=>c.n==='PirateSweepRequest').length,1);assert.equal(f.ledger.pendingCounters().pirateSweeps,1);f.state.fail=null;f.state.used=1;await runPirateSweeps(f.client,f.config,f.player,f.options);assert.equal(f.state.used,3);assert.equal(f.ledger.pendingCounters().pirateSweeps??0,0);});
 await test('明确拒绝释放次数但不跨轮立即重试',async()=>{const f=setup();f.state.fail='reject';await runPirateSweeps(f.client,f.config,f.player,f.options);await runPirateSweeps(f.client,f.config,f.player,f.options);assert.equal(f.calls.filter(c=>c.n==='PirateSweepRequest').length,1);assert.equal(f.ledger.pendingCounters().pirateSweeps??0,0);});
@@ -43,5 +43,41 @@ await test('海盗扫荡只按海盗开关和扫荡选择执行',async()=>{
   assert(!f.calls.some(c=>c.n==='DailyTaskInfoRequest'));
  }
 });
-await test('旧配置只补默认先锋，不改变首杀设置及原扫荡开关',()=>{const s=defaultSettings();delete s.pirateSweep;s.schedule.pirate=false;s.pirateHunt.maxLevel=20;const next=importAutomationSettings({format:SETTINGS_FORMAT,version:1,settings:s});assert.deepEqual(next.pirateSweep,{type:'1'});assert.equal(next.schedule.pirate,false);assert.deepEqual(next.pirateHunt,s.pirateHunt);});
+await test('旧配置补默认先锋，保留连败上限及原扫荡开关',()=>{const s=defaultSettings();delete s.pirateSweep;s.schedule.pirate=false;s.pirateHunt.maxFailures=2;const next=importAutomationSettings({format:SETTINGS_FORMAT,version:1,settings:s});assert.deepEqual(next.pirateSweep,defaultSettings().pirateSweep);assert.equal(next.schedule.pirate,false);assert.deepEqual(next.pirateHunt,s.pirateHunt);});
+const targets=f=>f.calls.filter(c=>c.n==='PirateSweepRequest').map(c=>c.b.uid);
+const sweep=f=>runPirateSweeps(f.client,f.config,f.player,f.options);
+await test('固定次数优先，外部扫荡只扣共享次数，全部配完后保留余额',async()=>{
+ for(const [settings,used,expected] of [
+  [{types:['3','2','1'],times1:1,times2:1,times3:-1},1,[105,205]],
+  [{types:['1','2','3'],times1:0,times2:1,times3:1},0,[205,305]],
+  [{types:['3','1'],times1:2,times3:2},0,[105,105,305]],
+  [{types:['1','2','3'],times1:-1,times2:1,times3:-1},0,[205,105,305]],
+  [{types:[]},0,[]],
+ ]){
+  const f=setup();Object.assign(f.settings.pirateSweep,settings);f.state.used=used;
+  await sweep(f);await sweep(f);assert.deepEqual(targets(f),expected);
+ }
+});
+await test('固定目标暂缺时保留次数，余额可先扫，地图刷新后补齐',async()=>{
+ const f=setup(),all=f.state.pirates;
+ Object.assign(f.settings.pirateSweep,{types:['1','2'],times1:2,times2:-1});
+ f.state.pirates=all.filter(row=>row.uid!==105);
+ await sweep(f);assert.deepEqual(targets(f),[205]);
+ assert.match(f.events.at(-1).reason,/等待地图刷新海盗先锋/);
+ f.state.pirates=all;await sweep(f);assert.deepEqual(targets(f),[205,105,105]);
+});
+await test('未知回执重启后仍占本类次数，预览与执行选择相同，次日重新分配',async()=>{
+ const f=setup(),file=path.join(root,'restart.json');
+ f.options.ledger=createUsageLedger('isolated',{file});
+ Object.assign(f.settings.pirateSweep,{types:['1','2'],times1:1,times2:1});
+ f.state.fail='unknown';await sweep(f);
+ f.options.ledger=createUsageLedger('isolated',{file});await sweep(f);assert.deepEqual(targets(f),[105]);
+ f.state.fail=null;f.state.used=1;
+ const preview=await readPirateSweeps(f.client,f.config,f.player,f.settings,f.options.ledger.keyRecords());
+ assert.equal(preview.type,2);assert.deepEqual(preview.allocations.map(row=>row.used),[1,0]);
+ await sweep(f);assert.deepEqual(targets(f),[105,205]);
+ f.client.serverClockOffsetMs=86400000;f.state.used=0;
+ f.options.ledger=createUsageLedger('isolated',{file,now:()=>Date.now()+86400000});
+ await sweep(f);assert.deepEqual(targets(f),[105,205,105,205]);
+});
 console.log('海盗免费扫荡专项 '+count+'/'+count+' 通过');

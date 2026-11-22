@@ -33,6 +33,7 @@ export const operationLabels = {
   '/api/equipment/crafting/start': '制造装备',
   '/api/equipment/crafting/collect': '收取完工装备',
   '/api/lineups': '查看推荐阵容',
+  '/api/league/order': '积分赛出战顺序',
   '/api/lineups/apply': '应用推荐阵容',
   '/api/lineup-presets': '读取保存的阵容',
   '/api/lineup-editor': '读取布阵信息',

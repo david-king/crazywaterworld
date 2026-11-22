@@ -20,7 +20,7 @@ await test('实际协议连续首杀1→2→3，仅个人记录确认才推进',
 await test('战败即停止，不重复撞同一等级',async()=>{const f=pirateAdvanceFixture({mode:'lose'});const r=await run(f);assert.match(r.reason,/战败/);assert.equal(f.client.writes.length,1);});
 await test('等级、实际汽油库存、耐久和编队门控',async()=>{
  for(const mutate of [f=>f.state.fuel=299,f=>f.fleet.durability=1,f=>f.building.fleet.formation.heroPositions=[],f=>f.state.stage=99]){const f=pirateAdvanceFixture();mutate(f);await run(f);assert.equal(f.client.writes.length,0);}
- const f=pirateAdvanceFixture();f.settings.pirateHunt.maxLevel=1;assert.equal((await run(f)).wins,1);assert.equal(f.client.writes.length,1);
+ const f=pirateAdvanceFixture();f.config.tables['1_SeasonTaskCfg'].data[0].maxPirateLevel=1;assert.equal((await run(f)).wins,1);assert.equal(f.client.writes.length,1);
 });
 await test('旧汽油保留量与本次预算不再阻止连续首杀',async()=>{const f=pirateAdvanceFixture();Object.assign(f.settings.pirateHunt,{petrolReserve:3000,fuelBudget:1});const r=await run(f);assert.equal(r.wins,3);assert.equal(r.spent,900);assert.equal(f.client.writes.length,3);});
 await test('单次手动首杀忽略旧汽油限制，仍扣除其他任务待确认费用',async()=>{
@@ -46,7 +46,7 @@ await test('首杀漏收战果但舰队归队后停止连续推进并释放意�
 });
 await test('舰队先释放占用后读到迟到个人首杀胜利，连续推进仍能前往下一等级',async()=>{
  const f=pirateAdvanceFixture({mode:'wait'}),l=ledger();let waits=0;
- f.settings.pirateHunt.maxLevel=2;
+ f.config.tables['1_SeasonTaskCfg'].data[0].maxPirateLevel=2;
  const result=await run(f,{ledger:l,sleep:async()=>{
   assert(++waits<=2);Object.assign(f.fleet,{state:1,curGridIdx:0,targetGridIdx:0});f.state.level=waits;
  },prepareDispatch:async()=>{

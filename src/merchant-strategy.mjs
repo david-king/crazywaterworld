@@ -34,9 +34,9 @@ export function merchantStrategyPlan(plan, config, event, state, policy, time, l
       const [hour, minute] = policy.firstDepartureTime.split(':').map(Number);
       const at = dayOf(time) * 86400 - 28800 + hour * 3600 + minute * 60;
       if (time < at) return { kind: 'wait', reason: '等待首趟指定出发时间 ' + policy.firstDepartureTime, nextCheckAt: at };
-    } else if (plan.exploration) {
+    } else if (plan.exploration || plan.waitForFirstDeparture) {
       const at = Math.max(event.startTime, timing.tradeStartTime) + policy.firstDepartureWaitMinutes * 60;
-      if (time < at) return { kind: 'wait', reason: '首趟等待盈利商品或共享商情，尚未到有限寻价时间', nextCheckAt: at };
+      if (time < at) return { kind: 'wait', reason: '首趟等待盈利商品或共享商情，稍后按参考价配货或换港寻价', nextCheckAt: at };
     }
   }
   if ((plan.kind === 'move' || swap) && policy.speedUpMode === 'arrival' && today.some(record =>

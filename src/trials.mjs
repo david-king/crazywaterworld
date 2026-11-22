@@ -3,7 +3,7 @@ import { setTimeout as sleep } from 'node:timers/promises';
 import { stageFailureLimit } from './stages.mjs';
 import { waitForChallenge } from './battle-pacing.mjs';
 
-async function readRaid(client, raidId) {
+export async function readRaid(client, raidId) {
   const { raid } = await client.request('TrialRaidInfoRequest', { raidId });
   if (!raid || raid.raidId !== raidId) throw new Error('无法确认试炼副本进度');
   return raid;
@@ -11,6 +11,25 @@ async function readRaid(client, raidId) {
 
 function raidStages(config, raidId) {
   return config.tables.TrialRaidStageCfg.data.filter(row => row.raidId === raidId).sort((a, b) => a.stageLevel - b.stageLevel);
+}
+
+// 配置页只展示服务器确认的最高通关记录。stageId 是副本内的标识，展示用 stageLevel。
+export function trialStageSummary(config, level, passedByRaid) {
+  return (config?.tables?.TrialRaidCfg?.data ?? []).map(({ raidId, title }) => {
+    const row = { raidId, name: title, passed: null, next: null };
+    const stages = config.tables.TrialRaidStageCfg?.data ? raidStages(config, raidId) : [];
+    if (!stages.length) return { ...row, reason: '缺少关卡配置' };
+    if (level > 0 && level < stages[0].openLevel) return { ...row, reason: '角色 ' + stages[0].openLevel + ' 级开放' };
+    const id = passedByRaid?.get(raidId);
+    if (id == null) return row;
+    const index = stages.findIndex(stage => stage.stageId === id);
+    if (id !== 0 && index < 0) return { ...row, reason: '关卡配置未匹配' };
+    row.passed = stages[index]?.stageLevel ?? 0;
+    const next = stages[index + 1];
+    row.next = next?.stageLevel ?? null;
+    if (next && level > 0 && level < next.openLevel) row.reason = '角色 ' + next.openLevel + ' 级开放';
+    return row;
+  });
 }
 
 // V74 RaidItem uses buySweepTimes for the next price. sweepTimes and the

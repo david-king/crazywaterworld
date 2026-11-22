@@ -1,6 +1,7 @@
 import { toNumber } from './client.mjs';
 import { uidText, wireUid } from './hero-equipment.mjs';
 import { filterOpponentsByPower } from './opponent-power.mjs';
+import { bestLeagueOrder, leagueFormationOrder, leagueTeamPowers, recoverLeagueOrder, rivalTeamPowers, withLeagueOrder } from './league-order.mjs';
 
 const label = '积分赛每日挑战';
 const serverNow = client => (Date.now() + (client.serverClockOffsetMs || 0)) / 1000;
@@ -26,25 +27,35 @@ function challengeReason(state, options, now) {
   return '';
 }
 
-function selectLeagueRival(state, list, options) {
+async function selectLeagueRival(client, player, state, list, options) {
   if (!Array.isArray(list?.rivals)) return { reason: '尚未取得积分赛对手名单' };
   const candidates = list.rivals.map(row => ({ id: uidText(row.playerId), name: row.nickname,
     power: toNumber(row.power), score: toNumber(row.score) })).filter(row =>
     row.id && row.id !== state.selfId && integer(row.power) && row.power > 0 && integer(row.score));
   const filtered = filterOpponentsByPower(candidates, state.info.mine.power, options.maxPowerRatio);
-  if (!filtered.candidates || (filtered.reason && !options.fallbackWeakest)) return { reason: filtered.reason };
-  const fallback = !filtered.candidates.length;
-  // LeagueChallengePop switches to its diamond refresh button above 1.
-  const times = list.refreshTimes;
-  if (fallback && options.fallbackWeakest && Object.hasOwn(list, 'refreshTimes') && integer(times) && times <= 1 && times > state.lastRefreshTimes) {
-    return { refreshTimes: times, note: '免费刷新对手，仍无人符合战力上限时挑战当前名单中战力最低者' };
+  if (!filtered.candidates) return { reason: filtered.reason };
+  const formation = leagueFormationOrder(state.info, state.teams, player);
+  const powers = await leagueTeamPowers(client, formation.teams);
+  let best;
+  const seen = new Set();
+  for (const target of filtered.candidates) {
+    if (seen.has(target.id)) continue;
+    seen.add(target.id);
+    const rival = await rivalTeamPowers(client, target.id, state.teams);
+    if (!rival) continue;
+    const plan = bestLeagueOrder(powers, rival);
+    const swaps = plan.order.filter((index, slot) => index !== slot + 1).length;
+    if (!best || plan.wins > best.wins || (plan.wins === best.wins && swaps < best.swaps)) best = { ...plan, swaps, target };
+    if (best.wins === state.teams && !best.swaps) break;
   }
-  if (!candidates.length) return { reason: '当前名单没有可挑战的对手' };
-  const byPower = (a, b) => a.power - b.power || b.score - a.score;
-  const byScore = (a, b) => b.score - a.score || a.power - b.power;
-  const target = fallback ? candidates.sort(byPower)[0]
-    : filtered.candidates.sort(options.target === 'score' ? byScore : byPower)[0];
-  return { target, note: (fallback ? '兜底挑战' : '挑战') + (target.name || target.id) + '（战力 ' + target.power + '，积分 ' + target.score + '）' + (filtered.note ?? '') };
+  const times = list.refreshTimes;
+  if ((!best || best.wins < 2) && state.lastRefreshTimes < 0 &&
+      Object.hasOwn(list, 'refreshTimes') && integer(times) && times <= 1) {
+    return { refreshTimes: times, note: '免费刷新后重新比较分队战力' };
+  }
+  if (!best || best.wins < Math.ceil(state.teams / 2)) return { reason: '当前名单没有可争胜或争平的对手，保留挑战券' };
+  return { ...best, signature: formation.signature,
+    note: '挑战' + (best.target.name || best.target.id) + '，出战顺序 ' + best.order.join(' → ') + '，预计 ' + best.wins + ' 路战力占优' };
 }
 
 async function readLeagueStatus(client, config, player, getSettings, { preview = false, ledger }) {
@@ -100,13 +111,16 @@ export async function readLeagueChallenge(client, config, player, getSettings, o
   const list = await read(client, 'LeagueRefreshRival', { isRefresh: false });
   const settings = getSettings().league;
   const reason = challengeReason(state, settings, serverNow(client));
-  return reason ? { ...state, reason } : { ...state, ...selectLeagueRival(state, list, settings) };
+  return reason ? { ...state, reason } : { ...state, ...await selectLeagueRival(client, player, state, list, settings) };
 }
 
-async function submitLeagueRequest(client, ledger, key, details, name, body) {
+async function submitLeagueRequest(client, ledger, key, details, name, body, enabled) {
   const ticket = ledger.reserve({}, {}, {}, { uniqueKey: key, details });
   try {
-    return { ticket, reply: await read(client, name, body) };
+    const reply = await client.request(name + 'Request', body, name + 'Response', undefined, () => {
+      if (!enabled()) throw Object.assign(Error('积分赛操作已取消'), { notSent: true });
+    });
+    return { ticket, reply };
   } catch (error) {
     if (error.notSent || (error.prompt && error.request === name + 'Request')) ledger.cancel(ticket);
     throw error;
@@ -118,6 +132,7 @@ export async function runLeagueChallenge(client, protocol, config, player, { get
   if (!enabled()) return wait('积分赛挑战已关闭');
   if (!protocol.LeagueFightRequest || !protocol.LeagueFightResponse) return wait('当前协议缺少积分赛挑战定义');
   if (!ledger) return wait('积分赛挑战记录不可用');
+  await recoverLeagueOrder(client, player, ledger);
   const readState = () => readLeagueChallenge(client, config, player, getSettings, { ledger });
   const state = await readState();
   const prefix = quotaPrefix(player);
@@ -155,14 +170,50 @@ export async function runLeagueChallenge(client, protocol, config, player, { get
     const refreshKey = key + ':refresh:' + fresh.refreshTimes;
     if (ledger.hasKey(refreshKey)) return wait('本次免费刷新已提交，等待名单更新');
     const { ticket, reply } = await submitLeagueRequest(client, ledger, refreshKey,
-      { ...details, refreshTimes: fresh.refreshTimes }, 'LeagueRefreshRival', { isRefresh: true });
+      { ...details, refreshTimes: fresh.refreshTimes }, 'LeagueRefreshRival', { isRefresh: true },
+      () => enabled() && !challengeReason(fresh, getSettings().league, serverNow(client)));
     ledger.confirm(ticket);
     const status = await readLeagueStatus(client, config, player, getSettings, { ledger });
-    fresh = status.reason ? status : { ...status, ...selectLeagueRival(status, reply, getSettings().league) };
+    fresh = status.reason ? status : { ...status, ...await selectLeagueRival(client, player, status, reply, getSettings().league) };
   }
-  const { ticket, reply } = await submitLeagueRequest(client, ledger, key, details, 'LeagueFight', { playerId: wireUid(fresh.target.id) });
-  if (uidText(reply?.lPlayer?.playerId) !== fresh.selfId || uidText(reply?.rPlayer?.playerId) !== fresh.target.id ||
-      !integer(toNumber(reply.lPlayer.finalScore))) throw new Error('积分赛战果尚未确认，等待任务进度更新');
-  ledger.confirm(ticket);
-  return { label, ok: true, note: (state.refreshTimes !== undefined ? '免费刷新后' : '') + fresh.note + '，战后积分 ' + toNumber(reply.lPlayer.finalScore) };
+  const fight = async (canFight = enabled) => {
+    const { ticket, reply } = await submitLeagueRequest(client, ledger, key, details, 'LeagueFight', { playerId: wireUid(fresh.target.id) },
+      () => canFight() && !challengeReason(fresh, getSettings().league, serverNow(client)));
+    const left = uidText(reply?.lPlayer?.playerId), right = uidText(reply?.rPlayer?.playerId);
+    const ours = left === fresh.selfId && right === fresh.target.id ? reply.lPlayer :
+      right === fresh.selfId && left === fresh.target.id ? reply.rPlayer : null;
+    if (!ours || !integer(toNumber(ours.finalScore))) throw new Error('积分赛战果尚未确认，等待任务进度更新');
+    ledger.confirm(ticket);
+    let result = '战后积分 ' + toNumber(ours.finalScore);
+    if (reply.records?.length === fresh.teams && reply.records.every(row => typeof row.isLWin === 'boolean')) {
+      const wins = reply.records.filter(row => row.isLWin === (ours === reply.lPlayer)).length;
+      result = '实际 ' + wins + ' 胜 ' + (fresh.teams - wins) + ' 负，' + result;
+      if (integer(toNumber(ours.score))) {
+        const delta = toNumber(ours.finalScore) - toNumber(ours.score);
+        result += '（' + (delta > 0 ? '+' : '') + delta + '）';
+      }
+    }
+    return { label, ok: true, note: (state.refreshTimes !== undefined ? '免费刷新后' : '') + fresh.note + '，' + result };
+  };
+  const selection = JSON.stringify(getSettings().league);
+  const active = () => enabled() && JSON.stringify(getSettings().league) === selection;
+  if (!active()) return wait('挑战条件已变化');
+  return withLeagueOrder(client, player, ledger, fresh.signature, fresh.order, active, async () => {
+    const status = await readLeagueStatus(client, config, player, getSettings, { ledger });
+    if (status.reason) return wait(status.reason);
+    if (status.battles !== state.battles || status.reset !== state.reset || status.info.settleTime !== state.info.settleTime ||
+        status.teams !== fresh.teams) return wait('场次或赛期已变化');
+    const current = leagueFormationOrder(status.info, status.teams, player);
+    const expected = fresh.order.map(i => fresh.signature[i - 1]);
+    if (JSON.stringify(current.signature) !== JSON.stringify(expected)) return wait('当前积分赛队序已变化');
+    const list = await read(client, 'LeagueRefreshRival', { isRefresh: false });
+    const target = list.rivals?.find(row => uidText(row.playerId) === fresh.target.id);
+    const eligible = target && filterOpponentsByPower([target], status.info.mine.power, getSettings().league.maxPowerRatio);
+    if (!eligible?.candidates?.length) return wait('对手已变化，重新选择');
+    const own = await leagueTeamPowers(client, current.teams);
+    const rival = await rivalTeamPowers(client, fresh.target.id, status.teams);
+    if (!rival || own.filter((power, i) => power > rival[i]).length !== fresh.wins) return wait('分队战力已变化，重新排阵');
+    if (!active() || ledger.hasKey(key) || challengeReason(status, getSettings().league, serverNow(client))) return wait('挑战条件已变化');
+    return fight(active);
+  });
 }

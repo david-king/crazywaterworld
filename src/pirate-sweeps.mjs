@@ -7,12 +7,13 @@ const now=c=>Math.floor((Date.now()+(c.serverClockOffsetMs||0))/1000);
 const day=t=>Math.floor((t+28800)/86400);
 const active=new WeakSet(),rejections=new WeakMap();
 const reward=r=>r?.reward?.asset?.some(a=>Number(a.num)>0)||['hero','antique','equipIds','badge','supply'].some(k=>r?.[k]?.length>0);
-export async function readPirateSweeps(client,config,player,settings){
- const type=Number(settings.pirateSweep.type),time=now(client),state={day:day(time),type,name:rows(config,'WorldPirateCfg').find(r=>r.type===type)?.showName,used:null,limit:null,left:null,level:null,target:null,reason:''};
+export async function readPirateSweeps(client,config,player,settings,keyRecords={}){
+ const time=now(client),state={day:day(time),used:null,limit:null,left:null,allocations:[],target:null,reason:''};
  const world=exactAutomationId(player?.worldId),level=rows(config,'ModuleOpenCfg').find(r=>r.moduleId==='世界')?.playerLevel;
  state.world=world;
  if(!world||!valid(level)||!(player?.level>=level))return {...state,reason:'尚未确认世界玩法开放'};
- if(![1,2,3].includes(type)||!state.name)return {...state,reason:'扫荡海盗种类未确认'};
+ const sweep=settings.pirateSweep;
+ if(!sweep.types.length)return {...state,reason:'未选择免费扫荡目标'};
  const base=rows(config,'PirateParamCfg').find(r=>r.paramName==='每日野怪扫荡次数')?.paramValue;
  const vip=rows(config,'VipLevelCfg').find(r=>r.level===player.vip?.vipLevel);
  if(!valid(base)||!vip)return {...state,reason:'每日扫荡次数或VIP权益未确认'};
@@ -31,18 +32,38 @@ export async function readPirateSweeps(client,config,player,settings){
  }
  if(!valid(limit))throw Error('每日扫荡总次数无效');
  state.limit=limit;state.used=all.sweepTimes;state.left=Math.max(0,limit-state.used);
- const killed=record.records.filter(r=>r.type===type);
- if(killed.length>1||killed.some(r=>!valid(r.maxKilledLevel)))return {...state,reason:'所选海盗首杀等级未确认'};
- state.level=killed[0]?.maxKilledLevel??0;
- if(!state.left)return {...state,reason:'今日免费扫荡次数已用完（'+state.used+'/'+limit+'）'};
- if(!state.level)return {...state,reason:state.name+'尚未完成首杀，暂不能扫荡'};
  const season=Math.floor(Number(world)/1e6)%1000;
- if(!rows(config,'WorldPirateCfg').some(r=>r.type===type&&r.level===state.level&&Number(r.season)===season))return {...state,reason:'所选海盗最高已首杀等级配置未确认'};
- const candidates=all.pirates.filter(p=>p.type===type&&p.level===state.level&&valid(p.uid)&&p.uid>0&&valid(p.cityId)&&p.cityId>0);
- const unique=candidates.filter(p=>all.pirates.filter(other=>other.uid===p.uid).length===1);
- state.target=unique.sort((a,b)=>a.cityId-b.cityId||a.uid-b.uid)[0];
- if(!state.target)state.reason='地图暂时没有'+state.name+' '+state.level+'级目标，等待刷新，不自动降级';
- return state;
+ const configs=rows(config,'WorldPirateCfg').filter(row=>Number(row.season)===season);
+ const prefix='pirate-sweep:'+world+':';
+ const records=Object.entries(keyRecords).filter(([key,r])=>key.startsWith(prefix)&&!r.expired);
+ const today=records.filter(([,r])=>r.details?.day===state.day);
+ const uidCounts=new Map();
+ for(const p of all.pirates)uidCounts.set(p.uid,(uidCounts.get(p.uid)??0)+1);
+ for(const type of [1,2,3].filter(type=>sweep.types.includes(String(type)))){
+  const name=configs.find(row=>row.type===type)?.showName??['','海盗先锋','海盗精锐','海盗头目'][type];
+  const times=sweep['times'+type],used=today.filter(([,r])=>r.details?.type===type).length;
+  const killed=record.records.filter(r=>r.type===type),level=killed[0]?.maxKilledLevel??0;
+  const row={type,name,times,used,level,target:null,reason:''};
+  if(killed.length>1||!valid(level))row.reason=name+'首杀等级未确认';
+  else if(!level)row.reason=name+'尚未完成首杀';
+  else if(!configs.some(r=>r.type===type&&r.level===level))row.reason=name+'最高已首杀等级配置未确认';
+  else {
+   row.target=all.pirates.filter(p=>p.type===type&&p.level===level&&valid(p.uid)&&p.uid>0&&valid(p.cityId)&&p.cityId>0&&uidCounts.get(p.uid)===1)
+    .sort((a,b)=>a.cityId-b.cityId||a.uid-b.uid)[0];
+   if(!row.target)row.reason='等待地图刷新'+name+' '+level+'级目标';
+  }
+  state.allocations.push(row);
+ }
+ if(records.some(([,r])=>!r.confirmed&&!(r.details?.day===state.day&&state.used>r.details.used)))return {...state,pending:true,reason:'前次扫荡次数尚未确认，未重复提交'};
+ if(!state.left)return {...state,reason:'今日免费扫荡次数已用完（'+state.used+'/'+limit+'）'};
+ const fixed=state.allocations.filter(row=>row.times>row.used);
+ const reserved=fixed.reduce((sum,row)=>sum+row.times-row.used,0);
+ const remaining=state.allocations.filter(row=>row.times===-1).sort((a,b)=>a.used-b.used||a.type-b.type);
+ // 暂缺地图目标时保留该类固定次数，只有超出预留的次数才能用于其余目标。
+ const eligible=state.left>reserved ? [...fixed,...remaining] : fixed;
+ const next=eligible.find(row=>row.target);
+ if(next)return {...state,type:next.type,name:next.name,level:next.level,target:next.target};
+ return {...state,reason:eligible.map(row=>row.reason).join('，')||'今日所选海盗的扫荡次数已完成'};
 }
 export async function runPirateSweeps(client,config,player,{getSettings,ledger,enabled,report,scheduler}){
  if(!enabled()||active.has(client))return;
@@ -50,18 +71,17 @@ export async function runPirateSweeps(client,config,player,{getSettings,ledger,e
  const title='海盗日常扫荡',emit=e=>report({...e,label:e.label??title,taskKey:'pirate'});
  try{
   for(let attempts=0;attempts<100&&enabled();attempts++){
-   const settings=getSettings(),state=await readPirateSweeps(client,config,player,settings);
-   const prefix='pirate-sweep:'+state.world+':',records=ledger.keyRecords();
+   const settings=getSettings(),records=ledger.keyRecords(),state=await readPirateSweeps(client,config,player,settings,records);
+   const prefix='pirate-sweep:'+state.world+':';
    for(const [key,r]of Object.entries(records))if(key.startsWith(prefix)&&!r.confirmed&&r.details?.day===state.day&&valid(state.used)&&state.used>r.details.used)ledger.resolveKey(key,true);
-   if(Object.entries(ledger.keyRecords()).some(([key,r])=>key.startsWith(prefix)&&!r.confirmed&&!r.expired)){emit({skipped:true,status:'pending',reason:'前次扫荡次数尚未确认，未重复提交'});return;}
-   if(state.reason){emit({skipped:true,reason:state.reason});if(state.left===0)scheduler?.defer('pirate',scheduler.nextDay());return;}
+   if(state.reason){emit({skipped:true,...(state.pending?{status:'pending'}:{}),reason:state.reason});if(state.left===0)scheduler?.defer('pirate',scheduler.nextDay());return;}
    const key=prefix+state.day+':'+state.used;
    if(ledger.hasKey(key)){emit({skipped:true,reason:'本次扫荡次数已记录，等待服务器计数更新'});return;}
    const signature=key+':'+state.target.uid,rejected=rejections.get(client);
    if(rejected?.signature===signature&&rejected.until>Date.now()){emit({skipped:true,reason:'服务器此前拒绝此目标，稍后核对再试'});return;}
-   const fresh=await readPirateSweeps(client,config,player,getSettings());
+   const fresh=await readPirateSweeps(client,config,player,getSettings(),ledger.keyRecords());
    if(!enabled()||getSettings()!==settings||day(now(client))!==state.day||exactAutomationId(player.worldId)!==state.world)return;
-   if(fresh.reason||fresh.used!==state.used||fresh.target?.uid!==state.target.uid||fresh.type!==state.type){emit({skipped:true,reason:fresh.reason||'扫荡前目标或剩余次数已变化，等待重新核对'});return;}
+   if(fresh.reason||fresh.day!==state.day||fresh.world!==state.world||fresh.used!==state.used||fresh.target?.uid!==state.target.uid||fresh.target.cityId!==state.target.cityId||fresh.type!==state.type||fresh.level!==state.level){emit({skipped:true,reason:fresh.reason||'扫荡前目标或剩余次数已变化，等待重新核对'});return;}
    const ticket=ledger.reserve({pirateSweeps:1},{},{},{uniqueKey:key,details:{kind:'pirateSweep',day:state.day,used:state.used,type:state.type,level:state.level}});
    if(!enabled()){ledger.cancel(ticket);return;}
    try{

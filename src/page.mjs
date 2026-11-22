@@ -1271,6 +1271,11 @@ function renderLoop(data) {
   configSyncRecovery(data);
 }
 
+function configLoopPath() {
+  return configVisible() && configEditor.owner === current && configEditor.selectedGroups[configEditor.category] === 'progression'
+    ? '/api/loop?trials=1' : '/api/loop';
+}
+
 let loopReads = 0;
 async function refreshLoop() {
   if(document.hidden)return;
@@ -1291,7 +1296,7 @@ async function refreshLoop() {
   if (!account) return;
   loopReads++;
   try {
-    const data = await call('/api/loop');
+    const data = await call(configLoopPath());
     if (account === current && version === loopVersion) renderLoop(data);
   } catch {
     if (account === current && version === loopVersion) {

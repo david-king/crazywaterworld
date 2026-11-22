@@ -3,7 +3,7 @@ import {
   beginOrderMaterialSpend, cancelOrderMaterialSpend, confirmOrderMaterialOperation,
   confirmOrderMaterialSpends, refreshOrderMaterialSpends
 } from './order-reservations.mjs';
-import { merchantActionSeconds, merchantPointerSeconds, merchantTiming } from './merchant-planner.mjs';
+import { MERCHANT_DEFAULTS, merchantActionSeconds, merchantPointerSeconds, merchantTiming } from './merchant-planner.mjs';
 import { buyMerchantPointers, reconcileMerchantAction } from './merchant-strategy.mjs';
 import { estimateMerchantRace, merchantCompetitorArrivals } from './merchant-race.mjs';
 import { watchMerchant } from './merchant-monitor.mjs';
@@ -88,7 +88,7 @@ export function planMerchantSpeed(config, event, state, radar, stock, settings, 
       : '未发现同港在途同盟船，保留指针' };
   }
   const rival = arrivals.findLast(eta => eta <= cargo.moveEndTime);
-  const discount = settings.estimateDiscountPercent ?? 10;
+  const discount = settings.estimateDiscountPercent ?? MERCHANT_DEFAULTS.estimateDiscountPercent;
   const threshold = settings.speedUpMinProfit ?? 1000;
   const keep = settings.keepPointers ?? 0;
   const maxAge = settings.quoteMaxAgeSeconds ?? 300;

@@ -250,6 +250,56 @@ function renderLineupRecovery(host, state, account) {
   section.append(actions); host.append(section);
 }
 
+function renderLeagueOrder(account, toolbar, host) {
+  const state = savedLineupState(account);
+  const toggle = smallButton('积分赛出战顺序');
+  toggle.setAttribute('aria-expanded', String(!!state.orderOpen));
+  toggle.setAttribute('aria-controls', 'league-order-rows');
+  toolbar.append(toggle);
+  const list = el('div', 'saved-lineup-list');
+  list.id = 'league-order-rows';
+  list.hidden = !state.orderOpen;
+  host.append(list);
+  const request = async body => {
+    if (state.orderBusy || current !== account) return;
+    state.orderBusy = true; state.orderError = '';
+    renderSavedLineups(account);
+    try { state.order = await lineupRequest('/api/league/order', account, body); }
+    catch (error) { state.order = null; state.orderError = error.message; }
+    finally { state.orderBusy = false; renderSavedLineups(account); }
+  };
+  toggle.onclick = () => {
+    state.orderOpen = !state.orderOpen;
+    if (state.orderOpen && !state.orderBusy) void request();
+    else renderSavedLineups(account);
+  };
+  if (!state.orderOpen) return;
+  const iconButton = (icon, title, action) => {
+    const button = smallButton('');
+    button.append($('league-order-icons').content.children[icon].cloneNode(true));
+    button.title = title; button.setAttribute('aria-label', title);
+    button.disabled = !!state.orderBusy; button.onclick = action;
+    return button;
+  };
+  toolbar.append(iconButton(2, '刷新积分赛队伍', () => request()));
+  if (state.orderError || (state.orderBusy && !state.order)) {
+    const status = el('div', state.orderError ? 'warn' : 'dim', state.orderError || '正在读取队伍…');
+    status.setAttribute('role', 'status'); list.append(status);
+  }
+  state.order?.teams.forEach((heroes, i, teams) => {
+    const row = el('div', 'saved-lineup-row'), info = el('div'), actions = el('div', 'bar');
+    info.append(el('strong', '', '第 ' + (i + 1) + ' 队'), el('div', '', heroes.join('、')));
+    for (const offset of [-1, 1]) {
+      const to = i + offset;
+      if (to < 0 || to >= teams.length) continue;
+      const title = (offset < 0 ? '上移' : '下移') + '第 ' + (i + 1) + ' 队';
+      actions.append(iconButton(offset < 0 ? 0 : 1, title, () =>
+        request({ from: i + 1, to: to + 1, signature: state.order.signature })));
+    }
+    row.append(info, actions); list.append(row);
+  });
+}
+
 function renderSavedLineups(account) {
   if (account !== current) return;
   const host = $('saved-lineup-view');
@@ -267,6 +317,7 @@ function renderSavedLineups(account) {
   create.onclick = () => openSavedLineupEditor(account);
   capture.onclick = () => captureSavedLineup(account);
   toolbar.append(create, capture); host.append(toolbar);
+  renderLeagueOrder(account, toolbar, host);
   const status = el('p', state.error ? 'warn' : 'dim', state.message || (state.saved ? '' : '正在读取已保存阵容…'));
   status.setAttribute('role', 'status');
   if (status.textContent) host.append(status);

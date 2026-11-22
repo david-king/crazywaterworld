@@ -1,6 +1,7 @@
 import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
+import { isDeepStrictEqual } from 'node:util';
 import { atomicJson, readJson, withFileLock } from './json-store.mjs';
 
 /** @typedef {Record<string, number>} Counters */
@@ -26,7 +27,7 @@ import { atomicJson, readJson, withFileLock } from './json-store.mjs';
  * @property {(counters: Counters, limits?: Counters, minimums?: Counters, options?: {uniqueKey?: string | null, details?: Record<string, unknown> | null, paidGold?: PaidGoldBaseline}) => LedgerTicket} reserve
  * @property {(ticket: LedgerTicket) => boolean} markPaidGoldReward
  * @property {(info: {paidTimes?: number, resetTime?: number} | null | undefined, account?: string | null) => boolean} reconcilePaidGold
- * @property {(uniqueKey: string, details: Record<string, unknown>) => void} updateKeyDetails
+ * @property {(uniqueKey: string, details: Record<string, unknown>, expected?: KeyRecord) => boolean} updateKeyDetails
  * @property {(uniqueKey: string) => void} releaseCompletedKey
  * @property {(records: Record<string, KeyRecord>) => {released: number, archived: string[]}} archiveManualForge
  * @property {(ticket: LedgerTicket | null | undefined) => void} confirm
@@ -243,13 +244,15 @@ export function createUsageLedger(accountId, { file = usageFile(), now = Date.no
         return false;
       });
     },
-    updateKeyDetails(uniqueKey, details) {
+    updateKeyDetails(uniqueKey, details, expected) {
       return withFileLock(file, () => {
         if (!plain(details)) throw new Error('任务记录内容不合法');
         const { store, entry } = forUpdate();
+        if (expected && !isDeepStrictEqual(entry.keys[uniqueKey], expected)) return false;
         if (!Object.hasOwn(entry.keys, uniqueKey)) throw new Error('任务记录已不存在');
         entry.keys[uniqueKey].details = copy(details);
         atomicJson(file, store);
+        return true;
       });
     },
     releaseCompletedKey(uniqueKey) {

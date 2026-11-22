@@ -38,7 +38,7 @@ add('progression.enabled','推关与试炼总开关','世界与挑战',{help:'�
 add('progression.mainline','主线 / 闯关自动挑战','世界与挑战',{gates:['progression.enabled']});
 add('progression.trials','试炼自动推关','世界与挑战',{gates:['progression.enabled']});
 add('pirate.enabled','海盗挂机','世界与挑战',{configLabel:'开启挂机',configuredFields:['schedule.pirate','pirateHunt.enabled'],help:'挂机时执行下方已选的海盗动作。关闭后保留选择。'});
-add('pirateHunt.enabled','海盗首杀','世界与挑战',{gates:['pirate.enabled'],configLabel:'自动挑战下一级',help:'按个人首杀记录挑战所选种类的下一等级，每次出征消耗汽油。'});
+add('pirateHunt.enabled','海盗首杀','世界与挑战',{gates:['pirate.enabled'],configLabel:'自动挑战下一级',help:'每天按海盗先锋、海盗精锐、海盗头目的顺序推进一轮。每类逐级挑战，到赛季阶段上限或达到连败上限后换下一类。每次出征消耗汽油，每天北京时间零点重置。'});
 add('antique.enabled','藏品自动养成','藏品',{
  configLabel:'藏品养成总开关', configuredFields:['antique.activate','antique.star','antique.master','antique.suit'],
  help:'开启后，挂机按下方已选动作培养藏品。关闭会暂停藏品养成，仍可编辑各项设置。养成只使用已有资源。',
@@ -62,7 +62,7 @@ for (const task of automationTasks) {
  if (nativeKeys.has(task.key)) continue;
  const group = ['freeRecruit','heroRecruitRewards','heroAdRecruit'].includes(task.key) ? '英雄' : ['freeAntiqueRecruit','antiqueRecruitRewards','antiqueAdRecruit'].includes(task.key) ? '藏品' : ['周期活动','限时活动'].includes(task.group) ? '活动' : ['联盟','挑战'].includes(task.group) ? '世界与挑战' : task.group === '日常' ? '日常行动' : task.group === '海面' ? '基地' : '任务与领奖';
  const gates = task.key==='pirate' ? ['pirate.enabled'] : task.group==='日常' ? ['loop.dailies','dailies.enabled'] : task.key==='adSpeedUpBuilding'?['loop.world','building.enabled']:task.key==='adSpeedUpProduce'?['loop.world','factory.enabled']:task.key==='adSpeedUpMuseum'?['loop.world']:[];
- add('schedule.'+task.key,task.label,task.key === 'shop' ? '折扣商店' : combatGroups[task.key] ?? group,{gates,taskKey:task.key,...(task.key==='pirate'?{configLabel:'每日免费扫荡',help:'使用当天剩余的免费次数，无需派舰。三种海盗共用次数。'}:{}),...(task.key==='guildTitleReward'?{help:'默认关闭，每天只领取服务器确认可领的职级礼包；结果未知时保留记录，不重复提交。'}:{}),...(task.key==='seasonChest'?{help:'默认关闭。每箱消耗服务器指定的 3 把赛季钥匙，钥匙不足时等待，不花钻石。钥匙在进入新赛季时清零。'}:{})});
+add('schedule.'+task.key,task.label,task.key === 'shop' ? '折扣商店' : combatGroups[task.key] ?? group,{gates,taskKey:task.key,...(task.key==='pirate'?{configLabel:'每日免费扫荡',help:'三类海盗共用每日免费次数。按所选目标和各类设定的次数扫荡，无需派舰。'}:{}),...(task.key==='guildTitleReward'?{help:'默认关闭，每天只领取服务器确认可领的职级礼包；结果未知时保留记录，不重复提交。'}:{}),...(task.key==='seasonChest'?{help:'默认关闭。每箱消耗服务器指定的 3 把赛季钥匙，钥匙不足时等待，不花钻石。钥匙在进入新赛季时清零。'}:{})});
 }
 // 模块主控与细项在同一配置分组编辑；主控仍保留独立的保存字段。
 const idleModules = {

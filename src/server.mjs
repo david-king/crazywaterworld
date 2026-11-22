@@ -48,7 +48,7 @@ import { readAllianceRadar } from './alliance-radar.mjs';
 import { previewRadarSweep } from './radar-sweep.mjs';
 import { planRadarPreview, pendingPetrol } from './dispatch-preview.mjs';
 import { inspectHunt } from './pirates.mjs';
-import { selectPirateAdvance, runSinglePirateHunt } from './pirate-advance.mjs';
+import { pirateAutoDay, selectPirateAdvance, runSinglePirateHunt } from './pirate-advance.mjs';
 import { fleetRecordReason, dispatchReservationReason, fleetDispatchView, dispatchLabels, bridgeFleetReservations } from './fleet-availability.mjs';
 import { watchFreeRewardClock } from './extra-free-rewards.mjs';
 import { createPirateAdvanceTask } from './pirate-advance.mjs';
@@ -62,11 +62,12 @@ import path from 'node:path';
 import { createHash, randomUUID } from 'node:crypto';
 import zlib from 'node:zlib';
 import { GameClient, toNumber } from './client.mjs';
-import { challengeTrial, trialProgress, createTrialTask } from './trials.mjs';
+import { challengeTrial, trialProgress, createTrialTask, readRaid, trialStageSummary } from './trials.mjs';
 import { readTrialSweeps, executeTrialSweep } from './trial-sweeps.mjs';
 import { readHeroEquipment, equipHeroEmptySlots, enhanceHeroEquipment, uidText } from './hero-equipment.mjs';
 import { readEquipmentCrafting, startEquipmentCraft, collectEquipmentCraft } from './equipment-crafting.mjs';
 import { readLineups, applyLineup, editorLineupRecommendations } from './lineups.mjs';
+import { moveLeagueTeam, readManualLeagueOrder, recoverLeagueOrder } from './league-order.mjs';
 import { getLineupCatalog, normalizeFormation, readLineupEditor, validateLineupSettings } from './saved-lineups.mjs';
 import { readLineupRuntime, recoverLineup } from './lineup-runtime.mjs';
 import { createLineupExecutor, lineupRole, selectedSavedLineup } from './lineup-execution.mjs';
@@ -1159,6 +1160,7 @@ export function createConsole({ host = '127.0.0.1', port = 17321, onLog, recover
         instance.freeRecruitTimes??={};instance.freeRecruitTimes[name==='RecruitStartResponse'?'hero':'antique']=body.recruitData?.freeEndTimeSeconds;
       }
       if (name === 'TreasureLootStatsResponse') recordTreasureRewards(instance, body);
+      if (name === 'TrialRaidInfoResponse' || name === 'SCTrialRaidUpdate') recordTrialStage(instance, body?.raid);
     });
     instance.on('login',()=>{session.loop.controlStatus=new Map();session.loop.fleetMaintenance=null;});
     watchFreeRewardClock(instance);
@@ -1693,6 +1695,10 @@ export function createConsole({ host = '127.0.0.1', port = 17321, onLog, recover
       enabled:()=>session.client===client&&session.generation===generation&&!session.paused&&client.connected,
       report:entry=>emit(session,entry.ok?'info':'warn',entry.label+' · '+(entry.reason||entry.error||''))});}
     catch(error){emit(session,'warn','舰队阵容仍待恢复：'+error.message);}
+    try {
+      await recoverLeagueOrder(client, session.player, usageFor(session),
+        () => session.client === client && session.generation === generation && !session.paused && client.connected);
+    } catch (error) { emit(session, 'warn', '积分赛防守队序待核对：' + error.message); }
     if (session.client !== client || session.generation !== generation || session.paused || !client.connected) {
       throw new Error('连接初始化期间已断开或取消');
     }
@@ -2574,8 +2580,9 @@ export function createConsole({ host = '127.0.0.1', port = 17321, onLog, recover
             return {...output({actions:[],notes:['任务顺序：'+settings.fleetDispatch.priority.map(k=>dispatchLabels[k]).join(' → '),'意向仅表示配置允许；派遣前仍核对目标和费用，正在执行的任务不抢占。']},{fleets:table.length},'舰队调度'),viewOnly:true,dispatch:{fleets:table.map(f=>({name:f.buildingId,reason:[f.reason,...f.reserved.map(r=>'预留给'+r),'允许顺序：'+(f.intents.map(i=>i.label).join(' → ')||'无'),'当前目标：'+(f.targetGrid??'主城')].filter(Boolean).join('；')}))}};
           }
           if(category==='pirateSweep'){
-            const state=await readPirateSweeps(client,config,session.player,settings),notes=[];
+            const state=await readPirateSweeps(client,config,session.player,settings,usageFor(session).keyRecords()),notes=[];
             if(state.left!==null)notes.push('今日剩余 '+state.left+'/'+state.limit+' 次（三种海盗共用）');
+            for(const row of state.allocations)notes.push(row.name+' · 挂机已用 '+row.used+' 次，'+(row.times===-1?'使用剩余次数':'每日设定 '+row.times+' 次'));
             if(state.reason)notes.push(state.reason);if(!settings.schedule.pirate)notes.push('每日免费扫荡已关闭');
             return output({actions:!state.reason&&settings.schedule.pirate?[{kind:'pirateSweep',label:'扫荡'+state.name+' '+state.level+'级',costs:[]}]:[],notes},{remaining:state.left},'海盗日常扫荡');
           }
@@ -2594,8 +2601,12 @@ export function createConsole({ host = '127.0.0.1', port = 17321, onLog, recover
           if (category === 'pirateHunt') {
             const snapshot=await inspectHunt(client,config,session.player),ledger=usageFor(session);
             for(const fleet of snapshot.view.fleets??[])fleet.reason ||= (!settings.pirateHunt.fleetIds.includes(fleet.buildingId)?'未选择此舰队':'')|| fleetRecordReason(ledger.keyRecords(),fleet.buildingId,exactAutomationId(session.player.worldId))||(previewCityReserved.includes(fleet.buildingId)?'城战时段预留':dispatchReservationReason(client,settings,'pirateHunt',fleet.buildingId,{ignoreOwners:['cityWar']}));
-            const progress=pirateRunState(session);
-            const selection=progress.halted?{reason:progress.reason}:selectPirateAdvance(snapshot,settings.pirateHunt,{pendingFuel:pendingPetrol(ledger)});
+            const checkpoint=session.loop.running?session.loop.challengeRun?.pirate:null;
+            const dailyRun=pirateAutoDay(ledger,session.player,checkpoint);
+            const halted=checkpoint?.scope===dailyRun.scope && checkpoint.state?.halted;
+            const reason=dailyRun.reason || (halted && checkpoint.state.reason) || (session.pirateAdvance.view().running && '手动首杀推进中，本轮跳过');
+            const autoState=checkpoint?.scope===dailyRun.scope ? checkpoint.state??{} : {};
+            const selection=reason?{reason}:selectPirateAdvance(snapshot,settings.pirateHunt,{pendingFuel:pendingPetrol(ledger),autoState});
             const plan={actions:selection.reason?[]:[{kind:'pirateFirst',label:selection.fleet.name+' → '+selection.target.name+' '+selection.target.level+'级',costs:[{id:'汽油',num:selection.cost}]}],notes:selection.reason?[selection.reason]:[]};
             return {...output(plan,{fleets:snapshot.view.fleets?.length??0,targets:snapshot.view.targets?.length??0},'海盗首杀'),dispatch:{fleets:snapshot.view.fleets,fuel:snapshot.view.fuel,pending:pendingPetrol(ledger)}};
           }
@@ -3794,6 +3805,19 @@ export function createConsole({ host = '127.0.0.1', port = 17321, onLog, recover
         json(await progressionJob(session, account, route, null, client => readLineups(client, loadConfigSafe(), session.player), { read: true }));
         return;
       }
+      if (route === 'GET /api/league/order') {
+        const { account, session } = scoped_(parsed);
+        json(await progressionJob(session, account, route, null, client => readManualLeagueOrder(client, loadConfigSafe(), session.player), { read: true }));
+        return;
+      }
+      if (route === 'POST /api/league/order') {
+        const { account, session } = scoped_(parsed), payload = jsonBody();
+        needConfirm(payload);
+        const key = JSON.stringify([route, payload.signature, payload.from, payload.to]);
+        json(await progressionJob(session, account, key, operationLabels[parsed.pathname], (client, enabled) =>
+          moveLeagueTeam(client, loadConfigSafe(), session.player, usageFor(session), payload, enabled)));
+        return;
+      }
       if (route === 'POST /api/lineups/apply') {
         const { account, session } = scoped_(parsed);
         const payload = jsonBody();
@@ -4667,7 +4691,9 @@ export function createConsole({ host = '127.0.0.1', port = 17321, onLog, recover
             }catch { /* 未取到时间时沿用已有的实际观察，不推算冷却。 */ }
           }).catch(()=>{});
         }
-        json(loopView(session));
+        const view = loopView(session);
+        if (parsed.searchParams.get('trials') === '1') view.trialProgress = configTrialStages(session);
+        json(view);
         return;
       }
       if (route === 'POST /api/loop/start') {
@@ -5080,6 +5106,33 @@ export function createConsole({ host = '127.0.0.1', port = 17321, onLog, recover
   }
 
   // 活动统计与自动参与的真实回包也会刷新此连接的当日领奖数。
+  function recordTrialStage(client, raid) {
+    if (!Number.isSafeInteger(raid?.raidId) || !Number.isSafeInteger(raid.passedStage) || raid.passedStage < 0) return;
+    client.trialPassedStages ??= new Map();
+    client.trialPassedStages.set(raid.raidId, Math.max(client.trialPassedStages.get(raid.raidId) ?? 0, raid.passedStage));
+  }
+
+  function configTrialStages(session) {
+    const { client, player } = session;
+    const rows = trialStageSummary(loadConfigSafe({ allowStale: true }), player?.level, client?.trialPassedStages);
+    const connected = () => client?.connected && session.client === client && session.player === player && !session.paused;
+    const missing = rows.filter(row => row.passed === null && !row.reason);
+    if (!missing.length || !player?.level || !connected() || client.trialStageRead || Date.now() < (client.trialRetryAt ?? 0)) return rows;
+    // 只在打开此分组时补读缺失的副本，后续直接复用普通查询、挑战和扫荡收到的进度更新。
+    client.trialStageRead = readJob(session, async () => {
+      for (const { raidId } of missing) {
+        if (!connected()) break;
+        if (client.trialPassedStages?.has(raidId)) continue;
+        try { recordTrialStage(client, await readRaid(client, raidId)); }
+        catch { /* 保留待同步，其他副本仍可正常显示。 */ }
+      }
+    }, { recoverFormation: false }).catch(() => {}).finally(() => {
+      client.trialStageRead = null;
+      if (missing.some(row => !client.trialPassedStages?.has(row.raidId))) client.trialRetryAt = Date.now() + 15000;
+    });
+    return rows;
+  }
+
   const treasureRewards = new WeakMap();
   const rewardClock = client => Date.now() + (client.serverClockOffsetMs || 0);
   function recordTreasureRewards(client, stats) {
@@ -5126,6 +5179,7 @@ export function createConsole({ host = '127.0.0.1', port = 17321, onLog, recover
       connected,
       fleetMaintenance:{...(loop.fleetMaintenance??{rows:[]}),configured:maintenanceConfigured,enabled:loop.running&&connected&&maintenanceConfigured},
       singleTasks: {pirate:session.pirateAdvance.view(), stages:session.stages?.view?.(), mutual:session.mutualAid?.view?.()},
+      mainlineStage: session.player?.mainlineStage ?? null,
       challenges: { mainline: loop.challengeRun?.mainline ?? {}, trials: loop.challengeRun?.trials ?? {}, pirate: loop.challengeRun?.pirate?.state ?? {} },
       pirateAdvance: session.pirateAdvance.view(),
       controls: automationControlView(settings).filter(control => !control.taskKey || isActivityTaskAvailable(control.taskKey, session.client)).map(control=>{

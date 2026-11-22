@@ -71,13 +71,13 @@ const configZeroHints={
 };
 const merchantActivityFields = [
     configField('merchant.enabled','开启自动挂机'),
-    configField('schedule.merchantTrade','按整船收益自动走商','switch',{help:'周期活动。按批次成本、资金、舱位和本港库存规划多商品组合，比较整船预期收益选港；没有成员共享紧缺货也可选择已知普通港口，本港盈利出售不依赖商情。远端价格可能是估算，到港重新核价；临近结束停止无法及时卖出的采购。'}),
+    configField('schedule.merchantTrade','按整船收益自动走商','switch',{help:'按每件占舱、剩余舱位、资金和本港可购库存配货，比较各目的港扣除买入成本后的整船预计利润。没有成员共享紧缺货也可选择已知普通港口，本港盈利出售不依赖商情。到港重读实价，临近结束只采购来得及卖出的货。'}),
     configField('merchant.autoShareIntel','到港自动共享情报','switch',{help:'默认关闭，手动开启后随已开启的走商及所属分组执行。确认到港后共享本港尚未共享的紧缺情报，已有共享直接跳过；每日紧缺更新后重新检查，不按每次价格刷新重复发送。回读确认后才记为已共享，未知结果保留防重记录，失败不阻塞买卖；达到利润上限仍可共享当前港口。'}),
     configField('schedule.tradeTasks','领取海商王联盟任务奖励','switch',{help:'保留原联盟任务领奖开关，按本期联盟任务达成进度自动领取。'}),
     configField('schedule.merchantRewards','领取战令、利润和联盟奖励','switch',{help:'按本期利润、战令分数、联盟任务进度和当日商情贡献领取已达成档。'}),
     configField('merchant.quoteMaxAgeSeconds','报价最长参考时间','number',{unit:'秒',help:'默认300秒。记录采集时间，过期或跨刷新时点的报价不能当作有效报价；到港仍须重新读取当前报价。'}),
     configField('merchant.monitorSeconds','港口监控间隔','number',{unit:'秒',help:'默认60秒。监测本港价格和联盟共享库存，推送可提前唤醒串行检查；刷新时刻和到港时刻单独安排检查。异地港口没有实时价格接口，仍以到港读取为准。'}),
-    configField('merchant.estimateDiscountPercent','估算卖价风险折扣','number',{unit:'%',help:'默认10%。没有可用远端报价时，以商品基准价扣除此比例估算，日志标明估算；实际成交价和收益以到港回读为准。'}),
+    configField('merchant.estimateDiscountPercent','估算卖价风险折扣','number',{unit:'%',help:'默认0%，直接按参考卖价估算利润。填1%至99%时，优先购买打折后仍有利润的货，再按原参考价寻找薄利机会。设为100%时停用估价采购。没有可执行的盈利买卖时，空船仍可能换港寻价。'}),
     configField('merchant.minExpectedProfit','最低预期整船利润','number',{unit:'商会币',help:'采购与选港需达到的风险调整后预期利润，默认1。资金、容量和可购库存同时限制采购数量。'}),
     configField('merchant.refreshWaitSeconds','刷新前最多等待','number',{unit:'秒',help:'默认120秒，0关闭。仅在等待后的预计收益优于立即出航且能及时成交时等待；刷新后重新读取价格和库存。刷新时刻使用游戏配置。'}),
     configField('merchant.liquidationMinutes','活动结束前清仓窗口','number',{unit:'分钟',help:'默认120分钟，0关闭提前清仓。窗口内优先处理持货；无论此值多少，都不采购无法在交易截止前卖出的货物。'}),
@@ -190,7 +190,7 @@ const configGroups = [
       }),
     ]),
     configField('resourceFields.fleetIds','参与舰队','multi',{catalog:'expeditionFleets',empty:'请选择参与占领的舰队，空选不派遣',help:'只使用已编队、空闲且没有待确认任务的舰队，遵守舰队调度顺序与城战预留。'}),
-    configField('resourceFields.minDurabilityPercent','最低耐久','number',{unit:'%',help:'占领需要战斗；舰队需达到耐久门槛及田地推荐战力。出征返航后仍未确认占领时，当日暂停自动占田。'}),
+    configField('resourceFields.minDurabilityPercent','最低耐久','number',{unit:'%',help:'舰队需达到耐久门槛及田地推荐战力。返航后等待一个检查周期核对占领结果。同一舰队当天有两块田仍未确认时，暂缓该舰队自动占田。'}),
     configField('resourceFields.reserveFleetCount','保留空闲舰队','number',{unit:'队',help:'派遣后至少保留此数量的可用空闲舰队给其他任务。设为 0 可使用所有符合条件的舰队。'}),
     configField('resourceFields.minLevel','最低资源田等级','number',{help:'从最高等级开始选田，高级田不足时逐级向下选择，直到此等级。'}),
     configField('resourceFields.checkEverySeconds','检查间隔','number',{unit:'秒',help:'每次检查都会查找可占的高级田。需要更换时，先放弃旧田，再派舰队占领新田。'}),
@@ -225,9 +225,7 @@ const configGroups = [
   ]},
   {id:'league',title:'积分赛',category:'daily',fields:[
     configField('schedule.leagueChallenge','积分赛每日挑战','switch',{help:'使用已有编队和挑战券，每轮最多挑战一次，达到每日战斗次数后停止。'}),
-    configField('league.target','选对手策略','choice',{componentSelect:true,options:[['weakest','优先战力最低'],['score','优先积分最高']]}),
-    configField('league.maxPowerRatio','对手战力上限（相对己方）','number',{unit:'%',help:'填 70 表示优先选战力不超过本人积分赛战力 70% 的对手，再按所选策略排序。0 表示不限。'}),
-    configField('league.fallbackWeakest','免费刷新后兜底挑战','switch',{help:'当前名单无人符合上限时使用免费刷新次数。刷到符合条件的对手就打，免费次数用完仍无人符合时，挑战当前名单中战力最低者。'}),
+    configField('league.maxPowerRatio','对手战力上限（相对己方）','number',{unit:'%',help:'填 70 表示仅挑战总战力不超过本人积分赛战力 70% 的对手。0 表示不限。'}),
     configField('league.dailyBattleLimit','每日战斗次数','number',{unit:'次',help:'每场用 1 张券。填 0 暂停战斗并留券，领奖仍按各自开关执行。'}),
     configField('league.claimTask','领取积分赛每日任务奖励','switch',{help:'任务达标后领取，需开启「每日任务与奖励」总开关。'}),
     configField('schedule.leagueCollect','领取累计收集奖励'),
@@ -455,12 +453,13 @@ const configGroups = [
   { id: 'pirate-hunt', title: '海盗', category: 'world', fields: [
     configField('pirate.enabled','开启挂机'),
     configField('schedule.pirate','每日免费扫荡'),
-    configField('pirateSweep.type','扫荡种类','choice',{options:[['1','海盗先锋'],['2','海盗精锐'],['3','海盗头目']],help:'只扫荡该种类中自己已击败的最高等级。地图上没有该等级时等待刷新。'}),
+    configField('pirateSweep.types','免费扫荡目标','multi',{options:[['1','海盗先锋'],['2','海盗精锐'],['3','海盗头目']],selectAll:true,empty:'未选择扫荡目标',help:'三类共享每日免费次数。固定次数按先锋、精锐、头目的顺序分配，每类扫荡已首杀的最高等级。'}),
+    ...['海盗先锋','海盗精锐','海盗头目'].map((name,index)=>configField('pirateSweep.times'+(index+1),name+'每日扫荡次数','number',{
+      unit:'次',when:d=>d.pirateSweep.types.includes(String(index+1)),help:'填正整数指定每日次数，0 表示跳过，-1 表示使用固定次数分配后的余额。多个种类填 -1 时优先扫荡今天刷得较少的种类。',
+    })),
     configField('pirateHunt.enabled','自动挑战下一级'),
-    configField('pirateHunt.maxFailures','连续战败上限','number',{unit:'次',help:'只计已确认的战败，首杀成功后清零。达到上限后，本次挂机停止挑战海盗。'}),
+    configField('pirateHunt.maxFailures','每类连续战败上限','number',{unit:'次',help:'每类单独计算已确认的连败，首杀成功清零。该类到顶或连败达到设定次数后转到下一类，三类都完成后结束当天首杀。'}),
     configField('pirateHunt.fleetIds','首杀舰队','multi',{catalog:'expeditionFleets',empty:'请选择舰队',help:'每次从所选舰队中派出一支已编队的空闲舰队。'}),
-    configField('pirateHunt.types','首杀种类','multi',{catalog:'pirateTypes',empty:'全部种类',help:'留空表示全部种类。优先挑战可选目标中等级最低的海盗。'}),
-    configField('pirateHunt.maxLevel','首杀等级上限','number',{unit:'级',help:'包含所填等级。0 表示按当前赛季已开放的等级挑战。'}),
     configField('pirateHunt.minDurabilityPercent','首杀最低耐久','number',{unit:'%',help:'跳过耐久低于此比例的舰队。耐久上限未知时也跳过。0 表示有耐久即可。'}),
   ] },
   { id: 'cityWar', title: '联盟城战', category: 'world', fields: [
@@ -1137,6 +1136,20 @@ function configRender() {
       const section = el('section', 'config-section'); section.id = 'config-group-' + group.id;
       section.setAttribute('role', direct ? 'group' : 'tabpanel');
       section.setAttribute('aria-labelledby', singleGroup ? 'config-tab-' + category : direct ? 'config-family-' + family.id : 'config-subtab-' + group.id);
+      if (group.id === 'progression') {
+        const progress = el('div', 'mainline-progress');
+        const card = el('section');
+        card.id = 'config-mainline-progress';
+        card.setAttribute('aria-labelledby', 'config-mainline-progress-title');
+        const trials = el('section', 'config-trial-progress');
+        trials.id = 'config-trial-progress';
+        trials.setAttribute('aria-labelledby', 'config-trial-progress-title');
+        const title = el('h3', '', '试炼进度');
+        title.id = 'config-trial-progress-title';
+        trials.append(title, el('div'));
+        progress.append(card, trials);
+        section.append(progress);
+      }
       if (group.description) section.append(el('p','config-section-intro',group.description));
       if (['cityWar','silicon','treasure','resourceFields'].includes(group.id) && !configEditor.data.catalog?.fleetAvailability?.known) {
         section.append(el('p','config-section-intro','舰队名单尚未同步。连接游戏后重新打开挂机配置即可查看舰队名单。'));
@@ -1389,6 +1402,10 @@ function configLineupPicker(spec, id) {
 function configRenderUsage() {
   const group = configEditor.groups.get(configEditor.selectedGroups[configEditor.category]);
   const root = $('config-usage'), runtime = configEditor.runtime;
+  if (group?.id === 'progression') {
+    configRenderMainlineProgress(runtime);
+    configRenderTrialProgress(runtime);
+  }
   const preview = configEditor.previewSummary;
   const summary = $('config-preview-summary');
   const matching = group && preview?.group === group.id ? preview : null;
@@ -1467,6 +1484,81 @@ function configRenderUsage() {
   }
 }
 
+function configRenderMainlineProgress(runtime) {
+  const card = $('config-mainline-progress');
+  const stage = runtime?.mainlineStage;
+  const synced = Number.isSafeInteger(stage) && stage > 0;
+  const key = synced ? stage + '/' + !!runtime.connected : 'pending';
+  if (card.renderKey === key) return;
+  card.renderKey = key;
+  const head = el('div', 'mainline-progress-head');
+  const title = el('h3', '', '主线推关进度');
+  title.id = 'config-mainline-progress-title';
+  head.append(title);
+  clear(card).append(head);
+  if (!synced) {
+    card.append(el('p', 'mainline-progress-note', '关卡待同步'));
+    return;
+  }
+  if (!runtime.connected) head.append(el('span', 'mainline-progress-note', '最近同步'));
+  const stages = el('ol', 'mainline-progress-stages');
+  stages.setAttribute('aria-label', '主线关卡');
+  // 游戏的关卡条固定七格，第一关之前留空，当前关始终在第四格。
+  for (let offset = -3; offset <= 3; offset++) {
+    const number = stage + offset;
+    if (number < 1) continue;
+    const step = el('li');
+    step.style.gridColumn = String(offset + 4);
+    step.dataset.state = offset < 0 ? 'passed' : offset === 0 ? 'current' : 'upcoming';
+    const caption = offset === 0 ? '当前关' : offset === 1 ? '下一关' : '';
+    step.setAttribute('aria-label', '第 ' + number + ' 关，' + (caption || (offset < 0 ? '已通关' : '待挑战')));
+    if (offset === 0) step.setAttribute('aria-current', 'step');
+    step.append(el('span', 'mainline-stage-number', number));
+    stages.append(step);
+  }
+  card.append(stages);
+}
+
+function configRenderTrialProgress(runtime) {
+  const body = $('config-trial-progress').lastElementChild;
+  const rows = runtime?.trialProgress ?? (configEditor.data?.catalog?.trialRaids ?? []).map(raid => ({ name: raid.label }));
+  const key = JSON.stringify(rows);
+  if (body.renderKey === key) return;
+  body.renderKey = key;
+  clear(body);
+  if (!rows.length) {
+    body.append(el('p', 'mainline-progress-note', '试炼配置待同步'));
+    return;
+  }
+  const table = el('table');
+  table.setAttribute('aria-labelledby', 'config-trial-progress-title');
+  const head = table.createTHead().insertRow();
+  for (const label of ['副本', '已通关', '下一关']) {
+    const th = el('th', '', label);
+    th.scope = 'col';
+    head.append(th);
+  }
+  const list = table.createTBody();
+  for (const raid of rows) {
+    const row = list.insertRow();
+    const name = el('th', '', raid.name);
+    name.scope = 'row';
+    row.append(name);
+    if (raid.passed == null) {
+      const status = row.insertCell();
+      status.colSpan = 2;
+      status.className = 'mainline-progress-note';
+      status.textContent = raid.reason || '待同步';
+      continue;
+    }
+    row.insertCell().textContent = raid.passed ? '第 ' + raid.passed + ' 关' : '未首通';
+    const next = row.insertCell();
+    next.textContent = raid.next != null ? '第 ' + raid.next + ' 关' : '全部通关';
+    if (raid.reason) next.append(el('small', 'mainline-progress-note', raid.reason));
+  }
+  body.append(table);
+}
+
 function configPreviewFacts(preview) {
   const actions = preview.moduleActions ?? (preview.viewOnly ? null : preview.actions);
   let result = preview.fields && !preview.moduleActivities ? '参数预览' : '只读预览';
@@ -1523,7 +1615,7 @@ async function configLoad(force = false) {
   if (!Object.keys(configEditor.errors).length) configMessage('');
   configUpdateState();
   try {
-    const [data,runtime]=await Promise.all([call('/api/settings?fleets=1'),call('/api/loop').catch(()=>null)]);
+    const [data,runtime]=await Promise.all([call('/api/settings?fleets=1'),call(configLoopPath()).catch(()=>null)]);
     if (configPageStale() || account !== current || version !== configEditor.serial) return;
     const recoveryChanged = data.recovery?.required && (data.recoveryToken !== configEditor.data?.recoveryToken || JSON.stringify(data.recovery) !== JSON.stringify(configEditor.data?.recovery));
     if((!force || JSON.stringify(configEditor.draft)!==original)&&configEditor.owner===account&&configEditor.draft&&!(recoveryChanged&&!configIsDirty()&&!configEditor.recoveryBlocked)&&
@@ -1841,7 +1933,8 @@ function configMultiselect(spec, id, options = {}) {
   const count = el('span'); let limit = 120;
   const more = configButton('显示更多选项', () => { limit += 120; paintList(); });
   const all = () => {
-    const options = (catalog[spec.catalog] ?? []).filter(item =>
+    const choices = spec.options?.map(([value,label])=>({value,label})) ?? catalog[spec.catalog] ?? [];
+    const options = choices.filter(item =>
       spec.key !== 'heroes.heroIds' || !item.hidden || read().includes(item.value));
     if (spec.catalog!=='expeditionFleets') for (const value of read()) if (!options.some(item => item.value === value)) options.unshift({ value, label: value + '（当前配置中未找到）' });
     return options;

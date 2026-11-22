@@ -20,6 +20,32 @@
 .config-section { margin:0 24px; padding:16px 0; border:0; scroll-margin-top:calc(var(--header-h) + 64px); min-width:0 }
 .config-subheading { margin:20px 0 8px; scroll-margin-top:calc(var(--header-h) + 64px) }
 .config-section-intro { color:var(--muted-foreground); margin:0 0 12px; max-width:70ch }
+.mainline-progress { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); margin:0 0 12px; padding:12px clamp(8px,2vw,16px); border:1px solid var(--border); border-radius:10px; background:var(--card); container:progress-card / inline-size }
+.mainline-progress>section { grid-column:1 / -1; min-width:0 }
+#config-mainline-progress { container-type:inline-size }
+.mainline-progress-head { display:flex; align-items:baseline; justify-content:space-between; gap:8px }
+.mainline-progress h3 { margin:0; font-size:14px; font-weight:600 }
+.mainline-progress-note { color:var(--muted-foreground); font-size:12px }
+#config-mainline-progress>p,.mainline-progress-stages { margin:12px 0 0 }
+.mainline-progress-stages { display:grid; grid-template-columns:repeat(3,minmax(0,1fr)) minmax(0,1.2fr) repeat(3,minmax(0,1fr)); gap:clamp(2px,1.3cqi,6px); list-style:none; padding:0; text-align:center }
+.mainline-progress-stages li { min-width:0 }
+.mainline-stage-number { display:grid; place-items:center; height:29px; border:1px solid var(--border); border-radius:4px; color:var(--muted-foreground); font-size:clamp(11px,3.8cqi,16px); font-weight:600; font-variant-numeric:tabular-nums }
+.mainline-progress-stages [data-state=passed] .mainline-stage-number { border-color:color-mix(in srgb,#168497 42%,var(--border)); background:color-mix(in srgb,#168497 9%,var(--card)); color:var(--foreground) }
+.mainline-progress-stages [aria-current=step] .mainline-stage-number { border-color:#116676; background:#116676; color:white; font-weight:750 }
+.config-trial-progress { margin-top:14px; padding-top:10px; border-top:1px solid var(--border) }
+.config-trial-progress table { width:100%; margin-top:6px; border-collapse:collapse; font-size:13px; font-variant-numeric:tabular-nums }
+.config-trial-progress :is(th,td) { height:auto; padding:5px 0; text-align:end; vertical-align:middle }
+.config-trial-progress thead th { font-size:12px; font-weight:400; color:var(--muted-foreground) }
+.config-trial-progress tr>th:first-child { text-align:start }
+.config-trial-progress tbody th { font-weight:500 }
+.config-trial-progress small { display:block }
+@container progress-card (min-width:40rem) {
+  .mainline-progress>section { grid-column:auto }
+  #config-mainline-progress { padding-inline-end:18px }
+  .config-trial-progress { margin:0; padding:0 0 0 18px; border-top:0; border-inline-start:1px solid var(--border) }
+  .config-trial-progress table { margin-top:4px }
+  .config-trial-progress :is(th,td) { padding-block:2px }
+}
 
 .config-row { display:grid; grid-template-columns:minmax(0,1fr) minmax(0,420px); align-items:center; gap:6px 24px; padding:8px 0; min-height:44px; border-bottom:1px solid var(--border); scroll-margin-top:calc(var(--header-h) + 64px) }
 .config-row:last-child { border-bottom:0 }

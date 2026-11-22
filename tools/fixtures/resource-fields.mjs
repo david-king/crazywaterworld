@@ -78,8 +78,9 @@ export function resourceFieldFixture() {
     }
     return protocol[reply].decode(protocol[reply].encode(result).finish());
   };
-  client.sendWatch = async (name, body) => {
+  client.sendWatch = async (name, body, { beforeSend } = {}) => {
     if (!['ChallengeResFieldRequest', 'GiveUpResFieldRequest'].includes(name)) throw Error('资源田离线夹具禁止未声明写入：' + name);
+    beforeSend?.();
     protocol[name].decode(protocol[name].encode(body).finish());
     client.writes.push({ name, body: structuredClone(body) });
     if (f.reject || f.rejectRequest === name) throw Object.assign(Error('模拟服务端明确拒绝'), { prompt: {}, request: name });

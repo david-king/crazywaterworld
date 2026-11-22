@@ -35,12 +35,21 @@ settings.progression.trials = true;
 settings.lineups = { presets: [{ id: 'qa-lineup', name: '主线突击', formation }], mainlinePresetId: '', trialPresets: [] };
 saveAutomationSettings(accountId, settings, { revision: 0 });
 const requests = [], gameWrites = [], challengePayloads = [], pageErrors = [], recommendationRequests = [];
+let leagueTeams = owned.slice(0, 3).map((hero, index) => ({ index: index + 1, presetId: 1,
+  heroPositions: [{ heroId: hero.id, pos: seats[0] }] }));
+const leagueWrites = [];
 let failNextBindingSave = false;
 const client = new EventEmitter();
 Object.assign(client, {
   connected: true, serverClockOffsetMs: 0, stopping: false,
-  async request(name) {
+  async request(name, body) {
     requests.push(name);
+    if (name === 'LeagueInfoRequest') return { mine: { playerId: player.playerId }, roomDan: 6, ownFormations: leagueTeams };
+    if (name === 'LeagueFormationSequenceRequest') {
+      leagueWrites.push(body.index);
+      leagueTeams = body.index.map((index, i) => ({ ...leagueTeams[index - 1], index: i + 1 }));
+      return { formations: leagueTeams };
+    }
     if (name === 'GetFormationRequest') return { formation: structuredClone(formation) };
     if (name === 'AllHeroRequest') return { heroes: owned.map((hero, index) => ({ heroId: hero.id, level: 60 + index, power: 10000 + index * 1234 })) };
     if (name === 'MyFormationPresetRequest') return { ids: config.tables.FormationTypeUnlockCfg.data.slice(0, 10).map(row => row.id) };
@@ -127,6 +136,20 @@ try {
 
   const desktop = await openPage({ width: 1440, height: 1000 });
   const page = desktop.page;
+  const orderUrl = base + '/api/league/order?account=' + accountId;
+  const originalOrder = await fetch(orderUrl).then(response => response.json());
+  const orderToggle = page.getByRole('button', { name: '积分赛出战顺序', exact: true });
+  await orderToggle.click();
+  const firstTeam = page.locator('#league-order-rows .saved-lineup-row').first();
+  await firstTeam.getByText(originalOrder.teams[0][0], { exact: true }).waitFor();
+  await firstTeam.getByRole('button', { name: '下移第 1 队' }).click();
+  await firstTeam.getByText(originalOrder.teams[1][0], { exact: true }).waitFor();
+  const stale = await fetch(orderUrl, { method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ confirm: true, signature: originalOrder.signature, from: 1, to: 2 }) });
+  assert.match((await stale.json()).error, /已变化/);
+  assert.deepEqual(leagueWrites, [[2, 1, 3]]);
+  await orderToggle.click();
+  console.log('通过：阵容页积分赛队序、服务端换位回读、过期队序防重');
   const modal = page.locator('#saved-lineup-dialog');
   const editorRequests = () => requests.filter(name => name === 'GetFormationRequest').length;
   const openEditor = async (targetPage, name) => {

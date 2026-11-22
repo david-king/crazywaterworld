@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import { merchantActionSeconds, merchantSettings, merchantTiming, optimizePurchasePlan, planMerchant } from '../src/merchant-planner.mjs';
+import { merchantStrategyPlan } from '../src/merchant-strategy.mjs';
 
 const table = data => ({ data });
 const now = Date.UTC(2026, 10, 12, 4, 10) / 1000;
@@ -23,7 +24,7 @@ function fixture() {
   const market = { goods: [{ goodsId: 1, price: 50, stock: 0 }], specGoodsId: 1 };
   const radar = { radar: [{ cityId: 10, specGoodsId: 1, rareGoodsId: 0 }, { cityId: 20, specGoodsId: 2, rareGoodsId: 0 },
     { cityId: 30, specGoodsId: 3, rareGoodsId: 0 }] };
-  const f = { config, event, state, market, radar, now, visited: [], settings: {}, markets: [] };
+  const f = { config, event, state, market, radar, now, visited: [], settings: { estimateDiscountPercent: 10 }, markets: [] };
   f.plan = () => planMerchant(config, event, state, f.market, f.radar, f.now, f.visited,
     { settings: f.settings, markets: f.markets, actionSeconds: f.actionSeconds });
   f.batch = (extra = {}) => ({ pid: 1, goodsId: 1, cityId: 10, buyPrice: 50, num: 10, ...extra });
@@ -33,6 +34,20 @@ function fixture() {
 }
 let tests = 0;
 const test = (name, fn) => { fn(); tests++; console.log('通过：' + name); };
+
+test('默认零折扣按原价差买货，无利可图时仍可空船寻价', () => {
+  const f = fixture();
+  f.settings = {};
+  f.market.goods[0].price = 99;
+  const buy = f.plan();
+  assert.equal(buy.kind, 'buy');
+  assert.equal(buy.purchases[0].expectedPrice, 100);
+  assert.equal(buy.expectedProfit, 11);
+  f.market.goods[0].price = 100;
+  const explore = f.plan();
+  assert.equal(explore.kind, 'move');
+  assert.equal(explore.exploration, true);
+});
 
 test('配置归一化与北京时间交易、刷新边界使用真实配置', () => {
   const f = fixture(), timing = merchantTiming(f.config, f.event, f.now);
@@ -148,6 +163,175 @@ test('采购估值相同优先运往共享紧缺港，实价估算更差时不�
   assert.equal(f.plan().destination, 30);
   f.markets = [f.history(30, 55)];
   assert.equal(f.plan().destination, 20);
+});
+
+test('仅有薄利时首趟按设置等待，随后买货出航，到港按实价卖出', () => {
+  const f = fixture();
+  f.now = Date.UTC(2026, 10, 12, 2) / 1000;
+  f.settings.firstDepartureWaitMinutes = 10;
+  const next = () => merchantStrategyPlan(f.plan(), f.config, f.event, f.state, merchantSettings(f.settings), f.now);
+  f.market.goods[0].price = 95;
+  f.radar.radar = [{ cityId: 20, specGoodsId: 2 }];
+  assert.equal(next().kind, 'wait');
+  f.now += 600;
+  const buy = next();
+  assert.equal(buy.mode, 'THIN_MARGIN');
+  assert.equal(buy.kind, 'buy');
+  assert.equal(buy.count, 10);
+  assert.equal(buy.expectedProfit, 52);
+  f.state.player.coins -= buy.price * buy.count;
+  f.state.player.goods = [f.batch({ buyPrice: buy.price, num: buy.count })];
+  const move = next();
+  assert.equal(move.kind, 'move');
+  assert.equal(move.destination, buy.destination);
+  assert.equal(move.expectedProfit, buy.expectedProfit);
+  f.state.cargo.cityId = move.destination;
+  f.now = move.arrival;
+  f.market.goods[0].price = 94;
+  assert.notEqual(next().kind, 'sell');
+  f.market.goods[0].price = 96;
+  assert.equal(next().gain, 11);
+});
+
+test('有稳妥航线只补同港正收益货物，原批次的出售时间优先', () => {
+  const f = fixture();
+  f.radar.radar = [{ cityId: 20, specGoodsId: 3 }, { cityId: 30, specGoodsId: 1 }];
+  f.state.player.goods = [f.batch({ num: 3 })];
+  f.market.goods = [{ goodsId: 2, price: 190, stock: 16 }];
+  const buy = f.plan();
+  assert.equal(buy.kind, 'buy');
+  assert.equal(buy.mode, 'THIN_MARGIN');
+  assert.equal(buy.destination, 20);
+  assert.equal(buy.count, 4);
+  const late = f.event.endTime;
+  f.settings.liquidationMinutes = 0;
+  f.event.endTime = f.now + 7200 + 181;
+  assert.equal(f.plan().kind, 'move', '剩余三轮不足以采购、出航并卖出两个批次');
+  f.event.endTime = late;
+  f.state.player.goods.push(f.batch({ pid: 2, goodsId: 2, buyPrice: 190, num: 4 }));
+  f.state.player.coins -= buy.price * buy.count;
+  f.market.goods[0].stock += buy.count;
+  const move = f.plan();
+  assert.equal(move.kind, 'move');
+  assert.equal(move.destination, 20);
+  assert.deepEqual(move.salePids, [1, 2]);
+});
+
+test('共享紧缺港参考同基准价紧缺货实价，空船先采购，装货后按同一估价选港', () => {
+  const f = fixture();
+  f.config.tables.TradeGoodsCfg.data[0].unitPrice = 50;
+  f.config.tables.TradeGoodsCfg.data[1].unitPrice = 50;
+  f.market.rareGoodsId = 2;
+  f.market.goods = [{ goodsId: 1, price: 48, stock: 0 }, { goodsId: 2, price: 56, stock: 0 }];
+  const target = f.radar.radar.find(port => port.cityId === 30);
+  target.rareGoodsId = 1;
+  const buy = f.plan();
+  assert.equal(buy.kind, 'buy');
+  assert.equal(buy.goodsId, 1);
+  assert.equal(buy.destination, 30);
+  assert.equal(buy.purchases[0].expectedPrice, 50);
+  assert.equal(buy.expectedProfit, 21);
+  assert.match(buy.label, /紧缺/);
+
+  f.state.player.goods = [f.batch({ buyPrice: 48 })];
+  const move = f.plan();
+  assert.equal(move.kind, 'move');
+  assert.equal(move.destination, 30);
+  assert.equal(move.expectedProfit, buy.expectedProfit);
+  f.state.player.goods = [];
+  f.radar.radar = [target];
+  f.markets = [f.history(30, 46)];
+  assert.notEqual(f.plan().kind, 'buy', '目的港已见的低价优先于其他港紧缺样本');
+  f.markets = [];
+  f.settings.minExpectedProfit = 84;
+  assert.notEqual(f.plan().kind, 'buy');
+  f.settings.minExpectedProfit = 1;
+  target.rareGoodsId = 0;
+  assert.equal(f.plan().purchases[0].expectedPrice, 50);
+  assert.equal(f.plan().mode, 'THIN_MARGIN');
+  target.rareGoodsId = 1;
+  f.config.tables.TradeGoodsCfg.data[1].unitPrice = 200;
+  f.market.goods[1].stock = 20;
+  assert.equal(f.plan().purchases[0].expectedPrice, 50, '不同基准价的货物不可用作紧缺参考价');
+});
+
+test('可比紧缺报价取有效港口样本的最低价，过期后恢复普通估价', () => {
+  const f = fixture();
+  f.market.goods[0].price = 100;
+  f.radar.radar.find(port => port.cityId === 30).rareGoodsId = 1;
+  f.radar.radar.push({ cityId: 40, specGoodsId: 3, rareGoodsId: 1 });
+  f.markets = [f.history(20, 130, { rareGoodsId: 1 }), f.history(40, 120, { rareGoodsId: 1 })];
+  const buy = f.plan();
+  assert.equal(buy.kind, 'buy');
+  assert.equal(buy.purchases[0].expectedPrice, 108);
+  for (const snapshot of f.markets) snapshot.observedAt -= 301;
+  assert.equal(f.plan().exploration, true);
+});
+
+function lateMarket() {
+  const f = fixture();
+  f.config.tables.TradeShipCfg.data.push({ lv: 5, capacity: 100, profitMargin: 1500 });
+  f.state.cargo.cargoLv = 5;
+  f.state.player.coins = 5_000_000;
+  f.settings.estimateDiscountPercent = 0;
+  f.radar.radar = [{ cityId: 20, specGoodsId: 99 }];
+  f.config.tables.TradeGoodsCfg.data = [
+    { goodsId: 1, itemName: '橙特产', qualityIndex: 4, unitPrice: 800, capacity: 10, maxCount: 1 },
+    { goodsId: 2, itemName: '橙货', qualityIndex: 4, unitPrice: 800, capacity: 10, maxCount: 1 },
+    { goodsId: 3, itemName: '紫货', qualityIndex: 3, unitPrice: 280, capacity: 4, maxCount: 20 }
+  ];
+  f.market.goods = [{ goodsId: 1, price: 691, stock: 0 }, { goodsId: 2, price: 740, stock: 0 }, { goodsId: 3, price: 257, stock: 0 }];
+  return f;
+}
+
+test('本金受限时紫货更赚，舱位受限时同一组报价改买橙货', () => {
+  const f = lateMarket();
+  f.market.goods.shift();
+  f.config.tables.TradeGoodsCfg.data[1].maxCount = 2;
+  f.config.tables.TradeShipCfg.data.at(-1).capacity = 20;
+  f.state.player.coins = 1030;
+  const cashLimited = f.plan();
+  assert.deepEqual(cashLimited.purchases.map(p => [p.goodsId, p.count]), [[3, 4]]);
+  assert.equal(cashLimited.expectedProfit, 106);
+  assert.match(cashLimited.label, /每件占 4 格，本批占 16 格/);
+  for (const coins of [4_999_999, 5_000_000, 5_000_001]) {
+    f.state.player.coins = coins;
+    const spaceLimited = f.plan();
+    assert.deepEqual(spaceLimited.purchases.map(p => [p.goodsId, p.count]), [[2, 2]]);
+    assert.equal(spaceLimited.expectedProfit, 138);
+  }
+});
+
+test('逐笔扣除已占舱位和联盟已购库存，剩余14格可装一橙一紫', () => {
+  const f = lateMarket();
+  f.config.tables.TradeShipCfg.data.at(-1).capacity = 24;
+  f.state.player.goods = [f.batch({ goodsId: 1, num: 1, buyPrice: 691 })];
+  f.market.goods[0].stock = 1;
+  f.market.goods[2].stock = 19;
+  const mixed = f.plan();
+  assert.deepEqual(mixed.purchases.map(p => [p.goodsId, p.count]), [[2, 1], [3, 1]]);
+  assert.equal(mixed.expectedProfit, 126 + 69 + 27);
+  f.state.player.goods.push(f.batch({ pid: 2, goodsId: 2, num: 1, buyPrice: 740 }));
+  f.market.goods[1].stock++;
+  const last = f.plan();
+  assert.equal(last.goodsId, 3);
+  assert.equal(last.count, 1);
+  f.market.goods[2].stock++;
+  assert.equal(f.plan().kind, 'move');
+});
+
+test('500万本金的大额组合至少达到按本金收益装货的可行利润', () => {
+  const f = lateMarket();
+  f.config.tables.TradeShipCfg.data.at(-1).capacity = 81_000;
+  const defs = f.config.tables.TradeGoodsCfg.data;
+  [7000, 7000, 15000].forEach((max, i) => { defs[i].maxCount = max; });
+  f.market.goods[0].stock = 7000 - 5457;
+  defs.push({ goodsId: 4, itemName: '木板', qualityIndex: 1, unitPrice: 50, capacity: 1, maxCount: 60000 });
+  f.market.goods.push({ goodsId: 4, price: 46, stock: 0 });
+  const plan = f.plan();
+  assert(plan.expectedProfit >= 810542);
+  assert(plan.purchases.reduce((sum, p) => sum + p.count * p.price, 0) <= 5_000_000);
+  assert(plan.purchases.reduce((sum, p) => sum + p.count * p.capacity, 0) <= 81_000);
 });
 
 test('有界组合背包在容量和现金双约束下优于逐件贪心', () => {
@@ -537,8 +721,8 @@ test('清仓期可执行更少亏损的异港路线，已访问港不阻止本�
 
 test('持货寻价和空船调港有边界，不凭过期商情循环往返', () => {
   const f = fixture();
-  f.state.player.goods = [f.batch({ buyPrice: 95 })];
-  f.market.goods[0].price = 95;
+  f.state.player.goods = [f.batch({ buyPrice: 100 })];
+  f.market.goods[0].price = 100;
   const plan = f.plan();
   assert.equal(plan.kind, 'move');
   assert.equal(plan.exploration, true);

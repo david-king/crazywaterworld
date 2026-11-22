@@ -668,8 +668,40 @@ try {
     old.discountShop.extra = true;
     assert.throws(() => validateSettings(old), error => !!error.fields?.['discountShop.extra']);
   });
+  test('加载、导入和旧页面保存时移除首杀种类与等级上限，保留免费扫荡目标', () => {
+    const expected = defaultSettings();
+    expected.pirate.enabled = expected.schedule.pirate = true;
+    expected.pirateSweep = { types: ['2'], times1: 1, times2: -1, times3: 1 };
+    Object.assign(expected.pirateHunt, { enabled: true, maxFailures: 4, fleetIds: ['1远征船'] });
+    for (const version of [45, 46, 47]) {
+      const old = structuredClone(expected);
+      old.pirateSweep = { type: '2' };
+      if (version < 47) old.pirateHunt.types = ['3'];
+      if (version === 45) old.pirateHunt.maxLevel = 12;
+      fs.writeFileSync(file, JSON.stringify({ version, accounts: { pirate: { settingsVersion: version, revision: 3, settings: old } } }));
+      assert.deepEqual(loadAutomationSettings('pirate', { file }).settings, expected);
+      assert.deepEqual(importAutomationSettings({ format: SETTINGS_FORMAT, version, settings: old }), expected);
+      const saved = saveAutomationSettings('pirate', old, { file, revision: 3 });
+      assert.deepEqual(exportAutomationSettings(saved.settings).settings, expected);
+      assert.deepEqual(old.pirateSweep, { type: '2' });
+    }
+  });
+  test('主线第46版和海盗第48版配置分别升级后保留积分赛与扫荡选择', () => {
+    const expected = defaultSettings();
+    expected.league.dailyBattleLimit = 7;
+    expected.pirateSweep = { types: ['2'], times1: 1, times2: -1, times3: 1 };
+    const main = structuredClone(expected);
+    Object.assign(main.pirateHunt, { types: ['1'], maxLevel: 12 });
+    main.pirateSweep = { type: '2' };
+    const pirates = structuredClone(expected);
+    Object.assign(pirates.league, { target: 'score', fallbackWeakest: true });
+    for (const [version, settings] of [[46, main], [48, pirates]]) {
+      assert.deepEqual(importAutomationSettings({ format: SETTINGS_FORMAT, version, settings }), expected);
+      assert.deepEqual(migrateSettingsVersion(settings, version), expected);
+    }
+  });
   test('版本1升级后重复迁移保持一致，保留有效的用户值', () => {
-    assert.equal(SETTINGS_SCHEMA_VERSION, 45);
+    assert.equal(SETTINGS_SCHEMA_VERSION, 49);
     const settings = legacySettings();
     settings.factory.checkEverySeconds = 270;
     settings.resources.diamondDailyLimit = 1234;

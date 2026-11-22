@@ -22,7 +22,7 @@ export const settingsFile = () => path.join(dataDirectory(), 'automation-setting
 export const SETTINGS_FORMAT = 'crazywaterworld-automation';
 // 文件 version / 账号 settingsVersion 是格式编号，只随结构迁移调整；
 // revision 是每次保存递增的修订号，仅用于并发冲突检查，不能用作格式版本。
-export const SETTINGS_SCHEMA_VERSION = 45;
+export const SETTINGS_SCHEMA_VERSION = 49;
 const LEGACY_SETTINGS_FORMAT = 'crazywaterword-automation';
 const treasureQualityLabels = { ORANGE: '万吨货轮', PURPLE: '中型货轮', BLUE: '小型货轮' };
 const treasureChaseDefaults = {
@@ -54,7 +54,7 @@ export const DEFAULT_SETTINGS = {
   activityAutomation: activityAutomationDefaults,
   weeklyActivity: WEEKLY_ACTIVITY_DEFAULTS,
   weekOrder: { enabled: false, allowDiamonds: false },
-  merchant: { enabled: false, autoShareIntel: false, quoteMaxAgeSeconds: 300, estimateDiscountPercent: 10, refreshWaitSeconds: 120, liquidationMinutes: 120,
+  merchant: { enabled: false, autoShareIntel: false, quoteMaxAgeSeconds: 300, estimateDiscountPercent: 0, refreshWaitSeconds: 120, liquidationMinutes: 120,
     maxLossPercent: 0, minExpectedProfit: 1, autoSpeedUp: false, speedUpMinProfit: 1000, keepPointers: 0,
     speedUpMode: 'profit', guardLastPointer: false, speedUpMaxPerLeg: 4, monitorSeconds: 60,
     refreshWindowMinutes: 8, dailyPointerLimit: 28, autoBuyPointers: false, pointerDailyDiamondLimit: 0,
@@ -81,7 +81,7 @@ export const DEFAULT_SETTINGS = {
   appointments: { enabled: false, priorities: [...DEFAULT_APPOINTMENT_PRIORITIES] },
   dailies: { enabled: false, claimTasks: false, claimDailyChest: false, claimWeeklyChest: false, claimGift: false },
   arena: { challengeHigher: false, challengeLimit: 3, target: 'weakest', maxPowerRatio: 0, fallbackWeakest: false, sweepLower: false, sweepLimit: 3, claimTask: false },
-  league: { target: 'weakest', dailyBattleLimit: 1, maxPowerRatio: 0, fallbackWeakest: false, claimTask: false },
+  league: { dailyBattleLimit: 1, maxPowerRatio: 0, claimTask: false },
   tasks: { main: false, branch: false, achievements: false },
   progression: { enabled: false, mainline: false, trials: false, raidIds: ['1','2','3'], maxFailures: 3 },
   lineups: { presets: [], mainlinePresetId: '', trialPresets: [] },
@@ -93,8 +93,8 @@ export const DEFAULT_SETTINGS = {
   worldBoss: { enabled: false, fleetIds: [], fleetPresets: [], minDurabilityPercent: 80 },
   radar: { runEnabled:false, enabled:false, repairIdle:false, fleetIds:[], types:['pirate','collect','refugee','spy','fixed'], allowMaterials:false, minDurabilityPercent:80, checkEverySeconds:30 },
   pirate: { enabled: false },
-  pirateSweep: { type: '1' },
-  pirateHunt: { enabled: false, maxFailures: 3, fleetIds: [], types: [], maxLevel: 0, minDurabilityPercent: 80, checkEverySeconds: 15 },
+  pirateSweep: { types: ['1'], times1: -1, times2: 1, times3: 1 },
+  pirateHunt: { enabled: false, maxFailures: 3, fleetIds: [], minDurabilityPercent: 80, checkEverySeconds: 15 },
   treasure: { enabled: false, windows: [], autoJoin: false, qualities: Object.keys(treasureQualityLabels), follow: false, followMode: 'trigger', fleetIds: [], followNames: [], followPlayerIds: [], avoidPlayerIds: [],
     rewardItems: [], ...treasureRewardFilterDefaults, ...treasureChaseDefaults, avoidNames: [], allowHostile: false, minDurabilityPercent: 80,
     maxProgress: 90, personalProgressLimit: 20, dailyDispatchLimit: 0, checkEverySeconds: 15, participationMode: 'untilFull', repeatAttack: false,
@@ -168,12 +168,13 @@ const constraints = {
   'trials.raidIds': { ...strings(3), values: ['1','2','3'] }, 'trials.paidPerRaidLimit': int(100),
   'trials.dailyDiamondBudget': int(100000), 'trials.maxSingleCost': int(10000),
   'arena.target': { kind: 'choice', values: ['weakest', 'rank'] }, 'arena.challengeLimit': int(100000), 'arena.sweepLimit': int(100000),
-  'league.target': { kind: 'choice', values: ['weakest', 'score'] }, 'league.dailyBattleLimit': int(100000),
+  'league.dailyBattleLimit': int(100000),
   'arena.maxPowerRatio': int(1000), 'league.maxPowerRatio': int(1000),
   'progression.raidIds': { ...strings(3), values: ['1','2','3'] }, 'progression.maxFailures': int(100, 1),
   'pirateHunt.maxFailures': int(100, 1),
-  'pirateSweep.type': {kind:'choice',values:['1','2','3']},
-  'pirateHunt.fleetIds': strings(10), 'pirateHunt.types': strings(20), 'pirateHunt.maxLevel': int(1000),
+  'pirateSweep.types': { ...strings(3), values: ['1', '2', '3'] },
+  'pirateSweep.times1': int(1_000_000_000, -1), 'pirateSweep.times2': int(1_000_000_000, -1), 'pirateSweep.times3': int(1_000_000_000, -1),
+  'pirateHunt.fleetIds': strings(10),
   'pirateHunt.minDurabilityPercent': int(100), 'pirateHunt.checkEverySeconds': int(60, 5),
   'treasure.fleetIds': strings(10), 'treasure.followNames': strings(30), 'treasure.followPlayerIds': strings(30),
   'treasure.chaseNames': strings(30), 'treasure.chaseTargetSeconds': int(3600), 'treasure.chaseDailyDiamondLimit': int(100000000),
@@ -346,7 +347,6 @@ function validateCurrentSettings(input, { partial = false, catalog = null } = {}
   if (plain(input?.silicon) && Object.hasOwn(input.silicon, 'dailyDiamondLimit')) input = migrateVersion25Settings(input);
   input = migrateVersion26Settings(input);
   input = migrateVersion28Settings(input);
-  if (plain(input?.league)) input = { ...input, league: { fallbackWeakest: false, ...input.league } };
   input = migrateVersion34Settings(input);
   if (['arena', 'league'].some(group => plain(input?.[group]) && Object.hasOwn(input[group], 'keepTickets'))) input = migrateVersion23Settings(input);
   if (plain(input?.arena) && (Object.hasOwn(input.arena, 'dailyBattleLimit') || Object.hasOwn(input.arena, 'fallbackLowerRank'))) input = migrateVersion37Settings(input);
@@ -356,6 +356,10 @@ function validateCurrentSettings(input, { partial = false, catalog = null } = {}
   input = migrateVersion41Settings(input);
   input = migrateVersion42Settings(input);
   input = migrateVersion44Settings(migrateVersion43Settings(input));
+  input = migrateVersion45Settings(input);
+  input = migrateVersion46Settings(input);
+  input = migrateVersion47Settings(input);
+  input = migrateVersion48Settings(input);
   if (plain(input?.resourceFields) && !Object.hasOwn(input.resourceFields, 'refillAfterLoss')) {
     input = { ...input, resourceFields: { ...input.resourceFields, refillAfterLoss: false } };
   }
@@ -470,7 +474,6 @@ function validateCurrentSettings(input, { partial = false, catalog = null } = {}
     if (windows.some(value => !dailyWindowPattern.test(value))) errors[field] = '时段格式为 HH:mm-HH:mm，每行一个，支持跨午夜';
   }
   if (output.pirateHunt.fleetIds.some(value=>! /^[1-9]\d*远征船$/.test(value))) errors['pirateHunt.fleetIds']='请选择有效的海盗首杀舰队';
-  if (output.pirateHunt.types.some(value=>! /^[1-9]\d*$/.test(value))) errors['pirateHunt.types']='请选择有效的海盗类型';
   if (![1,5,10,50].includes(output.eventActions.compassDrawCount)) errors['eventActions.compassDrawCount']='请选择1、5、10或50次';
   if (output.farm.autoPlant && output.farm.customPlant) errors['farm.customPlant'] = '自动种植和自定义种植只能开启一种';
   if (output.factory.speedUpSources.some(source => !output.factory.demandPriority.includes(source))) errors['factory.speedUpSources'] = '加速来源必须保留在需求优先级列表中';
@@ -514,7 +517,7 @@ function validateCurrentSettings(input, { partial = false, catalog = null } = {}
       'treasure.fallbackMediumRewardPriority': 'materials', 'treasure.fallbackSmallRewardPriority': 'materials',
       'cityWar.fleetIds': 'expeditionFleets', ...Object.fromEntries([...legacyCityRefs].map(refs => ['cityWar.' + refs, 'cityTargets'])),
       'radar.fleetIds':'expeditionFleets','worldBoss.fleetIds':'expeditionFleets','resourceFields.fleetIds':'expeditionFleets',
-      'pirateHunt.fleetIds': 'expeditionFleets', 'pirateHunt.types': 'pirateTypes',
+      'pirateHunt.fleetIds': 'expeditionFleets',
       'forge.buildingIds': 'forgeBuildings', 'forge.recipeIds': 'forgeRecipes',
       'alliance.allowedMaterials': 'materials', 'alliance.blockedMaterials': 'materials',
       'alliance.requestMaterials': 'materials', 'alliance.techIds': 'guildTech',
@@ -566,7 +569,6 @@ export function settingsCatalog(config) {
     })),
     petSpecies: unique(rows('PetBreedCfg').map(r => option(r.spId, rows('PetSpeciesCfg').find(s => s.id === r.spId || s.spId === r.spId)?.name || `海兽种类 ${r.spId}`))),
     radarTypes: [['pirate','击退海盗'],['collect','收集资源'],['refugee','解救难民'],['spy','城战试探'],['fixed','固定情报']].map(([value,label])=>option(value,label)),
-    pirateTypes: unique(rows('WorldPirateCfg').map(r=>option(r.type,r.showName))),
     trialRaids: rows('TrialRaidCfg').map(r => option(r.raidId, r.title)),
     demandSources: DEMAND_SOURCES.map(([value, label]) => option(value, label)),
     appointmentPriorities: APPOINTMENT_PRIORITIES.map(({ id, label }) => option(id, label)),
@@ -712,7 +714,7 @@ export function importAutomationSettings(document, options) {
   return validateSettings(migrateSettingsVersion(document.settings, document.version), { ...options, partial: false });
 }
 
-const settingsMigrations = new Map([[1, migrateVersion1Settings], [2, migrateVersion2Settings], [3, migrateVersion3Settings], [4, migrateVersion4Settings], [5, migrateVersion5Settings], [6, migrateVersion6Settings], [7, migrateVersion7Settings], [8, migrateVersion8Settings], [9, migrateVersion9Settings], [10, migrateVersion10Settings], [11, migrateVersion11Settings], [12, migrateVersion12Settings], [13, migrateVersion13Settings], [14, migrateVersion14Settings], [15, migrateVersion15Settings], [16, migrateVersion16Settings], [17, migrateVersion17Settings], [18, migrateVersion18Settings], [19, migrateVersion19Settings], [20, migrateVersion20Settings], [21, migrateVersion21Settings], [22, migrateVersion22Settings], [23, migrateVersion23Settings], [24, migrateVersion24Settings], [25, migrateVersion25Settings], [26, migrateVersion26Settings], [27, migrateVersion27Settings], [28, migrateVersion28Settings], [29, migrateVersion29Settings], [30, migrateVersion30Settings], [31, migrateVersion31Settings], [32, migrateVersion32Settings], [33, migrateVersion33Settings], [34, migrateVersion34Settings], [35, migrateVersion35Settings], [36, migrateVersion36Settings], [37, migrateVersion37Settings], [38, migrateVersion38Settings], [39, migrateVersion39Settings], [40, migrateVersion40Settings], [41, migrateVersion41Settings], [42, migrateVersion42Settings], [43, migrateVersion43Settings], [44, migrateVersion44Settings]]);
+const settingsMigrations = new Map([[1, migrateVersion1Settings], [2, migrateVersion2Settings], [3, migrateVersion3Settings], [4, migrateVersion4Settings], [5, migrateVersion5Settings], [6, migrateVersion6Settings], [7, migrateVersion7Settings], [8, migrateVersion8Settings], [9, migrateVersion9Settings], [10, migrateVersion10Settings], [11, migrateVersion11Settings], [12, migrateVersion12Settings], [13, migrateVersion13Settings], [14, migrateVersion14Settings], [15, migrateVersion15Settings], [16, migrateVersion16Settings], [17, migrateVersion17Settings], [18, migrateVersion18Settings], [19, migrateVersion19Settings], [20, migrateVersion20Settings], [21, migrateVersion21Settings], [22, migrateVersion22Settings], [23, migrateVersion23Settings], [24, migrateVersion24Settings], [25, migrateVersion25Settings], [26, migrateVersion26Settings], [27, migrateVersion27Settings], [28, migrateVersion28Settings], [29, migrateVersion29Settings], [30, migrateVersion30Settings], [31, migrateVersion31Settings], [32, migrateVersion32Settings], [33, migrateVersion33Settings], [34, migrateVersion34Settings], [35, migrateVersion35Settings], [36, migrateVersion36Settings], [37, migrateVersion37Settings], [38, migrateVersion38Settings], [39, migrateVersion39Settings], [40, migrateVersion40Settings], [41, migrateVersion41Settings], [42, migrateVersion42Settings], [43, migrateVersion43Settings], [44, migrateVersion44Settings], [45, migrateVersion45Settings], [46, migrateVersion46Settings], [47, migrateVersion47Settings], [48, migrateVersion48Settings]]);
 const supportedSettingsVersion = version => Number.isSafeInteger(version) && version >= 1;
 const entrySettingsVersion = entry => Object.hasOwn(entry, 'settingsVersion') ? entry.settingsVersion : 1;
 function newestSettingsVersion(store) {
@@ -1125,6 +1127,34 @@ function migrateVersion22Settings(settings) {
     if (plain(next[group])) next[group] = { maxPowerRatio: 0, ...next[group] };
   }
   return next;
+}
+
+// Main v46 and the pirate branch used different v46 formats.
+function migrateVersion48Settings(settings) {
+  settings = migrateVersion45Settings(settings);
+  if (!plain(settings?.league)) return settings;
+  const { target, fallbackWeakest, ...league } = settings.league;
+  return { ...settings, league };
+}
+
+function migrateVersion47Settings(settings) {
+  if (!plain(settings?.pirateSweep) || !Object.hasOwn(settings.pirateSweep, 'type')) return settings;
+  const { type, ...other } = settings.pirateSweep;
+  const pirateSweep = { types: [type], times1: 1, times2: 1, times3: 1 };
+  if (['1', '2', '3'].includes(type)) pirateSweep['times' + type] = -1;
+  return { ...settings, pirateSweep: { ...pirateSweep, ...other } };
+}
+
+function migrateVersion46Settings(settings) {
+  if (!plain(settings?.pirateHunt) || !Object.hasOwn(settings.pirateHunt, 'types')) return settings;
+  const { types, ...pirateHunt } = settings.pirateHunt;
+  return { ...settings, pirateHunt };
+}
+
+function migrateVersion45Settings(settings) {
+  if (!plain(settings?.pirateHunt) || !Object.hasOwn(settings.pirateHunt, 'maxLevel')) return settings;
+  const { maxLevel, ...pirateHunt } = settings.pirateHunt;
+  return { ...settings, pirateHunt };
 }
 
 function migrateVersion44Settings(settings) {

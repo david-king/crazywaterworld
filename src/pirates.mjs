@@ -247,7 +247,31 @@ function huntKey(session, parts) {
   return createHmac('sha256', session.secret).update(JSON.stringify([session.revision, ...parts])).digest('hex');
 }
 
-export async function inspectHunt(client, config, player, enterMap = false, allowPreset = false) {
+function pirateTypeProgress(configRows, stageCap, records) {
+  if (!(stageCap > 0) || !Array.isArray(records)) return [];
+  const highest = new Map();
+  for (const row of configRows) {
+    if (row.level <= stageCap && row.level > (highest.get(row.type)?.level ?? 0)) highest.set(row.type, row);
+  }
+  return [...highest.values()].sort((a, b) => a.type - b.type).map(row => ({
+    type: row.type, name: row.showName, limit: row.level,
+    cleared: records.find(record => record.type === row.type)?.maxKilledLevel ?? 0,
+  }));
+}
+
+export function pirateTypePlan(progress, options, autoState) {
+  const rows = (progress ?? []).filter(row => autoState || !options.types?.length || options.types.includes(String(row.type)));
+  if (!rows.length || rows.some(row => !Number.isSafeInteger(row.cleared) || row.cleared < 0)) return {};
+  const failedTypes = new Set(autoState?.failedTypes);
+  if (autoState?.failures >= options.maxFailures) failedTypes.add(autoState.type);
+  const remaining = rows.filter(row => row.cleared < row.limit && row.type >= (autoState?.type ?? 0) && !failedTypes.has(row.type));
+  if (remaining.length) return autoState ? { current: remaining[0], next: remaining[1] } : {};
+  if (failedTypes.size) return { done: '各类海盗均已达到连败上限或赛季等级上限' };
+  const limits = [...new Set(rows.map(row => row.limit))];
+  return { done: '海盗已达到当前赛季阶段的首杀等级上限' + (limits.length === 1 ? '（' + limits[0] + ' 级）' : '') };
+}
+
+export async function inspectHunt(client, config, player, enterMap = false, allowPreset = false, { advanceOptions, autoState, skipCapped = false } = {}) {
   const session = huntSession(client);
   const world = normalize(player?.worldId);
   const tables = config?.tables ?? {};
@@ -262,11 +286,23 @@ export async function inspectHunt(client, config, player, enterMap = false, allo
   const scenario = player.scenarioId || 1;
   const configRows = tables.WorldPirateCfg?.data?.filter(row => Number(row.season) === season);
   if (!configRows?.length) { view.reason = '缺少本赛季海盗配置'; return snapshot; }
-  const buildings = (await client.request('OnWaterRequest', {}, 'OnWaterResponse')).building;
   const { stage } = await client.request('SeasonTaskStageRequest', {}, 'SeasonTaskStageResponse');
   const stages = tables[scenario + '_SeasonTaskCfg']?.data;
   const stageCap = stage === 0 ? Infinity : stages?.find(r => Number(r.season) === season && r.stage === stage)?.maxPirateLevel;
   if (!stageCap) view.reason = '无法确认当前赛季阶段的海盗等级上限';
+  const readKillRecords = async () => {
+    const { records } = await client.request('PirateKillRecordRequest', {}, 'PirateKillRecordResponse');
+    if (Array.isArray(records)) records.forEach(session.record);
+    view.typeProgress = pirateTypeProgress(configRows, stageCap, records);
+    if (advanceOptions) snapshot.doneReason = pirateTypePlan(view.typeProgress, advanceOptions, autoState).done;
+    return records;
+  };
+  let records;
+  if (skipCapped) {
+    records = await readKillRecords();
+    if (snapshot.doneReason) { view.reason = snapshot.doneReason; return snapshot; }
+  }
+  const buildings = (await client.request('OnWaterRequest', {}, 'OnWaterResponse')).building;
 
   const merge = await client.request('UniteWorldsPlanRequest', {}, 'UniteWorldsPlanResponse');
   const now = Math.floor((Date.now() + (client.serverClockOffsetMs || 0)) / 1000);
@@ -284,12 +320,11 @@ export async function inspectHunt(client, config, player, enterMap = false, allo
   else if (view.fuel !== null && view.fuel < view.fuelPerFleet) view.reason ||= '汽油不足，派一支舰队需要 ' + view.fuelPerFleet + ' 汽油';
 
   if (enterMap && !view.reason) await client.request('WorldInfoRequest', { screenCenter: { x: 0, y: 0 } }, 'WorldInfoResponse');
-  const records = (await client.request('PirateKillRecordRequest', {}, 'PirateKillRecordResponse')).records;
+  if (!skipCapped) records = await readKillRecords();
   const map = (await client.request('AllPirateRequest', {}, 'AllPirateResponse')).pirates;
   const own = normalize(await client.request('MyFleetsRequest', {}, 'MyFleetsResponse')).fleets;
   if (![records, map, own, buildings].every(Array.isArray)) { view.reason = '未取得完整的海盗、舰队或建筑状态'; return snapshot; }
   snapshot.records=records; snapshot.ownFleets=own;
-  records.forEach(session.record);
   own.forEach(session.observeFleet);
   const cities = tables[scenario + '_CityCfg']?.data ?? [];
   const places = new Map();

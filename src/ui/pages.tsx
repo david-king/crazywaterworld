@@ -7,7 +7,7 @@ import { Switch } from "./switch"
 import { HelpTip } from "./help-tip"
 import { Badge } from "./badge"
 import { DialogFooter, DialogHeader, DialogTitle } from "./dialog"
-import { Backpack, Gem, Gift, LayoutGrid, MessageCircle, Music2, Plus, QrCode, Search, Shirt, Smartphone, Sprout, X } from "lucide-react"
+import { ArrowDown, ArrowUp, Backpack, Gem, Gift, LayoutGrid, MessageCircle, Music2, Plus, QrCode, RefreshCw, Search, Shirt, Smartphone, Sprout, X } from "lucide-react"
 
 function Panel({title, help, titleAfter, children}: {title: string; help?: string; titleAfter?: React.ReactNode; children: React.ReactNode}) {
   return <Card><CardHeader><CardTitle className="title-with-help">{title}{help && <HelpTip title={title}>{help}</HelpTip>}</CardTitle>{titleAfter && <CardAction className="row-span-1 self-center max-md:col-span-2 max-md:col-start-1 max-md:row-start-2 max-md:justify-self-start">{titleAfter}</CardAction>}</CardHeader><CardContent>{children}</CardContent></Card>
@@ -240,6 +240,7 @@ export function lineupsPage() {
   return renderToStaticMarkup(<div className="grid gap-3">
     <Panel title="我的阵容" help="管理已保存的自定义阵容，点击查看或在弹窗中编辑。主线和试炼可在各自入口选择阵容，挑战结束后自动还原到挑战前的搭配。">
       <div id="saved-lineup-view" className="progression-view" />
+      <template id="league-order-icons"><ArrowUp /><ArrowDown /><RefreshCw /></template>
     </Panel>
   </div>)
 }

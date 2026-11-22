@@ -16,7 +16,6 @@ const collections = {
   petSpecies: { tables: ['PetBreedCfg'], fields: ['pet.species'] },
   expeditionFleets: { tables: ['BuildingUnlockCfg'], fields: ['treasure.fleetIds', 'cityWar.fleetIds',
     'cityWar.defenceFleetIds', 'radar.fleetIds', 'worldBoss.fleetIds', 'pirateHunt.fleetIds', 'resourceFields.fleetIds'] },
-  pirateTypes: { tables: ['WorldPirateCfg'], fields: ['pirateHunt.types'] },
   forgeBuildings: { tables: ['BuildingUnlockCfg'], fields: ['forge.buildingIds'] },
   forgeRecipes: { tables: ['BuildingEquipMakeCfg'], fields: ['forge.recipeIds'] },
   guildTech: { tables: ['GuildTechCfg'], fields: ['alliance.techIds'] },

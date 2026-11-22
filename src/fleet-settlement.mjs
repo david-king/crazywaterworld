@@ -211,7 +211,7 @@ export function cancelResourceFieldReplacement(ledger, key, record, now, reason)
 // 对已有派遣做结算，不发出游戏动作。先按读回前的记录编号限定范围，防止迟到快照释放新占用。
 export function settleFleetSnapshot(
   ledger,
-  { worldId, fleets, events, reports, kills, cargoUids, resourceFields, now, readStartedAt, kinds, baseline, allowBossTimeout = true }
+  { worldId, fleets, events, reports, kills, cargoUids, resourceFields, resourceFieldPolicy, now, readStartedAt, kinds, baseline, allowBossTimeout = true }
 ) {
   if (!ledger?.keyRecords || !worldId || !Array.isArray(fleets)) return [];
   const records = ledger.keyRecords(),
@@ -235,6 +235,10 @@ export function settleFleetSnapshot(
           && integer(field.cityId) && field.cityId > 0 && integer(field.type) && field.type > 0)
         && new Set(resourceFields.map(field => field.gridIdx)).size === resourceFields.length;
       if (d.replacement && d.phase !== 'dispatching') {
+        // The scheduler owns a resumable, unsent challenge. A read-only settlement
+        // can release it after the user disables automation or leaves this alliance.
+        if (d.resumeIdentity && (!resourceFieldPolicy || resourceFieldPolicy.playerId !== d.playerId
+          || (resourceFieldPolicy.enabled && resourceFieldPolicy.identity === d.resumeIdentity))) continue;
         // A live replacement owns the released slot. After an interrupted give-up, only
         // observed removal and an ended lease can cancel its unspent challenge budget.
         if (['givingUp', 'released'].includes(d.phase) && !r.confirmed && fieldsSynced

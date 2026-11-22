@@ -1,8 +1,9 @@
 import { runStages } from './stages.mjs';
 import { runTrialStages } from './trials.mjs';
-import { runPirateAdvance } from './pirate-advance.mjs';
+import { pirateAutoDay, runPirateAdvance } from './pirate-advance.mjs';
+import { checkFleetSettlement } from './fleet-settlement.mjs';
 
-// 一次挂机持有同一对象；断线重连不清零，重新开始挂机时创建新计数。
+// 断线重连沿用本次进度。重开挂机时主线和试炼重新计数，海盗先检查当日轮次。
 export function createChallengeRun() { return { mainline: {}, trials: {}, pirate: {} }; }
 
 export async function runChallengeRound(client, config, { player, getSettings, state, ledger,
@@ -80,8 +81,15 @@ export async function runChallengeRound(client, config, { player, getSettings, s
   if (mode !== 'progression' && pirateEnabled() && current()) {
     if (isPirateBusy()) { report({ key: 'pirateAuto', label: '海盗首杀', skipped: true, reason: '手动首杀推进中，本轮跳过' }); return; }
     try {
+      const dailyRun = pirateAutoDay(ledger, player, state.pirate);
+      if (state.pirate.scope !== dailyRun.scope) state.pirate = { scope: dailyRun.scope };
+      if (dailyRun.reason) {
+        await checkFleetSettlement(client, player, ledger);
+        report({ key: 'pirateAuto', label: '海盗首杀', skipped: true, reason: dailyRun.reason });
+        return;
+      }
       const spentBefore = state.pirate.state?.spent ?? 0, winsBefore = state.pirate.state?.wins ?? 0;
-      const result = await runPirateAdvance({ client, config, player, ledger, checkpoint: state.pirate, oneCheck: true,
+      const result = await runPirateAdvance({ client, config, player, ledger, checkpoint: state.pirate, dailyRun, oneCheck: true,
         options: structuredClone(getSettings().pirateHunt), getSettings, signal, prepareDispatch,
         enabled: () => current() && pirateEnabled() && !isPirateBusy() });
       const advanced = result.wins > winsBefore, dispatched = result.spent > spentBefore;
