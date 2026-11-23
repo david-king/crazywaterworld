@@ -265,7 +265,7 @@ export async function runLoop(client, protocol, {
     if (name === 'SCTreasureLootUpdate') {
       const p = getSettings()?.treasure;
       if (treasureChaseActive(p, serverNowSeconds()) && body?.treasure?.some(target => [target.battlePoint?.leftFighter, target.battlePoint?.rightFighter]
-        .some(member => member && !member.isNpc && p.chaseNames.includes(member.name)))) treasureScan.invalidate();
+        .some(member => member && !member.isNpc && (p.chasePlayerIds?.length || p.chaseNames.includes(member.name))))) treasureScan.invalidate();
     }
     if (name === 'SCWarDeclaration' || name === 'SCCityWarTime') { recallStarts.cityWar = null; cityWarScan.invalidate(); }
     const now = serverNowSeconds();
@@ -282,6 +282,7 @@ export async function runLoop(client, protocol, {
     }
     if (name === 'SCServerTimeChanged') scheduler.wake();
   });
+  const factoryWaitHistory = new Map();
   const factorySchedule = createFactorySchedule(client, {
     getSettings, getBlockedCollectionTypes, getConfig: () => config,
     isEnabled: key => !stop.aborted && client.connected !== false && nativePreferenceEnabled(getSettings(), key)
@@ -480,7 +481,7 @@ export async function runLoop(client, protocol, {
           if (kind === 'upgrade') return checkUpgrade && enabled('upgrade') && orderRead;
           return ['startProduce', 'nativeProduce'].includes(kind) && canFactory('startProduce') && orderRead;
         };
-        const plan = planWorld(survey, { config, enabled: allow, settings: currentSettings, blockedCollectionTypes: getBlockedCollectionTypes?.(), usage: usage(), extraDemand: demand });
+        const plan = planWorld(survey, { config, enabled: allow, settings: currentSettings, blockedCollectionTypes: getBlockedCollectionTypes?.(), usage: usage(), extraDemand: demand, factoryWaitHistory });
         if (currentSettings?.factory?.cooperateNative && allow('startProduce')) observeNativePlan(survey, plan);
         const freshGuard = runtimeGuard(createActionGuard(client, getSettings, usageLedger, { player, enabled: current }));
         const result = await runWorldRound(client, protocol, plan, { ...harvestOptions, allowMutate, enabled: allow, onStep: stepLog('world'),
@@ -1188,7 +1189,7 @@ export async function runLoop(client, protocol, {
         }
         if (factorySchedule.active())
           factorySchedule.checked(survey.factories, { version: factoryReadVersion, slots: survey.factorySlots, progressed: true });
-        const plan = planWorld(survey, { config, enabled: allowWorld,
+        const plan = planWorld(survey, { config, enabled: allowWorld, factoryWaitHistory,
           settings, blockedCollectionTypes: getBlockedCollectionTypes?.(), usage: usage(), extraDemand,
           allowSpeedUp: isEnabled ? enabled('speedUp') : allowSpeedUp,
           allowReroll: isEnabled ? enabled('denyOrder') : allowReroll,

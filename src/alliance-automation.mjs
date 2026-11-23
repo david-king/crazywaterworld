@@ -3,7 +3,8 @@ import { createHash } from 'node:crypto';
 import { exactAutomationId, automationWireId } from './automation-policy.mjs';
 import { beijingDay } from './automation-settings.mjs';
 import { displayMaterial } from './config.mjs';
-import { readMutualAid } from './guild-mutual.mjs';
+import { failGuildGiftAttempt, readMutualAid } from './guild-mutual.mjs';
+import { guildAidGiftLimitKey } from './usage-ledger.mjs';
 import { claimGuildWelfare, claimMyGuildAid } from './guild.mjs';
 import { readGuildTech, upgradeGuildTech } from './guild-tech.mjs';
 import { readGuildOrderView, serviceGuildOrders } from './guild-orders.mjs';
@@ -59,15 +60,17 @@ export async function readAllianceRecruitDemand(client, protocol, config, player
   return allianceRecruitDemand({ ...view, checkedAt: nowOf(client) }, settings, ledger?.snapshot());
 }
 
-async function aidState(client, protocol, config, player, settings, enabled) {
-  const state = await readMutualAid(client, config, player, { target: 20, mode: 'all', memberIds: [], askEnabled: false });
+async function aidState(client, protocol, config, player, settings, enabled, { ledger, forGift = false } = {}) {
+  const state = await readMutualAid(client, config, player, { target: 20, mode: 'all', memberIds: [], askEnabled: false }, { ledger, enabled });
   const counter = await client.request('CounterInfoRequest', {}, 'CounterInfoResponse');
   const matches = counter.counters?.filter(row => row.type === 'DAILY_GUILD_AID');
   if (!Array.isArray(matches) || matches.length > 1) throw Error('今日联盟求助计数未完整返回');
   const count = matches.length ? Number(matches[0].num?.low === undefined ? matches[0].num : BigInt(matches[0].num.high) * 4294967296n + BigInt(matches[0].num.low >>> 0)) : 0;
   const limit = rows(config, 'GuildParamCfg').find(row => row.paramName === '每日求助次数上限')?.paramValue;
   if (!valid(count) || !valid(limit) || limit < 1) throw Error('今日联盟求助次数或上限未确认');
-  const reserved = await readOrderReservedStock(client, protocol, config, { player, settings, enabled, itemIds: [...new Set(state.candidates.map(row => row.itemId))] });
+  // Only the snapshot used to choose a gift needs to acquire its material checks.
+  const itemIds = forGift ? [...new Set(state.candidates.map(row => row.itemId))] : [];
+  const reserved = await readOrderReservedStock(client, protocol, config, { player, settings, enabled, itemIds });
   if (!enabled()) throw Error('账号状态已变化');
   return { ...state, ...reserved, askUsed: count, askLimit: limit };
 }
@@ -83,7 +86,6 @@ async function resolveAidRecords(state, ledger, player) {
   for (const [key, record] of Object.entries(ledger.keyRecords())) {
     if (!scope(record, player)) continue;
     const d = record.details;
-    if (!record.confirmed && d.kind === 'guildAidGift' && d.acknowledged && !state.askIds.includes(d.reqId)) ledger.resolveKey(key, true);
     if (!record.confirmed && d.kind === 'guildAidClaim' && !d.ids.some(id => state.ownRequests.some(row => row.id === id))) {
       ledger.resolveKey(key, true);
     }
@@ -91,12 +93,12 @@ async function resolveAidRecords(state, ledger, player) {
       state.ownRequests.some(row => row.itemId === d.itemId && !d.beforeIds.includes(row.id))) ledger.resolveKey(key, true);
     // Completed per-request records need not accumulate indefinitely. Sequence
     // markers survive throughout the day, including after process restarts.
-    if (record.confirmed && d.day && d.day !== state.day && ['guildAidGift', 'guildAidAsk', 'guildAidSequence', 'guildAidClaim'].includes(d.kind)) ledger.releaseCompletedKey(key);
+    if (record.confirmed && d.day && d.day !== state.day && ['guildAidGift', 'guildAidGiftLimit', 'guildAidAsk', 'guildAidSequence', 'guildAidClaim'].includes(d.kind)) ledger.releaseCompletedKey(key);
   }
 }
 
 async function runMutual(client, protocol, config, player, { getSettings, ledger, enabled, report }) {
-  let state = await aidState(client, protocol, config, player, getSettings(), enabled);
+  let state = await aidState(client, protocol, config, player, getSettings(), enabled, { ledger });
   if (ledger.snapshot().day !== state.day) throw Error('账号账本与游戏日期尚未对齐');
   await resolveAidRecords(state, ledger, player);
   const identity = stamp(player), day = state.day;
@@ -170,43 +172,54 @@ async function runMutual(client, protocol, config, player, { getSettings, ledger
   }
   p = getSettings().alliance;
   if (!current() || !p.autoHelp || !p.helpDailyLimit) return;
-  if (unfinished('guildAidGift')) return report({ key: 'allianceHelp', label: '联盟自动帮助', skipped: true, reason: '前次赠送结果待确认，保留用量' });
-  if ((ledger.snapshot().counters.guildAidGifts ?? 0) >= p.helpDailyLimit) return;
-  const maxGifts = p.helpDailyLimit - (ledger.snapshot().counters.guildAidGifts ?? 0);
-  for (let gift = 0; gift < maxGifts && current(); gift++) {
-  p = getSettings().alliance;
-  if (!p.autoHelp || (ledger.snapshot().counters.guildAidGifts ?? 0) >= p.helpDailyLimit) return;
-  // Keep filling the daily gift target while eligible requests remain.
-  // Refresh inventory, reservations and filters before every donation.
-  state = await aidState(client, protocol, config, player, getSettings(), current);
-  p = getSettings().alliance;
-  const chosen = state.candidates.find(row => allianceMaterialAllowed(row.itemId, getSettings(), player) &&
-    (!p.memberKeywords?.length || p.memberKeywords.some(word => row.name.toLocaleLowerCase().includes(word.toLocaleLowerCase()))) &&
-    (state.available.get(row.itemId) ?? 0) - p.stockReserve >= 1 && !ledger.hasKey('guildAidGift:' + state.worldId + ':' + state.playerId + ':' + row.id));
-  if (!chosen) return report({ key: 'allianceHelp', label: '联盟自动帮助', skipped: true, reason: '没有符合材料、昵称、库存保留和订单预留的求助' });
-  if (!current() || !p.autoHelp || chosen.endTime <= nowOf(client)) return;
-  const key = 'guildAidGift:' + state.worldId + ':' + state.playerId + ':' + chosen.id;
-  const details = { kind: 'guildAidGift', day, worldId: state.worldId, playerId: state.playerId, guildId: state.guildId, reqId: chosen.id, memberId: chosen.memberId, itemId: chosen.itemId };
-  const token = ledger.reserve({ guildAidGifts: 1 }, { guildAidGifts: p.helpDailyLimit }, {}, { uniqueKey: key, details });
-  let debit, sent = false;
-  try {
-    debit = beginOrderMaterialSpend(player, [{ id: chosen.itemId, need: 1, have: state.stock.get(chosen.itemId) ?? 0 }], '联盟自动帮助', { operation: {} });
-    if (!current() || !getSettings().alliance.autoHelp) { ledger.cancel(token); cancelOrderMaterialSpend(debit); return; }
-    const reply = await client.request('GuildAidHelpRequest', { reqId: [automationWireId(chosen.id)], type: 0 }, 'GotRewardResponse'); sent = true;
-    if (!reply?.reward?.asset?.some(row => typeof row.id === 'string' && Number(row.num?.low === undefined ? row.num : row.num.low) > 0)) throw Error('赠送回执没有有效奖励');
-    ledger.updateKeyDetails(key, { ...details, acknowledged: true });
-    confirmOrderMaterialOperation(debit);
-    await refreshOrderMaterialSpends(client, player, { enabled: current });
-    if (!current()) throw Error('赠送已回执，等待账号恢复后核对');
-    const after = await aidState(client, protocol, config, player, getSettings(), current);
-    if (after.askIds.includes(chosen.id)) throw Error('求助完成状态尚未确认');
-    ledger.confirm(token);
-    report({ key: 'allianceHelp', label: '已帮助 ' + chosen.name + '：' + chosen.material + ' ×1', ok: true });
-  } catch (error) {
-    if (!debit || rejected(error, 'GuildAidHelpRequest', sent)) { ledger.cancel(token); cancelOrderMaterialSpend(debit); }
-    report({ key: 'allianceHelp', label: '联盟自动帮助', error: error.message, pending: !!debit && !rejected(error, 'GuildAidHelpRequest', sent) });
-    return;
-  }
+  while (current()) {
+    p = getSettings().alliance;
+    if (ledger.hasKey(guildAidGiftLimitKey(state))) return report({ key: 'allianceHelp', label: '联盟自动帮助', skipped: true, reason: '游戏今日赠送已达上限' });
+    if (!p.autoHelp || (ledger.snapshot().counters.guildAidGifts ?? 0) >= p.helpDailyLimit) return;
+    // Keep filling the daily gift target while eligible requests remain.
+    // Refresh inventory, reservations and filters before every donation.
+    state = await aidState(client, protocol, config, player, getSettings(), current, { forGift: true });
+    p = getSettings().alliance;
+    const chosen = state.candidates.find(row => allianceMaterialAllowed(row.itemId, getSettings(), player) &&
+      ((!p.memberIds?.length && !p.memberKeywords?.length) || p.memberIds?.includes(row.memberId) || p.memberKeywords?.some(word => row.name.toLocaleLowerCase().includes(word.toLocaleLowerCase()))) &&
+      (state.available.get(row.itemId) ?? 0) - p.stockReserve >= 1 && !ledger.hasKey('guildAidGift:' + state.worldId + ':' + state.playerId + ':' + row.id));
+    if (!chosen) return report({ key: 'allianceHelp', label: '联盟自动帮助', skipped: true, reason: '没有符合材料、盟友筛选、库存保留和订单预留的求助' });
+    if (!current() || !p.autoHelp || chosen.endTime <= nowOf(client)) return;
+    const key = 'guildAidGift:' + state.worldId + ':' + state.playerId + ':' + chosen.id;
+    const details = { kind: 'guildAidGift', day, worldId: state.worldId, playerId: state.playerId, guildId: state.guildId, reqId: chosen.id, memberId: chosen.memberId, itemId: chosen.itemId };
+    const token = ledger.reserve({ guildAidGifts: 1 }, { guildAidGifts: p.helpDailyLimit }, {}, { uniqueKey: key, details });
+    let debit, sent = false, acknowledged = false, checked = false;
+    try {
+      debit = beginOrderMaterialSpend(player, [{ id: chosen.itemId, need: 1, have: state.stock.get(chosen.itemId) ?? 0 }], '联盟自动帮助', { operation: {
+        verify() {
+          const record = ledger.keyRecords()[key];
+          return record?.id === token.id && (record.confirmed || record.expired === true);
+        },
+      } });
+      if (!current() || !getSettings().alliance.autoHelp) { ledger.cancel(token); cancelOrderMaterialSpend(debit); return; }
+      const reply = await client.request('GuildAidHelpRequest', { reqId: [automationWireId(chosen.id)], type: 0 }, 'GotRewardResponse'); sent = true;
+      if (!reply?.reward?.asset?.some(row => typeof row.id === 'string' && Number(row.num?.low === undefined ? row.num : row.num.low) > 0)) throw Error('赠送回执没有有效奖励');
+      ledger.updateKeyDetails(key, { ...details, acknowledged: true });
+      acknowledged = true;
+      confirmOrderMaterialOperation(debit);
+      await refreshOrderMaterialSpends(client, player, { enabled: current });
+      if (!current()) throw Error('赠送已回执，等待账号恢复后核对');
+      const after = await aidState(client, protocol, config, player, getSettings(), current);
+      checked = true;
+      if (after.askIds.includes(chosen.id)) throw Error('求助完成状态尚未确认');
+      ledger.confirm(token);
+      report({ key: 'allianceHelp', label: '已帮助 ' + chosen.name + '：' + chosen.material + ' ×1', ok: true });
+    } catch (error) {
+      if (!debit || (!sent && error.notSent === true)) {
+        ledger.cancel(token); cancelOrderMaterialSpend(debit);
+        return report({ key: 'allianceHelp', label: '联盟自动帮助', error: error.message });
+      }
+      if (acknowledged && !checked) return report({ key: 'allianceHelp', label: '联盟自动帮助', error: error.message, pending: true });
+      const limited = failGuildGiftAttempt(ledger, key, token, error);
+      if (error.prompt && error.request === 'GuildAidHelpRequest') cancelOrderMaterialSpend(debit);
+      report({ key: 'allianceHelp', label: '联盟自动帮助', skipped: true, reason: limited ? '游戏今日赠送已达上限' : '本次赠送按失败跳过：' + error.message });
+      if (limited) return;
+    }
   }
 }
 

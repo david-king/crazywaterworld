@@ -93,6 +93,21 @@ const check = async (name, work) => {
 };
 
 try {
+  await check('追杀目标出征后改名，去程加速按同一角色 ID 复核，换人后停止', async () => {
+    const { f, s } = fixture(), usage = ledger(), id = '9007199254740995';
+    Object.assign(s.treasure, { chase: true, chasePlayerIds: [id], chaseDailyDiamondLimit: 120,
+      chaseSpeedUp: false, autoJoin: false, marchSpeedUp: false, chaseTargetSeconds: 0 });
+    Object.assign(f.state.targets[0], { ownerGuildIdx: 8, ownerFleetNum: 1 });
+    f.state.defenders[72] = [{ guildIdx: 8, name: '旧名' }];
+    f.state.ranks[72] = [{ guildIdx: 8, nickname: '旧名', playerId: id }];
+    assert.equal((await run(f, s, usage)).results[0].step.chasePlayerId, id);
+    s.treasure.chaseSpeedUp = true;
+    f.state.defenders[72][0].name = f.state.ranks[72][0].nickname = '新名';
+    const result = await run(f, s, usage);
+    assert.deepEqual(result.results.map(row => [row.status, row.step.chaseName]), [['confirmed', '新名']]);
+    f.state.ranks[72][0].playerId = '9007199254740994';
+    assert.deepEqual((await preview(f, s, usage)).actions, []);
+  });
   await check('追杀去程独立花钻并绑定原对手，普通去程开关与额度不能代付', async () => {
     const { f, s } = fixture(), usage = ledger();
     Object.assign(s.treasure, { chase: true, chaseNames: ['对手甲', '对手乙'], chaseSpeedUp: true, chaseTargetSeconds: 0,

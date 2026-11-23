@@ -120,7 +120,7 @@ export async function testResidentOrders() {
 }
 
 async function testManualResidentOrder() {
-  const context = client => ({ config, player: client.player, cargoEnabled: () => true });
+  const context = client => ({ config, player: client.player });
   const survey = client => surveyWorld(client, protocol, { ...context(client), ordersOnly: true, includeCargo: true });
   const setup = () => {
     const client = mock();
@@ -195,24 +195,28 @@ async function testManualResidentOrder() {
   await assert.rejects(submitResidentOrder(auto, protocol, { ...context(auto), index: 2, orderKey: observed.orders[1].orderKey }), /刷新|处理/);
   assert.equal(auto.calls.filter(n => n === 'FinishWorkerOrderRequest').length, 1);
 
-  const weekly = setup();
-  weekly.weekly = weekly.stock = 50;
-  weekly.otherWeekly = [{ id: '淡水', num: 1 }];
-  const weeklyKey = (await survey(weekly)).orders[1].orderKey;
-  assert.match((await submitResidentOrder(weekly, protocol, { ...context(weekly), index: 2, orderKey: weeklyKey })).label, /商人订单待补 烤鱼 ×3/);
-
-  for (const block of [c => { c.weekly = 50; }, c => { c.cargo = 49; }, c => { c.cargo = null; }, c => { c.stock = 0; }]) {
+  for (const reserve of [c => { c.weekly = 50; }, c => { c.cargo = 49; }, c => { c.weekly = c.cargo = null; }]) {
+    const manual = setup();
+    reserve(manual);
+    const id = (await survey(manual)).orders[1].orderKey;
+    manual.calls.length = 0;
+    await submitResidentOrder(manual, protocol, { ...context(manual), index: 2, orderKey: id });
+    assert.equal(manual.stock, 47, '玩家可以选择把已预留的实际库存用于当前订单');
+    assert.equal(manual.calls.filter(name => name === 'FinishWorkerOrderRequest').length, 1);
+    assert(!manual.calls.some(name => ['WeekInfoRequest', 'WeekOrderInfoRequest', 'CargoShipsRequest'].includes(name)));
+  }
+  for (const block of [c => { c.stock = 2; }, c => { c.itemReply = {}; }]) {
     const waiting = setup();
     const id = (await survey(waiting)).orders[1].orderKey;
     block(waiting);
-    await assert.rejects(submitResidentOrder(waiting, protocol, { ...context(waiting), index: 2, orderKey: id }), /预留|材料|库存|贸易港/);
+    await assert.rejects(submitResidentOrder(waiting, protocol, { ...context(waiting), index: 2, orderKey: id }), /仓库还缺 烤鱼 ×1|未能读取仓库库存/);
     assert(!waiting.calls.includes('FinishWorkerOrderRequest'));
   }
   const cancelled = setup();
   const cancelKey = (await survey(cancelled)).orders[1].orderKey;
   cancelled.calls.length = 0;
   await assert.rejects(submitResidentOrder(cancelled, protocol, { ...context(cancelled), index: 2, orderKey: cancelKey,
-    enabled: () => !cancelled.calls.includes('CargoShipsRequest') }), /已取消/);
+    enabled: () => !cancelled.calls.includes('AllItemRequest') }), /已取消/);
   assert(!cancelled.calls.includes('FinishWorkerOrderRequest'));
 }
 

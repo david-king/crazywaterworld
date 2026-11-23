@@ -19,7 +19,6 @@ h1 { font-size:16px; font-weight:600; line-height:1.2; letter-spacing:-.01em; wh
 .mast:has(#console-version-open:not([hidden])) .brand-label { display:none }
 /* 页头按可用宽度换行，连接按钮显隐时由账号选择框伸缩。 */
 .connection { display:flex; align-items:center; justify-content:flex-end; gap:8px; min-width:0; max-width:100%; flex:1 1 52rem; margin-left:auto }
-.connection:has(#hint:not(:empty)) { flex-basis:100% }
 .account-picker { position:relative; width:320px; max-width:100%; min-width:0; flex:0 1 320px }
 #account-picker-list { position:absolute; inset-inline:0; top:calc(100% + 6px); z-index:50; max-height:min(60dvh,360px); overflow-y:auto; overscroll-behavior:contain; scrollbar-width:thin }
 .account-picker-option { grid-template-columns:minmax(0,1fr) 16px }
@@ -30,8 +29,6 @@ h1 { font-size:16px; font-weight:600; line-height:1.2; letter-spacing:-.01em; wh
 .hosting-controls,.hosting-interval { display:flex; align-items:center; gap:8px; flex-shrink:0 }
 .hosting-interval { gap:6px; font-size:13px; color:var(--muted-foreground); white-space:nowrap }
 #log-top-count { color:var(--muted-foreground); font-variant-numeric:tabular-nums }
-#hint:empty { display:none }
-#hint { font-size:12px; white-space:nowrap }
 
 #console-quick-dialog { gap:10px; padding:16px }
 #console-quick-results { display:grid; gap:2px; max-height:min(52dvh,420px); overflow:auto; overscroll-behavior:contain }
@@ -256,9 +253,50 @@ html:has(.world-map-detail:modal) { overflow:hidden }
 .world-fuel-summary strong { margin-left:6px; font-weight:500; font-variant-numeric:tabular-nums }
 .world-journey { font-variant-numeric:tabular-nums }
 /* ---- 建筑一览 ---- */
+#production-day-preview { display:flex; flex-wrap:wrap; align-items:baseline; gap:4px 14px; font-size:13px; color:var(--muted-foreground) }
+#production-day-preview strong { color:var(--foreground) }
 #production-plan-result:not(:empty) { display:grid; gap:12px; min-width:0 }
 .production-plan-summary { display:flex; flex-wrap:wrap; align-items:baseline; gap:3px 12px; margin:0; padding:10px 14px; border-inline-start:3px solid var(--primary); background:var(--muted); border-radius:0 6px 6px 0; font-size:13px }
 .production-plan-summary strong { font-size:18px; font-weight:600; font-variant-numeric:tabular-nums }
+.factory-auto-control { display:inline-flex; align-items:center; gap:6px }
+.factory-auto-control small { max-width:16em; white-space:normal }
+#production-day-card { --day-running:#238271; --day-queued:#a56410; --day-planned:#5267b5; min-width:0; scroll-margin-top:calc(var(--header-h,0px) + 12px) }
+[data-theme=dark] #production-day-card { --day-running:#79d6bc; --day-queued:#f3bd68; --day-planned:#a6b4ff }
+#production-day-title { font-size:18px; line-height:1.25; font-weight:650 }
+#production-day-picker { position:relative; max-width:100% }
+#production-day-picker svg { position:absolute; top:50%; left:11px; transform:translateY(-50%); color:var(--muted-foreground); pointer-events:none }
+#production-day-factory { width:10.5rem; height:34px; padding-left:34px; border-radius:8px; background-color:var(--card); color:var(--foreground); font-weight:500 }
+#production-day-result { min-width:0; font-size:13px; font-variant-numeric:tabular-nums }
+.plan-day-meta,.plan-day-note { margin:0; line-height:1.55; color:var(--muted-foreground); font-size:12px }
+.plan-day-note { margin-top:4px }
+.plan-day-totals { display:flex; align-items:baseline; flex-wrap:wrap; gap:6px 18px; margin:12px 0 8px; color:var(--muted-foreground); font-size:12px }
+.plan-day-totals strong { color:var(--foreground); font-size:14px; font-weight:600 }
+.production-batches { list-style:none; padding:0; margin:8px 0 0; max-height:30rem; overflow:auto; scrollbar-width:thin }
+.production-batch { display:grid; grid-template-columns:minmax(7rem,1fr) minmax(12rem,1fr) minmax(5rem,.6fr) 7rem 3rem; align-items:center; gap:4px 12px; padding:8px 4px; border-top:1px solid var(--border); min-height:40px }
+.production-batch-name { display:flex; align-items:baseline; gap:7px; overflow-wrap:anywhere }
+.production-batch-quantity,.production-batch-duration,.production-batch.gap { color:var(--muted-foreground) }
+.production-batch-time { font-variant-numeric:tabular-nums }
+.production-batch-state { font-size:12px; color:var(--muted-foreground) }
+.production-batch.running .production-batch-state { color:var(--day-running) }
+.production-batch.queued .production-batch-state { color:var(--day-queued) }
+.production-batch.planned .production-batch-state { color:var(--day-planned) }
+.production-batch-insert { color:var(--foreground); font:inherit; padding:3px 5px; background:var(--card); border:1px solid var(--border); border-radius:5px; cursor:pointer }
+.production-batches-nav { display:flex; justify-content:flex-end; align-items:center; gap:10px; color:var(--muted-foreground); font-size:12px }
+.production-batches-nav:not(:empty) { margin-top:8px }
+.production-insert-form { display:grid; gap:12px }
+.production-insert-form label { display:grid; gap:4px; font-size:13px }
+@media(max-width:750px) {
+  .production-batch { grid-template-columns:minmax(0,1fr) auto auto; column-gap:8px }
+  .production-batch-time { grid-column:1; grid-row:2; font-size:12px }
+  .production-batch-duration { grid-column:2; grid-row:2; font-size:12px }
+  .production-batch-state { grid-column:2; grid-row:1 }
+  .production-batch-insert { grid-column:3; grid-row:1 / 3 }
+}
+@media (max-width:640px) {
+  #production-day-factory { width:8.8rem; padding-inline:29px 27px }
+  #production-day-picker svg { left:9px }
+  #production-day-title { font-size:15px }
+}
 #production-plan-result > details { border-top:1px solid var(--border); padding-top:8px }
 #production-plan-result > details > summary { font-size:13px; font-weight:500 }
 #production-plan-result > details[open] > summary { margin-bottom:8px }
@@ -294,6 +332,19 @@ summary.plan-material-label::after { width:12px; height:12px }
   .plan-demand-eta::before { content:"预计 "; color:var(--muted-foreground) }
 }
 #world-view:empty,#world-factories:empty,.world-orders-panel:has(#world-orders:empty) { display:none }
+#world-orders { display:grid; grid-template-columns:minmax(0,1fr); gap:12px }
+.resident-order-progress { display:flex; align-items:center; gap:16px; font-variant-numeric:tabular-nums }
+.resident-order-ring { --order-ink:#487cc4; --order-track:#e2eaf5; position:relative; flex:none; width:90px; aspect-ratio:1; display:grid; align-content:center; justify-items:center; gap:2px }
+[data-theme=dark] .resident-order-ring { --order-ink:#89b9f5; --order-track:#304057 }
+.resident-order-ring::before { content:""; position:absolute; inset:0; border-radius:50%; background:conic-gradient(var(--order-ink) var(--order-fill),var(--order-track) 0); mask:radial-gradient(closest-side,transparent calc(100% - 7px),#000 calc(100% - 6px)) }
+.resident-order-ring strong { font-size:24px; line-height:1; font-weight:650 }
+.resident-order-ring small { font-size:15px; font-weight:500; color:var(--muted-foreground) }
+.resident-order-ring span { font-size:11px; line-height:1.3; color:var(--muted-foreground) }
+.resident-order-remaining { font-size:13px; font-weight:500 }
+@container main (min-width:54rem) {
+  #world-orders:has(> .resident-order-progress + .sea-records) { grid-template-columns:7.5rem minmax(0,1fr); gap:20px }
+  .resident-order-progress:not(:only-child) { flex-direction:column; justify-content:center; gap:8px; text-align:center }
+}
 #world-factories { display:grid; grid-template-columns:minmax(0,1fr); align-items:start; gap:12px }
 #world-factories h2 { margin:0; font:inherit }
 #world-factories [data-slot=card]:has([data-building-list][hidden]) > [data-slot=card-content] { display:none }
@@ -888,7 +939,6 @@ button.factory-empty:disabled { cursor:wait; opacity:.6 }
   #loop-every { appearance:textfield }
   #loop-every::-webkit-inner-spin-button,#loop-every::-webkit-outer-spin-button { appearance:none; margin:0 }
   #log-top-count { min-width:0; overflow:hidden; text-overflow:ellipsis }
-  #hint { grid-column:1 / -1; white-space:normal; overflow-wrap:anywhere }
   /* 底部导航按实际入口数量均分一行。 */
   #tabs { position:fixed; inset:auto 0 0; z-index:40; display:grid; grid-auto-flow:column; grid-auto-columns:minmax(0,1fr); gap:0; width:100%; margin:0; padding:4px calc(4px + env(safe-area-inset-right)) calc(4px + env(safe-area-inset-bottom)) calc(4px + env(safe-area-inset-left)); overflow:visible; background:var(--background); border-top:1px solid var(--border) }
   .nav-tab { flex-direction:column; justify-content:center; gap:2px; height:48px; padding:0; font-size:0.75rem; min-width:0 }

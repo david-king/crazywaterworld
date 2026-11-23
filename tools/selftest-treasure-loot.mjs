@@ -206,6 +206,38 @@ try {
     assert.deepEqual(await chosen(), [['对手乙', 72]]);
   });
 
+  await check('角色 ID 优先追杀同名出发者，守军改名后复核同一 ID 并实际派遣', async () => {
+    const f = treasureFixture(), s = treasureSettings(), id = f.state.ranks[71][0].playerId;
+    Object.assign(s.treasure, { autoJoin: false, chase: true, chasePlayerIds: [id], fleetIds: ['1远征船'] });
+    const now = Math.floor(Date.now() / 1000);
+    const fleet = { state: 2, buildingId: '1远征船', moveStartTs: now - 5, moveEndTs: now + 180, targetGridIdx: 500, treasureLootUid: 72 };
+    f.state.ranks[71] = [];
+    f.client.onRequest = name => name === 'WorldInfoRequest' ? { fleets: [
+      { ...fleet, owner: { playerId: '9007199254740994', nickname: '新名' }, targetGridIdx: 400, treasureLootUid: 71 },
+      { ...fleet, owner: { playerId: id, nickname: '新名' } },
+    ] } : undefined;
+    assert.deepEqual((await preview(f, s)).actions.map(step => [step.targetUid, step.chasePlayerId]), [[72, id]]);
+    f.client.emit('close');
+    f.state.ranks[71] = [{ playerId: id, nickname: '同行者甲', guildIdx: 7 }];
+    let reads = 0;
+    f.client.onRequest = name => {
+      if (name === 'TreasureLootListRequest' && ++reads === 2) f.state.defenders[71][0].name = f.state.ranks[71][0].nickname = '改名后的船长';
+    };
+    const outcome = await run(f, s);
+    assert.deepEqual(outcome.results.map(row => [row.status, row.step.chaseName, row.step.chasePlayerId]), [['confirmed', '改名后的船长', id]]);
+  });
+  await check('ID 追杀遇到身份冲突、接用旧昵称的其他角色或仅剩历史排名时跳过', async () => {
+    const f = treasureFixture(), s = treasureSettings(), row = f.state.ranks[71][0];
+    Object.assign(s.treasure, { autoJoin: false, chase: true, chasePlayerIds: [row.playerId], fleetIds: ['1远征船'] });
+    f.state.ranks[71].push({ ...row, playerId: '9007199254740994' });
+    assert.deepEqual((await preview(f, s)).actions, []);
+    f.state.ranks[71].shift();
+    assert.deepEqual((await preview(f, s)).actions, []);
+    f.state.ranks[71] = [row]; f.state.defenders[71] = []; f.state.targets[0].ownerFleetNum = 0;
+    assert.deepEqual((await preview(f, s)).actions, []);
+    f.state.targets[0].battlePoint = { rightFighter: { name: row.nickname, guildIdx: 7 } };
+    assert.equal((await preview(f, s)).actions[0].chasePlayerId, row.playerId);
+  });
   await check('追杀优先于常规目标，复核发现离开时取消原计划，后续恢复常规策略', async () => {
     const f = treasureFixture(), s = treasureSettings();
     Object.assign(s.treasure, { chase: true, chaseNames: ['同行者甲'], fleetIds: ['1远征船'] });

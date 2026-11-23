@@ -68,6 +68,20 @@ try {
     assert.equal(library.isExpired('Future'), false);
   });
 
+  await test('重复过期记录无需写锁，混合历史只补充新过期码', () => {
+    const file = path.join(libraryDirectory, 'shared-gift-codes.json');
+    const history = code => ({ code, status: 'rejected', promptName: 'GIFT_CODE_EXPIRED' });
+    library.expire('ExpiredOnce', '首次回执');
+    fs.rmdirSync(file + '.lock');
+    library.reconcile([history('ExpiredOnce')]);
+    library.expire('ExpiredOnce', '重复回执');
+    assert(!fs.existsSync(file + '.lock'));
+    library.reconcile([history('ExpiredOnce'), history('NewExpired'), history('NewExpired')]);
+    const { expired } = JSON.parse(fs.readFileSync(file, 'utf8'));
+    assert.deepEqual(expired.filter(row => row.code === 'ExpiredOnce').map(row => row.reason), ['首次回执']);
+    assert.equal(expired.filter(row => row.code === 'NewExpired').length, 1);
+  });
+
   await test('手动有效期按北京时间换日，不能延长公共码已有的较早到期日', () => {
     library.addManualBatch(['ManualDay'], '2026-11-19');
     library.addManualBatch(['TONIGHT'], '2026-11-21');

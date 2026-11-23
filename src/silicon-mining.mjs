@@ -78,10 +78,50 @@ function persistState(ledger, world, state) {
   else { const ticket = ledger.reserve({}, {}, {}, { uniqueKey: key, details: state }); ledger.confirm(ticket); }
 }
 
-export async function readSiliconMining(client, protocol, config, player, { settings, ledger } = {}) {
+// 矿位没有 UID。只用这次按 ID 读取的同服资料核对完整昵称及联盟，不复用旧昵称。
+async function readMinePlayerProfiles(client, protocol, snapshot, policies, mines, manualAttack) {
+  const ids = new Set();
+  for (const policy of policies) {
+    const relevant = manualAttack ? (!manualAttack.fleetId || manualAttack.fleetId === policy.id) && mines.some(mine => mine.gridId === manualAttack.gridId)
+      : policy.enabled && !policy.emptyOnly && mines.some(mine => policy.tiers.includes(mine.tier));
+    if (!relevant) continue;
+    for (const id of policy.safePlayerIds ?? []) ids.add(id);
+    if (!manualAttack && policy.huntEnabled) for (const id of policy.huntPlayerIds ?? []) ids.add(id);
+  }
+  for (const id of ids) {
+    try {
+      // 回包不含请求 ID，必须串行读取。
+      const profile = await get(client, protocol, 'OtherPlayerInfo', { playerId: id });
+      const worldId = exactAutomationId(profile.worldId);
+      if (worldId && typeof profile.nickname === 'string' && profile.nickname.trim() && integer(profile.guildIdx) && profile.guildIdx < 1000) {
+        snapshot.playerProfiles[id] = { worldId, nickname: profile.nickname, guildIdx: profile.guildIdx };
+      }
+    } catch (error) {
+      if (!error.prompt) break;
+    }
+  }
+  if ([...ids].some(id => !snapshot.playerProfiles[id])) snapshot.notes.push('部分角色 ID 的资料未同步，相关舰队暂缓无法核对的抢占');
+}
+function matchMinePlayers(snapshot) {
+  const ids = Object.keys(snapshot.playerProfiles);
+  if (!ids.length) return;
+  const occupants = snapshot.mines.filter(mine => !mine.reason && mine.tier !== 'BLUE')
+    .flatMap(mine => mine.positions.map(slot => slot.player)).filter(player => player && !player.fleetId && player.guildIdx !== snapshot.guildIdx);
+  for (const player of occupants) {
+    const matches = ids.filter(id => profileMatches(snapshot, id, player));
+    if (matches.length !== 1 || occupants.some(other => other !== player && other.nickname === player.nickname && other.guildIdx === player.guildIdx)) continue;
+    player.matchedPlayerId = matches[0];
+  }
+}
+function profileMatches(snapshot, id, player) {
+  const profile = snapshot.playerProfiles?.[id];
+  return !!profile && profile.worldId === snapshot.worldId && profile.nickname === player.nickname && profile.guildIdx === player.guildIdx;
+}
+
+export async function readSiliconMining(client, protocol, config, player, { settings, ledger, manualAttack = null, resolvePlayerProfiles = true } = {}) {
   const snapshot = { checkedAt: now(client), identity: identity(player), worldId: exactAutomationId(player?.worldId), playerId: exactAutomationId(player?.playerId), nickname: player?.nickname,
     guildIdx: Number(BigInt(exactAutomationId(player?.guildId) ?? '0') % 1000n), reason: '', notes: [], reward: null, dailyRewards: null,
-    mines: [], fleets: [], buildings: [], fuel: null, petrolCost: null, pendingFuel: ledger ? pendingPetrol(ledger) : 0, repairs: {}, blacklist: [], fightTimes: 0, maxFightTimes: null };
+    mines: [], fleets: [], buildings: [], fuel: null, petrolCost: null, pendingFuel: ledger ? pendingPetrol(ledger) : 0, repairs: {}, blacklist: [], playerProfiles: {}, fightTimes: 0, maxFightTimes: null };
   snapshot.reason = openingReason(config, player, snapshot.checkedAt);
   if (snapshot.reason) return snapshot;
   const p = settings?.silicon;
@@ -110,6 +150,12 @@ export async function readSiliconMining(client, protocol, config, player, { sett
   if (new Set(snapshot.fleets.map(fleet => fleet.buildingId)).size !== snapshot.fleets.length) { snapshot.reason = '舰队编号重复'; return snapshot; }
   const colors = new Map(['BLUE', 'PURPLE', 'ORANGE'].flatMap(tier => rows(config, 'ChipMineCfg').filter(row => row.quality === tier && row.qualityIndex === protocol.Color?.[tier]).map(row => [row.qualityIndex, row])));
   if (new Set(list.chipMines.map(mine => mine.gridId)).size !== list.chipMines.length) { snapshot.reason = '矿区编号重复'; return snapshot; }
+  if (resolvePlayerProfiles && !snapshot.reason && (p.enabled || manualAttack)) {
+    // 先查角色资料，再读现场矿位，避免较长名单使矿位快照在派遣前过期。
+    const occupied = list.chipMines.filter(mine => mine.occupiedNum !== 0 && colors.has(mine.color) && colors.get(mine.color).quality !== 'BLUE');
+    await readMinePlayerProfiles(client, protocol, snapshot, p.fleets,
+      occupied.map(mine => ({ gridId: mine.gridId, tier: colors.get(mine.color).quality })), manualAttack);
+  }
   // 同名响应没有 gridId，必须逐矿查询，不能并发造成目标错配。
   for (const mine of list.chipMines) {
     const type = colors.get(mine.color);
@@ -142,12 +188,18 @@ export async function readSiliconMining(client, protocol, config, player, { sett
     try { const black = await get(client, protocol, 'BlackList'); if (!Array.isArray(black.list)) throw Error(); snapshot.blacklist = black.list.filter(row => exactAutomationId(row.playerId) && row.nickname).map(row => ({ id: exactAutomationId(row.playerId), name: nameKey(row.nickname) })); }
     catch { snapshot.notes.push('游戏黑名单未同步，本轮不追击'); }
   }
+  matchMinePlayers(snapshot);
+  if (who !== identity(player)) snapshot.reason = '读取期间账号或联盟已变化';
+  else if (Object.keys(snapshot.playerProfiles).length) client.emit?.('list-player-profiles',
+    Object.entries(snapshot.playerProfiles).map(([id, profile]) => ({ id, name: profile.nickname })));
   return snapshot;
 }
 
 const opponentKey = player => hash([nameKey(player.nickname), player.guildIdx]);
-const protectedOpponent = (policy, player) => (policy.safePlayers ?? []).some(name => nameKey(name) === nameKey(player.nickname))
-  || (policy.safeGuilds ?? []).some(id => String(id) === String(player.guildIdx));
+const opponentHistoryKey = player => player.matchedPlayerId ? 'id:' + player.matchedPlayerId : opponentKey(player);
+const protectedOpponent = (policy, player, snapshot) => (policy.safePlayers ?? []).some(name => nameKey(name) === nameKey(player.nickname))
+  || (policy.safeGuilds ?? []).some(id => String(id) === String(player.guildIdx))
+  || (policy.safePlayerIds ?? []).some(id => !snapshot.playerProfiles?.[id] || profileMatches(snapshot, id, player));
 export function siliconPursuitActive(snapshot, policy, settings) {
   // rewardResetTime 是服务端三日周期，不把每15分钟产奖误当作三日重置。
   const start = snapshot.reward?.rewardResetTime - 3 * 86400;
@@ -196,10 +248,16 @@ function miningCandidates(snapshot, policy, settings, state, fleet, used, planne
     for (const position of mine.positions) {
       const target = position.player;
       if (!target || target.fleetId || target.guildIdx === snapshot.guildIdx || !nameKey(target.nickname) || !integer(fleet?.power, 1) || target.power > fleet.power * (policy.maxPowerRatio ?? 100) / 100) continue;
-      if (protectedOpponent(policy, target)) continue;
-      if (policy.failureLimit > 0 && (state.failures[policy.id + ':' + opponentKey(target)] ?? 0) >= policy.failureLimit) continue;
-      if (policy.huntEnabled && !(policy.huntPlayers ?? []).some(name => nameKey(name) === nameKey(target.nickname))) continue;
-      if (pursuit && (!state.defeated[opponentKey(target)] || snapshot.blacklist.filter(member => member.name === nameKey(target.nickname)).length !== 1)) continue;
+      if (protectedOpponent(policy, target, snapshot)) continue;
+      const failures = state.failures[policy.id + ':' + opponentHistoryKey(target)] ?? 0;
+      const legacyFailures = target.matchedPlayerId ? state.failures[policy.id + ':' + opponentKey(target)] ?? 0 : 0;
+      if (policy.failureLimit > 0 && failures + legacyFailures >= policy.failureLimit) continue;
+      if (policy.huntEnabled && !policy.huntPlayerIds?.includes(target.matchedPlayerId) && !(policy.huntPlayers ?? []).some(name => nameKey(name) === nameKey(target.nickname))) continue;
+      if (pursuit) {
+        const members = snapshot.blacklist.filter(member => member.name === nameKey(target.nickname));
+        if (members.length !== 1 || target.matchedPlayerId && members[0].id !== target.matchedPlayerId) continue;
+        if (!state.defeated[opponentKey(target)] && state.defeated['id:' + members[0].id]?.guildIdx !== target.guildIdx) continue;
+      }
       if (targetHeld(mine.gridId, position.index)) continue;
       candidates.push({ mine, index: position.index, opponent: target });
     }
@@ -317,7 +375,10 @@ async function reconcile(client, protocol, snapshot, ledger) {
         }
       }
       if (record.confirmed && miningFinished) {
-        if (details.opponent && !details.occupied) state.failures[details.buildingId + ':' + opponentKey(details.opponent)] = (state.failures[details.buildingId + ':' + opponentKey(details.opponent)] ?? 0) + 1;
+        if (details.opponent && !details.occupied) {
+          const failureKey = details.buildingId + ':' + opponentHistoryKey(details.opponent);
+          state.failures[failureKey] = (state.failures[failureKey] ?? 0) + 1;
+        }
         ledger.releaseCompletedKey(key);
       }
     } else if (details.kind === 'siliconRetreat' && !position && fleet && (miningFinished || fleet.state === 2 && fleet.targetGridIdx !== details.gridId)) {
@@ -356,7 +417,7 @@ async function reconcile(client, protocol, snapshot, ledger) {
         if (matching.length !== 1) continue;
         const [key, record] = matching[0], detail = await get(client, protocol, 'CampaignReportDetail', { campaignId: automationWireId(uid) });
         if (!detail.battles?.some(battle => battle.win === true && nameKey(battle.rightCamp?.player?.nickname) === nameKey(record.details.opponent.nickname))) continue;
-        state.defeated[opponentKey(record.details.opponent)] = { nickname: record.details.opponent.nickname, guildIdx: record.details.opponent.guildIdx, at };
+        state.defeated[opponentHistoryKey(record.details.opponent)] = { nickname: record.details.opponent.nickname, guildIdx: record.details.opponent.guildIdx, at };
         state.reports.push(uid); if (ledger.hasKey(key)) ledger.updateKeyDetails(key, { ...ledger.keyRecords()[key].details, won: true });
       }
     } catch { /* 战报失败不会把目标加入追击名单。 */ }
@@ -413,7 +474,7 @@ async function sendAndCheck(client, protocol, player, options, snapshot, step, c
   if (!allowed()) { ledger.cancel(ticket); return false; }
   try {
     await client.sendWatch(step.request, step.body, { window: 500 });
-    const fresh = await readSiliconMining(client, protocol, options.config, player, { settings: getSettings(), ledger });
+    const fresh = await readSiliconMining(client, protocol, options.config, player, { settings: getSettings(), ledger, resolvePlayerProfiles: false });
     if (who !== identity(player)) throw Error('写入后账号已切换，保留待确认记录');
     if (options.manualShortcut && !enabled()) throw Error('写入后连接已变化，保留待确认记录');
     await reconcile(client, protocol, fresh, ledger);
@@ -482,7 +543,8 @@ function planSiliconShortcut(snapshot, settings, ledger, client, intent, fleetId
   if (intent.kind === 'attack') {
     if (personal || occupant?.fleetId || occupant?.guildIdx === snapshot.guildIdx) throw Error('仅可抢占其他玩家的公共矿位');
     if (!occupant || occupant.nickname !== intent.opponent.nickname || occupant.guildIdx !== intent.opponent.guildIdx || occupant.power !== intent.opponent.power) throw Error('抢占目标已变化，请刷新矿位后重新选择');
-    if (protectedOpponent(policy, occupant)) throw Error('目标在这支舰队的安全名单中');
+    if (policy.safePlayerIds?.some(id => !snapshot.playerProfiles?.[id])) throw Error('安全玩家资料未同步，暂缓抢占');
+    if (protectedOpponent(policy, occupant, snapshot)) throw Error('目标在这支舰队的安全名单中');
     const pending = ledger.pendingCounters();
     const pendingAttacks = [1, 2, 3].reduce((sum, n) => sum + (pending['siliconAttacks' + n] ?? 0), 0);
     if (snapshot.fightTimes + pendingAttacks + returningHunts >= snapshot.maxFightTimes) throw Error('今日共享抢占次数不足');
@@ -499,7 +561,7 @@ export async function previewSiliconShortcut(client, protocol, config, player, r
   const intent = shortcutIntent(rawIntent), { getSettings, ledger, enabled = () => true } = options;
   const settings = getSettings(), who = identity(player);
   if (!enabled() || active.has(client)) throw Error('硅矿任务正在处理或连接已变化，请稍后再试');
-  const snapshot = await readSiliconMining(client, protocol, config, player, { settings, ledger });
+  const snapshot = await readSiliconMining(client, protocol, config, player, { settings, ledger, resolvePlayerProfiles: intent.kind === 'attack', manualAttack: intent });
   if (!enabled() || who !== identity(player) || settings !== getSettings()) throw Error('账号或配置已变化，请重新选择');
   // 同步已完成操作的账本证据，自动化关闭后也能继续手动操作；不发送游戏写入。
   await reconcile(client, protocol, snapshot, ledger);
@@ -529,7 +591,7 @@ export async function runSiliconShortcut(client, protocol, config, player, previ
   if (preview.worldId !== exactAutomationId(player.worldId)) throw Error('所在区服已变化，请重新选择');
   active.add(client); installReservations(client, ledger, preview.worldId);
   try {
-    const snapshot = await readSiliconMining(client, protocol, config, player, { settings, ledger });
+    const snapshot = await readSiliconMining(client, protocol, config, player, { settings, ledger, resolvePlayerProfiles: intent.kind === 'attack', manualAttack: { ...intent, fleetId } });
     if (!enabled() || who !== identity(player) || settings !== getSettings()) throw Error('账号或配置已变化，操作未发送');
     await reconcile(client, protocol, snapshot, ledger);
     const step = planSiliconShortcut(snapshot, settings, ledger, client, intent, fleetId);
@@ -564,7 +626,7 @@ export async function previewSiliconEventRecall(client, protocol, config, player
   }
   const ids = p.fleetIds.filter(id => fleets.some(f => f.buildingId === id && isMiningSilicon(f)));
   if (!ids.length) return result;
-  const snapshot = await readSiliconMining(client, protocol, config, player, { settings, ledger });
+  const snapshot = await readSiliconMining(client, protocol, config, player, { settings, ledger, resolvePlayerProfiles: false });
   if (snapshot.reason) result.notes.push(snapshot.reason);
   else if (now(client) < start) for (const id of ids) {
     const own = ownSlot(snapshot, id);
@@ -587,7 +649,7 @@ export async function recallSiliconForEvent(client, protocol, config, player, op
   try {
     for (const id of fleetIds) {
       if (!current(id)) continue;
-      const snapshot = await readSiliconMining(client, protocol, config, player, { settings, ledger });
+      const snapshot = await readSiliconMining(client, protocol, config, player, { settings, ledger, resolvePlayerProfiles: false });
       if (snapshot.reason || !current(id)) continue;
       await reconcile(client, protocol, snapshot, ledger);
       const own = ownSlot(snapshot, id);
@@ -615,7 +677,7 @@ export async function settleSiliconEventRecalls(client, protocol, config, player
       r.details.kind === 'siliconRetreat' && r.details.recallSource)) return;
   active.add(client);
   try {
-    const snapshot = await readSiliconMining(client, protocol, config, player, { settings, ledger });
+    const snapshot = await readSiliconMining(client, protocol, config, player, { settings, ledger, resolvePlayerProfiles: false });
     if (enabled() && who === identity(player)) await reconcile(client, protocol, snapshot, ledger);
   } finally { active.delete(client); }
 }
@@ -709,6 +771,7 @@ export async function runSiliconMining(client, protocol, config, player, options
         const fresh = await readSiliconMining(client, protocol, config, player, { settings, ledger });
         if (!enabled() || settings !== getSettings() || who !== identity(player) || day(fresh.checkedAt) !== day(now(client))) continue;
         await reconcile(client, protocol, fresh, ledger);
+        if (!enabled() || settings !== getSettings() || who !== identity(player)) continue;
         constrainFuel(fresh);
         const reviewed = planSiliconMining(fresh, settings, ledger, client, options.heldForEvent).actions.find(action => action.kind === proposed.kind && action.buildingId === proposed.buildingId && action.gridId === proposed.gridId && action.index === proposed.index && hash(action.opponent) === hash(proposed.opponent) && hash(action.huntTarget) === hash(proposed.huntTarget));
         if (!reviewed) continue;
@@ -720,7 +783,7 @@ export async function runSiliconMining(client, protocol, config, player, options
       } finally { reserveDispatch(client, 'silicon', []); }
     }
     if (enabled() && who === identity(player)) {
-      settings = getSettings(); snapshot = await readSiliconMining(client, protocol, config, player, { settings, ledger });
+      settings = getSettings(); snapshot = await readSiliconMining(client, protocol, config, player, { settings, ledger, resolvePlayerProfiles: false });
       if (enabled() && settings === getSettings() && who === identity(player)) {
         await reconcile(client, protocol, snapshot, ledger);
         constrainFuel(snapshot);

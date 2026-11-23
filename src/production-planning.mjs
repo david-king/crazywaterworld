@@ -1,4 +1,6 @@
 import { optimizeProductionSchedule } from './production-optimizer.mjs';
+import { planStockRefills, scheduleRankedStock } from './production-restock.mjs';
+import { simulateNativeFactoryStarts } from './factory-native-simulation.mjs';
 import { createProductionTiming } from './production-timing.mjs';
 import { resourceReserve, worldPreferenceEnabled } from './automation-policy.mjs';
 import { activityProductionEnabled } from './activity-automation.mjs';
@@ -24,7 +26,7 @@ function describeProductionBlocks(blocks, name) {
   for (const block of blocks) {
     const label = labels[block.reason] ?? block.reason;
     if (!groups.has(label)) groups.set(label, new Set());
-    if (block.itemId) groups.get(label).add(name(block.itemId));
+    if (block.itemId) groups.get(label).add(name(block.itemId) + (block.missingQuantity > 0 && block.kind ? '还差 ' + block.missingQuantity + ' 件' : ''));
   }
   return [...groups].map(([label, items]) => items.size ? label + '（' + [...items].join('、') + '）' : label).join('；');
 }
@@ -63,6 +65,8 @@ export function buildProductionModel(snapshot, config, settings, { pendingMateri
     .sort((a, b) => a.priority - b.priority || a.id.localeCompare(b.id));
   const priorityLabels = new Map([...new Set(orderRows.map(order => order.priority))].map(priority => [priority,
     unique(orderRows.filter(order => order.priority === priority).map(order => sourceNames[order.source] || order.source)).join('、')]));
+  const stockPriority = settings.factory?.demandFirst ? prioritySources.indexOf('factory') : -1;
+  if (stockPriority >= 0) priorityLabels.set(stockPriority, '工厂补料');
   const missingReads = snapshot.missingReads.map(read => read.request + ' · ' + read.reason);
   const notes = [];
   const timingByJob = new Map();
@@ -74,11 +78,14 @@ export function buildProductionModel(snapshot, config, settings, { pendingMateri
   const factoryConfigs = new Map(rows(config, 'BuildingProduceCfg').map(recipe => [recipe.itemId, recipe]));
   const cropConfigs = new Map(rows(config, 'FarmlandPlantCfg').map(recipe => [recipe.id, recipe]));
   const factoryMachines = new Map();
+  const uncertainSupply = new Map();
+  const nativeReceipts = worldPreferenceEnabled(settings, 'gainFactory');
+  const blockedCollection = new Set(settings.factory?.blockedCollectionTypes ?? []);
   const addIncoming = (id, itemId, quantity, finishTime) => {
     if (quantity > 0) incoming.push({ id, itemId, quantity, readyAt: relative(finishTime) });
   };
-  const addFixed = (machine, job, start, finish, basis) => {
-    addIncoming(job.id, job.productId, job.num, finish);
+  const addFixed = (machine, job, start, finish, basis, collect = true) => {
+    if (collect) addIncoming(job.id, job.productId, job.num, finish);
     fixedTimeline.push({ kind: 'existing', machineId: machine.id, itemId: job.productId, quantity: job.num,
       startAt: start, finishAt: finish, timingLabel: timingNames[basis.source] ?? basis.source, estimated: basis.estimated });
   };
@@ -86,7 +93,9 @@ export function buildProductionModel(snapshot, config, settings, { pendingMateri
     const building = snapshot.buildings.find(row => row.id === factory.id);
     const name = displayBuilding(config, { buildingId: factory.id, type: factory.type });
     const { lanes, finishes, jobs, missing } = timing.factoryQueue(building, factory.queue);
-    missingReads.push(...missing.map(reason => name + reason));
+    // Only take confirmed timers from a native queue if its remaining order is uncertain.
+    // An unknown handoff there does not change availability at other facilities.
+    (factory.nativeAutoActive ? notes : missingReads).push(...missing.map(reason => name + reason));
     capacityEstimated ||= lanes.estimated || lanes.count > 1 && lanes.expiresAt !== null;
     const facilityMachines = Array.from({ length: lanes.count }, (_, index) => ({
       id: factory.id + ':' + (index + 1), availableAt: relative(finishes[index]),
@@ -96,20 +105,45 @@ export function buildProductionModel(snapshot, config, settings, { pendingMateri
       machineNames.set(machine.id, name + (facilityMachines.length > 1 ? ' 第' + (index + 1) + '生产位' : ''));
     }
     factoryMachines.set(factory.id, facilityMachines);
-    for (const { job, index, start, finish, basis } of jobs) addFixed(facilityMachines[index], job, start, finish, basis);
+    const collect = !factory.nativeAutoActive || (nativeReceipts && !blockedCollection.has(factory.type));
+    for (const { job, index, start, finish, basis } of jobs) {
+      if (factory.nativeAutoActive && missing.length && basis.source !== 'server') continue;
+      addFixed(facilityMachines[index], job, start, finish, basis, collect);
+    }
     machines.push(...facilityMachines);
-    for (const item of factory.finished) addIncoming(factory.id + ':finished:' + item.id, item.id, item.num, now);
-    if (factory.nativeAutoActive) missingReads.push(name + '原生自动生产正在追加任务，未来占用尚未固定');
+    if (collect) for (const item of factory.finished) addIncoming(factory.id + ':finished:' + item.id, item.id, item.num, now);
     if (lanes.estimated || lanes.expiresAt !== null) notes.push(name + ' · ' + lanes.reasons.join('，'));
   }
+  const collectNativeCrop = worldPreferenceEnabled(settings, 'farm') && settings.farm?.harvest
+    && !settings.factory?.blockedCollectionTypes?.includes('农田');
+  const harvestReason = collectNativeCrop ? '等待原生农田下一茬' : '自动收获已关闭，原生农田来料时间待确认';
   for (const farm of snapshot.farms) {
     const machine = { id: farm.id, availableAt: Math.max(relative(farm.upgradingUntil), relative(farm.ripeTime)) };
     machines.push(machine);
     machineNames.set(machine.id, displayBuilding(config, { buildingId: farm.id, type: '农田' }));
     if (farm.productId && farm.ripeTime) addFixed(machine,
-      { id: farm.id + ':crop', productId: farm.productId, num: farm.num }, now, Math.max(now, farm.ripeTime), { source: 'server', estimated: false });
+      { id: farm.id + ':crop', productId: farm.productId, num: farm.num }, now, Math.max(now, farm.ripeTime),
+      { source: 'server', estimated: false }, !snapshot.autoFarming || collectNativeCrop);
   }
-  if (snapshot.autoFarming) missingReads.push('原生自动种植正在运行，后续农田占用尚未固定');
+  if (snapshot.autoFarming) notes.push(collectNativeCrop ? '原生农田计入在田作物的已知收成，下一茬待游戏确定。' : harvestReason);
+  const localFactories = new Map();
+  for (const recipe of snapshot.recipes) {
+    if (recipe.facilityType === '农田') {
+      if (snapshot.autoFarming) uncertainSupply.set(recipe.productId, { kind: 'future-harvest', reason: harvestReason });
+      continue;
+    }
+    const eligible = snapshot.factories.filter(factory => factory.enabled && factory.type === recipe.facilityType
+      && factory.level >= recipe.unlockLevel);
+    const local = eligible.filter(factory => !factory.nativeAutoActive && settings.factory?.produce !== false);
+    localFactories.set(recipe.productId, local);
+    const managed = eligible.filter(factory => factory.nativeAutoActive);
+    if (recipe.available && !local.length && managed.length) {
+      const facility = managed.length === 1 ? displayBuilding(config, { buildingId: managed[0].id, type: recipe.facilityType })
+        : managed.length + ' 座' + recipe.facilityType;
+      uncertainSupply.set(recipe.productId, { kind: 'native-factory', reason: nativeReceipts && !blockedCollection.has(recipe.facilityType)
+        ? '等待' + facility + '确认后续产出' : facility + '的自动收取已关闭，入库时间待确认' });
+    }
+  }
   if (!Number.isSafeInteger(snapshot.stockCap) || snapshot.stockCap <= 0) missingReads.push('加工品存量上限未确认');
   const incomingStock = new Map();
   for (const item of incoming) incomingStock.set(item.itemId, (incomingStock.get(item.itemId) ?? 0) + item.quantity);
@@ -117,22 +151,26 @@ export function buildProductionModel(snapshot, config, settings, { pendingMateri
     buildings: snapshot.buildings.map(building => ({ ...building,
       ...snapshot.factories.find(factory => factory.id === building.id) })),
     settings, stock: new Map(inventory.map(item => [item.itemId, item.quantity])), incoming: incomingStock,
+    uncertainSupply,
   });
   const skippedOrders = new Map();
+  const waitingSupply = new Map();
   const activeOrderRows = orderRows.filter(order => {
     const blocked = snapshot.complete ? eligibility(order.requirements, { reserve: true }) : [];
-    if (blocked.length) skippedOrders.set(order.id, blocked);
+    if (blocked.length) {
+      const waiting = blocked.every(block => block.kind === 'future-harvest' || block.kind === 'native-factory');
+      (waiting ? waitingSupply : skippedOrders).set(order.id, blocked);
+    }
     return blocked.length === 0;
   });
   const needed = dependencyItems(activeOrderRows, snapshot.recipes);
   const recipes = snapshot.recipes.map(recipe => {
     const farm = recipe.facilityType === '农田';
     const targets = farm
-      ? snapshot.farms.filter(plot => plot.enabled && (settings.farm?.customPlant
+      ? snapshot.farms.filter(plot => !snapshot.autoFarming && plot.enabled && (settings.farm?.customPlant
         ? settings.farm.crops.some(crop => crop.id === recipe.productId && crop.target > 0)
         : settings.farm?.autoPlant !== false)).map(plot => machines.find(machine => machine.id === plot.id))
-      : snapshot.factories.filter(factory => factory.type === recipe.facilityType && factory.level >= recipe.unlockLevel
-        && factory.enabled && settings.factory?.produce !== false).flatMap(factory => factoryMachines.get(factory.id));
+      : localFactories.get(recipe.productId).flatMap(factory => factoryMachines.get(factory.id));
     const durationByMachine = {};
     for (const machine of targets) {
       const building = snapshot.buildings.find(row => row.id === machine.id.replace(/:\d+$/, ''));
@@ -142,7 +180,7 @@ export function buildProductionModel(snapshot, config, settings, { pendingMateri
     }
     const durations = Object.values(durationByMachine).filter(value => value > 0);
     stockCaps[recipe.productId] = snapshot.stockCap * (farm ? 5 : 1);
-    if (farm && settings.farm?.customPlant) {
+    if (farm && !snapshot.autoFarming && settings.farm?.customPlant) {
       stockCaps[recipe.productId] = Math.min(stockCaps[recipe.productId],
         settings.farm.crops.find(crop => crop.id === recipe.productId)?.target ?? 0);
     }
@@ -174,24 +212,84 @@ export function buildProductionModel(snapshot, config, settings, { pendingMateri
   return {
     input: { snapshotTime: now, complete: snapshot.complete && !missingReads.length, missingReads: unique(missingReads),
       inventory, orders, recipes, machines, incoming, stockCaps, stockCapMode: 'start-projected' },
-    orderRows, activeOrderRows, skippedOrders, timingByJob, machineNames, fixedTimeline, notes, capacityEstimated, priorityLabels,
+    orderRows, activeOrderRows, skippedOrders, waitingSupply, timingByJob, machineNames, fixedTimeline, notes, capacityEstimated, priorityLabels, stockPriority,
   };
 }
 
 /** Optimize completion by configured priority, sharing materials and capacity. */
 export function planProduction(snapshot, config, settings, options = {}) {
   const model = buildProductionModel(snapshot, config, settings, options);
-  const result = optimizeProductionSchedule(model.input, options.search);
+  const waitingLabels = new Map();
+  let waitingHarvestCount = 0;
+  for (const [id, blocks] of model.waitingSupply) {
+    const harvest = blocks.some(b => b.kind === 'future-harvest');
+    const factory = blocks.some(b => b.kind === 'native-factory');
+    if (harvest) waitingHarvestCount++;
+    waitingLabels.set(id, harvest && factory ? '等待原生来料' : factory ? '等待原生工厂' : '等待农田来料');
+  }
+  const waitingSupplyCount = waitingLabels.size;
+  if (settings.factory?.strategy === 'nativeSimulation') {
+    const name = id => config?.materialName?.(id) || id;
+    const now = snapshot.serverNow;
+    const eligible = new Set(snapshot.factories.filter(f => f.enabled && !f.nativeAutoActive).map(f => f.id));
+    const unlocked = new Set(snapshot.recipes.filter(r => r.available).map(r => r.productId));
+    const stock = new Map(snapshot.inventory.map(item => [item.id, item.num]));
+    const available = new Map(model.input.inventory.map(item => [item.itemId, item.quantity]));
+    for (const f of snapshot.factories) {
+      for (const item of [...f.finished, ...f.queue.map(job => ({ id: job.productId, num: 1 }))]) {
+        stock.set(item.id, (stock.get(item.id) ?? 0) + item.num);
+      }
+    }
+    const pendingInputs = new Set((options.pendingMaterials ?? []).flatMap(entry => [...(entry.scope ?? [])]));
+    const canPlan = (snapshot.inventoryKnown ?? snapshot.complete) && now > 0 && snapshot.stockCap > 0
+      && settings.factory.enabled && settings.factory.produce && settings.loop?.world !== false;
+    const picks = canPlan ? simulateNativeFactoryStarts({
+      buildings: snapshot.buildings.filter(b => eligible.has(b.id)),
+      recipes: rows(config, 'BuildingProduceCfg').filter(r => unlocked.has(r.itemId)),
+      targets: settings.factory.simulatedTargets,
+      timing: createProductionTiming({ config, ...snapshot.timing, serverNow: now }),
+      now, cap: snapshot.stockCap, slots: snapshot.factories[0]?.capacity ?? 0,
+      available: id => pendingInputs.has(id) ? 0 : available.get(id) ?? 0,
+      owned: id => stock.get(id) ?? 0,
+    }) : [];
+    const next = picks.map(({ building, row, lane }) => ({
+      kind: 'nativeSimulation', machineId: building.id + ':' + (lane.index + 1), itemId: row.itemId,
+      quantity: 1, startAt: lane.start, finishAt: lane.finish,
+    }));
+    const timeline = [...model.fixedTimeline, ...next].map(job => ({
+      ...job, machineName: model.machineNames.get(job.machineId), productName: name(job.itemId),
+    }));
+    return {
+      strategy: 'nativeSimulation', status: 'next-dispatch', scope: 'next-dispatch', snapshotTime: now, timeline,
+      config: snapshot.config, estimated: true, completionAt: null, upperBound: null, lowerBound: null, stockTarget: snapshot.stockCap,
+      statusLabel: '模拟原生 · 本轮排产', missingReads: model.input.missingReads,
+      pending: pendingInputs.size > 0, waitingHarvestCount, waitingSupplyCount,
+      orders: model.orderRows.map(order => ({ ...order, label: sourceNames[order.source] || order.source,
+        requirements: order.requirements.map(item => ({ ...item, name: name(item.id) })), completionAt: null,
+        skipped: model.skippedOrders.has(order.id),
+        waitingForSupply: waitingLabels.has(order.id), statusLabel: waitingLabels.get(order.id),
+        reason: describeProductionBlocks(model.skippedOrders.get(order.id) ?? model.waitingSupply.get(order.id) ?? [], name),
+      })),
+      recipes: materialTreeRecipes(model.orderRows, snapshot.recipes, timeline.map(job => job.itemId), name),
+    };
+  }
+  const stockTarget = Math.min(settings.factory?.keepStock ?? 0, snapshot.stockCap ?? 0);
+  const higherWaiting = model.orderRows.some(order => order.priority < model.stockPriority && model.waitingSupply.has(order.id));
+  const ranked = !higherWaiting && scheduleRankedStock(snapshot, model.input, stockTarget, model.stockPriority, options.search);
+  const result = ranked || optimizeProductionSchedule(model.input, options.search);
   const name = id => config?.materialName?.(id) || id;
   const completions = new Map(result.orderCompletions.map(order => [order.orderId, order]));
   const refreshUncertain = new Set(model.orderRows.filter(order => order.metadata?.refreshAt
     && completions.has(order.id) && snapshot.serverNow + completions.get(order.id).completedAt >= order.metadata.refreshAt).map(order => order.id));
-  const timeline = [...model.fixedTimeline, ...result.timeline.map(job => {
+  const uncertainCompletion = refreshUncertain.size > 0 || waitingSupplyCount > 0;
+  const refills = ranked || uncertainCompletion ? [] : planStockRefills(snapshot, model.input, result, stockTarget);
+  const planned = [...result.timeline, ...refills].map(job => {
     const basis = model.timingByJob.get(job.machineId + '\0' + job.itemId);
     return { ...job, startAt: snapshot.serverNow + job.start, finishAt: snapshot.serverNow + job.end,
       estimated: basis?.estimated !== false, timingLabel: timingNames[basis?.source] ?? '耗时待确认' };
-  })].map(job => ({ ...job, machineName: model.machineNames.get(job.machineId), productName: name(job.itemId),
-    priorityLabel: job.kind === 'existing' ? '已排队' : job.priority == null ? '腾仓辅助'
+  });
+  const timeline = [...model.fixedTimeline, ...planned].map(job => ({ ...job, machineName: model.machineNames.get(job.machineId), productName: name(job.itemId),
+    priorityLabel: job.kind === 'existing' ? '已排队' : job.priority == null ? (job.kind === 'restock' ? '补至库存水位' : '腾仓辅助')
       : '第' + (job.priority + 1) + '级 · ' + (model.priorityLabels.get(job.priority) || '需求备料'),
     inheritedPriority: job.kind === 'production' && job.priority != null
       && !model.activeOrderRows.some(order => order.priority === job.priority && order.requirements.some(item => item.id === job.itemId)),
@@ -216,21 +314,24 @@ export function planProduction(snapshot, config, settings, options = {}) {
   });
   const blocks = new Map(blockedOrders);
   return {
-    ...result, scope, status: refreshUncertain.size ? 'incomplete' : result.status,
+    ...result, scope, status: uncertainCompletion ? 'incomplete' : result.status,
     statusLabel: refreshUncertain.size ? '方案越过订单刷新边界，齐套时间待确认'
+      : waitingSupplyCount ? '部分需求的原生来料时间待定'
       : allSkipped ? '当前需求因工厂等级或禁用限制已全部跳过排产'
-        : !model.orderRows.length && result.status === 'optimal' ? '当前没有待齐套订单' : labels[result.status], estimated, config: snapshot.config,
-    lowerBound: refreshUncertain.size ? null : result.lowerBound,
-    upperBound: refreshUncertain.size ? null : result.upperBound,
-    objectiveLowerBound: refreshUncertain.size ? null : result.objectiveLowerBound,
-    objectiveUpperBound: refreshUncertain.size ? null : result.objectiveUpperBound,
-    completionAt: result.upperBound === null || refreshUncertain.size || allSkipped ? null : snapshot.serverNow + result.upperBound,
+        : !model.orderRows.length && result.status === 'optimal' ? (refills.length ? '当前按库存水位备货' : '当前没有待齐套订单') : labels[result.status], estimated, config: snapshot.config,
+    stockTarget,
+    lowerBound: uncertainCompletion ? null : result.lowerBound,
+    upperBound: uncertainCompletion ? null : result.upperBound,
+    objectiveLowerBound: uncertainCompletion ? null : result.objectiveLowerBound,
+    objectiveUpperBound: uncertainCompletion ? null : result.objectiveUpperBound,
+    completionAt: result.upperBound === null || uncertainCompletion || allSkipped ? null : snapshot.serverNow + result.upperBound,
+    waitingHarvestCount, waitingSupplyCount,
     missingReads: model.input.missingReads,
     recipes: materialTreeRecipes(model.orderRows, snapshot.recipes, timeline.map(job => job.itemId), name),
     priorityPolicy: '在原料、设备和截止约束内，按用户配置逐级最小化齐套时间，同级优化共同工期，独立生产位并行安排',
     priorityBounds: (result.priorityBounds ?? []).map(bound => ({ ...bound,
       label: '第' + (bound.priority + 1) + '级 · ' + (model.priorityLabels.get(bound.priority) || '需求备料'),
-      ...(refreshUncertain.size ? { lowerBound: null, upperBound: null } : {}) })),
+      ...(uncertainCompletion ? { lowerBound: null, upperBound: null } : {}) })),
     notes: unique([...model.notes, ...result.reasons,
       ...(model.skippedOrders.size ? ['已跳过 ' + model.skippedOrders.size + ' 项工厂等级不足或禁用的需求，材料可用于其他排产，恢复生产条件后重新计算'] : []),
       ...(refreshUncertain.size ? ['生产顺序按本次固定需求计算，联盟募兵订单刷新边界之后的实际需求需重新读取确认'] : []),
@@ -238,12 +339,12 @@ export function planProduction(snapshot, config, settings, options = {}) {
     assumptions: [
       '以需求优先级列表为顺序，先优化高级需求及其上游材料，再逐级优化后续需求的齐套时间',
       '范围包括活动总开关允许的当前订单与已开启来源的消费备料，未列入优先级列表的当前订单置于最后一级',
-      '建筑等消费备料齐套后独占保留，常规备货水位由库存策略处理',
+      '建筑等消费备料齐套后独占保留。按需优先生产时，工厂补料按其配置位置参与排产，每种加工品最多补至账号仓容与设置水位中的较小值',
+      '每座工厂预览最多一轮补货队列。已安排的补货占用对应原料和生产位，产物完工后可供后续需求使用',
       '固定当前生产加成、现有设施等级和已排队任务，新增任务按原料到齐立即开工估算',
       '生产、收获和已启用订单提交按零操作延迟计算，关闭提交的订单材料独占保留',
       '外部采集、购买、广告与道具加速、未来建筑升级收益需在新快照中确认后计算',
       '开工时检查库存、待收与在途总量，加工品上限来自当前配置，农产上限为其五倍',
-      '方案按订单生产独占可用资源计算，其他消费和备货任务需让出相应材料与产能',
     ],
     orders: model.orderRows.map(order => ({ ...order, label: (sourceNames[order.source] || order.source)
       + (order.source === 'building' && order.metadata?.buildingId ? ' · ' + order.metadata.buildingId + ' ' + order.metadata.level + '级' : ''),
@@ -251,10 +352,12 @@ export function planProduction(snapshot, config, settings, options = {}) {
       requirements: order.requirements.map(item => ({ ...item, name: name(item.id) })),
       completionAt: completions.has(order.id) && !refreshUncertain.has(order.id) ? snapshot.serverNow + completions.get(order.id).completedAt : null,
       skipped: model.skippedOrders.has(order.id),
+      waitingForSupply: waitingLabels.has(order.id),
       statusLabel: model.skippedOrders.has(order.id) ? '已跳过排产'
+        : waitingLabels.has(order.id) ? waitingLabels.get(order.id)
         : completions.has(order.id) && !refreshUncertain.has(order.id) ? '联合方案已齐套' : '待确认',
       reason: refreshUncertain.has(order.id) ? '备齐前订单会刷新，请在刷新后重新生成计划'
-        : describeProductionBlocks(model.skippedOrders.get(order.id) ?? blocks.get(order.id) ?? [], name),
+        : describeProductionBlocks(model.waitingSupply.get(order.id) ?? model.skippedOrders.get(order.id) ?? blocks.get(order.id) ?? [], name),
     })),
     timeline,
   };

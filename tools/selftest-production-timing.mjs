@@ -53,14 +53,28 @@ function fixture() {
   return { client, clock, source, watcher, message, push, advance, measure };
 }
 
-test('全局工厂减时采用客户端公式并保留估算标签', () => {
+test('工厂先按速度折算再减固定秒数，并保留估算标签', () => {
   const result = timing().factory(seed, { building: building() });
   assert.equal(result.seconds, 569);
   assert.equal(result.source, 'effects-estimate');
   assert.equal(result.estimated, true);
   assert(result.reasons.some(reason => reason.includes('尚未完整核验')));
   const boosted = timing({ effects: [{ id: 1, value: 0.5 }, { id: 2, value: 600 }] });
-  assert.equal(boosted.factory(seed).seconds, 800);
+  assert.equal(boosted.factory(seed).seconds, 600);
+});
+
+test('两个角色的食盐分别按秒级与半小时排产，专属加成只作用于匹配的工厂', () => {
+  const salt = { itemId: '食盐', buildType: '海水厂', produceTime: 3600 };
+  const source = { tables: { HeroSkillCfg: { data: [{ heroId: '莉莉', level: 2, skill2Param: '材料厂', skill2Effect: ['生产速度', 0.2] }] },
+    BuildingSkinCfg: { data: [{ id: 6, type: '材料厂', effects: ['材料厂生产速度+20%'] }] } } };
+  const low = createProductionTiming({ config: source, effects: [{ id: 1, value: 0 }, { id: 2, value: 1692 }],
+    heroes: [{ heroId: '莉莉', skillLevels: [2,2,0,0] }] });
+  assert.equal(low.factory(salt, { building: { skinId: 6 } }).seconds, 1908);
+  const screw = { itemId: '螺丝', buildType: '材料厂', produceTime: 4500 };
+  assert.equal(low.factory(screw).seconds, 2058);
+  assert.equal(low.factory(screw, { building: { skinId: 6 } }).seconds, Math.ceil(4500 / 1.4 - 1692));
+  const high = createProductionTiming({ config: source, effects: [{ id: 1, value: 1.026 }, { id: 2, value: 3270 }] });
+  assert.equal(high.factory(salt).seconds, 1);
 });
 
 test('同厂同配方实测优先，跨厂和跨配方保持独立', () => {

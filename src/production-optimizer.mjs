@@ -133,7 +133,11 @@ function prepare(input) {
     }
   }
   const items = [...new Set([...inventory.keys(), ...visited, ...incoming.map(entry => entry.itemId)])].sort();
-  const data = { inventory, machines, recipes, recipeByItem, incoming, orders, priorityLevels, caps, stockCapMode, orderDemand,
+  const capacityReservations = input.capacityReservations ?? {};
+  const calendarTimes = [...new Set([...machines.flatMap(machine => (machine.bookings ?? []).map(job => job.end)),
+    ...Object.values(capacityReservations).flatMap(entries => entries.map(entry => entry.until))]
+    .filter(Number.isFinite))].sort((a, b) => a - b);
+  const data = { inventory, machines, recipes, recipeByItem, incoming, orders, priorityLevels, caps, stockCapMode, orderDemand, capacityReservations, calendarTimes,
     topological: postorder.reverse(), items, errors };
   data.maxBatches = expandDemand(data, orderDemand, inventory, false).batches;
   if (hasRelevantCaps) for (const recipe of recipes) {
@@ -224,7 +228,7 @@ function actionsAt(data, state, heuristic = false) {
   const projected = projectedStock(state);
   const needs = productionPriorities(data, state, projected);
   let currentNeeds = null;
-  const nextEvent = Math.min(Infinity, ...state.events.map(event => event.time), ...state.available.filter(time => time > state.time + EPSILON));
+  const nextEvent = nextEventTime(data, state);
   const keepsHigherStock = (inputs, priority) => needs.reserved.every(tier => tier.priority >= priority
     || [...inputs].every(([id, quantity]) => (state.stock.get(id) ?? 0) - quantity
       >= Math.min(state.stock.get(id) ?? 0, tier.demand.get(id) ?? 0)));
@@ -244,11 +248,14 @@ function actionsAt(data, state, heuristic = false) {
     if (!desired[recipe.index] && !currentNeeds) currentNeeds = productionPriorities(data, state, state.stock);
     const priority = desired[recipe.index] ? needs.priorities[recipe.index] : currentNeeds.priorities[recipe.index];
     if (heuristic && !keepsHigherStock(recipe.inputs, priority)) continue;
-    const physical = (projected.get(recipe.itemId) ?? 0) + (state.held.get(recipe.itemId) ?? 0);
+    const reserved = data.capacityReservations[recipe.itemId];
+    const physical = (projected.get(recipe.itemId) ?? 0) + (state.held.get(recipe.itemId) ?? 0)
+      + (Array.isArray(reserved) ? sum(reserved.map(entry => entry.until > state.time ? entry.quantity : 0)) : 0);
     const cap = data.caps.get(recipe.itemId) ?? Infinity;
     if (data.stockCapMode === 'start-projected' ? physical >= cap : physical + recipe.outputQuantity > cap) continue;
     for (const machine of recipe.machineIndexes) {
       const duration = recipe.durations.get(machine);
+      if (data.machines[machine].bookings?.some(job => state.time < job.end && state.time + duration > job.start)) continue;
       // The incumbent keeps a shared machine free for the next higher-tier
       // event. Short tasks may fill the gap, and independent machines continue.
       // Exact search still considers every legal action, including deadline
@@ -298,11 +305,16 @@ function applyAction(data, state, action) {
   return next;
 }
 
-function advance(state) {
-  const future = [...state.events.map(event => event.time), ...state.available].filter(time => time > state.time + EPSILON);
-  if (!future.length) return null;
+function nextEventTime(data, state) {
+  return Math.min(data.calendarTimes.find(time => time > state.time + EPSILON) ?? Infinity,
+    ...state.events.map(event => event.time), ...state.available.filter(time => time > state.time + EPSILON));
+}
+
+function advance(data, state) {
+  const time = nextEventTime(data, state);
+  if (!Number.isFinite(time)) return null;
   const next = copyState(state);
-  next.time = Math.min(...future);
+  next.time = time;
   next.events = [];
   for (const event of state.events) {
     if (event.time <= next.time + EPSILON) next.stock.set(event.itemId, (next.stock.get(event.itemId) ?? 0) + event.quantity);
@@ -526,7 +538,7 @@ export function optimizeProductionSchedule(input, options = {}) {
     if (missedDeadline(greedy)) break;
     if (complete(greedy)) { best = greedy; break; }
     const action = actionsAt(data, greedy, true)[0];
-    const next = action ? applyAction(data, greedy, action) : advance(greedy);
+    const next = action ? applyAction(data, greedy, action) : advance(data, greedy);
     if (!next) break;
     greedy = next;
   }
@@ -543,7 +555,7 @@ export function optimizeProductionSchedule(input, options = {}) {
     const key = stateKey(data, state);
     if (visited.has(key)) continue;
     visited.add(key);
-    const next = advance(state);
+    const next = advance(data, state);
     if (next) stack.push(next);
     const actions = actionsAt(data, state);
     for (let index = actions.length - 1; index >= 0; index--) stack.push(applyAction(data, state, actions[index]));

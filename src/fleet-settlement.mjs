@@ -53,6 +53,11 @@ export function fleetAtHome(fleet) {
   );
 }
 
+// 原生城战委任是偏好开关，开启时舰队也可以在主城待命。
+export function resourceFieldFleetIdle(fleet) {
+  return fleetAtHome(fleet) && !fleet.targetGridIdx;
+}
+
 export function cityDispatchObserved(fleet, details) {
   return (fleet.state === 2 && fleet.targetCityId === details.cityId) ||
     (fleet.cityId === details.cityId && ([3, 5].includes(fleet.state) ||
@@ -225,8 +230,7 @@ export function settleFleetSnapshot(
       continue;
     const own = fleets.filter((f) => f.buildingId === d.buildingId);
     if (own.length !== 1) continue;
-    const fleet = own[0],
-      home = fleetAtHome(fleet);
+    const fleet = own[0];
     if (d.kind === 'resourceFieldDispatch') {
       if (!integer(d.gridIdx) || d.gridIdx < 0 || key !== 'resource-field:' + worldId + ':' + d.gridIdx) continue;
       if (baseline && baseline[key].details?.phase !== d.phase) continue;
@@ -259,7 +263,7 @@ export function settleFleetSnapshot(
       const current = ledger.keyRecords()[key];
       if (current?.confirmed && d.replacement) releaseResourceFieldReplacementLock(ledger, d);
       // 自动占田关闭后仍结算手动出征；归队只能释放已确认派遣，未知请求继续保留。
-      if (current?.confirmed && home && !(fleet.targetGridIdx ?? 0) && !fleet.autoFight?.isOn
+      if (current?.confirmed && resourceFieldFleetIdle(fleet)
         && fieldsSynced && integer(now) && current.details.active !== false) {
         const everOccupied = occupied || current.details.occupied === true;
         ledger.updateKeyDetails(key, { ...current.details, active: false, occupied, everOccupied, returnedAt: now });
@@ -270,6 +274,7 @@ export function settleFleetSnapshot(
       }
       continue;
     }
+    const home = fleetAtHome(fleet);
     if (d.kind === 'fleetSpeed') {
       if (fleetSpeedConfirmed(fleet, d, now)) {
         ledger.resolveKey(key, true); changes.push({key,reason:'已确认舰队加速，保留本航程累计费用'});

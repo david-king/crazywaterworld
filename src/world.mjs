@@ -28,19 +28,14 @@ import { captureFarmMaterialState, farmInventory, settleFarmMaterialState } from
 import { runFactoryProductionBatch, confirmFactoryProductionBeforeHarvest } from './factory-production.mjs';
 import { readOrderReservedStock } from './order-reservations.mjs';
 import { activityProductionEnabled } from './activity-automation.mjs';
-import { createProductionEligibility } from './production-eligibility.mjs';
-import { commitFactoryLane, createProductionTiming, nextFactoryLane, observedProductionDurations, secondProductionLane } from './production-timing.mjs';
+import { createProductionEligibility, factoryRecipeAvailability, factoryRecipeCosts, insertionRecipeReady } from './production-eligibility.mjs';
+import { simulateNativeFactoryStarts, simulatedFactoryQueueKey } from './factory-native-simulation.mjs';
+import { createFactoryDispatch, shortFactoryFeed } from './factory-dispatch.mjs';
+import { factoryInsertions } from './factory-insert-store.mjs';
+import { insertionYieldsToProduction } from './factory-insertion-queue.mjs';
+import { commitFactoryLane, createProductionTiming, nextFactoryLane, observedProductionDurations, observedProductionHeroes } from './production-timing.mjs';
 
-// 与客户端FactoryUtil一致：活动工坊只使用服务器limitTimeItem开放窗口。
-export function factoryRecipeAvailability(recipe, festivals, now) {
-  if (!recipe) return {allowed:false,reason:'配方未确认',signature:'missing'};
-  if (!recipe.limitType && recipe.buildType!=='活动工厂') return {allowed:true,signature:'ordinary'};
-  if (!Array.isArray(festivals)) return {allowed:false,reason:'活动配方开放状态未同步',signature:'unknown'};
-  const windows=festivals.flatMap(event=>(event.festivalData?.limitTimeItem??[]).filter(row=>row.item===recipe.limitType).map(row=>({item:row.item,openTime:row.openTime,closeTime:row.closeTime})));
-  const valid=windows.filter(w=>Number.isSafeInteger(w.openTime)&&Number.isSafeInteger(w.closeTime)&&w.openTime>0&&w.closeTime>=w.openTime);
-  const allowed=valid.some(w=>w.openTime<=now&&now<=w.closeTime);
-  return {allowed,reason:allowed?'':'当前活动未开放此配方',signature:JSON.stringify(valid)};
-}
+export { factoryRecipeAvailability, factoryRecipeCosts };
 const factoryFailures = new WeakMap();
 
 export const SPEED_UP_ITEM = '加速器';
@@ -94,23 +89,9 @@ export function inventoryStockRows(survey, config) {
     .sort((a, b) => b.num - a.num);
 }
 
-function factoryRecipeCosts(recipe) {
-  if (!Array.isArray(recipe?.costItem)) return null;
-  const costs = new Map();
-  for (const pair of recipe.costItem) {
-    if (!Array.isArray(pair)) return null;
-    const [id, num] = pair;
-    if (typeof id !== 'string' || !id || !Number.isSafeInteger(num) || num < 0) return null;
-    const total = (costs.get(id) ?? 0) + num;
-    if (!Number.isSafeInteger(total)) return null;
-    if (total) costs.set(id, total);
-  }
-  return Array.from(costs, ([id, num]) => ({ id, num }));
-}
-
 // Bind a click to the displayed recipe and actual factory state. Including
 // finished products also invalidates old clicks when a new job finishes instantly.
-function factoryProductionKey(player, building, recipe) {
+export function factoryProductionKey(player, building, recipe) {
   const { factoryQ, finishedProducts } = building.factory;
   return createHash('sha256').update(JSON.stringify([
     exactAutomationId(player?.worldId), exactAutomationId(player?.playerId), building.buildingId, building.level,
@@ -148,6 +129,74 @@ export function manualFactoryProducts(building, survey, config, incoming) {
       seconds: recipe.produceTime, productionKey: factoryProductionKey(survey.player, building, recipe) });
   }
   return products;
+}
+
+const lastNativeProducts = new WeakMap();
+
+function nativeFactoryIdentity(player, buildingId) {
+  return JSON.stringify([exactAutomationId(player?.worldId), exactAutomationId(player?.playerId), buildingId]);
+}
+
+export function nativeFactoryControl(client, building, survey, config, preferred) {
+  const identity = nativeFactoryIdentity(survey.player, building.buildingId);
+  const current = building.factory.autoProductId || null;
+  const entitled = survey.autoProduceForever === true || survey.autoProduceEndTime > survey.serverNow;
+  const on = !!current && entitled;
+  const recipes = rowsOf(config, 'BuildingProduceCfg').filter(row => row.buildType === building.type && building.level > 0
+    && row.unlockLevel <= building.level && factoryRecipeAvailability(row, survey.festivals, survey.serverNow).allowed);
+  const unlocked = new Set(recipes.map(row => row.itemId));
+  const queue = building.factory.factoryQ ?? [];
+  const productId = on ? current : [preferred, lastNativeProducts.get(client)?.get(identity), current,
+    ...queue.filter(job => job.finishTime > survey.serverNow).map(job => job.productId),
+    ...queue.map(job => job.productId), recipes[0]?.itemId].find(id => unlocked.has(id)) ?? null;
+  return { on, productId, name: productId ? displayMaterial(config, productId) : null,
+    key: createHash('sha256').update(JSON.stringify([identity, current, on])).digest('hex').slice(0, 24),
+    reason: !entitled ? '游戏原生自动生产权益未开启或已到期' : !productId ? '当前没有可用的自动生产配方' : '' };
+}
+
+export async function toggleNativeFactory(client, protocol, target, { player, enabled, config }) {
+  const { buildingId, productId, on, key } = target;
+  if (typeof on !== 'boolean' || typeof buildingId !== 'string' || !buildingId || typeof productId !== 'string'
+    || !productId || typeof key !== 'string') throw new Error('请刷新后重新选择工厂');
+  const request = on ? 'SetFactoryAutoProduceRequest' : 'CancelFactoryAutoProduceRequest';
+  if (!protocol[request] || !protocol.OnWaterRequest || !protocol.OnWaterResponse) throw new Error('当前协议不支持切换工厂自动生产');
+  const check = () => { if (!player || !enabled()) throw new Error('账号状态已变化，请刷新建筑一览'); };
+  const now = () => Math.floor((Date.now() + (client.serverClockOffsetMs || 0)) / 1000);
+  const type = makeTypeResolver(config)(buildingId);
+  const read = async () => {
+    check();
+    const water = normalize(await client.request('OnWaterRequest', {}, 'OnWaterResponse'));
+    check();
+    const building = water.building?.find(b => b.buildingId === buildingId);
+    if (!building?.factory || !building.level) throw new Error('工厂状态未同步，请刷新建筑一览');
+    return { current: building.factory.autoProductId || null, expires: water.autoProduceForever ? Infinity : water.autoProduceEndTime || 0,
+      control: nativeFactoryControl(client, { ...building, type }, { ...water, player, festivals:client.festivals, serverNow:now() }, config, productId) };
+  };
+  const matches = state => on ? state.control.on && state.current === productId : !state.current;
+  const before = await read();
+  const label = on ? '已开启原生自动生产' : '已关闭原生自动生产';
+  if (matches(before)) return { confirmed:true, label, control:before.control };
+  if (before.control.reason) throw new Error(before.control.reason);
+  if (key !== before.control.key || before.control.on === on || before.control.productId !== productId) {
+    throw new Error('工厂状态或配方已变化，请刷新后重试');
+  }
+  await client.sendWatch(request, on ? { buildingId, productId } : { buildingId }, { beforeSend() {
+    check();
+    if (before.expires <= now()) throw new Error('游戏原生自动生产权益已到期');
+  } });
+  let after;
+  try {
+    after = await read();
+  } catch {
+    check();
+    return { confirmed:false, label:'切换已提交，游戏状态待同步' };
+  }
+  if (!matches(after)) return { confirmed:false, label:'切换已提交，游戏状态待同步', control:after.control };
+  if (!on) {
+    if (!lastNativeProducts.has(client)) lastNativeProducts.set(client, new Map());
+    lastNativeProducts.get(client).set(nativeFactoryIdentity(player, buildingId), before.current);
+  }
+  return { confirmed:true, label, control:after.control };
 }
 
 // 这些常量散在几张 param 表里（人口/存量在 GameParamCfg，制造位在 BuildingProduceParamCfg），
@@ -335,6 +384,7 @@ export async function surveyWorld(client, protocol, { config = null, player = nu
       buildingId,
       type,
       level,
+      skinId: raw.skinId ?? null,
       farm: raw.farm ?? null,
       factory: raw.factory ?? null,
       petBreed: raw.petBreed ?? null,
@@ -451,15 +501,19 @@ export async function surveyWorld(client, protocol, { config = null, player = nu
   const slots = paramOf(config, SLOTS_PARAM);
   const secondLaneConfigured = rowsOf(config, 'MonthCardCfg').some(row =>
     Array.isArray(row.effectList) && row.effectList.some(effect => effect?.[0] === '第二生产位' && effect[1] > 0));
-  const readTiming = includeProductionTiming && !ordersOnly && secondLaneConfigured && factories.some(b =>
-    b.level > 0 && Array.isArray(b.factory.factoryQ) && slots - b.factory.factoryQ.length >= 2
+  const readTiming = includeProductionTiming && !ordersOnly && factories.some(b =>
+    b.level > 0 && Array.isArray(b.factory.factoryQ) && slots > b.factory.factoryQ.length
     && rowsOf(config, 'BuildingProduceCfg').some(recipe => recipe.buildType === b.type));
-  const monthCards = readTiming ? await get('MonthCardRequest') : null;
+  const monthCards = readTiming && secondLaneConfigured ? await get('MonthCardRequest') : null;
   const serverClock = () => Math.floor((Date.now() + (client.serverClockOffsetMs || 0)) / 1000);
-  const timingEffectsNeeded = secondProductionLane(config, monthCards, serverClock()).until > 0;
-  const effects = (includeInventoryCaps && !ordersOnly) || timingEffectsNeeded ? await get('GameEffectRequest') : null;
+  const effects = (includeInventoryCaps && !ordersOnly) || readTiming ? await get('GameEffectRequest') : null;
+  const heroes = readTiming && rowsOf(config, 'HeroSkillCfg').length
+    ? observedProductionHeroes(client) ?? (await get('AllHeroRequest'))?.heroes : null;
   // RAW_MATERIAL_UPPER_BOUND is the account's current per-material capacity, including bonuses.
   const rawMaterialCap = Array.isArray(effects?.effects) ? effects.effects.find(effect => effect?.id === 16)?.value : null;
+  const baseOrderLimit = rowsOf(config, 'OrderParamCfg').find(row => row.paramName === '订单每日上限')?.paramValue;
+  // WORKER_ORDER_INC (18) adds to the configured limit. An absent effect in a full list means zero bonus.
+  const orderBonus = Array.isArray(effects?.effects) ? effects.effects.find(effect => effect?.id === 18)?.value ?? 0 : null;
   const resFieldInfo = resFields?.info ?? null;
   const vip = rowsOf(config, 'VipLevelCfg').find(row => row.level === player?.vip?.vipLevel);
   const stockBonus = Number(vip?.effects?.find(([effect]) => effect === '加工品存量上限')?.[1] ?? 0);
@@ -471,6 +525,7 @@ export async function surveyWorld(client, protocol, { config = null, player = nu
     player,
     stock,
     stockKnown,
+    factoryInsertions: factoryInsertions(player),
     resourceStockKnown: Array.isArray(resourceList?.list) && resourceList.list.every(entry =>
       Number.isSafeInteger(entry?.res) && Number.isSafeInteger(entry.amount) && entry.amount >= 0),
     have,
@@ -481,7 +536,9 @@ export async function surveyWorld(client, protocol, { config = null, player = nu
     weekOrder,
     cargoOrder,
     cargoOrders,
-    orderOfTheDay: water.orderOfTheDay ?? { orderNum: 0, rewardedNum: 0 },
+    orderOfTheDay: water.orderOfTheDay ?? null,
+    residentOrderLimit: Number.isSafeInteger(baseOrderLimit) && baseOrderLimit > 0 && Number.isSafeInteger(orderBonus) && orderBonus >= 0
+      ? baseOrderLimit + orderBonus : null,
     autoProduceEndTime: water.autoProduceEndTime ?? 0,
     autoProduceForever: water.autoProduceForever === true,
     festivals: Array.isArray(client.festivals)?normalize(client.festivals):null,
@@ -498,7 +555,7 @@ export async function surveyWorld(client, protocol, { config = null, player = nu
     stockCap: baseStockCap > 0 ? baseStockCap + stockBonus : 0,
     rawMaterialCap,
     factorySlots: slots,
-    productionTiming: { monthCards, effects: timingEffectsNeeded ? effects : null, observedDurations: observedProductionDurations(client) },
+    productionTiming: { monthCards, effects, heroes, observedDurations: observedProductionDurations(client) },
     resFields: resFieldInfo ? normalize(resFieldInfo) : null,
     fleets: fleets ? normalize(fleets.fleets ?? []) : null,
     worldOpenLevel: rowsOf(config, 'ModuleOpenCfg').find(r => r.moduleId === '世界')?.playerLevel,
@@ -506,38 +563,47 @@ export async function surveyWorld(client, protocol, { config = null, player = nu
   };
 }
 
-// Equal durations have the same lane occupancy. Keep their original order.
+// Equal durations are interchangeable only when their downstream work is too.
 function* factoryJobOrders(batch) {
   if (batch.length <= 1) { yield batch; return; }
   const seen = new Set();
   for (const job of batch) {
-    if (seen.has(job.seconds)) continue;
-    seen.add(job.seconds);
+    const key = job.handoff ? job.recipe.itemId : job.seconds;
+    if (seen.has(key)) continue;
+    seen.add(key);
     for (const rest of factoryJobOrders(batch.filter(other => other !== job))) yield [job, ...rest];
   }
 }
 
 // Keep all material reservations and the selected quantities. Within one
 // demand priority, a long job may finish sooner if it starts beside a short one.
-function orderFactoryJobs(jobs, building, timing) {
+function orderFactoryJobs(jobs, building, timing, queueState, handoffs) {
   const original = jobs.map(job => job.step);
   if (jobs.length < 2 || !jobs.some(job => job.step.demandDriven) || jobs.some(job => job.step.needsConfirmedBorrow)) return original;
-  const { lanes, finishes: initial, missing } = timing.factoryQueue(building);
-  if (lanes.count < 2 || missing.length) return original;
-  const timed = jobs.map(job => ({ ...job, seconds: timing.factory(job.recipe, { building }).seconds }));
+  const { lanes, finishes: initial, missing } = queueState;
+  if ((lanes.count < 2 && !handoffs) || missing.length) return original;
+  const timed = jobs.map(job => ({ ...job, handoff: handoffs?.get(job.recipe), seconds: timing.factory(job.recipe, { building }).seconds }));
   if (timed.some(job => !job.seconds)) return original;
 
   let finishes = initial;
   const ordered = [];
   function simulate(batch) {
     const available = [...finishes];
-    let done = 0;
+    const downstream = new Map();
+    let done = 0, total = 0;
     for (const job of batch) {
       const lane = nextFactoryLane(available, lanes.expiresAt, job.seconds);
       commitFactoryLane(available, lane);
-      done = Math.max(done, lane.finish);
+      let end = lane.finish;
+      if (job.handoff) {
+        const { building, ready, seconds } = job.handoff;
+        end = Math.max(end, downstream.get(building) ?? ready) + seconds;
+        downstream.set(building, end);
+      }
+      done = Math.max(done, end);
+      total += end;
     }
-    return { batch, available, done };
+    return { batch, available, done, total };
   }
   for (let start = 0; start < timed.length;) {
     let end = start + 1;
@@ -550,7 +616,7 @@ function orderFactoryJobs(jobs, building, timing) {
       const candidates = batch.length <= 6 ? factoryJobOrders(batch) : [[...batch].sort((a, b) => b.seconds - a.seconds)];
       for (const candidate of candidates) {
         const result = simulate(candidate);
-        if (result.done < best.done) best = result;
+        if (result.done < best.done || handoffs && result.done === best.done && result.total < best.total) best = result;
       }
     }
     ordered.push(...best.batch.map(job => job.step));
@@ -558,6 +624,32 @@ function orderFactoryJobs(jobs, building, timing) {
     start = end;
   }
   return ordered;
+}
+
+export function manualResidentOrderDecision(survey, order, config) {
+  if (!order.orderKey) return { status: 'unknown', reason: '无法确认这条居民订单，请刷新后再试' };
+  if (order.refreshTime) return { status: 'refreshing', reason: '订单刷新中，等待新需求' };
+  if (!order.requirements.length || order.requirements.some(r => !r.id || !Number.isSafeInteger(r.num) || r.num <= 0)) {
+    return { status: 'unknown', reason: '尚未收到完整订单需求' };
+  }
+  if (!survey.stockKnown) return { status: 'unknown', reason: '未能读取仓库库存' };
+  if (order.missing.length) {
+    const missing = order.missing.map(({ id, num }) => displayMaterial(config, id) + ' ×' + num);
+    return { status: 'missing', reason: '仓库还缺 ' + missing.join('、') };
+  }
+  return { status: 'ready', reason: '仓库材料已齐，手动提交可使用挂机预留的材料' };
+}
+
+function residentDeliveryAction(order, orderOfTheDay, weeklyBorrowed = [], borrowedText = '') {
+  const label = `交付${order.workerName || '未知居民'}的订单 #${order.index}`;
+  return {
+    kind: 'finishOrder', request: 'FinishWorkerOrderRequest', response: 'FinishWorkerOrderResponse',
+    body: { index: order.index }, costs: order.requirements,
+    counters: { residentOrders: 1 }, counterMinimums: { residentOrders: Number(orderOfTheDay?.orderNum ?? 0) },
+    orderKey: order.orderKey, requirements: order.requirements, workerId: order.workerId, textId: order.textId,
+    weeklyBorrowed,
+    label: label + (order.rewardExp == null ? '' : `（经验 ${order.rewardExp}）`) + (borrowedText ? '；商人订单待补 ' + borrowedText : ''),
+  };
 }
 
 // 计划：收成品 → 竣工 → 建造 → 交单 → 排产 → 余料升级 → 加速。每步都只排「客户端确实会发的请求」。
@@ -572,6 +664,8 @@ export function planWorld(survey, {
   blockedCollectionTypes = settings?.factory?.blockedCollectionTypes,
   usage = { counters: {} },
   extraDemand = [],
+  factoryWaitHistory,
+  checkShortFeeds = true,
 } = {}) {
   const { now, have } = survey;
   // 规划是同步的。运行时检查可能读取磁盘，每种动作在本次规划中只查询一次。
@@ -675,7 +769,7 @@ export function planWorld(survey, {
   }
   // 1. 收成品：工厂走 GainFactoryProduce，非工厂建筑的囤积产物一次性批量收。
   for (const b of survey.factories) {
-    if (enabled('gainFactory') && canCollect(b) && (b.factory.finishedProducts ?? []).length > 0) {
+    if (enabled('gainFactory') && !survey.factoryInsertions?.[b.buildingId]?.flight && canCollect(b) && (b.factory.finishedProducts ?? []).length > 0) {
       for (const item of b.factory.finishedProducts) markHarvest(item.id, Number(item.num));
       actions.push({
         kind: 'gainFactory',
@@ -881,19 +975,7 @@ export function planWorld(survey, {
         borrowedTotals.set(id, (borrowedTotals.get(id) ?? 0) + num);
       }
       for (const r of order.requirements) reserve(r.id, r.num);
-      actions.push({
-        kind: 'finishOrder',
-        request: 'FinishWorkerOrderRequest',
-        response: 'FinishWorkerOrderResponse',
-        body: { index: order.index },
-        costs: order.requirements,
-        counters: { residentOrders: 1 },
-        counterMinimums: { residentOrders: Number(survey.orderOfTheDay?.orderNum ?? 0) },
-        weeklyBorrowed,
-        orderKey: order.orderKey, requirements: order.requirements, workerId: order.workerId, textId: order.textId,
-        label: `交付${label}${order.rewardExp == null ? '' : `（经验 ${order.rewardExp}）`}` +
-          (borrowedText ? '；商人订单待补 ' + borrowedText : ''),
-      });
+      actions.push(residentDeliveryAction(order, survey.orderOfTheDay, weeklyBorrowed, borrowedText));
       residentPlanned++;
       continue;
     }
@@ -975,7 +1057,27 @@ export function planWorld(survey, {
     onSkip: (record, blockers) => notes.push(skipReason(blockers)) }) : null;
   const productionNeeded = id => (detailedNeeds?.get(id)?.num ?? 0) > 0 && (settings?.factory.demandFirst ||
     detailedNeeds.get(id).sources.some(source => independentSources.includes(source)));
-  const recipeRank = row => productionNeeded(row.itemId) ? detailedNeeds.get(row.itemId).priority : Infinity;
+  const incoming = factoryIncomingStock(survey.factories);
+  const committedInputs = new Map();
+  // A forecast can hold completed demand in the warehouse; those units still take up space.
+  const warehouseCount = survey.warehouseCount ?? have;
+  const occupiedStock = id => warehouseCount(id) + (incoming.get(id) ?? 0) - (borrowedTotals.get(id) ?? 0);
+  const projectedStock = id => occupiedStock(id) - (committedInputs.get(id) ?? 0);
+  const roomForRecipe = row => Math.max(0, survey.stockCap - projectedStock(row.itemId));
+  const stockTarget = Math.min(settings?.factory.keepStock ?? survey.stockCap, survey.stockCap);
+  // The factory source is a stock target, including its expanded ingredients.
+  // It never grants the order-only exemption from the per-product waterline.
+  const itemOrderRank = id => {
+    if (!productionNeeded(id)) return Infinity;
+    const needs = detailedNeeds.get(id).productionBySource;
+    const rank = demandPriority.findIndex(source => source !== 'factory' && needs[source] > 0);
+    return rank < 0 ? Infinity : rank;
+  };
+  const orderNeedsProduction = id => Number.isFinite(itemOrderRank(id));
+  const stockIndex = demandPriority.indexOf('factory');
+  // With no lower tier, the existing spare-capacity pass already handles stock.
+  const stockRank = settings?.factory.demandFirst && stockIndex >= 0 && stockIndex < demandPriority.length - 1 ? stockIndex : Infinity;
+  const recipeRank = row => Math.min(itemOrderRank(row.itemId), projectedStock(row.itemId) < stockTarget ? stockRank : Infinity);
   // The factory phase runs before pet feeding. Keep complete feed batches out
   // of lower-priority recipes so stocking the factory cannot starve the pet.
   const petRank = demandPriority.indexOf('petAdvance');
@@ -1026,50 +1128,187 @@ export function planWorld(survey, {
       });
     }
   }
-  const incoming = factoryIncomingStock(survey.factories);
-  const projectedStock = id => have(id) + (incoming.get(id) ?? 0) - (borrowedTotals.get(id) ?? 0);
   const replacementJobs = new Map();
   const factoryReasons = new Map();
   const timing = createProductionTiming({ config, ...survey.productionTiming, serverNow: survey.serverNow ?? now });
+  const dispatch = createFactoryDispatch(survey, timing, canCollect, rowsOf(config, 'FarmlandPlantCfg'));
+  const simulateNative = settings?.factory.strategy === 'nativeSimulation';
+  const smart = !simulateNative && settings?.factory.demandFirst === true;
+  const revisit = settings?.factory.checkEverySeconds ?? 30;
+  const nextWaits = new Map();
+  // Each source tier allocates shared inputs across all factories.
+  const priorities = demandPriority.map((_, i) => i).filter(i => demandPriority[i] === 'factory' ? i === stockRank && stockTarget > 0
+    : [...detailedNeeds.values()].some(need => (need.productionBySource[demandPriority[i]] ?? 0) > 0));
+  const isNative = b => b.factory.autoProductId && (survey.autoProduceForever || survey.autoProduceEndTime > (survey.serverNow ?? now));
+  const fullForInsertion = id => survey.stockCap > 0 && survey.stockKnown !== false
+    && warehouseCount(id) + (incoming.get(id) ?? 0) >= survey.stockCap;
+  const facilities = survey.factories.filter(b => {
+    if (!(b.level > 0) || blockedFactory(b)) return false;
+    const entry = survey.factoryInsertions?.[b.buildingId];
+    if (!entry) return true;
+    const time = survey.serverNow ?? now;
+    const canMake = id => insertionRecipeReady(produceRows.find(row => row.itemId === id), b.level, survey.festivals, time, free);
+    return !isNative(b) && insertionYieldsToProduction(entry, time, fullForInsertion, canMake);
+  });
+  const usableRows = new Set(facilities.flatMap(b => produceRows.filter(r => r.buildType === b.type && r.unlockLevel <= b.level)));
+  const downstream = new Map();
+  for (const row of usableRows) {
+    if (!orderNeedsProduction(row.itemId)) continue;
+    for (const [item] of row.costItem ?? []) {
+      if (!downstream.has(item)) downstream.set(item, []);
+      downstream.get(item).push(row);
+    }
+  }
+  const tailTime = new Map();
+  function remainingPath(row, seen = new Set()) {
+    if (tailTime.has(row)) return tailTime.get(row);
+    if (seen.has(row)) return 0;
+    const costs = (downstream.get(row.itemId) ?? []).filter(next => recipeRank(next) === recipeRank(row)).map(next => {
+      const times = facilities.filter(b => b.type === next.buildType && b.level >= next.unlockLevel).map(b => dispatch.seconds(b, next));
+      return Math.min(...times) + remainingPath(next, new Set([...seen, row]));
+    });
+    const tail = Math.max(0, ...costs);
+    tailTime.set(row, tail);
+    return tail;
+  }
+  for (const row of usableRows) remainingPath(row);
+  // When many ordinary factories are simultaneously waiting on unknown inputs,
+  // let the lower-ranked lines with the shortest runnable fillers resume first.
+  const earlyFallback = new Set();
+  if (smart && priorities.length) {
+    const ordinary = facilities.filter(b => !isNative(b) && produceRows.some(r => r.buildType === b.type && r.unlockLevel <= b.level));
+    const blocked = [];
+    for (const b of ordinary) {
+      if (dispatch.queues.get(b).count) continue;
+      const local = [...usableRows].filter(r => r.buildType === b.type && r.unlockLevel <= b.level);
+      const rank = Math.min(...local.map(recipeRank));
+      if (!Number.isFinite(rank) || !local.filter(r => recipeRank(r) === rank).every(r => !Number.isFinite(dispatch.readyAt(r, recipeFree)))) continue;
+      const backups = local.filter(r => recipeRank(r) > rank && occupiedStock(r.itemId) < survey.stockCap
+        && (orderNeedsProduction(r.itemId) || projectedStock(r.itemId) < stockTarget)
+        && (r.costItem ?? []).every(([id,n]) => recipeFree(r,id) >= n));
+      if (backups.length) blocked.push({ b, rank, seconds: Math.min(...backups.map(r => dispatch.seconds(b,r))) });
+    }
+    if (blocked.length >= 2 && blocked.length * 2 >= ordinary.length) {
+      blocked.sort((a,b) => b.rank - a.rank || a.seconds - b.seconds || a.b.buildingId.localeCompare(b.b.buildingId));
+      const working = ordinary.filter(b => dispatch.queues.get(b).count > 0).length;
+      const release = Math.min(Math.ceil(blocked.length / 2), Math.max(0, Math.ceil(ordinary.length / 2) - working));
+      for (const row of blocked.slice(0, release)) earlyFallback.add(row.b);
+    }
+  }
+  // A verified one-to-one feeder batch can be compared across two stages.
+  // For joins, missing co-inputs or ambiguous machines retain the normal order.
+  function batchHandoffs(b, jobs, tier) {
+    if (!smart || !settings.factory.gain || !canCollect(b) || !Number.isFinite(tier) || jobs.length < 2 || jobs.length > 6
+      || dispatch.queues.get(b).lanes.count !== 1) return;
+    const handoffs = new Map(), counts = new Map(), materials = new Map();
+    for (const { recipe } of jobs) {
+      const children = (downstream.get(recipe.itemId) ?? []).filter(row => recipeRank(row) === tier);
+      if (children.length !== 1) return;
+      const child = children[0];
+      const targets = facilities.filter(f => f.type === child.buildType && f.level >= child.unlockLevel);
+      if (targets.length !== 1 || targets[0] === b || isNative(targets[0])) return;
+      const target = targets[0], queue = dispatch.queues.get(target);
+      if (queue.lanes.count !== 1 || queue.missing.length || recipeFree(child, recipe.itemId) > 0
+        || incoming.get(recipe.itemId) > jobs.filter(job => job.recipe === recipe).length) return;
+      const count = (counts.get(child) ?? 0) + 1;
+      if (count > (detailedNeeds.get(child.itemId)?.productionBySource[demandPriority[tier]] ?? 0)) return;
+      counts.set(child, count);
+      for (const [id, amount] of child.costItem) {
+        if (id === recipe.itemId) { if (amount !== 1) return; continue; }
+        const required = (materials.get(id) ?? 0) + amount;
+        if (recipeFree(child, id) < required) return;
+        materials.set(id, required);
+      }
+      handoffs.set(recipe, { building: target, ready: queue.finishes[0], seconds: dispatch.seconds(target, child) });
+    }
+    return handoffs.size > 1 ? handoffs : undefined;
+  }
   const constructionGap = id => buildMaterials.has(id)
     ? Math.max(0, buildMaterials.get(id).num - free(id) - (incoming.get(id) ?? 0)) : 0;
-  for (const b of survey.factories) {
-    if (!enabled('startProduce')) break;
-    if (!(b.level > 0)) continue;
-    if (blockedFactory(b)) { factoryReasons.set(b.buildingId, '已在设置中禁用此工厂'); continue; }
-    if (b.factory.autoProductId && (survey.autoProduceForever || survey.autoProduceEndTime > (survey.serverNow ?? now))) {
-      const desired = settings?.factory.cooperateNative ? produceRows.filter(row =>
-        row.buildType === b.type && row.unlockLevel <= b.level && productionNeeded(row.itemId) && projectedStock(row.itemId) < survey.stockCap) : [];
+  function planFactory(b, tier, stockouts, shortFeed = false) {
+    if (isNative(b)) {
+      const desired = !simulateNative && settings?.factory.cooperateNative ? produceRows.filter(row =>
+        row.buildType === b.type && row.unlockLevel <= b.level && (productionNeeded(row.itemId) || Number.isFinite(recipeRank(row)))
+        && projectedStock(row.itemId) < (orderNeedsProduction(row.itemId) ? survey.stockCap : stockTarget)) : [];
       const choices = desired.filter(row => (row.costItem ?? []).every(([id,n]) => recipeFree(row, id) >= n));
       const shortages=desired.filter(row=>!choices.includes(row)).map(row=>name(row.itemId)+'：'+(row.costItem??[]).filter(([id,n])=>recipeFree(row,id)<n).map(([id,n])=>name(id)+'需'+n+'，可用'+recipeFree(row,id)+'，缺'+(n-recipeFree(row,id))).join('；'));
       if(shortages.length)notes.push(buildingName(b)+'原生协同等待原料：'+shortages.join('；'));
       const bFactoryTarget = b.factory.autoProductId;
-      choices.sort((a,b) => detailedNeeds.get(a.itemId).priority - detailedNeeds.get(b.itemId).priority ||
-        Number(b.itemId === bFactoryTarget) - Number(a.itemId === bFactoryTarget) || detailedNeeds.get(b.itemId).num - detailedNeeds.get(a.itemId).num);
+      choices.sort((a,b) => recipeRank(a) - recipeRank(b) ||
+        Number(b.itemId === bFactoryTarget) - Number(a.itemId === bFactoryTarget) || (detailedNeeds.get(b.itemId)?.num ?? 0) - (detailedNeeds.get(a.itemId)?.num ?? 0));
       const best = choices[0];
       if (best && best.itemId !== b.factory.autoProductId) {
         actions.push({kind:'startProduce',request:'SetFactoryAutoProduceRequest',response:null,
           body:{buildingId:b.buildingId,productId:best.itemId},previousProduct:b.factory.autoProductId,eligibilityKey:factoryRecipeAvailability(best,survey.festivals,survey.serverNow??now).signature+':'+b.level,
-          demandSources:detailedNeeds.get(best.itemId).sources,
+          demandSources:recipeRank(best) === stockIndex ? ['factory'] : detailedNeeds.get(best.itemId).sources,
           label:buildingName(b)+'：原生自动目标改为'+name(best.itemId)+'，保留当前生产队列',costs:[]});
         factoryReasons.set(b.buildingId,'按需求调整原生自动目标，当前队列继续完成');
-      } else factoryReasons.set(b.buildingId, '游戏自动生产 '+name(b.factory.autoProductId)+(settings?.factory.cooperateNative?(shortages.length?'；等待所需原料':'；当前目标无需调整或需求已在产'):'；需求协同未开启'));
-      continue;
+      } else factoryReasons.set(b.buildingId, '游戏自动生产 '+name(b.factory.autoProductId)+(!simulateNative && settings?.factory.cooperateNative?(shortages.length?'；等待所需原料':'；当前目标无需调整或需求已在产'):'；需求协同未开启'));
+      return;
     }
-    if (settings && !settings.factory.produce) {factoryReasons.set(b.buildingId,'普通排产关闭；原生协同只调整已开启的自动目标');continue;}
-    const queue = b.factory.factoryQ ?? [];
-    if (queue.length >= survey.factorySlots) continue;
+    if (settings && !settings.factory.produce) {factoryReasons.set(b.buildingId,'普通排产关闭；原生协同只调整已开启的自动目标');return;}
+    const state = dispatch.queues.get(b);
+    const slotLimit = survey.factoryInsertions?.[b.buildingId]
+      ? Math.min(survey.factorySlots, b.factory.factoryQ.length + 1) : survey.factorySlots;
+    if (state.count >= slotLimit) return;
+    const initialFinishes = [...state.finishes];
+    const localRows = produceRows.filter(row => row.buildType === b.type && row.unlockLevel <= b.level);
+    if (!localRows.length) {
+      factoryReasons.set(b.buildingId, unavailableRecipes.get(b.type) || '当前等级没有已解锁的生产配方');
+      return;
+    }
+    const inTier = row => recipeRank(row) === tier && (!stockouts || stockouts.get(row.itemId) > 0);
+    if (!localRows.some(inTier)) return;
+    const higher = [...usableRows].filter(row => recipeRank(row) < tier);
+    const protectedInputs = new Map();
+    for (const row of higher) {
+      // Reserve one runnable batch for a blocked higher-priority recipe.
+      if (stockouts && !roomForRecipe(row)) continue;
+      for (const [item, n] of row.costItem ?? []) protectedInputs.set(item, (protectedInputs.get(item) ?? 0) + n);
+    }
     const jobs = [];
-    for (let slot = queue.length; slot < survey.factorySlots; slot++) {
+    for (let slot = state.count; slot < slotLimit; slot++) {
+      const waiting = higher.filter(row => row.buildType === b.type && row.unlockLevel <= b.level)
+        .flatMap(row => {
+          // A full output cannot start until someone spends it. Ingredients
+          // being on hand do not establish a release time for that job.
+          const room = stockouts ? roomForRecipe(row) : Infinity;
+          const at = room ? dispatch.readyAt(row, recipeFree) : Infinity;
+          const rank = recipeRank(row);
+          const wanted = rank === stockRank && Number.isFinite(rank) ? Math.max(0, stockTarget - projectedStock(row.itemId))
+            : detailedNeeds.get(row.itemId)?.productionBySource[demandPriority[rank]] ?? 0;
+          const quantity = Math.min(wanted, room || 1);
+          let waited = 0;
+          if (!Number.isFinite(at)) {
+            const time = survey.serverNow ?? now;
+            const missing = room ? row.costItem.filter(([id, n]) => recipeFree(row, id) < n).map(([id]) => id) : 'capacity';
+            const key = JSON.stringify([b.buildingId, row.itemId, missing]);
+            const since = Math.min(time, factoryWaitHistory?.get(key) ?? time);
+            nextWaits.set(key, since);
+            waited = time - since;
+          }
+          const wave = { row, at, quantity, waited, earlyFallback: earlyFallback.has(b) };
+          if (Number.isFinite(at) && state.lanes.count > 1 && quantity > 1) {
+            const secondAt = dispatch.readyAt(row, recipeFree, 2);
+            return Number.isFinite(secondAt) ? [{ ...wave, quantity: 1 }, { row, at: secondAt, quantity: 1 }]
+              : [{ ...wave, quantity: 1 }];
+          }
+          return [wave];
+        }).sort((a, other) => (Number.isFinite(a.at) ? a.at : (survey.serverNow ?? now) + revisit)
+          - (Number.isFinite(other.at) ? other.at : (survey.serverNow ?? now) + revisit) || recipeRank(a.row) - recipeRank(other.row));
       const reasons = [];
-      const cand = produceRows.filter(row => {
-        if (row.buildType !== b.type || row.unlockLevel > b.level) return false;
+      const cand = localRows.filter(row => {
+        if (!inTier(row)) return false;
         const id = row.itemId;
         let reason;
-        if (projectedStock(id) >= survey.stockCap)
+        if (occupiedStock(id) >= survey.stockCap)
           reason = '库存、待收和在产合计已达 ' + survey.stockCap;
-        else if (settings && projectedStock(id) >= settings.factory.keepStock && !productionNeeded(id))
-          reason = '已达到设置的备货水位 ' + settings.factory.keepStock;
+        else if (settings && projectedStock(id) >= stockTarget && !orderNeedsProduction(id))
+          reason = '已达到有效备货水位 ' + stockTarget;
+        else if (!shortFeed && smart && (waiting.length || tier === Infinity) && !dispatch.fits(b, row, waiting, revisit))
+          reason = '为下一次需求派单保留生产时间';
+        else if ((row.costItem ?? []).some(([item,n]) => protectedInputs.has(item) && recipeFree(row,item) - n < protectedInputs.get(item)))
+          reason = '共享原料已为更高优先级的生产预留';
         else {
           const missing = (row.costItem ?? []).filter(([item, n]) => recipeFree(row, item) < n);
           if (missing.length) reason = missing.map(([item, n]) => name(item) + '需要 ' + n + '，可用 ' + recipeFree(row, item)).join('；');
@@ -1081,25 +1320,44 @@ export function planWorld(survey, {
         factoryReasons.set(b.buildingId, reasons.join('；') || unavailableRecipes.get(b.type) || '当前等级没有已解锁的生产配方');
         break;
       }
-      const compareCustom = (a, b) => recipeRank(a) - recipeRank(b)
-        || a.produceTime - b.produceTime
-        || (settings.factory.demandFirst ? (detailedNeeds.get(b.itemId)?.num ?? 0) - (detailedNeeds.get(a.itemId)?.num ?? 0) : 0)
-        || projectedStock(a.itemId) - projectedStock(b.itemId);
+      // At the same demand tier, give a waiting downstream line its first
+      // usable batch before filling all six slots for an already supplied line.
+      const feedsIdle = new Set();
+      if (smart && settings.factory.gain && canCollect(b) && Number.isFinite(tier) && cand.length > 1) for (const row of cand) {
+        for (const child of downstream.get(row.itemId) ?? []) {
+          if (recipeRank(child) !== tier) continue;
+          const missing = child.costItem.filter(([id, n]) => recipeFree(child, id) + (incoming.get(id) ?? 0) < n);
+          if (missing.length !== 1 || missing[0][0] !== row.itemId) continue;
+          if (facilities.some(f => f.type === child.buildType && f !== b && !isNative(f) && f.level >= child.unlockLevel
+            && dispatch.queues.get(f).count < dispatch.queues.get(f).lanes.count)) {
+            feedsIdle.add(row);
+            break;
+          }
+        }
+      }
+      const compareCustom = (a, other) => Number(feedsIdle.has(other)) - Number(feedsIdle.has(a))
+        || (tailTime.get(other) ?? 0) - (tailTime.get(a) ?? 0)
+        || dispatch.seconds(b, a) - dispatch.seconds(b, other)
+        || (settings.factory.demandFirst ? (detailedNeeds.get(other.itemId)?.num ?? 0) - (detailedNeeds.get(a.itemId)?.num ?? 0) : 0)
+        || projectedStock(a.itemId) - projectedStock(other.itemId);
       const best = cand.sort(settings ? compareCustom : (a, b2) => (weeklyGap.get(b2.itemId) ?? 0) - (weeklyGap.get(a.itemId) ?? 0)
         || (cargoGap.get(b2.itemId) ?? 0) - (cargoGap.get(a.itemId) ?? 0)
         || (demand.get(b2.itemId) ?? 0) - (demand.get(a.itemId) ?? 0)
         || constructionGap(b2.itemId) - constructionGap(a.itemId)
         || a.produceTime - b2.produceTime
         || projectedStock(a.itemId) - projectedStock(b2.itemId))[0];
-      for (const [id, n] of best.costItem ?? []) reserve(id, n);
+      for (const [id, n] of best.costItem ?? []) {
+        reserve(id, n);
+        committedInputs.set(id, (committedInputs.get(id) ?? 0) + n);
+      }
       const need = demand.get(best.itemId) ?? 0;
       const weeklyNeed = weeklyGap.get(best.itemId) ?? 0;
       const cargoNeed = cargoGap.get(best.itemId) ?? 0;
       const buildNeed = constructionGap(best.itemId);
-      const forDemand = !settings || productionNeeded(best.itemId);
+      const forDemand = !settings || orderNeedsProduction(best.itemId) && tier !== stockIndex;
       const priority = settings ? recipeRank(best) : [weeklyNeed, cargoNeed, need, buildNeed].findIndex(gap => gap > 0);
       const demandSources = forDemand ? Object.entries(detailedNeeds?.get(best.itemId)?.productionBySource ?? {})
-        .filter(([, quantity]) => quantity > 0).map(([source]) => source) : [];
+        .filter(([source, quantity]) => source !== 'factory' && quantity > 0).map(([source]) => source) : [];
       const projected = projectedStock(best.itemId);
       // The account may already be at its storage limit. Only run a dependent
       // job after enough resident deliveries have actually freed that stock.
@@ -1114,8 +1372,9 @@ export function planWorld(survey, {
       incoming.set(best.itemId, (incoming.get(best.itemId) ?? 0) + 1);
       if (detailedNeeds?.has(best.itemId)) {
         const need = detailedNeeds.get(best.itemId);
+        // A unit made for the waterline can also fill an outstanding order.
+        const source = demandPriority[itemOrderRank(best.itemId)] ?? demandPriority.find(source => (need.productionBySource[source] ?? 0) > 0);
         need.num = Math.max(0, need.num - 1);
-        const source = demandPriority.find(source => (need.productionBySource[source] ?? 0) > 0);
         if (source) need.productionBySource[source]--;
         need.priority = demandPriority.findIndex(source => (need.productionBySource[source] ?? 0) > 0);
         if (need.priority < 0) need.priority = Infinity;
@@ -1134,14 +1393,128 @@ export function planWorld(survey, {
         eligibilityKey:factoryRecipeAvailability(best,survey.festivals,survey.serverNow??now).signature+':'+b.level,
         costs: (best.costItem ?? []).map(([id, num]) => ({ id, num: Number(num) })),
         ...(needsConfirmedBorrow ? { needsConfirmedBorrow } : {}),
+        factoryStrategy: 'smart',
         demandDriven: settings ? forDemand : !!(need || weeklyNeed || cargoNeed || buildNeed),
         ...(demandSources.length ? { demandSources } : {}),
         displayFactory, displayProduct,
-        label: `${displayFactory}安排生产${displayProduct} 1 件，耗时 ${durationText(best.produceTime)}。${reason}`,
+        label: `${displayFactory}安排生产${displayProduct} 1 件，预计耗时 ${durationText(dispatch.seconds(b, best))}。${reason}`,
       };
-      jobs.push({ step, recipe: best, priority });
+      jobs.push({ step, recipe: best, priority, arrival: dispatch.commit(b, best) });
+      if (stockouts) {
+        stockouts.set(best.itemId, stockouts.get(best.itemId) - 1);
+        factoryReasons.delete(b.buildingId);
+        break;
+      }
     }
-    actions.push(...orderFactoryJobs(jobs, b, timing));
+    const ordered = higher.some(row => row.buildType === b.type) ? jobs.map(job => job.step)
+      : orderFactoryJobs(jobs, b, timing, { ...state, finishes: initialFinishes }, batchHandoffs(b, jobs, tier));
+    if (ordered.some((step, index) => step !== jobs[index].step)) {
+      state.finishes = initialFinishes;
+      for (const step of ordered) {
+        const job = jobs.find(entry => entry.step === step);
+        const lane = nextFactoryLane(state.finishes, state.lanes.expiresAt, dispatch.seconds(b, job.recipe));
+        commitFactoryLane(state.finishes, lane);
+        if (job.arrival) job.arrival.at = lane.finish;
+      }
+    }
+    actions.push(...ordered);
+  }
+  if (enabled('startProduce')) {
+    for (const b of survey.factories.filter(blockedFactory)) factoryReasons.set(b.buildingId, '已在设置中禁用此工厂');
+    for (const b of facilities.filter(isNative)) planFactory(b);
+    const ordinary = facilities.filter(b => !isNative(b));
+    if (simulateNative) {
+      const picks = settings.factory.produce ? simulateNativeFactoryStarts({
+        buildings: ordinary, recipes: produceRows, targets: settings.factory.simulatedTargets, timing,
+        now: survey.serverNow ?? now, cap: survey.stockCap, slots: survey.factorySlots, insertions:survey.factoryInsertions,
+        available: id => free(id) - (feedStock.get(id) ?? 0), owned: id => warehouseCount(id) + (incoming.get(id) ?? 0),
+      }) : [];
+      for (const { building, row, seconds, primary, laneUntil } of picks) {
+        for (const [id, n] of row.costItem) reserve(id, n);
+        incoming.set(row.itemId, (incoming.get(row.itemId) ?? 0) + 1);
+        credit(row.itemId, 1);
+        const displayFactory = buildingName(building), displayProduct = name(row.itemId);
+        actions.push({ kind: 'startProduce', request: 'StartFactoryProduceRequest', response: null,
+          body: { buildingId: building.buildingId, productId: row.itemId }, factoryStrategy: 'nativeSimulation',
+          simulatedTargetsKey: JSON.stringify(settings.factory.simulatedTargets ?? []), demandDriven: false,
+          simulatedQueueKey: simulatedFactoryQueueKey(building.factory),
+          ...(laneUntil != null ? { latestStart:laneUntil-seconds } : {}),
+          eligibilityKey: factoryRecipeAvailability(row,survey.festivals,survey.serverNow??now).signature+':'+building.level,
+          costs: row.costItem.map(([id,num]) => ({id,num})), displayFactory, displayProduct,
+          label: displayFactory + '模拟原生生产' + displayProduct + '（' + (primary ? '主产物' : '候补') + '），预计耗时 ' + durationText(seconds) });
+      }
+    } else {
+      planSmartFactories(ordinary);
+    }
+    if (factoryWaitHistory) {
+      factoryWaitHistory.clear();
+      for (const [key, since] of nextWaits) factoryWaitHistory.set(key, since);
+    }
+  }
+
+  function planSmartFactories(ordinary) {
+    if (checkShortFeeds && smart && settings.factory.produce && enabled('gainFactory')) {
+      const feed = shortFactoryFeed({
+        idle: ordinary.filter(b => dispatch.queues.get(b).count === 0 && canCollect(b)),
+        recipes: [...usableRows], rank: recipeRank, incoming, free: recipeFree, seconds: dispatch.seconds, revisit, slots: survey.factorySlots,
+        room: row => Math.min(roomForRecipe(row), orderNeedsProduction(row.itemId) ? Infinity : Math.max(0,stockTarget-projectedStock(row.itemId))),
+        defaultHeads() {
+          const baseline = planWorld(survey, { config, allowSpeedUp, allowReroll, minOrderExp, maxUpgrades,
+            enabled, settings, blockedCollectionTypes, usage, extraDemand, factoryWaitHistory:new Map(factoryWaitHistory), checkShortFeeds:false });
+          const heads = new Map();
+          for (const step of baseline.actions) if (step.request === 'StartFactoryProduceRequest' && !heads.has(step.body.buildingId))
+            heads.set(step.body.buildingId,step.body.productId);
+          return heads;
+        },
+      });
+      if (feed) {
+        const shortage = new Map([[feed.row.itemId,feed.units]]);
+        for (let i=0; i<feed.units; i++) {
+          const before = actions.length;
+          planFactory(feed.building,recipeRank(feed.row),shortage,true);
+          if (actions.length === before) break;
+        }
+      }
+    }
+    for (const tier of priorities) {
+      const pathByFactory = new Map(ordinary.map(b => [b, Math.max(-1, ...produceRows.filter(row =>
+        row.buildType === b.type && row.unlockLevel <= b.level && recipeRank(row) === tier).map(row => tailTime.get(row) ?? 0))]));
+      for (const b of [...ordinary].sort((a,b) => pathByFactory.get(b) - pathByFactory.get(a))) planFactory(b, tier);
+    }
+    // A downstream booking can expose a replenishment gap at a factory we
+    // already visited. Each successful pass consumes at least one free slot.
+    let before;
+    do {
+      before = actions.length;
+      for (const b of ordinary) planFactory(b, Infinity);
+    } while (smart && actions.length > before);
+    // Recheck genuinely idle machines after the main allocations. Include
+    // the missing ingredients of one batch, even when their stock is nonzero.
+    if (smart && settings.factory.produce && (stockTarget > 0 || priorities.length)) {
+      const idle = ordinary.filter(b => dispatch.queues.get(b).count === 0);
+      const ordinaryRecipes = new Map([...usableRows].filter(row =>
+        ordinary.some(b => b.type === row.buildType && b.level >= row.unlockLevel)).map(row => [row.itemId, row]));
+      const stockouts = new Map();
+      function traceShortage(row, quantity) {
+        const previous = stockouts.get(row.itemId) ?? 0;
+        stockouts.set(row.itemId, Math.max(previous, quantity));
+        if (previous) return;
+        for (const [id, n] of row.costItem ?? []) {
+          const supplier = ordinaryRecipes.get(id);
+          const shortage = n - recipeFree(row, id) - (incoming.get(id) ?? 0);
+          if (supplier && shortage > 0) traceShortage(supplier, shortage);
+        }
+      }
+      for (const row of ordinaryRecipes.values()) {
+        if ((stockTarget > 0 || orderNeedsProduction(row.itemId)) && projectedStock(row.itemId) <= 0
+          && idle.some(b => b.type === row.buildType && b.level >= row.unlockLevel)) {
+          traceShortage(row, 1);
+        }
+      }
+      if (stockouts.size) for (const tier of [...priorities, Infinity]) {
+        for (const b of idle) if (!dispatch.queues.get(b).count) planFactory(b, tier, stockouts);
+      }
+    }
   }
 
   // 6. 余料升级建筑：把订单与排产占用的材料扣掉之后再比升级消耗，按人口需求升序（便宜的先生效）。
@@ -1314,6 +1687,7 @@ export function settingDemands(survey, config, records, priority, {
     const crop = crops.get(b.farm?.productId);
     if (crop) incoming.set(crop.id, (incoming.get(crop.id) ?? 0) + crop.produceNum);
   }
+  const speedDemand = speedQuota && settings?.factory.speedUpSources.length ? new Map() : null;
   const add = (source, id, count, seen = new Set()) => {
     if (!id || !Number.isFinite(count) || count <= 0 || seen.has(id)) return;
     const previous = result.get(id);
@@ -1324,12 +1698,10 @@ export function settingDemands(survey, config, records, priority, {
     const immediate = Math.max(0, unfilled - (previous?.unfilled ?? 0));
     const productionBySource = { ...previous?.productionBySource };
     if (extra > 0) productionBySource[source] = (productionBySource[source] ?? 0) + extra;
-    // Stock and finished goods have already covered earlier demands. Only the
-    // part covered by the existing queue can justify speeding up a slot.
-    if (speedQuota && immediate > extra && settings?.factory.speedUpSources.includes(source)) {
-      const queued = speedQuota.get(id) ?? new Map();
-      queued.set(source, (queued.get(source) ?? 0) + immediate - extra);
-      speedQuota.set(id, queued);
+    if (speedDemand && incoming.has(id)) {
+      if (!speedDemand.has(id)) speedDemand.set(id, new Map());
+      const requested = speedDemand.get(id);
+      requested.set(source, (requested.get(source) ?? 0) + count);
     }
     result.set(id, { required, unfilled, num, priority: Math.min(previous?.priority ?? Infinity, extra > 0 ? priority.indexOf(source) : Infinity),
       sources: [...new Set([...(previous?.sources ?? []), ...(immediate > 0 ? [source] : [])])], productionBySource });
@@ -1338,7 +1710,10 @@ export function settingDemands(survey, config, records, priority, {
     if (crop?.produceNum > 0 && extra > 0) add(source, crop.material[0], Math.ceil(extra / crop.produceNum) * crop.material[1], new Set([...seen,id]));
   };
   const checkProduction = eligibility ?? (settings ? worldProductionEligibility(survey, config, settings) : null);
-  const orderedRecords = priority.flatMap(source => records.filter(row => row.source === source)).filter(record => {
+  // Attribute real shortages first. Stock is a target for the same goods, not
+  // another delivery. The dispatcher applies its configured rank at selection.
+  const stockLast = [...priority.filter(source => source !== 'factory'), ...priority.filter(source => source === 'factory')];
+  const orderedRecords = stockLast.flatMap(source => records.filter(row => row.source === source)).filter(record => {
     if (selectedOrders.has(record)) return true;
     const blockers = checkProduction?.(record.requirements ?? [], { reserve: true }) ?? [];
     if (blockers.length) onSkip(record, blockers);
@@ -1374,6 +1749,20 @@ export function settingDemands(survey, config, records, priority, {
       missingReserve.delete(item.id);
     }
     for (const [id, count] of missingReserve) add(record.source, id, count);
+  }
+  // Allocate already queued units once, in the user's order. Stock top-ups
+  // and orders can both request the same item with different speed-up flags.
+  for (const [id, requested] of speedDemand ?? []) {
+    let stock = survey.have(id) + (finished.get(id) ?? 0), queued = incoming.get(id);
+    for (const source of priority) {
+      const count = requested.get(source) ?? 0;
+      const fromStock = Math.min(stock, count), fromQueue = Math.min(queued, count - fromStock);
+      stock -= fromStock; queued -= fromQueue;
+      if (fromQueue > 0 && settings.factory.speedUpSources.includes(source)) {
+        if (!speedQuota.has(id)) speedQuota.set(id, new Map());
+        speedQuota.get(id).set(source, fromQueue);
+      }
+    }
   }
   return result;
 }
@@ -1446,22 +1835,27 @@ export async function runWorldRound(client, protocol, plan, {
 // A harvest earlier in this round can complete the weekly order. Do not spend
 // its stock based solely on a plan that was made before the harvest.
 async function confirmResidentOrder(client, protocol, step, config, player, cargoEnabled, settings, usage) {
-  if (!config || !player) return { reason: '无法复核商人订单和贸易港预留' };
-  const includeCargo = cargoEnabled();
-  const survey = await surveyWorld(client, protocol, { config, player, ordersOnly: true, includeCargo });
-  if (survey.orderCheckError) return { reason: survey.orderCheckError };
+  if (!player) return { reason: '无法确认交单账号' };
+  if (!step.manualCheck && !config) return { reason: '无法复核商人订单和贸易港预留' };
+  const includeCargo = !step.manualCheck && cargoEnabled();
+  const survey = await surveyWorld(client, protocol, { config, player, ordersOnly: true, includeWeekOrder: !step.manualCheck, includeCargo });
   const order = survey.orders.find(row => row.index === step.body.index);
   if (!order || (step.orderKey && order.orderKey !== step.orderKey)) return { reason: '这条居民订单已刷新或已处理，请查看当前订单' };
-  if (!step.manualCheck && (order.workerId !== step.workerId || order.textId !== step.textId ||
+  if (step.manualCheck) {
+    const decision = manualResidentOrderDecision(survey, order, config);
+    return decision.status === 'ready' ? { action: residentDeliveryAction(order, survey.orderOfTheDay) } : { reason: decision.reason };
+  }
+  if (survey.orderCheckError) return { reason: survey.orderCheckError };
+  if (order.workerId !== step.workerId || order.textId !== step.textId ||
     order.requirements.length !== step.requirements.length ||
-    !order.requirements.every(item => step.requirements.some(old => item.id === old.id && item.num === old.num)))) {
+    !order.requirements.every(item => step.requirements.some(old => item.id === old.id && item.num === old.num))) {
     return { reason: '订单需求已刷新，留待下一轮重新安排' };
   }
-  const fresh = planWorld({ ...survey, orders: [order] }, { config, enabled: kind => kind === 'finishOrder', settings: step.manualCheck ? null : settings, usage });
+  const fresh = planWorld({ ...survey, orders: [order] }, { config, enabled: kind => kind === 'finishOrder', settings, usage });
   const current = fresh.actions.find(action => action.kind === 'finishOrder');
   if (!current) return { reason: fresh.orderDecisions[0].reason };
-  if ((!includeCargo && cargoEnabled()) || (!step.manualCheck && current.weeklyBorrowed.some(item =>
-    item.num > (step.weeklyBorrowed.find(old => old.id === item.id)?.num ?? 0)))) {
+  if ((!includeCargo && cargoEnabled()) || current.weeklyBorrowed.some(item =>
+    item.num > (step.weeklyBorrowed.find(old => old.id === item.id)?.num ?? 0))) {
     return { reason: '订单预留已变化，请重新核对库存' };
   }
   return { action: current };
@@ -1495,7 +1889,7 @@ export async function rerollResidentOrder(client,protocol,{index,orderKey,config
  }catch(error){if(error.prompt&&error.request==='DenyOrderRequest')ledger.cancel(ticket);throw error;}
 }
 
-export async function submitResidentOrder(client, protocol, { index, orderKey, config, player, cargoEnabled = () => false, enabled = () => true }) {
+export async function submitResidentOrder(client, protocol, { index, orderKey, config, player, enabled = () => true }) {
   if (!Number.isSafeInteger(index) || index < 0 || index > 2147483647 || typeof orderKey !== 'string' || !orderKey) {
     throw new Error('请从当前居民订单列表中选择要交付的一单');
   }
@@ -1504,7 +1898,7 @@ export async function submitResidentOrder(client, protocol, { index, orderKey, c
   const step = { kind: 'finishOrder', request: 'FinishWorkerOrderRequest', response: 'FinishWorkerOrderResponse',
     body: { index }, orderKey, manualCheck: true, label: '交付居民订单 #' + index };
   const { results } = await runWorld(client, protocol, { actions: [step] }, {
-    config, player, allowMutate: true, cargoEnabled, enabled,
+    config, player, allowMutate: true, enabled,
   });
   const [entry] = results;
   if (!entry?.ok) throw new Error(entry?.error || '账号托管状态已变化，已取消手动交单');
@@ -1513,7 +1907,7 @@ export async function submitResidentOrder(client, protocol, { index, orderKey, c
   return { index, label: '已' + entry.step.label + '，获得' + prize, reward };
 }
 
-export async function startManualFactoryProduction(client, protocol, target, { config, player, settings, enabled }) {
+export async function startManualFactoryProduction(client, protocol, target, { config, player, settings, enabled, beforeInsertSend }) {
   const { buildingId, productId, productionKey } = target;
   if (typeof buildingId !== 'string' || !buildingId || typeof productionKey !== 'string' || !/^[0-9a-f]{24}$/.test(productionKey)) {
     throw new Error('请刷新工厂后选择要生产的物品');
@@ -1524,7 +1918,7 @@ export async function startManualFactoryProduction(client, protocol, target, { c
   if (!costs || !Number.isSafeInteger(recipe.unlockLevel)) throw new Error('这座工厂没有对应的生产配方');
   const name = displayMaterial(config, productId);
   const step = { kind: 'startProduce', request: 'StartFactoryProduceRequest', body: { buildingId, productId },
-    costs, displayProduct: name, displayFactory: displayBuilding(config, { buildingId, type }), label: '手动生产' + name + ' ×1' };
+    costs, beforeInsertSend, displayProduct: name, displayFactory: displayBuilding(config, { buildingId, type }), label: '手动生产' + name + ' ×1' };
   const { results: [entry] } = await runFactoryProductionBatch(client, protocol, [step], {
     config, player, enabled,
     async checkSnapshot(building) {
@@ -1532,13 +1926,15 @@ export async function startManualFactoryProduction(client, protocol, target, { c
       if (!costs.length) return;
       const { available } = await readOrderReservedStock(client, protocol, config, { player, settings, enabled, itemIds: costs.map(cost => cost.id) });
       for (const { id, num } of costs) {
-        if ((available.get(id) ?? 0) < num) throw new Error(displayMaterial(config, id) + '不足，扣除订单预留后可用 '
-          + (available.get(id) ?? 0) + '，本次需要 ' + num);
+        const free = Math.max(0, (available.get(id) ?? 0) - (beforeInsertSend ? resourceReserve(settings, id) || 0 : 0));
+        if (free < num) throw new Error(displayMaterial(config, id) + '不足，扣除预留后可用 ' + free + '，本次需要 ' + num);
       }
     },
   });
   if (entry.status === 'unknown') return { confirmed: false, label: step.displayFactory + ' · ' + step.label + '，结果待核对' };
-  if (!entry.ok) throw new Error(entry.error || '工厂排产未完成，请刷新后重试');
+  if (!entry.ok) throw Object.assign(new Error(entry.error || '工厂排产未完成，请刷新后重试'), {
+    notSent: !!(entry.failureError?.notSent || entry.failureError?.prompt && entry.failureError.request === step.request),
+  });
   return { confirmed: true, label: step.displayFactory + '已安排生产' + name + ' ×1' };
 }
 
@@ -1663,12 +2059,19 @@ export async function runWorld(client, protocol, plan, {
       const batch = [step];
       for (let next = stepIndex + 1; next < plan.actions.length; next++) {
         const candidate = plan.actions[next];
-        if (candidate.request !== step.request || candidate.response || candidate.body.buildingId !== step.body.buildingId) break;
+        // A stale stock target can reject a whole batch at preflight. Settle
+        // demand jobs before validating optional refill jobs from the same factory.
+        if (candidate.request !== step.request || candidate.response || candidate.body.buildingId !== step.body.buildingId
+          || candidate.demandDriven !== step.demandDriven) break;
         batch.push(candidate);
       }
       const result = await runFactoryProductionBatch(client, protocol, batch, {
         config, player, settings, getSettings, enabled, beforeStep, afterStep, cancelStep, window,
         checkStep(action) {
+          if (action.demandDriven === false && results.some(entry => !entry.ok && entry.step.demandDriven === true
+            && entry.step.request === action.request && entry.step.body.buildingId === action.body.buildingId)) {
+            throw new AutomationSkip('本轮同厂需求排产未确认，重新核对后再补库存');
+          }
           if (action.needsConfirmedBorrow > (confirmedBorrow.get(action.body.productId) ?? 0)) throw new AutomationSkip('尚未确认居民订单已释放相应库存，稍后复查补产');
           if (failedRecipes.has(JSON.stringify(action.body)) || rejected.has(stepKey(action))) throw new AutomationSkip('前次生产未确认或已被拒绝，暂不重复提交');
           checkFactoryStep(action);

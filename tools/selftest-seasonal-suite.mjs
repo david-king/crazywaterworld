@@ -520,13 +520,13 @@ await test('海商王进度区分持仓、计划商品和城池；无共享仍�
   const progress = () => merchantProgress(f.config, f.window, f.state.trade, f.player, f.now,
     async (name) => name === 'TradeGuildRadar' ? f.state.radar : f.state.markets[f.state.trade.cargo.cityId], f.ledger, f.settings);
   const buy = await progress();
-  assert.match(buy, /当前商品：空载/);
+  assert.match(buy, /当前船货：空载/);
   assert.match(buy, /计划买入：.+目标城池：/);
   assert.match(buy, /预期收益：约 2,575 商会币/);
   await f.run(merchantActivity, 'merchantTrade');
   await f.run(merchantActivity, 'merchantTrade');
   const sailing = await progress();
-  assert.match(sailing, /当前商品：.+ ×250/);
+  assert.match(sailing, /当前船货：.+ ×250/);
   assert.match(sailing, /目标城池：.+航行中/);
   assert.match(sailing, /预期收益：约 2,575 商会币/);
   Object.assign(f.state.trade.cargo, { cityId: 20, moveToCityId: 0, moveEndTime: 0 });
@@ -536,6 +536,36 @@ await test('海商王进度区分持仓、计划商品和城池；无共享仍�
   await f.run(merchantActivity, 'merchantTrade');
   assert.equal(f.sent('TradeSellRequest').length, 1);
   assert.equal(f.state.writes.length, 3);
+});
+await test('整船货单合并同种货，靠港卸货后仍可查看本航程的出港货单', async () => {
+  const f = setup();
+  const cargo = f.state.trade.cargo;
+  const water = { pid: 1, goodsId: 1002, num: 1, cityId: 34, buyPrice: 50 };
+  const goods = [water, { pid: 2, goodsId: 4006, num: 57, cityId: 37, buyPrice: 687 },
+    { pid: 3, goodsId: 3008, num: 1, cityId: 37, buyPrice: 253 },
+    { pid: 4, goodsId: 2001, num: 2, cityId: 37, buyPrice: 119 }, { ...water, pid: 5, cityId: 37, buyPrice: 48 }];
+  const scope = 'merchant:' + f.window.startTime + ':' + f.window.period;
+  const start = f.now - 7200;
+  const move = { scope, expected: { request: 'TradeMoveRequest', city: 37, destination: 67, start, estimatedProfit: 12000 },
+    before: { goods } };
+  const records = { move: { confirmed: true, details: move } };
+  const preview = () => merchantProgress(f.config, f.window, f.state.trade, f.player, f.now,
+    () => assert.fail('只读货单不需要询价'), { keyRecords: () => records });
+  const manifest = '防风门窗 ×57、淡水 ×2、鱼油 ×2、鱼胶汤 ×1（共 62 件）';
+  f.state.trade.player.goods = goods;
+  Object.assign(cargo, { cityId: 37, moveToCityId: 67, moveStartTime: start, moveEndTime: f.now + 1 });
+  assert((await preview()).includes('当前船货：' + manifest));
+  Object.assign(cargo, { cityId: 67, moveToCityId: 0, moveStartTime: 0, moveEndTime: 0 });
+  f.player.guildId = '0';
+  f.state.trade.player.goods = [goods[0], goods[4]];
+  assert((await preview()).includes('当前船货：淡水 ×2 · 上次出港船货：' + manifest));
+  f.state.trade.player.goods = [];
+  assert((await preview()).includes('当前船货：空载 · 上次出港船货：' + manifest));
+  records.move.confirmed = false;
+  assert.doesNotMatch(await preview(), /上次出港船货/);
+  records.move.confirmed = true;
+  cargo.cityId = 37;
+  assert.doesNotMatch(await preview(), /上次出港船货/);
 });
 await test('航行中沿用出发估值，旧记录按同期快照还原，寻价或缺少依据时保留待定', async () => {
   const f = setup();

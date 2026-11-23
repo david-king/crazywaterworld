@@ -49,7 +49,6 @@ export function chrome() {
           <span id="loop-interval-status" className="sr-only" role="status" />
           <span id="loop-hint" className="sr-only" role="status" />
         </div>
-        <span id="hint" className="warn" />
         <Button id="console-quick-open" type="button" size="icon-sm" variant="outline" className="pointer-coarse:size-10" aria-label="站内搜索" title="站内搜索（Ctrl / ⌘ + K）" aria-keyshortcuts="Control+k Meta+k" aria-haspopup="dialog" aria-controls="console-quick-dialog"><Search aria-hidden="true" /></Button>
         <div id="theme-picker" className="theme-picker">
           <Button id="theme-trigger" type="button" size="icon-sm" variant="outline" className="pointer-coarse:size-10" aria-label="切换主题，当前为跟随系统" title="切换主题，当前为跟随系统" aria-haspopup="menu" aria-controls="theme-menu" aria-expanded="false">

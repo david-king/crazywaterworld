@@ -58,7 +58,7 @@ try {
     assert.equal(panel.rewardItems.GOLD.name, f.config.materialName('GOLD'));
     assert.equal(panel.trade.period, f.window.period);
     assert.equal(panel.trade.coins, 10000);
-    assert.deepEqual(panel.trade.voyage.facts[0], ['当前商品', '空载']);
+    assert.deepEqual(panel.trade.voyage.facts[0], ['当前船货', '空载']);
     assert.deepEqual(panel.trade.voyage.facts.find(([label]) => label === '预期收益'), ['预期收益', '约 2,575 商会币']);
     assert.equal(panel.trade.autoSpeedUp, false);
     assert.equal(panel.trade.buys, 0);

@@ -15,7 +15,7 @@ export function siliconFixture() {
   const state = { fuel: 50000, ruby: 5000, fightTimes: 0, maxFightTimes: 30,
     reward: { myRewardTimes: 0, maxRewardTimes: 100, rewardResetTime: now + 86400 },
     mines: [3, 4, 5].map(color => ({ gridId: color * 1000, color, occupiedNum: 0, positionNum: color === 3 ? 999 : 3 })),
-    positions: { 3000: [], 4000: [], 5000: [] }, blacklist: [], reports: [], reportDetails: {},
+    positions: { 3000: [], 4000: [], 5000: [] }, profiles: {}, blacklist: [], reports: [], reportDetails: {},
     guilds: [{ id: '9007199254741007', name: '潮汐联盟' }, { id: '9007199254741008', name: '深海联盟' }],
     merge: { worldIds: [], executeTs: 0, matchMaking: false },
     buildings: [1, 2, 3].map(n => ({ buildingId: n + '远征船', level: 1, fleet: { formation: { heroPositions: [{ heroId: '兰博', pos: { x: 0, y: 0 } }] } } })),
@@ -29,7 +29,7 @@ export function siliconFixture() {
   const time = () => Math.floor((Date.now() + client.serverClockOffsetMs) / 1000);
   client.request = async (name, body = {}, reply = name.replace(/Request$/, 'Response')) => {
     if (!protocol[name] || !protocol[reply]) throw Error('真实协议中不存在：' + name + '/' + reply);
-    protocol[name].decode(protocol[name].encode(body).finish()); client.reads.push({ name, body: structuredClone(body) });
+    const request = protocol[name].decode(protocol[name].encode(body).finish()); client.reads.push({ name, body: structuredClone(body) });
     const override = await f.beforeRead?.(name, body); if (override !== undefined) return override;
     let result;
     switch (name) {
@@ -44,6 +44,7 @@ export function siliconFixture() {
       case 'UniteWorldsPlanRequest': result = state.merge; break;
       case 'FleetRepairParamRequest': result = state.repair; break;
       case 'BlackListRequest': result = { list: state.blacklist }; break;
+      case 'OtherPlayerInfoRequest': result = state.profiles[request.playerId] ?? {}; break;
       case 'CampaignReportsRequest': result = { reports: body.pageNo === 0 ? state.reports : [], total: state.reports.length }; break;
       case 'CampaignReportDetailRequest': result = state.reportDetails[String(body.campaignId.low >>> 0)] ?? { battles: [] }; break;
       default: throw Error('隔离硅矿夹具禁止未声明读取：' + name);

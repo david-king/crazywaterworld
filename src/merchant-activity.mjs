@@ -193,6 +193,21 @@ function merchantNames(config, player) {
   };
 }
 
+function merchantCargoText(goods, goodsName) {
+  if (!Array.isArray(goods)) return '未同步';
+  if (!goods.length) return '空载';
+  const counts = new Map();
+  let total = 0;
+  for (const batch of goods) {
+    if (!positive(batch?.goodsId) || !positive(batch.num)) return '未同步';
+    counts.set(batch.goodsId, (counts.get(batch.goodsId) ?? 0) + batch.num);
+    total += batch.num;
+  }
+  const items = [...counts].sort(([idA, a], [idB, b]) => b - a || idA - idB)
+    .map(([id, count]) => goodsName(id) + ' ×' + count).join('、');
+  return counts.size > 1 ? items + '（共 ' + total + ' 件）' : items;
+}
+
 function merchantPortIntel(config, player, cargo, radar, { scope, nextRefreshAt, edits }) {
   if (!exactGuild(player.guildId)) return { scope, message: '加入联盟后可查看港口情报。' };
   if (!Array.isArray(radar?.radar)) return { scope, message: '港口情报读取失败，请刷新总览重试。' };
@@ -217,39 +232,43 @@ function merchantPortIntel(config, player, cargo, radar, { scope, nextRefreshAt,
 async function readMerchantVoyage(config, event, state, player, time, ask, ledger, settings, intel) {
   const cargo = state.cargo;
   const { cityName, goodsName } = merchantNames(config, player);
-  const goods = state.player.goods;
-  const stock = !Array.isArray(goods) ? '未同步' : goods.length ?
-    goods.map(g => goodsName(g.goodsId) + ' ×' + g.num).join('、') : '空载';
-  const facts = [['当前商品', stock]];
+  const stock = merchantCargoText(state.player.goods, goodsName);
+  const facts = [['当前船货', stock]];
   const scope = 'merchant:' + event.startTime + ':' + event.period;
+  const records = Object.values(ledger?.keyRecords() ?? {}).filter(r => r.details?.scope === scope);
+  const departures = records.filter(r => r.details.expected?.request === 'TradeMoveRequest');
   if (cargo.moveEndTime > time || (cargo.moveToCityId && cargo.moveToCityId !== cargo.cityId)) {
-    const leg = Object.values(ledger?.keyRecords() ?? {}).find(r => {
-      const e = r.details?.expected;
-      return r.details?.scope === scope && e?.request === 'TradeMoveRequest' && e.city === cargo.cityId &&
-        e.destination === cargo.moveToCityId && positive(cargo.moveStartTime) &&
+    const leg = departures.find(r => {
+      const e = r.details.expected;
+      return e.city === cargo.cityId && e.destination === cargo.moveToCityId && positive(cargo.moveStartTime) &&
         (r.details.after?.cargo?.moveStartTime === cargo.moveStartTime || Math.abs(e.start - cargo.moveStartTime) <= 2);
     })?.details.expected;
-    if (leg?.goodsId) facts.push(['本程商品', goodsName(leg.goodsId)]);
     if (positive(cargo.cityId)) facts.push(['出发港', cityName(cargo.cityId)]);
     facts.push(['目标城池', positive(cargo.moveToCityId) ? cityName(cargo.moveToCityId) : '未同步']);
     facts.push(expectedProfitFact(departureProfit(config, event, state, scope, leg, ledger), leg?.exploration));
     return { facts, status: cargo.moveEndTime > time ? '航行中，预计 ' + new Date(cargo.moveEndTime * 1000)
       .toLocaleTimeString('zh-CN', { timeZone: 'Asia/Shanghai', hour12: false }) + ' 到港' + (leg?.priceNote ? '；出发时' + leg.priceNote : '') : '等待到港确认' };
   }
+  const lastDeparture = departures.filter(r => r.confirmed && positive(r.details.expected.start) && r.details.expected.start <= time)
+    .sort((a, b) => b.details.expected.start - a.details.expected.start)[0]?.details;
+  if (lastDeparture && lastDeparture.expected.destination === cargo.cityId && Array.isArray(lastDeparture.before?.goods)) {
+    const departedWith = merchantCargoText(lastDeparture.before.goods, goodsName);
+    if (departedWith !== stock) facts.push(['上次出港船货', departedWith]);
+  }
   if (positive(cargo.cityId)) facts.push(['所在城池', cityName(cargo.cityId)]);
   const wait = status => ({ facts: [...facts, ['目标城池', '待定'], expectedProfitFact(null)], status });
   if (!tradingHours(config, time)) return wait('等待开放交易时段');
   if (!exactGuild(player.guildId)) return wait('需加入联盟后参与贸易');
   if (!positive(cargo.cityId)) return wait('等待商船位置同步');
-  const pending = Object.values(ledger?.keyRecords() ?? {}).find(r => !r.confirmed && r.details?.scope === scope);
+  const pending = records.find(r => !r.confirmed);
   if (pending) return wait('前次操作结果待确认');
   const plan = await readMerchantPlan(config, event, state, time, ask,
     voyageHistory(ledger, scope, marketEpoch(config, time), state, time), {
       settings: settings?.merchant ?? settings, ledger, player, intel, markets: knownMerchantMarkets(ledger, event), actionSeconds: merchantActionSeconds(settings)
     });
   if (plan.kind === 'wait') return wait(plan.reason);
-  if (plan.goodsId) facts.push(['计划' + ({ buy: '买入', sell: '卖出', move: '走商' })[plan.kind], goodsName(plan.goodsId)]);
-  else facts.push(['计划走商', '换港寻价']);
+  if (plan.kind === 'buy' || plan.kind === 'sell') facts.push([plan.kind === 'buy' ? '计划买入' : '计划卖出', goodsName(plan.goodsId)]);
+  if (plan.exploration) facts.push(['计划走商', '换港寻价']);
   facts.push(['目标城池', cityName(plan.destination ?? plan.city)]);
   facts.push(expectedProfitFact(plan.expectedProfit, plan.exploration));
   return { facts, status: plan.label, ...(plan.purchaseDetails && { purchaseDetails: plan.purchaseDetails }) };

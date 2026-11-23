@@ -31,6 +31,8 @@ function defenceFixture() {
   const f = warForgeFixture(), settings = warForgeSettings();
   settings.cityWar.defenceFleetIds = ['2远征船'];
   settings.forge.enabled = false;
+  // 常规派遣用例从委任已关闭开始。测试交接的用例单独开启对应舰队。
+  for (const fleet of f.state.fleets) fleet.autoFight.isOn = false;
   for (const city of f.state.cities) Object.assign(city, {
     attackFleetNum: 0, priorityAtkFleetNum: 0, defenceFleetNum: 0, priorityDefFleetNum: 0, battlePoints: [],
   });
@@ -501,11 +503,75 @@ await check('降低汽油日预算或库存低于保留量不阻止零消费防�
   assert.equal(usage.snapshot().counters.cityWarPetrol, 2000);
 });
 
-await check('仍处于原生委任阶段的防守队等待接管，不伪称已固定原生职责', async () => {
-  const { f, settings } = defenceFixture(); onlyDefence(settings);
-  f.state.fleets[1].autoFight.todayTimes = 0;
-  assert.match((await plan(f, settings)).fleets[0].reason, /原生委任尚余/);
-  await run(f, settings); assert.equal(f.client.writes.length, 0);
+await check('一队开战接管防守，二、三队各自用到全局次数再进攻', async () => {
+  for (const mode of [2, -1]) {
+    const { f, settings } = defenceFixture(), usage = ledger();
+    Object.assign(settings.cityWar, { fleetIds: ['1远征船', '2远征船', '3远征船'],
+      defenceFleetIds: ['1远征船'], nativeCommissionLimit: mode });
+    for (const fleet of f.state.fleets) fleet.autoFight = { isOn: true, todayTimes: 0 };
+    const attackTarget = mode === -1 ? 4 : mode;
+    const preview = await plan(f, settings, usage);
+    assert.deepEqual(preview.nativeOffFleetIds, ['1远征船']);
+    assert.deepEqual(preview.fleets.map(row => [row.nativeMode, row.nativeTarget]),
+      [[0, 0], [mode, attackTarget], [mode, attackTarget]]);
+    assert.equal(f.client.writes.length, 0);
+    await run(f, settings, usage);
+    assert.deepEqual(f.client.writes, [
+      { name: 'SetFleetAutoFightRequest', body: { buildingIds: ['1远征船'], isOn: false } },
+      { name: 'MoveFleetsToCityRequest', body: { buildingId: ['1远征船'], cityId: 3 } },
+    ]);
+    for (const fleet of f.state.fleets.slice(1)) {
+      fleet.autoFight.todayTimes = attackTarget;
+      const result = await run(f, settings, usage);
+      assert.deepEqual(result.results.map(entry => [entry.status, entry.step.buildingId, entry.step.cityId]),
+        [['confirmed', fleet.buildingId, 2]]);
+      assert.equal(fleet.autoFight.isOn, mode === -1);
+    }
+  }
+});
+
+await check('开战前不动委任，开战后先关防守队，出现受攻己城后直接驻防', async () => {
+  const { f, settings } = defenceFixture(), usage = ledger(); onlyDefence(settings);
+  const start = f.state.war.startTime, declarations = f.state.war.declarations;
+  f.state.fleets[1].autoFight = { isOn: true, todayTimes: 0 };
+  f.state.war.startTime = start + 600;
+  await run(f, settings, usage);
+  assert.deepEqual(f.client.writes, []);
+  f.state.war.startTime = start;
+  f.state.war.declarations = declarations.filter(row => row.cityId !== 3);
+  await run(f, settings, usage);
+  assert.deepEqual(f.client.writes, [{ name: 'SetFleetAutoFightRequest', body: { buildingIds: ['2远征船'], isOn: false } }]);
+  f.state.war.declarations = declarations;
+  await run(f, settings, usage);
+  assert.deepEqual(f.client.writes.slice(1), [{ name: 'MoveFleetsToCityRequest', body: { buildingId: ['2远征船'], cityId: 3 } }]);
+});
+
+await check('防守委任关闭未确认时只等该队，已用满额度的进攻队仍出战', async () => {
+  const { f, settings } = defenceFixture();
+  f.ignoreNativeOff = true;
+  f.state.fleets[1].autoFight = { isOn: true, todayTimes: 0 };
+  const result = await run(f, settings);
+  assert.match(result.notes.join(' '), /关闭结果待确认/);
+  assert.deepEqual(f.client.writes, [
+    { name: 'SetFleetAutoFightRequest', body: { buildingIds: ['2远征船'], isOn: false } },
+    { name: 'MoveFleetsToCityRequest', body: { buildingId: ['1远征船'], cityId: 2 } },
+  ]);
+});
+
+await check('回读缺少防守队的委任状态时等待确认，状态恢复后按零次驻防', async () => {
+  const { f, settings } = defenceFixture(), usage = ledger(); onlyDefence(settings);
+  const fleet = f.state.fleets[1];
+  fleet.autoFight = { isOn: true, todayTimes: 0 };
+  f.beforeRead = name => {
+    if (name === 'MyFleetsRequest' && f.client.writes.length) delete fleet.autoFight;
+  };
+  const pending = await run(f, settings, usage);
+  assert.match(pending.notes.join(' '), /关闭结果待确认/);
+  assert.deepEqual(f.client.writes.map(write => write.name), ['SetFleetAutoFightRequest']);
+  f.beforeRead = null;
+  fleet.autoFight = { isOn: false, todayTimes: 0 };
+  const recovered = await run(f, settings, usage);
+  assert.deepEqual(recovered.results.map(entry => [entry.status, entry.step.cityId]), [['confirmed', 3]]);
 });
 
 await check('指定城市详情读取失败时返回未确认，不访问不存在的目标', async () => {
@@ -577,7 +643,7 @@ await check('防守维修检查实际汽油，忽略旧单次/每日/保留量�
 await check('防守原生委任设为零时先关闭并回读确认，再发指定防守队', async () => {
   const { f, settings } = defenceFixture(); onlyDefence(settings);
   settings.cityWar.nativeCommissionLimit = 0;
-  f.state.fleets[1].autoFight.todayTimes = 0;
+  f.state.fleets[1].autoFight = { isOn: true, todayTimes: 0 };
   const result = await run(f, settings);
   assert.equal(result.results[0]?.status, 'confirmed');
   assert.deepEqual(f.client.writes, [
@@ -586,6 +652,7 @@ await check('防守原生委任设为零时先关闭并回读确认，再发指�
   ]);
   const other = defenceFixture(); onlyDefence(other.settings);
   other.settings.cityWar.nativeCommissionLimit = 0; other.f.ignoreNativeOff = true;
+  other.f.state.fleets[1].autoFight.isOn = true;
   await run(other.f, other.settings);
   assert.deepEqual(other.f.client.writes.map(row => row.name), ['SetFleetAutoFightRequest']);
 });

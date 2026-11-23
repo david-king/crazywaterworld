@@ -758,7 +758,7 @@ node tools/selftest-describe.mjs    # 字段布局还原自检
 - 分解和放生在对应模块每轮检查中扫描库存。上次结果待确认时，完整库存中已消失的 UID 自动核销，已确认 UID 保留标记以避免旧库存回显后重复发送。在场 UID 连续两次符合对应的分解或放生条件时可重试，否则解除旧待确认记录。账号连接、设置变化或暂停会中止发送前检查。
 - 当前协议没有 `LeagueFormationRequest`；本人的积分赛编队从 `LeagueInfoResponse.ownFormations`（字段 5，重复 `LeagueFormation`）读取，`LeagueFormationResponse` 只用于保存编队。
 - `WorldCity` 的本盟现场数量由 `attackFleetNum + priorityAtkFleetNum` 加上 `battlePoints` 中左侧非 NPC 且属于本盟的交战点组成；已同步在途舰队从 `WorldInfoResponse.fleets` 读取：`state == 2`、`targetCityId` 为目标城、`owner.guildId` 为本盟，并按 `owner.playerId` 排除 MyFleets 已统计的本人舰队。归属或数量无法确认时不当作 0。
-- `SetFleetAutoFightRequest { buildingIds[], isOn }` 没有配套响应；关闭后回读 `MyFleetsResponse.fleets[].autoFight.isOn` 确认。VIP 配置确认原生委任未解锁时，工具直接接管所选舰队。已解锁时，设置 -1 按 VIP 额度等待，0 关闭后接管，N 表示原生先用 N 次再关闭。
+- `SetFleetAutoFightRequest { buildingIds[], isOn }` 没有配套响应；关闭后回读 `MyFleetsResponse.fleets[].autoFight.isOn` 确认。VIP 配置确认原生委任未解锁时，工具直接接管所选舰队。已解锁时，防守队在城战时段首次检查就关闭委任。进攻队设 -1 按 VIP 额度等待，0 关闭后接管，正数先用指定次数（最多用完 VIP 额度）再关闭。
 
 ### 城战防守与逐队职责（#28）
 
@@ -771,7 +771,7 @@ node tools/selftest-describe.mjs    # 字段布局还原自检
 - 进攻侧使用 `cityWar.targetMode`、`targetPriority`、`cityRefs`，防守侧使用 `defenceTargetMode`、`defenceTargetPriority`、`defenceCityRefs`。两侧分别选择联盟有效目标或指定城市，并各自设置优先策略。读取旧存储和导入配置时，缺少的防守目标字段复制原共享设置，已有独立设置按原值载入。
 - 选城、排序、舰队意向预留、发送前复核和地图详情按目标职责读取对应配置。指定模式只使用该侧城市名单，场景、宣战或实时归属不匹配时跳过。启用人数优先的一侧在数量未知时等待选城，其有效目标仍参与舰队预留。
 - 防守采用 `defenceFleetNum + priorityDefFleetNum` 加右侧本盟非 NPC 交战点，进攻采用左侧；防守队列是服务器原始计数，不能据此承诺已剔除所有 NPC。双方均加入本盟已同步在途和本轮计划数量；防守费用为0，因此使用地图实际距离比较远近。
-- 原生委任只有每队开关，跟随联盟集结城市，可进攻也可防守，无法分别固定职责。工具分工在接管后生效，需要立即执行分工时设 `nativeCommissionLimit=0`，先关闭所选队的原生委任并回读确认。保留 -1/N 的先原生后接管语义。
+- 原生委任只有每队开关，跟随联盟集结城市，可进攻也可防守，无法分别固定职责。防守队开战后直接接管，即使当前没有受攻己城也先关闭原生委任并回读确认，再等待有效目标。进攻队继续遵循 `nativeCommissionLimit`。
 - 无 `MoveFleetsToCityResponse`；发送后读 `MyFleetsResponse`，以目标城行军、交战/排队或外驻状态确认。0汽油仍预留派遣次数与舰队键，未知结果跨重连/换日保留；仅空闲不能视为成功。同一目标在最后读取后仍可能易帜，现有协议没有原子化锁定防守角色的能力。
 - 维修门槛沿用配置“攻城战消耗耐久”和用户比例，不将其等同所有战斗实际扣除：配置说明对城防 NPC 与对玩家舰队的消耗不同，未发现单独的防守耐久参数。
 

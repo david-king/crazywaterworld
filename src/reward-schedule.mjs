@@ -40,7 +40,10 @@ export function rewardSchedule(client) {
       return true;
     },
     defer(key, until) {
-      if (Number.isFinite(until) && until > now()) { deadlines.set(key, Math.ceil(until)); if (!observations.has(key)) observations.set(key,{text:"已检查，等待下次开放",checkedAt:now()}); }
+      if (Number.isFinite(until) && until > now()) {
+        deadlines.set(key, Math.ceil(until));
+        if (!observations.has(key)) schedule.observe(key, '已检查，等待下次开放');
+      }
     },
     clear(key) {
       const removed = deadlines.delete(key);

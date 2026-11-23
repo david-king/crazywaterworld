@@ -7,6 +7,7 @@ let worldMapReceivedAt=0,worldMapLastAttempt=0,worldMapRefreshEvery=10,worldMapM
 let worldCityAction=null;
 let worldMapPopupPlacement=null;
 let worldMapOverviewRead=null;
+let worldMapRefreshRequested=false;
 const worldCitySending=new Set();
 const worldFleetSpeedBusy=new Set();
 const mapModalScreen=matchMedia('(max-width:700px), (hover:none) and (pointer:coarse)');
@@ -29,6 +30,7 @@ bindConsoleSlice('worldMap', { worldMapOwner, worldMapData, worldMapLoading, wor
 function resetWorldMap(){
  closeWorldMapDetail();
  worldMapOverviewRead=null;
+ worldMapRefreshRequested=false;
  if($('modal').open && $('m-body').querySelector('[data-fleet-speed-confirm]'))closeModal();
  setFleetSpeedFeedback('');
  setConsoleValue('worldMap', 'worldMapOwner', null);setConsoleValue('worldMap', 'worldMapData', null);worldMapPainted=null;setConsoleValue('worldMap', 'worldMapSelected', null);worldMapSerial++;setConsoleValue('worldMap', 'worldMapLoading', false);
@@ -85,11 +87,7 @@ async function submitFleetSpeed(account,fleet,quote,label){
  }catch(error){
   if(current===account && worldMapOwner===account)setFleetSpeedFeedback(error.message);
  }finally{
-  if(current===account && worldMapOwner===account){
-   // 已在途的地图读可能早于加速回执，等它落地后再取最终舰队状态。
-   if(worldMapOverviewRead)await worldMapOverviewRead.catch(()=>{});
-   if(current===account && worldMapOwner===account)await refreshWorldMap();
-  }
+  await refreshMapAfterCommand(account);
   worldFleetSpeedBusy.delete(account);
   if(current===account)updateFleetSpeedButtons();
  }
@@ -140,7 +138,9 @@ function worldFleetCard(point,showName=true){
  if(showName)card.append(el('h4','',point.name));
  const fleet=point.fleetInfo;
  if(fleet){
-  mapFacts(card,[['状态',fleet.state||'未同步'],['耐久',mapNumber(fleet.durability)+'/'+mapNumber(fleet.maxDura)],['任务',fleet.task||'未同步']]);
+  const facts=[['状态',fleet.state||'未同步'],['耐久',mapNumber(fleet.durability)+'/'+mapNumber(fleet.maxDura)],['任务',fleet.task||'未同步']];
+  if(fleet.dispatchNote)facts.push(['派遣限制',fleet.dispatchNote]);
+  mapFacts(card,facts);
  }else if(point.detail)card.append(el('p','',point.detail));
  const journey=fleet?.journey??point.motion;
  if(journey)card.append(journeyNode(journey));
@@ -399,10 +399,14 @@ async function loadWorldCityActions(view){
   const quote=await call('/api/world/city-actions?'+params,{signal:view.readController.signal});
   if(worldCityIsCurrent(view))view.quote=quote;
  }catch(error){if(!view.readController.signal.aborted)view.readError='城池操作未同步：'+error.message;}
- finally{view.loading=false;paintWorldCityActions(view);}
+ finally{
+  view.loading=false;
+  if(worldCityIsCurrent(view) && view.mapState!==cityActionMapState(view.point))void loadWorldCityActions(view);
+  else paintWorldCityActions(view);
+ }
 }
 function cityActionMapState(point){
- const fleets=worldMapData.fleets.map(fleet=>[fleet.id,fleet.state,fleet.task,fleet.grid]);
+ const fleets=worldMapData.fleets.map(fleet=>[fleet.id,fleet.state,fleet.task,fleet.grid,fleet.durability,fleet.dispatchNote]);
  return JSON.stringify([point.owner,point.assemble,point.warRole,point.fighting,point.cityInfo.declared,worldMapData.war?.inWindow,fleets]);
 }
 async function submitWorldCityAction(view,quote,action,buildingId){
@@ -421,12 +425,13 @@ async function submitWorldCityAction(view,quote,action,buildingId){
   worldCitySending.delete(view.account);
   if(current===view.account){
    if(worldCityAction && worldCityIsCurrent(worldCityAction))void loadWorldCityActions(worldCityAction);
-   void refreshWorldMap();
+   await refreshMapAfterCommand(view.account);
   }
  }
 }
 async function showWorldMapTarget(point,refresh=false,source='click'){
  if(!refresh&&Date.now()-worldMapDraggedAt<180)return;
+ if(!refresh && (point.cityInfo||point.layer==='fleets') && mapElapsed()>2)void refreshWorldMap();
  setConsoleValue('worldMap', 'worldMapSelected', point.key);if(!refresh)drawWorldMap();
  const panel=$('world-map-target-facts'),dialog=$('world-map-detail');
  const scrollTop=refresh?dialog.scrollTop:0;
@@ -547,9 +552,16 @@ function drawWorldMap(){
  }
  placeWorldMapPopup();
 }
+async function refreshMapAfterCommand(account){
+ // 先等操作前已发出的地图读取结束，再取本次操作之后的状态。
+ if(current!==account || worldMapOwner!==account)return;
+ if(worldMapOverviewRead)await worldMapOverviewRead.catch(()=>{});
+ if(current===account && worldMapOwner===account)await refreshWorldMap();
+}
 async function refreshWorldMap(){
  if(!current||snapshot.paused||disconnected.has(current)||worldMapLoading)return;const account=current,serial=++worldMapSerial;setConsoleValue('worldMap', 'worldMapLoading', true);worldMapLastAttempt=Date.now();$('world-map-refresh').disabled=true;$('world-map-time').textContent='正在同步…';
  try{
+  worldMapRefreshRequested=false;
   worldMapOverviewRead=call('/api/world/overview');
   const data=await worldMapOverviewRead;if(current!==account||serial!==worldMapSerial)return;
   const fresh=worldMapOwner!==account||worldMapData?.scenario!==data.scenario;setConsoleValue('worldMap', 'worldMapOwner', account);setConsoleValue('worldMap', 'worldMapData', data);setConsoleValue('worldMap', 'worldMapReceivedAt', Date.now());worldMapJourneyNodes=[];
@@ -560,7 +572,12 @@ async function refreshWorldMap(){
   clear($('world-map-fleets')).append(table(['舰队','耐久','状态','征程','操作'],data.fleets.map(fleet=>{
    const name=fleet.name.replace('远征舰队 ','舰队').replace(' 队',''),button=el('button','inline-link',name);
    button.type='button';button.dataset.locateFleet='fleet-'+fleet.id;button.setAttribute('aria-label','定位'+name);button.onclick=()=>locateOwnFleet(fleet);
-   return [button,number(fleet.durability)+'/'+number(fleet.maxDura),fleet.state,journeyNode(fleet.journey),worldFleetSpeedButton(account,fleet)];
+   let status=fleet.state;
+   if(fleet.dispatchNote){
+    status=el('div','',fleet.state);
+    status.append(el('div','dim',fleet.dispatchNote));
+   }
+   return [button,number(fleet.durability)+'/'+number(fleet.maxDura),status,journeyNode(fleet.journey),worldFleetSpeedButton(account,fleet)];
   })));
   const wars=clear($('world-map-wars'));wars.append(el('strong','','城战'));
   if(data.cityWars?.length)wars.append(table(['城市 / 状态','宣战','进攻队列','防守队列','交战 / 行军'],data.cityWars.map(w=>[w.name+' · '+w.status,w.declared.map(d=>d.attack+' → '+d.defence).join('；')||'未同步',number(w.attack)+' + 优先'+number(w.priorityAttack),number(w.defence)+' + 优先'+number(w.priorityDefence),number(w.battles)+' 点 / '+number(w.inbound)+' 队'])));
@@ -591,7 +608,7 @@ function maybeRefreshWorldMap(){
  if(!worldMapAutoRefresh||document.hidden||$('tab-overview').classList.contains('hidden'))return;
  if(!current||snapshot.paused||disconnected.has(current)){if(worldMapData)resetWorldMap();return;}
  if(worldMapOwner&&worldMapOwner!==current)resetWorldMap();
- if(!worldMapLoading&&Date.now()-worldMapLastAttempt>=worldMapRefreshEvery*1000)void refreshWorldMap();
+ if(!worldMapLoading&&(worldMapRefreshRequested||Date.now()-worldMapLastAttempt>=worldMapRefreshEvery*1000))void refreshWorldMap();
 }
 function updateWorldMapMotion(){
  if(!worldMapData||document.hidden||$('tab-overview').classList.contains('hidden'))return;

@@ -8,6 +8,22 @@ import {commentsEighteenFixture} from './fixtures/comments-eighteen.mjs';
 import {PAGE} from '../src/page.mjs';
 let count=0;const test=async(name,fn)=>{await fn();count++;console.log('通过：'+name);};
 const ledger={keyRecords:()=>({}),snapshot:()=>({day:'2026-11-04',counters:{treasurePetrol:8000,treasureRepairPetrol:4000,cityWarPetrol:5000,radarPetrol:1000,worldBossPetrol:300}}),confirmedCounters:()=>({treasurePetrol:6000,treasureRepairPetrol:2000,cityWarPetrol:5000,radarPetrol:1000,worldBossPetrol:300}),pendingCounters:()=>({treasurePetrol:2000,treasureRepairPetrol:2000})};
+await test('归队后的真实状态与派遣限制分别显示，列表和地图卡片同步',async()=>{
+ const f=await commentsEighteenFixture(),world=f.player.worldId,buildingId=f.fleets[0].buildingId;
+ const kinds=[['resource-field','resourceFieldDispatch','占田派遣待核对'],['silicon','siliconDispatch','硅矿派遣待核对'],
+  ['cityWar','cityDispatch','城战派遣待核对'],['radar-send','radarSend','情报派遣待核对']];
+ for(const [prefix,kind,note] of kinds){
+  const record={confirmed:false,details:{kind,buildingId,active:true}};
+  const records={[prefix+':'+world+':1']:record};
+  const book={...ledger,keyRecords:()=>structuredClone(records)};
+  const read=()=>readWorldOverview(f.client,f.config,f.player,f.settings,book,{mapLoader:async()=>f.map});
+  const data=await read(),row=data.fleets[0],card=data.points.find(p=>p.key==='fleet-'+buildingId).fleetInfo;
+  assert.deepEqual([row.state,row.task,row.target,row.dispatchNote],['主城空闲','空闲','—',note]);
+  assert.deepEqual([card.state,card.task,card.dispatchNote],[row.state,row.task,note]);
+  record.expired=true;
+  assert.equal((await read()).fleets[0].dispatchNote,'');
+ }
+});
 await test('行军中点按时间推算；开始前不倒走，到时只标待同步不假报已抵达',()=>{
  const p={x:0,y:0,motion:{start:{x:0,y:10},end:{x:100,y:30},startAt:100,endAt:290}};
  assert.deepEqual(mapMotionPosition(p,195),{x:50,y:20,estimated:true,progress:.5,remaining:95,awaitingSync:false});assert.equal(mapMotionPosition(p,50).progress,0);assert.equal(mapMotionPosition(p,300).remaining,0);assert.equal(mapMotionPosition(p,300).awaitingSync,true);

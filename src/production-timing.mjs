@@ -34,9 +34,8 @@ function estimatedTime(base, reduction, speed, reasons) {
     return { seconds: base, source: 'config-estimate', estimated: true,
       reasons: ['当前生产加成不完整，暂按配置原始耗时估算', ...reasons] };
   }
-  // The local client uses this global-effect formula. Building-specific server
-  // effects are not fully exposed here, so this value remains an estimate.
-  const duration = Math.ceil(Math.max(0, base - reduction) / (1 + speed));
+  // Server queue handoffs support applying the rate before subtracting seconds.
+  const duration = Math.ceil(Math.max(0, base / (1 + speed) - reduction));
   return { seconds: Math.max(1, duration), source: 'effects-estimate', estimated: true,
     reasons: ['按已读取的全局加成估算', ...reasons,
       ...(duration === 0 ? ['瞬时生产按至少 1 秒的调度粒度估算'] : [])] };
@@ -82,19 +81,38 @@ export function secondProductionLane(config, monthCards, now) {
 }
 
 export function createProductionTiming({
-  config, effects, monthCards, serverNow, observedDurations = [],
+  config, effects, heroes, monthCards, serverNow, observedDurations = [],
 } = {}) {
   const values = readEffects(effects);
   const observations = Array.isArray(observedDurations) ? observedDurations : [];
   const secondLane = secondProductionLane(config, monthCards, serverNow);
   const recipes = new Map(table(config, 'BuildingProduceCfg').map(row => [row.itemId, row]));
+  const skills = table(config, 'HeroSkillCfg');
+  const heroRates = new Map();
+  for (const hero of heroes ?? []) {
+    for (const slot of [2, 3]) {
+      const level = hero.skillLevels?.[slot - 1];
+      if (!positiveInteger(level)) continue;
+      const skill = skills.find(row => row.heroId === hero.heroId && row.level === level);
+      const factory = skill?.['skill' + slot + 'Param'];
+      const effect = skill?.['skill' + slot + 'Effect'];
+      if (factory && effect?.[0] === '生产速度' && finiteAmount(effect[1]))
+        heroRates.set(factory, (heroRates.get(factory) ?? 0) + effect[1]);
+    }
+  }
+  const skins = new Map(table(config, 'BuildingSkinCfg').map(row => [row.id, row]));
 
   const timing = {
     factory(recipe, { building } = {}) {
       const measured = observedTime(observations, recipe?.itemId, building?.buildingId, 'factory');
       if (measured) return measured;
-      const reasons = ['建筑专属技能、皮肤等加成尚未完整核验'];
-      return estimatedTime(recipe?.produceTime, values.get(2), values.get(1), reasons);
+      const type = recipe?.buildType, skin = skins.get(building?.skinId);
+      const skinRateText = skin && skin.type === type
+        ? skin.effects?.map(text => text.match(/生产速度\+([\d.]+)%/)?.[1]).find(Boolean) : null;
+      const skinRate = Number(skinRateText ?? 0) / 100;
+      const speed = values.has(1) ? values.get(1) + (heroRates.get(type) ?? 0) + skinRate : null;
+      return estimatedTime(recipe?.produceTime, values.get(2), speed,
+        ['工厂专属加成按当前可识别的英雄技能和建筑皮肤相加估算，叠加方式尚未完整核验']);
     },
 
     farm(crop) {
@@ -169,6 +187,7 @@ export function createProductionTiming({
 
 const timingWatchers = new WeakMap();
 export const observedProductionDurations = client => timingWatchers.get(client)?.snapshot() ?? [];
+export const observedProductionHeroes = client => timingWatchers.get(client)?.heroes() ?? null;
 const jobKey = job => JSON.stringify([job.idx ?? 0, job.productId]);
 const sampleKey = (buildingId, productId) => JSON.stringify([buildingId, productId]);
 
@@ -187,7 +206,10 @@ export function watchProductionTimings(client, configGetter, {
     states.delete(buildingId);
     for (const [key, row] of measurements) if (row.buildingId === buildingId) measurements.delete(key);
   };
+  let currentHeroes = null, currentEffects = new Map();
   const reset = () => {
+    currentHeroes = null;
+    currentEffects.clear();
     clear(); effectInputs.clear(); effectsSignature = null; recipeSignature = null;
     lastWallTime = null; lastMonotonicTime = null;
     offset = Number(client.serverClockOffsetMs) || 0;
@@ -236,14 +258,25 @@ export function watchProductionTimings(client, configGetter, {
     if (disposed) return;
     try {
       if (name === 'GameEffectResponse') {
-        const signature = JSON.stringify(Array.isArray(body?.effects) ? body.effects
-          .map(row => [row?.id, row?.value]).sort((a, b) => String(a[0]).localeCompare(String(b[0]))) : null);
+        const pairs = Array.isArray(body?.effects) ? body.effects.map(row => [row?.id, row?.value])
+          .sort((a, b) => String(a[0]).localeCompare(String(b[0]))) : null;
+        currentEffects = new Map(pairs ?? []);
+        const signature = JSON.stringify(pairs);
         if (effectsSignature !== null && signature !== effectsSignature) clear();
         effectsSignature = signature;
         return;
       }
-      if (name === 'SCGameEffectUpdate') { clear(); effectsSignature = null; return; }
-      if (name === 'SCUpdateHero') { clear(); return; }
+      if (name === 'SCGameEffectUpdate') {
+        const effect = body?.effect;
+        if (Number.isSafeInteger(effect?.id) && Number.isFinite(effect.value)) {
+          if (currentEffects.get(effect.id) === effect.value) return;
+          currentEffects.set(effect.id, effect.value);
+        } else currentEffects.clear();
+        clear(); effectsSignature = null; return;
+      }
+      if (name === 'SCUpdateHero') { currentHeroes = null; clear(); return; }
+      if (name === 'AllHeroResponse') currentHeroes = Array.isArray(body?.heroes)
+        ? body.heroes.map(({heroId, skillLevels}) => ({heroId, skillLevels: [...(skillLevels ?? [])]})) : null;
       if (['AllHeroResponse', 'AppointInfoResponse', 'MonthCardResponse', 'EnvSkinListResponse'].includes(name)) {
         const signature = JSON.stringify(body);
         if (effectInputs.has(name) && effectInputs.get(name) !== signature) clear();
@@ -288,6 +321,7 @@ export function watchProductionTimings(client, configGetter, {
   const listeners = [['message', onMessage], ['frame', onFrame], ['pong', onPong], ['close', reset], ['login', reset]];
   for (const [event, listener] of listeners) client.on?.(event, listener);
   const watcher = {
+    heroes() { return disposed || client.connected === false ? null : currentHeroes; },
     snapshot() { return disposed || client.connected === false ? [] : [...measurements.values()].map(row => ({ ...row })); },
     dispose() {
       if (disposed) return;

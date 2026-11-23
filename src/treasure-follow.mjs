@@ -37,9 +37,9 @@ export function matchesFollowDeparture(fleet,preferences,ownId,others=[]){
 }
 
 export function matchesChaseDeparture(fleet, preferences, ownId, others = []) {
- return preferences?.chase && fleet.state === 2 && !fleet.targetCityId && fleet.playerId !== ownId &&
-   preferences.chaseNames.includes(fleet.name) &&
-   !others.some(other => other.name === fleet.name && other.playerId !== fleet.playerId);
+ if (!preferences?.chase || fleet.state !== 2 || fleet.targetCityId || fleet.playerId === ownId) return false;
+ if (preferences.chasePlayerIds?.includes(fleet.playerId)) return true;
+ return preferences.chaseNames.includes(fleet.name) && !others.some(other => other.name === fleet.name && other.playerId !== fleet.playerId);
 }
 
 export const treasureChaseActive = (preferences, time) => !!preferences?.chase &&

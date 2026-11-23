@@ -1,10 +1,10 @@
-import {recordsInWorld} from './fleet-settlement.mjs';
+import {fleetAtHome} from './fleet-settlement.mjs';
 import {mapDimensions,mapPosition,mapRegions} from './world-map-geometry.mjs';
 import { loadMapAsset } from './world.mjs';
 import { normalize } from './worlds.mjs';
 import { exactAutomationId } from './automation-policy.mjs';
 import { createGuildNameResolver } from './guild-name.mjs';
-import { fleetRecordReason, dispatchReservationReason, fleetDispatchView } from './fleet-availability.mjs';
+import { dispatchReservationReason, fleetDispatchView } from './fleet-availability.mjs';
 import { fleetSpeedTarget } from './manual-fleet-speed.mjs';
 
 // 只读概览：静态资源只提供位置，归属和状态仅取本次服务器返回。
@@ -61,21 +61,22 @@ export async function readWorldOverview(client,config,player,settings,ledger,{ma
  const resourceTypes=config.tables[scenario+'_ResFieldTypeCfg']?.data??[];
  if(map)for(let grid=0;grid<map.width*map.height;grid++){const f=map.fieldAt(grid);if(f){const item=resourceTypes.find(row=>row.type===f.resType)?.product?.[0],name=item?(item==='公会科技点'?'科技点':item)+'资源田':'资源田';add('fields','field-'+grid,name,grid,(owned?.some(o=>o.gridIdx===grid)?'本人已占领':'归属未同步')+' · '+(cityCfg.find(c=>c.id===f.cityId)?.name||'所在城 '+f.cityId));}}
  const dispatch=fleetDispatchView(client,settings,ledger,own?.fleets??[],exactAutomationId(player.worldId));
- const records=recordsInWorld(ledger.keyRecords(),exactAutomationId(player.worldId)),guild=exactAutomationId(player.guildId);
- const home=cityCfg.find(c=>guild&&c.guildIndex===Number(BigInt(guild)%1000n));
+ const home=cityCfg.find(c=>ownGuildIdx!==null&&c.guildIndex===ownGuildIdx);
  const fleets=(own?.fleets??[]).map(raw=>{
-  const f=normalize({...raw,state:raw.state,durability:raw.durability,maxDura:raw.maxDura,curGridIdx:raw.curGridIdx,cityId:raw.cityId,startGridIdx:raw.startGridIdx,targetGridIdx:raw.targetGridIdx,moveStartTs:raw.moveStartTs,moveEndTs:raw.moveEndTs,startCityId:raw.startCityId,targetCityId:raw.targetCityId}),reason=fleetRecordReason(records,f.buildingId),state=({1:f.curGridIdx>0?'驻守在外':reason?'待确认 / 任务占用':'主城空闲',2:'行军',3:'战斗',4:'维修',5:'排队'})[f.state]||'未同步';
-  const reservation=dispatchReservationReason(client,settings,'overview',f.buildingId);
+  const f=normalize({...raw,state:raw.state,durability:raw.durability,maxDura:raw.maxDura,curGridIdx:raw.curGridIdx,cityId:raw.cityId,startGridIdx:raw.startGridIdx,targetGridIdx:raw.targetGridIdx,moveStartTs:raw.moveStartTs,moveEndTs:raw.moveEndTs,startCityId:raw.startCityId,targetCityId:raw.targetCityId});
+  const homeIdle=fleetAtHome(raw);
+  const state=({1:homeIdle?'主城空闲':f.curGridIdx>0?'驻守在外':f.treasureLootUid?'货轮任务中':f.chipWar?.rewardTs?'矿场任务中':'未同步',2:'行军',3:'战斗',4:'维修',5:'排队'})[f.state]||'未同步';
   const grid=f.state===2?f.startGridIdx:f.curGridIdx>0?f.curGridIdx:map?.cityInfo?.[f.cityId||home?.id]?.gridIdx;
   const name='远征舰队 '+f.buildingId.replace('远征船','')+' 队';
   const assignment=dispatch.find(d=>d.buildingId===f.buildingId);
-  const detail=state+' · 耐久 '+(f.durability??'未同步')+'/'+(f.maxDura??'未同步')+(f.state===2?' · 预计到达 '+(Number.isSafeInteger(f.moveEndTs)&&f.moveEndTs>0?new Date(f.moveEndTs*1000).toLocaleString('zh-CN',{timeZone:'Asia/Shanghai'}):'未同步'):'')+' · '+(reason||reservation||(f.state===1&&!f.curGridIdx&&!f.treasureLootUid&&!f.chipWar?.rewardTs&&f.durability>0?'可接任务，派遣前另核对编队与阈值':'暂不能接新任务'));
+  const dispatchNote=homeIdle?(assignment?.recordNote||dispatchReservationReason(client,settings,'overview',f.buildingId)):'';
+  const detail=state+' · 耐久 '+(f.durability??'未同步')+'/'+(f.maxDura??'未同步')+(f.state===2?' · 预计到达 '+(Number.isSafeInteger(f.moveEndTs)&&f.moveEndTs>0?new Date(f.moveEndTs*1000).toLocaleString('zh-CN',{timeZone:'Asia/Shanghai'}):'未同步'):'')+' · '+(dispatchNote||(homeIdle&&f.durability>0?'可接任务，派遣前另核对编队与阈值':'暂不能接新任务'));
   const taskDetail=' · 当前目标格 '+(f.state===2?f.targetGridIdx:f.curGridIdx||'主城')+' · 允许任务顺序 '+(assignment?.intents.map(i=>i.label).join(' → ')||'无');
   const motion=makeMotion(f);
   add('fleets','fleet-'+f.buildingId,name,grid,detail+taskDetail,{motion});
   const start=pos(f.startGridIdx),end=pos(f.targetGridIdx);
   if(f.state===2&&f.startGridIdx>0&&f.targetGridIdx>0&&start&&end)routes.push({start,end,name,key:'fleet-'+f.buildingId,color:'#2866cc'});
-  return {id:f.buildingId,name,state,detail:detail+taskDetail,grid,durability:f.durability,maxDura:f.maxDura,arriveAt:f.state===2?f.moveEndTs:null,journey:motion,
+  return {id:f.buildingId,name,state,dispatchNote,detail:detail+taskDetail,grid,durability:f.durability,maxDura:f.maxDura,arriveAt:f.state===2?f.moveEndTs:null,journey:motion,
    speedTarget:fleetSpeedTarget(raw,player),task:'未同步',target:'未同步'};
  });
  layers.fleets=Array.isArray(own?.fleets)?'已同步':'未同步';
@@ -101,31 +102,25 @@ export async function readWorldOverview(client,config,player,settings,ledger,{ma
  // 旧概览接口保留用量结构；汽油不再设置额外预算。
  const budgets=[['情报','radarPetrol'],['城战','cityWarPetrol'],['巨轮维修','treasureRepairPetrol'],['首杀本次','piratePetrol'],['Boss首战今日','worldBossPetrol'],['硅矿（含维修）','siliconPetrol'],['资源田','resourceFieldPetrol']]
   .map(([name,key])=>({name,limit:0,used:key==='piratePetrol'?pirateSpent:counters[key]??0,pending:pending[key]??0,remaining:null}));
- const targetPoint=(grid,uid,preferred)=>{
+ const targetPoint=(grid,uid)=>{
   if(uid){const ship=points.find(p=>p.layer==='treasure'&&p.key==='treasure-'+String(uid));if(ship)return ship;}
-  for(const layer of [preferred,'boss','radar','treasure','pirates','cities','fields'].filter(Boolean)){const point=points.find(p=>p.layer===layer&&p.grid===grid);if(point)return point;}
+  for(const layer of ['boss','radar','treasure','pirates','cities','fields']){const point=points.find(p=>p.layer===layer&&p.grid===grid);if(point)return point;}
   return null;
  };
  for(const f of fleets){const raw=own?.fleets.find(r=>r.buildingId===f.id),grid=raw?.state===2?raw.targetGridIdx:raw?.curGridIdx;
-  const held=Object.entries(records).find(([key,r])=>r.details?.buildingId===f.id && fleetRecordReason({[key]:r},f.id));
-  const kind=held?.[1].details.kind;
-  const waitingAtHome=!!held && raw?.state===1 && !raw.curGridIdx;
-  const waitingLabel=({'radarSend':'情报占用待核对','pirateFirst':'首杀战果待确认','worldBoss':'首战占用待核对','cityDispatch':'城战占用待核对','citySlot':'城战占用待核对','cityRepair':'维修待核对','treasureRepair':'维修待核对','treasureDispatch':'货轮派遣待核对'})[kind];
-  const heldTask=waitingAtHome?waitingLabel:({'radarSend':'情报','pirateFirst':'海盗首杀','worldBoss':'世界Boss'})[kind];
-  if(waitingAtHome && waitingLabel)f.state=waitingLabel;
-  const preferred=({'radarSend':'radar','pirateFirst':'pirates','worldBoss':'boss'})[held?.[1].details.kind];
-  const target=grid>0?targetPoint(grid,raw?.treasureLootUid,preferred):null;
+  const target=grid>0?targetPoint(grid,raw?.treasureLootUid):null;
   const ship=(treasure?.treasure??[]).find(t=>String(t.uid)===String(raw?.treasureLootUid));
   const city=cityCfg.find(c=>c.id===(raw?.state===2?raw.targetCityId:raw?.cityId));
-  const homeIdle=raw?.state===1&&!raw.curGridIdx&&!raw.treasureLootUid&&!held;
+  const homeIdle=fleetAtHome(raw);
   const targetCity=raw?.state===2?raw.targetCityId:raw?.cityId;
   // 城战排队/战斗回包可只给cityId而省略格子；行军阶段仍核对实际目标格。
-  const cityWar=!heldTask&&(kind==='cityDispatch'||(!raw?.treasureLootUid&&targetCity>0&&declarations.some(d=>d.cityId===targetCity)&&([3,5].includes(raw?.state)||raw?.state===2&&grid===map?.cityInfo?.[targetCity]?.gridIdx)));
-  f.task=homeIdle?'空闲':raw?.state===4?'维修':raw?.treasureLootUid?'万吨/货轮':heldTask|| (cityWar?'城战':({'radar':'情报','pirates':'海盗目标','boss':'世界Boss'})[target?.layer]||(raw?.chipWar?.rewardTs?'芯片争夺':raw?.state===1?'驻守':raw?.state===2&&raw?.targetCityId>0?'城市行军':'未同步'));
+  const cityWar=!raw?.treasureLootUid&&!raw?.chipWar?.rewardTs&&targetCity>0&&declarations.some(d=>d.cityId===targetCity)&&([3,5].includes(raw?.state)||raw?.state===2&&grid===map?.cityInfo?.[targetCity]?.gridIdx);
+  f.task=homeIdle?'空闲':raw?.state===4?'维修':raw?.treasureLootUid?'万吨/货轮':raw?.chipWar?.rewardTs?'芯片争夺':cityWar?'城战':
+   ({'radar':'情报','pirates':'海盗目标','boss':'世界Boss'})[target?.layer]||(raw?.state===1&&grid>0?'驻守':raw?.state===2&&raw?.targetCityId>0?'城市行军':'未同步');
   f.target=homeIdle?'—':ship?treasureName(ship):target?.name||city?.name||(grid>0?'目标格 '+grid:'未同步');
   if(cityWar)f.state='城战 · '+f.state;
   if(target)f.detail+=' · 目标 '+target.name;
-  const point=points.find(p=>p.key==='fleet-'+f.id);if(point){point.detail+=' · 当前任务 '+f.task+' · 当前目标 '+f.target;point.fleetInfo={state:f.state,durability:f.durability,maxDura:f.maxDura,task:f.task,journey:f.journey};}
+  const point=points.find(p=>p.key==='fleet-'+f.id);if(point){point.detail+=' · 当前任务 '+f.task+' · 当前目标 '+f.target;point.fleetInfo={state:f.state,durability:f.durability,maxDura:f.maxDura,task:f.task,dispatchNote:f.dispatchNote,journey:f.journey};}
  }
  const seen=new Set((own?.fleets??[]).map(f=>exactAutomationId(f.owner?.playerId||player.playerId)+':'+f.buildingId));
  for(const raw of marchFleets){

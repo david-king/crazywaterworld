@@ -10,7 +10,7 @@ import { createConsoleVersion, renderVersionedPage, consoleVersionError } from '
 import { createTraceLog, traceJson, redactLog } from './trace-log.mjs';
 import { createProtocolDiagnostics } from './protocol-diagnostics.mjs';
 import { createResourceUpdater } from './resource-updater.mjs';
-import {checkFleetSettlement,invalidateFleetReports} from './fleet-settlement.mjs';
+import {checkFleetSettlement,invalidateFleetReports,outstandingFleets} from './fleet-settlement.mjs';
 import {recoverFleetLineups, isFleetLineupRecord} from './fleet-lineups.mjs';
 import { recoverPirateHunts } from './pirate-recovery.mjs';
 import {readGuildTech,upgradeGuildTech} from './guild-tech.mjs';
@@ -98,7 +98,7 @@ import { appointments } from './appointments.mjs';
 import { surveyDailies, runDailies, formatSurvey, canClaimDailyReward } from './dailies.mjs';
 import { dailySingleState, addDailyOptions, runDailySingle } from './daily-single.mjs';
 import { surveyTasks, runTasks, formatTaskPlan, selectTaskSettings } from './tasks.mjs';
-import { makeTypeResolver, displayBuilding, weekFactoryInfo, surveyWorld, inventoryStockRows, factoryIncomingStock, manualFactoryProducts, startManualFactoryProduction, planWorld, runWorldRound, speedUpProduction, SPEED_UP_ITEM, submitResidentOrder, rerollResidentOrder, watchResidentRefreshes, formatWorldPlan, formatFieldReport, loadMapAsset } from './world.mjs';
+import { makeTypeResolver, displayBuilding, weekFactoryInfo, surveyWorld, inventoryStockRows, factoryIncomingStock, manualFactoryProducts, startManualFactoryProduction, nativeFactoryControl, toggleNativeFactory, planWorld, runWorldRound, speedUpProduction, SPEED_UP_ITEM, manualResidentOrderDecision, submitResidentOrder, rerollResidentOrder, watchResidentRefreshes, formatWorldPlan, formatFieldReport, loadMapAsset } from './world.mjs';
 import { runLoop, formatLoopRound, formatLoopStep } from './loop.mjs';
 import { foldBusinessEntry, createOperationJournal } from './business-journal.mjs';
 import { upgradeChanges } from './building-upgrade-log.mjs';
@@ -110,6 +110,7 @@ import { operationLabels } from './operation-labels.mjs';
 import { automationTasks, retiredAutomationTasks, migratedAutomationTasks, defaultCompassSpinCount, maxCompassSpinCount, taskSettings, worldTaskKey, dailyTaskKey } from './automation.mjs';
 import { rewardSchedule } from './reward-schedule.mjs';
 import { beijingDay, loadAutomationSettings, loadRecoverableAutomationSettings, settingsFile, defaultSettings, saveAutomationSettings, validateSettings, settingsCatalog, settingsFromNative, settingsFromLegacyNative, nativeTaskValues, applyNativeTask, hasExtraWork, createUsageLedger, exportAutomationSettings, importAutomationSettings, SettingsError, settingsUiRules } from './automation-settings.mjs';
+import { listedPlayerNames, knownListPlayerIds, rememberPlayerNames, prunePlayerNames, readWorldListPlayers } from './player-name-history.mjs';
 import { budgetPreview, exactAutomationId, createActionGuard, nativePreferenceEnabled, needsCargoDemand, AutomationSkip } from './automation-policy.mjs';
 import { guardRuntimeActions, validateRuntimeSettings } from './settings-runtime.mjs';
 import { assertResourcesReady, resourceReadiness } from './resource-store.mjs';
@@ -124,6 +125,9 @@ import { watchBasePushes, surveyBaseAutomation, planBaseAutomation, baseDemands,
 import { reconcileManualProduction } from './manual-production-sync.mjs';
 import { configuredMaterialRecipes, readProductionSnapshot } from './production-snapshot.mjs';
 import { materialTreeRecipes, planProduction } from './production-planning.mjs';
+import { forecastProductionDay } from './production-day.mjs';
+import { factoryInsertions } from './factory-insert-store.mjs';
+import { advanceFactoryInsertion, prepareFactoryInsertion } from './factory-insertion.mjs';
 import { createProductionTiming, watchProductionTimings } from './production-timing.mjs';
 import { captureManualProductionMaterialState, refreshOrderMaterialSpends } from './order-reservations.mjs';
 import { createStageTask } from './stages.mjs';
@@ -805,10 +809,12 @@ export function createConsole({ host = '127.0.0.1', port = 17321, onLog, recover
       session.operations = createOperationJournal((level, message, data, quiet) => emit(session, level, message, data, quiet), LOG_LIMIT);
       sessions.set(id, session);
       if (session.settingsRecovery) emit(session, 'error', session.settingsRecovery.message);
-      try {
-        const audit = JSON.parse(fs.readFileSync(factoryReportFile(id), 'utf8'));
-        if (audit.lines?.length) emit(session, 'info', '上次工厂检查 · ' + audit.time, { diagnostic: audit.lines.join('\n') });
-      } catch { /* 新账号没有历史核对记录 */ }
+      if (!session.paused) {
+        try {
+          const audit = JSON.parse(fs.readFileSync(factoryReportFile(id), 'utf8'));
+          if (audit.lines?.length) emit(session, 'info', '上次工厂检查 · ' + audit.time, { diagnostic: audit.lines.join('\n') });
+        } catch { /* 新账号没有历史核对记录 */ }
+      }
     }
     return sessions.get(id);
   }
@@ -907,7 +913,10 @@ export function createConsole({ host = '127.0.0.1', port = 17321, onLog, recover
     try { loadConfigSafe(); validateRuntimeSettings(settings, config); }
     catch (error) { compatibility = { error: error.message, fields: error.fields ?? {} }; }
     const recoveryToken = session.settingsRecovery ? createHash('sha256').update(JSON.stringify([saved.revision, saved.savedAt, session.settingsRecovery])).digest('hex') : null;
-    return { settings, revision: saved.revision, savedAt: saved.savedAt, baseRevision, compatibility, recovery: session.settingsRecovery, recoveryToken, catalog: ownedFleetCatalog(session,settingsCatalog(config)),
+    let playerNames = {};
+    try { playerNames = listedPlayerNames(session.id, settings); }
+    catch (error) { emit(session, 'warn', '名单昵称记录暂不可读：' + error.message); }
+    return { settings, playerNames, revision: saved.revision, savedAt: saved.savedAt, baseRevision, compatibility, recovery: session.settingsRecovery, recoveryToken, catalog: ownedFleetCatalog(session,settingsCatalog(config)),
       tasks: automationTasks.filter(task => !retiredAutomationTasks.has(task.key) && !availability.hiddenTasks.includes(task.key)), rules: { ...settingsUiRules(), hiddenFields: availability.hiddenFields },
       usage: usageFor(session).snapshot(), pendingUsage: usageFor(session).pendingCounters(), running: session.loop.running };
   }
@@ -1149,15 +1158,41 @@ export function createConsole({ host = '127.0.0.1', port = 17321, onLog, recover
     return path.join(DATA_DIR, 'factory-report-' + encodeURIComponent(id) + '.json');
   }
 
+  const playerPickerLists = new WeakMap();
+  function recordListNames(session, settings, rows, initialOnly = false) {
+    const playerNames = rememberPlayerNames(session.id, settings, rows, { initialOnly });
+    if (!playerNames) return;
+    const event = 'event: player-names-changed\ndata: ' + JSON.stringify({ account: session.id, playerNames }) + '\n\n';
+    for (const stream of streams) if (stream.allAccounts || stream.account === session.id) writeStream(stream, event);
+  }
+
   function wire(session, instance) {
+    session.mapIdleFleetIds = [];
+    function notifyFleetMap() {
+      const payload = `event: fleets-changed\ndata: ${JSON.stringify({ account: session.id })}\n\n`;
+      for (const stream of streams) if (stream.allAccounts || stream.account === session.id) writeStream(stream, payload);
+    }
     watchBasePushes(instance);
     watchProductionTimings(instance, loadConfigSafe);
     watchGuildShipPushes(instance);
     watchHeroRaidPushes(instance);
     watchSiliconMining(instance);
+    function noteNames(rows, initialOnly = false) {
+      if (session.client !== instance || !session.player || session.paused || !session.preferences) return;
+      try { recordListNames(session, session.preferences, rows, initialOnly); }
+      catch (error) { emit(session, 'warn', '名单昵称记录失败：' + error.message); }
+    }
+    instance.on('list-player-profiles', rows => noteNames(rows));
     instance.on('message', ({name,body}) => {
-      if (session.client===instance && ['MyFleetsResponse','SCMyFleetUpdate'].includes(name))
+      if (name === 'GuildMemberResponse' || name === 'BlackListResponse' || name === 'WorldInfoResponse' || name === 'SCFleet') {
+        const members = name === 'GuildMemberResponse' ? (body.titleList ?? []).flatMap(group => group.members ?? []) :
+          name === 'BlackListResponse' ? body.list ?? [] : (body.fleets ?? []).map(fleet => fleet.owner).filter(Boolean);
+        noteNames(members.map(member => ({ id: exactAutomationId(member.playerId), name: member.nickname })), name !== 'GuildMemberResponse');
+      }
+      if (session.client===instance && ['MyFleetsResponse','SCMyFleetUpdate'].includes(name)) {
         observeOwnedFleets(session,body?.fleets,{complete:name==='MyFleetsResponse'});
+        if (name === 'SCMyFleetUpdate' && body?.fleets?.length) notifyFleetMap();
+      }
       if(name==='RecruitInfoResponse')instance.freeRecruitTimes={hero:body.hero?.freeEndTimeSeconds,antique:body.antique?.freeEndTimeSeconds};
       if(name==='RecruitStartResponse'||name==='AntiqueRecruitResponse'){
         instance.freeRecruitTimes??={};instance.freeRecruitTimes[name==='RecruitStartResponse'?'hero':'antique']=body.recruitData?.freeEndTimeSeconds;
@@ -1173,6 +1208,27 @@ export function createConsole({ host = '127.0.0.1', port = 17321, onLog, recover
     // 任务已停或关闭自动派遣时也处理返航。合并同一批推送，进入账号原有的串行队列。
     let settlementTimer=null, settlementBusy=false, settlementDirty=false;
     const current=()=>session.client===instance && instance.connected && session.player && !session.paused && !session.productionSyncRequired;
+    let servicingInserts = false;
+    const insertTimer = setInterval(async () => {
+      if (servicingInserts || !current() || closing) return;
+      const player = session.player, generation = session.generation;
+      const enabled = () => current() && !closing && session.player === player && session.generation === generation;
+      servicingInserts = true;
+      try {
+        const ids = Object.keys(factoryInsertions(player));
+        if (ids.length) await enqueue(session, async () => {
+          for (const id of ids) {
+            if (!enabled()) return;
+            const message = await advanceFactoryInsertion(instance, protocolFor(instance),
+              { player, enabled, config:loadConfigSafe(), settings:session.preferences }, id);
+            if (message) emit(session,'warn',message,{ worldUpdated:true });
+          }
+        }, '执行排产插单');
+      } catch (error) { if (enabled()) emit(session,'warn','排产插单待核对：' + error.message); }
+      finally { servicingInserts = false; }
+    }, 10000);
+    insertTimer.unref?.();
+    instance.once('close', () => clearInterval(insertTimer));
     function scheduleSettlement(){
       if(!current())return;
       settlementDirty=true;
@@ -1185,7 +1241,8 @@ export function createConsole({ host = '127.0.0.1', port = 17321, onLog, recover
           settlementDirty=false;
           if(current()){const changes=await checkFleetSettlement(instance,session.player,usageFor(session),{afterPush:true});
             for(const change of changes)if(change.repairRecovery)emit(session,'info','战后维修 · '+change.buildingId+' · '+change.reason+'（已确认）');
-            await recoverFleetLineups(instance,session.player,usageFor(session),{enabled:current,report:entry=>emit(session,entry.ok?'info':'warn',entry.label+' · '+(entry.reason||entry.error||''))});}
+            const lineups=await recoverFleetLineups(instance,session.player,usageFor(session),{enabled:current,report:entry=>emit(session,entry.ok?'info':'warn',entry.label+' · '+(entry.reason||entry.error||''))});
+            if(current() && (changes.length || lineups.restored.length))notifyFleetMap();}
         }).catch(error=>{if(current())emit(session,'warn','舰队归队状态待核对：'+error.message);}).finally(()=>{
           settlementBusy=false;
           if(settlementDirty&&current())scheduleSettlement();
@@ -1209,13 +1266,19 @@ export function createConsole({ host = '127.0.0.1', port = 17321, onLog, recover
       }
       if(['SCNewCampaignReport','SCMyFleetUpdate','SCWorldBossCampaignEnd','SCRadarEventState','SCPirateCampaignEnd','SCPirateKillRecordUpdate'].includes(name))scheduleSettlement();
     });
-    const lineupRecoveryTimer=setInterval(()=>{
+    const fleetRecoveryTimer=setInterval(()=>{
       if(!current())return;
-      try{if(Object.values(usageFor(session).keyRecords()).some(isFleetLineupRecord))scheduleSettlement();}
-      catch(error){emit(session,'warn','舰队阵容恢复记录待核对：'+error.message);}
+      try{
+        const ids=session.mapIdleFleetIds,records=usageFor(session).keyRecords();
+        session.mapIdleFleetIds=[];
+        // 地图已经读到归队但可能漏收了推送。交由原任务按业务证据核对，避免每次刷新重复检查。
+        if(Object.values(records).some(isFleetLineupRecord) || (ids.length &&
+          outstandingFleets(records,exactAutomationId(session.player.worldId)).some(([,r])=>ids.includes(r.details.buildingId))))scheduleSettlement();
+      }
+      catch(error){emit(session,'warn','舰队历史记录待核对：'+error.message);}
     },15000);
-    lineupRecoveryTimer.unref?.();
-    instance.on('close',()=>{clearInterval(lineupRecoveryTimer);clearTimeout(settlementTimer);settlementTimer=null;settlementDirty=false;});
+    fleetRecoveryTimer.unref?.();
+    instance.on('close',()=>{clearInterval(fleetRecoveryTimer);clearTimeout(settlementTimer);settlementTimer=null;settlementDirty=false;});
     instance.on('message', ({ name, body }) => {
       if (session.client === instance && session.player && name === 'SCVipUpdate' && Number.isSafeInteger(body.vipLevel)) {
         session.player.vip = { ...session.player.vip, vipLevel: body.vipLevel, vipExp: body.vipExp };
@@ -1968,24 +2031,27 @@ export function createConsole({ host = '127.0.0.1', port = 17321, onLog, recover
           return { productId, name: step.displayProduct || displayMaterial(config, productId),
             estimatedFinishTime: canEstimate ? finishes.get(step.body) : null };
         }) : null;
+        const autoControl = nativeFactoryControl(instance, b, survey, config);
         return {
           buildingId: b.buildingId, displayName: displayBuilding(config, b), type: b.type, typeName: typeNames.get(b.type), level: b.level,
           queue: jobs.length, queueKnown, jobs, plannedJobs,
           manualProducts: manualFactoryProducts(b, survey, config, incoming).map(product => ({ ...product, icon: materialIcon(product.productId) })),
           capacity: Number.isSafeInteger(survey.factorySlots) && survey.factorySlots > 0 ? survey.factorySlots : null,
           auto: b.factory.autoProductId ? displayMaterial(config, b.factory.autoProductId) : null,
-          autoEnabled: !!b.factory.autoProductId && (survey.autoProduceForever || survey.autoProduceEndTime > survey.serverNow),
+          autoEnabled: autoControl.on, autoControl,
           icon: buildingIcon(b.type),
         };
       }),
+      orderOfTheDay: survey.orderOfTheDay && {
+        orderNum: survey.orderOfTheDay.orderNum ?? 0,
+        dailyLimit: survey.residentOrderLimit,
+      },
       orders: survey.orders.map((order) => ({
         ...order,
         workerIcon: workerIcon(order.workerId),
         decision: autoOrders.find(row => row.index === order.index),
         manualRefresh:{allowed:!!order.orderKey&&!order.refreshTime&&!order.refreshPending&&order.requirements.length>0&&session.player?.level>=12,reason:order.refreshPending?'上次换单待确认':order.refreshTime?'等待新订单':session.player?.level<12?'角色12级开放':!order.orderKey?'订单身份待确认':!order.requirements.length?'订单需求未同步':''},
-        manualDecision: order.orderKey ? planWorld({ ...survey, orders: [order] }, {
-          config, enabled: kind => kind === 'finishOrder',
-        }).orderDecisions[0] : { status: 'unknown', reason: '无法确认这条居民订单，请刷新后再试' },
+        manualDecision: manualResidentOrderDecision(survey, order, config),
         requirements: order.requirements.map((need) => ({ ...need, name: displayMaterial(config, need.id), sources: config?.materialSources(need.id), icon: materialIcon(need.id) })),
         missing: (order.missing ?? []).map((need) => ({ ...need, name: displayMaterial(config, need.id), sources: config?.materialSources(need.id), icon: materialIcon(need.id) })),
       })),
@@ -2402,15 +2468,52 @@ export function createConsole({ host = '127.0.0.1', port = 17321, onLog, recover
         json(loginSettingsView(session));
         return;
       }
+      if (route === 'GET /api/settings/player-names') {
+        const { session } = scoped_(parsed);
+        const settings = effectiveSettings(session), history = listedPlayerNames(session.id, settings);
+        const allowed = knownListPlayerIds(settings, history);
+        const ids = [...new Set((parsed.searchParams.get('ids') ?? '').split(',').filter(Boolean))];
+        if (ids.length > 100 || ids.some(id => !allowed.has(id))) throw new SettingsError({ ids: '请选择已保存名单中的角色' });
+        const { client, generation, player } = session;
+        const current = () => client?.connected && session.client === client && session.generation === generation && session.player === player && player && !session.paused;
+        const synced = [];
+        for (const id of ids) {
+          if (!current()) break;
+          try {
+            const profile = await readJob(session, () => {
+              if (!current()) throw Error('角色连接已变化');
+              return client.request('OtherPlayerInfoRequest', { playerId: id }, 'OtherPlayerInfoResponse', 8000);
+            }, { recoverFormation: false });
+            if (!current()) break;
+            if (typeof profile?.nickname !== 'string' || !profile.nickname.trim()) continue;
+            recordListNames(session, effectiveSettings(session), [{ id, name: profile.nickname }]);
+            synced.push(id);
+          } catch (error) { if (!error.prompt) break; }
+        }
+        json({ playerNames: listedPlayerNames(session.id, effectiveSettings(session)), synced, online: !!current() });
+        return;
+      }
       if (route === 'GET /api/settings/players') {
         const { session } = scoped_(parsed);
-        if (!session.client?.connected || session.paused) throw new Error('请先连接当前账号，再读取盟友名单');
-        const client = session.client;
-        const members = await enqueue(session, async () => {
-          if (session.client !== client || !client.connected || session.paused) throw new Error('账号连接已变化，请重新读取盟友名单');
-          return readGuildMembers(client, loadConfigSafe(), session.player);
-        });
-        json(members);
+        const { client, player, generation } = session;
+        if (!client?.connected || !player || session.paused) throw new Error('请先连接当前账号，再读取玩家名单');
+        const check = () => {
+          if (session.client !== client || session.player !== player || session.generation !== generation || !client.connected || session.paused)
+            throw new Error('角色连接已变化，请重新读取名单');
+        };
+        const world = parsed.searchParams.get('scope') === 'world';
+        const result = await readJob(session, () => {
+          check();
+          return world ? readWorldListPlayers(client, player, check) : readGuildMembers(client, loadConfigSafe(), player);
+        }, { recoverFormation: false });
+        check();
+        const cached = playerPickerLists.get(client);
+        const lists = cached?.player === player ? cached : { player };
+        lists[world ? 'world' : 'guild'] = result.members;
+        playerPickerLists.set(client, lists);
+        try { recordListNames(session, effectiveSettings(session), result.members, true); }
+        catch (error) { emit(session, 'warn', '名单昵称记录失败：' + error.message); }
+        json(result);
         return;
       }
       if (route === 'GET /api/settings/guild-fort-materials') {
@@ -2476,6 +2579,12 @@ export function createConsole({ host = '127.0.0.1', port = 17321, onLog, recover
         if (!current.revision && payload.baseRevision !== current.baseRevision) throw new SettingsError({ revision: '现有挂机开关已变化，请重新载入后再保存' });
         const entry = saveAutomationSettings(session.id, payload.settings, { revision: payload.revision, catalog: settingsCatalog(loadConfigSafe({ allowStale: true })), expectedRecoveryId: current.recovery?.id });
         adoptPreferences(session, entry);
+        try {
+          const lists = playerPickerLists.get(session.client);
+          if (lists && lists.player === session.player) recordListNames(session, entry.settings, [...(lists.guild ?? []), ...(lists.world ?? [])], true);
+          prunePlayerNames(session.id, entry.settings);
+        }
+        catch (error) { emit(session, 'warn', '配置已保存，名单昵称记录清理失败：' + error.message); }
         if (session.client) for (const task of automationTasks) rewardSchedule(session.client).clearTask(task.key);
         emit(session, 'info', '游戏配置已保存。正在运行的任务从下次检查开始使用新配置。');
         json(settingsView(session));
@@ -2939,6 +3048,7 @@ export function createConsole({ host = '127.0.0.1', port = 17321, onLog, recover
         sessions.get(account.id)?.operations.clear();
         flushBatch(sessions.get(account.id));
         sessions.delete(account.id);
+        try { prunePlayerNames(account.id, null); } catch (error) { emit(null, 'warn', '账号已删除，昵称记录清理失败：' + error.message); }
         try { publicGiftCodes.removeAccount(account.id); }
         catch (error) { emit(null, 'warn', '账号已删除，礼包自动兑换设置清理失败：' + error.message); }
         emit(null, 'info', `已删除账号 ${describeAccount(account).title}`);
@@ -3317,10 +3427,11 @@ export function createConsole({ host = '127.0.0.1', port = 17321, onLog, recover
       if (route === 'GET /api/gift-codes/initial' || route === 'POST /api/gift-codes/load') {
         const payload = req.method === 'POST' ? jsonBody() : null;
         if (payload) needConfirm(payload);
-        const known = new Map(loadStore().accounts.map(account => [account.id, account]));
+        const { accounts, activeId } = loadStore();
+        const known = new Set(accounts.map(account => account.id));
         const selected = payload ? payload.accounts
           : parsed.searchParams.has('accounts') ? JSON.parse(parsed.searchParams.get('accounts'))
-          : parsed.searchParams.has('account') ? [resolve(parsed).account.id] : [...known.keys()].slice(0, 1);
+          : parsed.searchParams.has('account') ? [resolve(parsed).account.id] : activeId ? [activeId] : [];
         if (!Array.isArray(selected) || selected.some(id => typeof id !== 'string' || !known.has(id))) throw Error('所选账号不存在，请刷新账号列表');
         if (payload) {
           try { await publicGiftCodes.refresh({ force: true }); }
@@ -4265,7 +4376,18 @@ export function createConsole({ host = '127.0.0.1', port = 17321, onLog, recover
       if (route === 'GET /api/world/overview') {
         const {session}=scoped_(parsed);
         if(!session.client?.connected||session.paused)throw new Error('请先连接当前账号，再读取世界概览');
-        if(!session.mapRead) { const job=readJob(session,()=>readWorldOverview(session.client,loadConfigSafe(),session.player,settingsView(session).settings,usageFor(session),{pirateSpent:pirateRunState(session).spent??0})).finally(()=>{if(session.mapRead===job)session.mapRead=null;});session.mapRead=job; }
+        if(!session.mapRead) {
+          const client=session.client,player=session.player,generation=session.generation;
+          const current=()=>session.client===client && client.connected && !session.paused && session.player===player && session.generation===generation;
+          const job=readJob(session,async()=>{
+            if(!current())throw Error('账号连接已变化，请重新读取地图');
+            const view=await readWorldOverview(client,loadConfigSafe(),player,settingsView(session).settings,usageFor(session),{pirateSpent:pirateRunState(session).spent??0});
+            if(!current())throw Error('账号连接已变化，请重新读取地图');
+            session.mapIdleFleetIds=view.fleets.filter(f=>f.dispatchNote).map(f=>f.id);
+            return view;
+          }).finally(()=>{if(session.mapRead===job)session.mapRead=null;});
+          session.mapRead=job;
+        }
         json(await session.mapRead);return;
       }
       if (route === 'GET /api/world/production-plan') {
@@ -4273,29 +4395,81 @@ export function createConsole({ host = '127.0.0.1', port = 17321, onLog, recover
         if (!session.client?.connected || session.paused || session.productionSyncRequired) throw new Error('请先连接并同步当前账号，再生成排产计划');
         if (!session.productionPlanRead) {
           const client = session.client, generation = session.generation, player = session.player;
-          const view = settingsView(session), settingsKey = JSON.stringify(view.settings);
-          const enabled = () => session.client === client && client.connected && !session.paused
+          const settings = effectiveSettings(session), settingsKey = JSON.stringify(settings);
+          const insertEpoch = session.factoryInsertEpoch ?? 0;
+          const accountCurrent = () => session.client === client && client.connected && !session.paused
             && session.player === player
-            && session.generation === generation && !session.productionSyncRequired
-            && JSON.stringify(settingsView(session).settings) === settingsKey;
+            && session.generation === generation && !session.productionSyncRequired;
+          const enabled = () => accountCurrent() && (session.factoryInsertEpoch ?? 0) === insertEpoch
+            && JSON.stringify(effectiveSettings(session)) === settingsKey;
           const job = readJob(session, async () => {
             if (!enabled()) throw new Error('账号或排产设置已变化，请重新计算');
             const config = loadConfigSafe();
             const timing = watchProductionTimings(client, loadConfigSafe);
             await refreshOrderMaterialSpends(client, player, { enabled, request: 'PetFeedRequest' });
-            const snapshot = await readProductionSnapshot(client, protocolFor(client), config, player, view.settings,
+            const snapshot = await readProductionSnapshot(client, protocolFor(client), config, player, settings,
               { enabled, observedDurations: timing.snapshot() });
             if (!enabled()) throw new Error('账号或排产设置已变化，请重新计算');
             if (loadConfigSafe() !== config) throw new Error('游戏配置已更新，请重新计算');
             snapshot.timing.observedDurations = timing.snapshot();
-            const result = planProduction(snapshot, config, view.settings,
-              { pendingMaterials: captureManualProductionMaterialState(session.player).all });
+            const pendingMaterials = captureManualProductionMaterialState(session.player).all;
+            return { snapshot, config, pendingMaterials, insertions:factoryInsertions(player) };
+          }).then(async ({ snapshot, config, pendingMaterials, insertions }) => {
             if (!enabled()) throw new Error('账号或排产设置已变化，请重新计算');
+            const result = planProduction(snapshot, config, settings, { pendingMaterials });
+            const anchors = new Map();
+            result.forecast = await forecastProductionDay(snapshot, config, settings, result.orders, {
+              anchors, insertions, pendingMaterials, checkCurrent() { if (!accountCurrent()) throw new Error('账号已变化，请重新计算'); },
+            });
+            if (result.strategy === 'nativeSimulation' && !result.forecast.partial) {
+              const ready = new Map(result.forecast.completions.map(order => [order.id, order.at]));
+              for (const order of result.orders) if (!order.reason) order.completionAt = ready.get(order.id) ?? null;
+            }
+            if (!enabled() || loadConfigSafe() !== config) throw new Error('账号或排产配置已变化，请重新计算');
+            if (!result.forecast.unavailable) {
+              result.forecast.insertKey = randomUUID();
+              session.factoryInsertPlan = { anchors, forecast:result.forecast, config, enabled };
+            }
             return result;
           }).finally(() => { if (session.productionPlanRead === job) session.productionPlanRead = null; });
           session.productionPlanRead = job;
         }
         json(await session.productionPlanRead);
+        return;
+      }
+      if (route === 'POST /api/world/production-insert-options' || route === 'POST /api/world/production-insert') {
+        const target = jsonBody(), submit = route.endsWith('/production-insert');
+        if (submit) needConfirm(target);
+        const { session } = scoped_(parsed);
+        const quote = session.factoryInsertPlan;
+        const enabled = () => quote && session.factoryInsertPlan === quote && quote.enabled()
+          && quote.config === loadConfigSafe() && target.planKey === quote.forecast.insertKey;
+        if (!enabled()) throw new Error('请重新生成当前账号的排产计划后插单');
+        const { client, player, generation } = session;
+        const context = { config:quote.config, player, enabled, settings:session.preferences };
+        const prepare = () => prepareFactoryInsertion(client, protocolFor(client), context, quote, target, submit);
+        if (!submit) {
+          json(await readJob(session, prepare, { recoverFormation:false }));
+          return;
+        }
+        const result = await enqueue(session, async () => {
+          if (!enabled()) throw new Error('请重新生成当前账号的排产计划后插单');
+          const saved = await prepare();
+          session.factoryInsertEpoch = (session.factoryInsertEpoch ?? 0) + 1;
+          session.factoryInsertPlan = null;
+          session.productionPlanRead = null;
+          session.worldRead = null;
+          context.enabled = () => session.client === client && client.connected && session.player === player
+            && session.generation === generation && !session.paused && !session.productionSyncRequired;
+          let warning;
+          try {
+            warning = await advanceFactoryInsertion(client, protocolFor(client), context, target.buildingId);
+          } catch (error) { warning = saved.label + '，等待核对游戏队列：' + error.message; }
+          const label = warning || saved.label;
+          emit(session, warning ? 'warn' : 'info', label, { worldUpdated:true });
+          return { ...saved, label, warning };
+        }, '插入工厂排产');
+        json(result);
         return;
       }
       if (route === 'GET /api/world') {
@@ -4308,9 +4482,10 @@ export function createConsole({ host = '127.0.0.1', port = 17321, onLog, recover
         json(await session.worldRead);
         return;
       }
-      if (route === 'POST /api/world/production-speed' || route === 'POST /api/world/production-start') {
+      if (['POST /api/world/production-speed', 'POST /api/world/production-start', 'POST /api/world/production-auto'].includes(route)) {
         const start = route.endsWith('/production-start');
-        const label = start ? '手动工厂排产' : '手动生产加速';
+        const auto = route.endsWith('/production-auto');
+        const label = auto ? '切换工厂原生自动生产' : start ? '手动工厂排产' : '手动生产加速';
         const payload = jsonBody();
         needConfirm(payload);
         const { session } = scoped_(parsed);
@@ -4318,10 +4493,12 @@ export function createConsole({ host = '127.0.0.1', port = 17321, onLog, recover
         const enabled = () => client?.connected && session.client === client && session.player === player
           && session.generation === generation && !session.paused && !session.productionSyncRequired;
         const result = await enqueue(session, async () => {
-          if (!enabled()) throw new Error('请先连接并同步当前账号，再' + (start ? '手动排产' : '使用加速器'));
-          const result = start
-            ? await startManualFactoryProduction(client, protocolFor(client), payload, { player, enabled, config: loadConfigSafe(), settings: session.preferences })
-            : await speedUpProduction(client, protocolFor(client), payload, { player, enabled, config: loadConfigSafe(), getSettings: () => session.preferences });
+          if (!enabled()) throw new Error('请先连接并同步当前账号，再' + (auto ? '切换自动生产' : start ? '手动排产' : '使用加速器'));
+          const context = { player, enabled, config: loadConfigSafe() };
+          let result;
+          if (auto) result = await toggleNativeFactory(client, protocolFor(client), payload, context);
+          else if (start) result = await startManualFactoryProduction(client, protocolFor(client), payload, { ...context, settings: session.preferences });
+          else result = await speedUpProduction(client, protocolFor(client), payload, { ...context, getSettings: () => session.preferences });
           session.worldRead = null;
           emit(session, result.confirmed ? 'info' : 'warn', result.label, { worldUpdated: true });
           return result;
@@ -4346,7 +4523,7 @@ export function createConsole({ host = '127.0.0.1', port = 17321, onLog, recover
           job = enqueue(session, async () => {
             if (!enabled()) throw new Error('账号连接已变化，请刷新居民订单');
             const result = await (isReroll?rerollResidentOrder:submitResidentOrder)(client, protocolFor(client), { index, orderKey, enabled, ledger:usageFor(session),
-              config: loadConfigSafe(), player: session.player, cargoEnabled: () => session.loop.tasks.cargo });
+              config: loadConfigSafe(), player: session.player });
             emit(session, 'info', result.label, { worldUpdated: true });
             return { ok: true, ...result };
           }, (isReroll?'手动换单 #':'手动提交居民订单 #') + index).finally(() => session.residentJobs.delete(key));
@@ -5264,6 +5441,8 @@ export function createConsole({ host = '127.0.0.1', port = 17321, onLog, recover
           .sort((a,b) => (b.checkedAt ?? 0) - (a.checkedAt ?? 0))[0];
         const observed = rewards?.status(key);
         let state=(observed?.checkedAt??0)>(recorded?.checkedAt??0)?observed:recorded||observed;
+        // 订单回读与发送日志可能在同一秒，当前连接的调度记录已包含最近一次回读或发送结果。
+        if (key === 'orderDaily' && observed) state = observed;
         if(state?.checkedAt && beijingDay(state.checkedAt*1000)!==displayUsage.day)state=null;
         if (state && control.taskKey === 'tradeTasks') state = { ...state, text: '海商王统一领奖的最近记录：' + state.text };
         let nextCheck = rewards?.nextCheck(checkKey) ?? null;

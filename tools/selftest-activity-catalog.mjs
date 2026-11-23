@@ -240,6 +240,22 @@ try {
     assert.equal(readActivityCatalog('account-a', now).length, 2);
   });
 
+  await test('空目录和重复活动推送无需写锁，截止时间变化仍会保存', () => {
+    const account = 'repeated-push';
+    const file = path.join(directory, 'activity-catalog', createHash('sha256').update(account).digest('hex') + '.json');
+    const current = entry('repeat', now - 10, now + 10);
+    assert.deepEqual(rememberActivityCatalog(account, [], now), []);
+    assert(!fs.existsSync(file + '.lock'));
+    rememberActivityCatalog(account, [current], now);
+    fs.rmdirSync(file + '.lock');
+    const refreshed = { ...current, progress: 2 };
+    assert.deepEqual(rememberActivityCatalog(account, [refreshed], now), [refreshed]);
+    assert.equal(rememberActivityCatalog(account, [], now + 20)[0].lifecycle, 'ended');
+    assert(!fs.existsSync(file + '.lock'));
+    rememberActivityCatalog(account, [{ ...current, endTime: now + 30 }], now);
+    assert.equal(readActivityCatalog(account, now)[0].endTime, now + 30);
+  });
+
   await test('超凡英雄活动展示当前连接确认的挑战、订单与抽奖进度', async () => {
     const game = Object.assign(new EventEmitter(), client()), calls = [];
     game.request = async name => {

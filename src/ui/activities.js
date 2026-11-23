@@ -965,10 +965,9 @@ function confirmWeekOrderAction(action, payload = {}) {
     if (pendingActivities.has(key)) return;
     pendingActivities.add(key);
     try {
-      const result = await call('/api/week-order/' + action + '?account=' + encodeURIComponent(account), {
+      await call('/api/week-order/' + action + '?account=' + encodeURIComponent(account), {
         method: 'POST', body: JSON.stringify({ confirm: true, orderKey: order.orderKey, ...payload }),
       });
-      if (account === current) $('hint').textContent = result.message;
     } finally {
       pendingActivities.delete(key);
       if (account === current) await refreshActivities();

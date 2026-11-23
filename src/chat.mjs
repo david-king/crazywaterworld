@@ -218,6 +218,7 @@ export function createGameChat(client, { player, config, changed }) {
       current();
       const info = await client.request('OtherPlayerInfoRequest', { playerId: id }, 'OtherPlayerInfoResponse', 8000);
       current();
+      if (info.nickname) client.emit?.('list-player-profiles', [{ id, name: info.nickname }]);
       const configName = (table, key, value) => config?.tables?.[table]?.data?.find(row => row[key] === value)?.name;
       const sameWorld = exactAutomationId(info.worldId) && exactAutomationId(info.worldId) === exactAutomationId(player.worldId);
       return { id, own: id === ownId, nickname: info.nickname || target.name, avatar: avatarUrl(info.avatar),

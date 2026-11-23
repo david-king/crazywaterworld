@@ -723,6 +723,17 @@ try {
       }
     }
   });
+  test('旧账号默认新版排产，模拟原生策略及主产物可完整导入导出', () => {
+    const old = defaultSettings();
+    delete old.factory.strategy;
+    delete old.factory.simulatedTargets;
+    const updated = importAutomationSettings({format:SETTINGS_FORMAT,version:55,settings:old});
+    assert.equal(updated.factory.strategy,'smart');
+    Object.assign(updated.factory,{strategy:'nativeSimulation',simulatedTargets:['氧气瓶','铜锭']});
+    assert.deepEqual(importAutomationSettings(exportAutomationSettings(updated)).factory,updated.factory);
+    updated.factory.strategy='invalid';
+    assert.throws(()=>validateSettings(updated),error=>!!error.fields?.['factory.strategy']);
+  });
   test('第50版旧存档可读取、导入和保存，满舱航线只在缺项时补齐', () => {
     // 固定旧版导出样本。用当前默认值构造旧存档会掩盖下次新增必填项时遗漏的迁移。
     const legacy = JSON.parse(fs.readFileSync(new URL('./fixtures/automation-settings-v50.json', import.meta.url), 'utf8'));
@@ -733,6 +744,10 @@ try {
       delete expected.merchant.speedUpMinProfit;
       expected.merchant.speedUpMode = 'deadline';
       expected.merchant.fullCargoRoutes = value ?? defaultSettings().merchant.fullCargoRoutes;
+      expected.treasure.chasePlayerIds = [];
+      expected.alliance.memberIds = [];
+      Object.assign(expected.factory,{strategy:'smart',simulatedTargets:[]});
+      for (const fleet of expected.silicon.fleets) Object.assign(fleet, { huntPlayerIds: [], safePlayerIds: [] });
       const entry = { settingsVersion: document.version, revision: 7, settings: document.settings };
       fs.writeFileSync(file, JSON.stringify({ version: document.version, accounts: { merchant: entry, other: entry } }));
       const bytes = fs.readFileSync(file);
@@ -786,8 +801,46 @@ try {
       }
     }
   });
+  test('53 版攻击名单保留原昵称，角色 ID 独立保存、导入及校验', () => {
+    const old = defaultSettings(), role = '9007199254740995';
+    old.treasure.chase = true;
+    old.treasure.chaseNames = ['12345'];
+    delete old.treasure.chasePlayerIds;
+    for (const fleet of old.silicon.fleets) {
+      Object.assign(fleet, { huntEnabled: true, huntPlayers: ['原目标'], safePlayers: ['原盟友'] });
+      delete fleet.huntPlayerIds;
+      delete fleet.safePlayerIds;
+    }
+    const settings = importAutomationSettings({ format: SETTINGS_FORMAT, version: 53, settings: old });
+    assert.deepEqual(settings.treasure.chaseNames, ['12345']);
+    assert.deepEqual(settings.treasure.chasePlayerIds, []);
+    assert.deepEqual(settings.silicon.fleets[0].safePlayers, ['原盟友']);
+    assert.deepEqual(settings.silicon.fleets[0].huntPlayers, ['原目标']);
+    Object.assign(settings.treasure, { chaseNames: [], chasePlayerIds: [role] });
+    Object.assign(settings.silicon.fleets[0], { huntPlayers: [], huntPlayerIds: [role], safePlayerIds: ['9223372036854775807'] });
+    assert.deepEqual(importAutomationSettings(exportAutomationSettings(settings)), settings);
+    for (const target of [settings.treasure.chasePlayerIds, settings.silicon.fleets[0].huntPlayerIds, settings.silicon.fleets[0].safePlayerIds]) {
+      for (const value of ['9223372036854775808', '1e15', '01', 123, target[0]]) {
+        target.push(value);
+        assert.throws(() => exportAutomationSettings(settings));
+        target.pop();
+      }
+    }
+  });
+  test('54 版联盟帮助保留昵称关键词，新名单以完整角色 ID 往返保存', () => {
+    const old = defaultSettings();
+    delete old.alliance.memberIds;
+    old.alliance.memberKeywords = ['原关键词'];
+    const settings = importAutomationSettings({ format: SETTINGS_FORMAT, version: 54, settings: old });
+    assert.deepEqual(settings.alliance.memberIds, []);
+    assert.deepEqual(settings.alliance.memberKeywords, ['原关键词']);
+    settings.alliance.memberIds = ['9007199254740995'];
+    assert.deepEqual(importAutomationSettings(exportAutomationSettings(settings)).alliance, settings.alliance);
+    settings.alliance.memberIds = ['9e15'];
+    assert.throws(() => validateSettings(settings), error => !!error.fields['alliance.memberIds']);
+  });
   test('版本1升级后重复迁移保持一致，保留有效的用户值', () => {
-    assert.equal(SETTINGS_SCHEMA_VERSION, 53);
+    assert.equal(SETTINGS_SCHEMA_VERSION, 56);
     const settings = legacySettings();
     settings.factory.checkEverySeconds = 270;
     settings.resources.diamondDailyLimit = 1234;

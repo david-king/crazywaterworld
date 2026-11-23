@@ -7,6 +7,7 @@ process.env.CW_DATA_DIR = root;
 const { createUsageLedger } = await import('../src/automation-settings.mjs');
 const { runAllianceAutomation, allianceRecruitDemand, readAllianceRecruitDemand, allianceExchangeMaterial } = await import('../src/alliance-automation.mjs');
 const { guildMutualFixture } = await import('./fixtures/guild-mutual.mjs');
+const { runGuildMutual } = await import('../src/guild-mutual.mjs');
 const { loadConfig } = await import('../src/config.mjs');
 let serial = 0, passed = 0;
 const test = async (name, fn) => { await fn(); passed++; console.log('通过：' + name); };
@@ -79,6 +80,14 @@ try {
     f.settings.alliance.stockReserve = 0; f.settings.alliance.blockedMaterials = ['橡胶圈']; await f.run(); assert.equal(f.gifts().length, 0);
     f.settings.alliance.blockedMaterials = []; await f.run(); assert.equal(f.gifts().length, 1);
     assert.equal(f.gifts()[0].id, '9007199254750000'); assert.equal(f.ledger.snapshot().counters.guildAidGifts, 1);
+  });
+  await test('自动帮助按角色 ID 区分同名盟友，改名后继续赠送', async () => {
+    const f = fixture();
+    f.settings.alliance.autoHelp = true;
+    f.settings.alliance.memberIds = [f.other]; await f.run(); assert.deepEqual(f.gifts(), []);
+    f.settings.alliance.memberIds = [f.friend];
+    f.state.members.find(row => row.playerId === f.friend).nickname = '新昵称';
+    await f.run(); assert.equal(f.gifts().length, 1);
   });
   await test('居民订单的同材料需求优先保留，不挪用帮助盟友', async () => {
     const f = fixture(); f.settings.alliance.autoHelp = true;
@@ -173,12 +182,39 @@ try {
     f.ledger = createUsageLedger('fixture-' + serial, { file: f.file, now: () => Date.now() + f.client.serverClockOffsetMs });
     await f.run(); assert.equal(f.asks().length, 1); assert.equal(f.ledger.snapshot().uncertain, 1);
   });
-  await test('赠送未知与明确拒绝分别保留/释放持久预算', async () => {
-    const f = fixture(); f.settings.alliance.autoHelp = true; f.state.failure = 'giftUnknown'; await f.run();
-    assert.equal(f.gifts().length, 1); assert.equal(f.ledger.snapshot().counters.guildAidGifts, 1);
-    f.state.failure = ''; f.ledger = createUsageLedger('fixture-' + serial, { file: f.file }); await f.run(); assert.equal(f.gifts().length, 1);
-    const g = fixture(); g.settings.alliance.autoHelp = true; g.state.failure = 'giftReject'; await g.run(); assert.equal(g.ledger.snapshot().counters.guildAidGifts, 0);
-    g.state.failure = ''; await g.run(); assert.equal(g.gifts().length, 2);
+  await test('丢回执与单笔拒绝均释放额度，同轮换单送到成功次数上限', async () => {
+    const f = fixture(), ids = f.state.requests.slice(0,4).map(row=>row.reqId);
+    Object.assign(f.settings.alliance,{autoHelp:true,helpDailyLimit:2});
+    f.state.stock.橡胶圈=5;
+    f.state.onGift=id=>{ f.state.failure=id===ids[0]?'giftUnknown':id===ids[1]?'giftReject':''; };
+    await f.run();
+    assert.deepEqual(f.gifts().map(row=>row.id),ids);
+    assert.equal(f.ledger.snapshot().counters.guildAidGifts,2);
+    assert.equal(f.ledger.confirmedCounters().guildAidGifts,2);
+    assert.equal(f.ledger.snapshot().uncertain,0);
+    f.ledger = createUsageLedger('fixture-' + serial, { file: f.file });
+    await f.run(); assert.equal(f.gifts().length,4);
+  });
+  await test('游戏提示赠送次数上限立即停止，当天两入口共享，跨日可重新赠送', async () => {
+    const f = fixture(), original = f.state.requests[0];
+    Object.assign(f.settings.alliance, { autoHelp: true, helpDailyLimit: 2 });
+    f.state.onGift = () => { throw Object.assign(Error('赠送提示'), {request:'GuildAidHelpRequest',prompt:{args:['今日赠送次数已达上限']}}); };
+    await f.run();
+    assert.equal(f.gifts().length, 1);
+    assert.match(f.reports.at(-1).reason, /游戏今日赠送已达上限/);
+    f.state.onGift = null;
+    f.ledger = createUsageLedger('fixture-' + serial, { file: f.file });
+    await f.run();
+    const manual = await runGuildMutual({...f,enabled:()=>true},{target:2},{wait:async()=>assert.fail('达到游戏上限应直接结束')});
+    assert.match(manual.reason,/上限/);
+    assert.equal(f.gifts().length,1); assert.equal(f.ledger.snapshot().counters.guildAidGifts,0);
+    const tomorrow = Math.floor(Date.now()/1000) + 86400;
+    original.endTime = tomorrow + 600;
+    f.client.serverClockOffsetMs = 86400000;
+    f.ledger = createUsageLedger('fixture-' + serial, {file:f.file, now:()=>Date.now()+f.client.serverClockOffsetMs});
+    await f.run();
+    assert.equal(f.gifts().length, 2); assert.equal(f.gifts()[1].id, original.reqId);
+    assert.equal(f.ledger.snapshot().counters.guildAidGifts, 1);
   });
   await test('读取期间改变参数或退出联盟时不继续发送', async () => {
     const f = fixture(); f.settings.alliance.autoHelp = true;

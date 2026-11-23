@@ -56,8 +56,8 @@ try {
     const view = await f.preview();
     assert.deepEqual(view.fleetChoices.map(choice => [parseInt(choice.buildingId, 10), choice.status]), [
       [1, '空闲'], [2, '行军中'], [3, '战斗中'], [4, '维修中'], [5, '排队中'], [6, '驻守在外'],
-      [7, '已在此城'], [8, '未编队'], [11, '耐久不足'], [12, '未知'], [13, '已预留'],
-      [14, '货轮任务中'], [15, '矿场任务中'], [16, '任务占用'],
+      [7, '已在此城'], [8, '未编队'], [11, '耐久不足'], [12, '未知'], [13, '空闲 · 舰队有原自动任务尚未确认结束'],
+      [14, '货轮任务中'], [15, '矿场任务中'], [16, '空闲 · 城战派遣待核对'],
     ]);
     assert.deepEqual(view.fleetChoices.filter(choice => choice.available).map(choice => choice.buildingId), ['1远征船']);
     assert.deepEqual(view.fleets.map(choice => choice.buildingId), ['1远征船']);

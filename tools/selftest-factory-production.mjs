@@ -3,7 +3,7 @@ import { loadProtocol } from '../src/proto.mjs';
 import { defaultSettings } from '../src/automation-settings.mjs';
 import { createActionGuard } from '../src/automation-policy.mjs';
 import { runFactoryProductionBatch } from '../src/factory-production.mjs';
-import { runWorld } from '../src/world.mjs';
+import { nativeFactoryControl, toggleNativeFactory, runWorld } from '../src/world.mjs';
 import { pendingOrderMaterialSpends, beginOrderMaterialSpend, cancelOrderMaterialSpend } from '../src/order-reservations.mjs';
 
 const protocol = loadProtocol(), now = () => Math.floor(Date.now() / 1000);
@@ -70,6 +70,49 @@ function fixture() {
   const batch = (steps = Array.from({ length: 6 }, () => step()), extra = {}) => runFactoryProductionBatch(client, protocol, steps, { ...options(), ...extra });
   return { player, settings, config, state, client, add, step, options, batch };
 }
+
+await test('原生开关优先当前产物，关闭后按相同角色与工厂恢复原目标', async () => {
+  const { player, client, config, state } = fixture();
+  const building = state.building;
+  state.water = {autoProduceForever:true};
+  const survey = {player,serverNow:now(),...state.water};
+  const control = (who=player) => nativeFactoryControl(client,{...building,type:'材料厂'},{...survey,player:who},config);
+  assert.equal(control().productId,'产品甲');
+  building.factory.factoryQ.push({idx:1,productId:'产品乙',finishTime:now()+60});
+  assert.equal(control().productId,'产品乙');
+  building.factory.autoProductId = '产品乙';
+  building.factory.factoryQ = [];
+  const { key, productId } = control();
+  client.sendWatch = async (name,body,opts) => {
+    opts.beforeSend();
+    const type = protocol[name], decoded = type.decode(type.encode(body).finish());
+    assert.equal(name,'CancelFactoryAutoProduceRequest');
+    assert.equal(decoded.buildingId,building.buildingId);
+    building.factory.autoProductId = '';
+  };
+  const result = await toggleNativeFactory(client,protocol,{buildingId:building.buildingId,on:false,productId,key},
+    {player,config,enabled:()=>true});
+  assert(result.confirmed);
+  assert.equal(control().productId,'产品乙');
+  assert.equal(control({...player,playerId:player.playerId+1}).productId,'产品甲');
+});
+
+await test('模拟原生按仓容派单，策略、主产物或队列变化后丢弃旧计划', async () => {
+  const f = fixture();
+  Object.assign(f.settings.factory,{strategy:'nativeSimulation',simulatedTargets:['产品甲'],keepStock:0});
+  const step = {...f.step(),factoryStrategy:'nativeSimulation',simulatedTargetsKey:'["产品甲"]',
+    simulatedQueueKey:'["",[]]',demandDriven:false};
+  const run = () => runWorld(f.client,protocol,{actions:[step]},{...f.options(),allowMutate:true});
+  f.settings.factory.strategy='smart'; await run();
+  assert.equal(f.state.writes.length,0);
+  f.settings.factory.strategy='nativeSimulation'; f.settings.factory.simulatedTargets=[]; await run();
+  assert.equal(f.state.writes.length,0);
+  f.settings.factory.simulatedTargets=['产品甲'];
+  assert((await run()).results[0].ok);
+  assert.equal(f.state.writes.length,1);
+  await run();
+  assert.equal(f.state.writes.length,1);
+});
 
 await test('runWorld真实入口连续六件只在批首批末查询，不再逐件等待300毫秒', async () => {
   const f = fixture(), steps = Array.from({length:6}, () => f.step()), start = performance.now();
@@ -225,6 +268,21 @@ await test('无需求的备货遵守新鲜库存水位，独立需求仍能超�
   const result = await f.batch(); assert(result.results.every(row => row.skipped)); assert.equal(f.state.writes.length, 0);
   const next = await f.batch(Array.from({length:6}, () => ({ ...f.step(), demandDriven: true })));
   assert.equal(next.results.filter(row => row.ok).length, 6);
+});
+await test('同厂末级备货在复核时已满，前面的急单仍能提交并确认', async () => {
+  const f = fixture();
+  f.settings.factory.keepStock = 3;
+  f.state.stock.set('产品乙', 3);
+  const actions = [{ ...f.step(), demandDriven: true }, { ...f.step('产品乙'), demandDriven: false }];
+  const result = await runWorld(f.client, protocol, { actions }, { ...f.options(), allowMutate: true });
+  assert.equal(result.results[0].ok, true);
+  assert.equal(result.results[1].skipped, true);
+  assert.deepEqual(f.state.writes.map(x => x.body.productId), ['产品甲']);
+  const g = fixture();
+  g.state.mode = 'reject'; g.state.failAt = 1;
+  const rejected = await runWorld(g.client, protocol, { actions }, { ...g.options(), allowMutate: true });
+  assert.equal(rejected.results[1].skipped, true);
+  assert.equal(g.state.writes.length, 1);
 });
 await test('原料为零的生产未知也按账号和工厂防重', async () => {
   const f = fixture(); f.config.tables.BuildingProduceCfg.data[0].costItem = []; f.state.mode = 'unknown'; f.state.failAt = 1;

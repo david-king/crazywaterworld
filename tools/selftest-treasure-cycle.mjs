@@ -241,10 +241,47 @@ try {
       b.state.members.titleList = [{ guildTitle: 2, members: [{ playerId: '9007199254741099', nickname: '乙账号盟友', guildTitle: 2 }] }]; b.state.members.total = 1;
       for (const [id, f] of [['cycle-a', a], ['cycle-b', b]]) Object.assign(app.sessions.get(id), { client: f.client, player: f.player, paused: false });
       assert.equal((await api('cycle-a', '/api/settings/players')).body.members.length, 3); assert.equal((await api('cycle-b', '/api/settings/players')).body.members[0].name, '乙账号盟友');
+      const readWorld = account => fetch(base + '/api/settings/players?scope=world&account=' + account);
+      const first = '9007199254741103', second = '9007199254741105';
+      const originalRequest = a.client.request;
+      a.client.request = async request => {
+        if (request === 'WorldInfoRequest') return { fleets: [{ owner: { playerId: first, nickname: '同名对手', guildIdx: 7 } },
+          { owner: { playerId: a.player.playerId, nickname: '我' } }] };
+        if (request === 'ChatRecordRequest') return { message: [
+          { content: {}, sender: { playerId: second, nickname: '同名对手', guildIdx: 8 } },
+          { content: {}, sender: { playerId: first, nickname: '旧消息' } },
+          { content: { systemMsgId: '系统' }, sender: { playerId: '123', nickname: '公告' } }] };
+        throw Error('本轮黑名单未同步');
+      };
+      const candidates = await (await readWorld('cycle-a')).json();
+      assert.match(candidates.reason, /黑名单/);
+      assert.deepEqual(candidates.members, [{ id: first, name: '同名对手', guildIdx: 7, source: '世界舰队' },
+        { id: second, name: '同名对手', guildIdx: 8, source: '世界聊天' }]);
+      a.client.request = originalRequest;
       const s = initial.settings; Object.assign(s.treasure, { enabled: true, autoRepair: true, follow: true, followPlayerIds: ['9007199254740995'], avoidPlayerIds: ['9007199254740997'], fleetIds: ['1远征船'], participationMode: 'always' });
+      s.treasure.chasePlayerIds = [first];
       const saved = await api('cycle-a', '/api/settings', { settings: s, revision: initial.revision, baseRevision: initial.baseRevision }); assert.equal(saved.status, 200);
       assert.equal((await api('cycle-b', '/api/settings')).body.settings.treasure.participationMode, 'untilFull');
       assert.deepEqual(importAutomationSettings(exportAutomationSettings(saved.body.settings)).treasure, s.treasure);
+      assert.deepEqual(saved.body.playerNames[first], { name: '同名对手', previous: [] });
+      assert.equal(saved.body.playerNames[second], undefined);
+      assert.equal((await api('cycle-b', '/api/settings')).body.playerNames[first], undefined);
+      const id = s.treasure.followPlayerIds[0], refresh = account => fetch(base + '/api/settings/player-names?account=' + account + '&ids=' + id);
+      const previousRequest = a.client.request;
+      let name = '原名';
+      a.client.request = (request, body, ...rest) => {
+        if (request !== 'OtherPlayerInfoRequest') return previousRequest(request, body, ...rest);
+        assert.equal(body.playerId, id);
+        return { nickname: name };
+      };
+      assert.deepEqual((await (await refresh('cycle-a')).json()).playerNames[id], { name, previous: ['同名盟友'] });
+      name = '新名';
+      assert.deepEqual((await (await refresh('cycle-a')).json()).playerNames[id], { name, previous: ['原名', '同名盟友'] });
+      assert.equal((await refresh('cycle-b')).status, 400);
+      name = '';
+      const failed = await (await refresh('cycle-a')).json();
+      assert.deepEqual(failed.synced, []); assert.equal(failed.playerNames[id].name, '新名');
+      a.client.request = previousRequest;
       assert.equal((await api('cycle-a', '/api/settings/preview', {category:'world',settings:s})).body.actions.length,0,'没有跟随对象时不为其他货轮维修');
       a.state.members.titleList[0].members[1].nickname='指定盟友';
       a.state.targets[0].ownerGuildIdx=7;a.state.targets[0].ownerFleetNum=1;

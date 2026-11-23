@@ -3,14 +3,50 @@ import { linkOperationResult } from './operation-log.mjs';
 import { AutomationSkip, createActionGuard, resourceReserve, worldActionAllowed } from './automation-policy.mjs';
 import { goldAccountKey } from './gold-reservations.mjs';
 import { farmInventory } from './farm-planting.mjs';
-import { pendingOrderMaterialSpends, settleOrderMaterialState } from './order-reservations.mjs';
+import { pendingOrderMaterialSpends, readOrderReservedStock, settleOrderMaterialState } from './order-reservations.mjs';
+import { insertionRecipeReady } from './production-eligibility.mjs';
 import { factoryProductionSnapshot, factoryProductionOperation } from './spend-evidence.mjs';
+import { factoryInsertions } from './factory-insert-store.mjs';
+import { insertionYieldsToProduction } from './factory-insertion-queue.mjs';
 import { emitDiagnostic } from './trace-log.mjs';
+import { simulatedFactoryQueueKey } from './factory-native-simulation.mjs';
 
 const pending = new Map(), busy = new Set();
 const resourceIds = new Set(['GOLD', 'RUBY', 'EXP', 'ARENA_POINT', 'LEAGUE_POINT']);
 const rows = (config, name) => config?.tables?.[name]?.data ?? [];
+export function factoryStockCapacity(config, player) {
+  const base = Number(rows(config, 'GameParamCfg').find(row => row.paramName === '产品存量初始上限')?.paramValue);
+  const bonus = Number(rows(config, 'VipLevelCfg').find(row => row.level === player?.vip?.vipLevel)?.effects?.find(([id]) => id === '加工品存量上限')?.[1] ?? 0);
+  const cap = base + bonus;
+  if (!Number.isSafeInteger(cap) || cap < 1) throw new AutomationSkip('无法确认加工品库存上限');
+  return cap;
+}
 const clock = client => Math.floor((Date.now() + (client.serverClockOffsetMs || 0)) / 1000);
+export function confirmedFactoryIncoming(water) {
+  const incoming = new Map();
+  for (const row of water.building) if (row.factory) {
+    if (row.level === 0 && Array.isArray(row.factory.factoryQ) && !row.factory.factoryQ.length
+      && Array.isArray(row.factory.finishedProducts) && !row.factory.finishedProducts.length) continue;
+    const other = factoryProductionSnapshot(water, row.buildingId);
+    if (!other) throw new AutomationSkip('其他工厂的在产和待收库存不完整');
+    for (const [id, count] of other.totals) incoming.set(id, (incoming.get(id) ?? 0) + count);
+  }
+  return incoming;
+}
+
+// Only alternatives behind the head need an ingredient comparison. Read it
+// before the new operation reserves its own materials.
+export async function readInsertionAlternativeStock(client, protocol, config, entry, context, isFull) {
+  if (!entry || entry.flight || entry.remove?.length || entry.jobs.length < 2) return null;
+  const ids = new Set(), now = clock(client), recipes = rows(config, 'BuildingProduceCfg');
+  for (const job of entry.jobs.slice(1)) {
+    if (job.at > now) break;
+    if (job.id === entry.jobs[0].id || isFull?.(job.id)) continue;
+    for (const [id, num] of recipes.find(r => r.itemId === job.id)?.costItem ?? []) if (num > 0) ids.add(id);
+  }
+  if (!ids.size) return null;
+  return (await readOrderReservedStock(client, protocol, config, { ...context, itemIds:ids })).available;
+}
 const costsOf = steps => {
   const costs = new Map();
   for (const step of steps) for (const row of step.costs ?? []) {
@@ -64,6 +100,7 @@ async function settlePrevious(client, player, account, key, enabled) {
 // production first, otherwise retain its products until a later readable round.
 export async function confirmFactoryProductionBeforeHarvest(client, protocol, buildingId, { player, enabled = () => true } = {}) {
   if (!player) return false;
+  if (factoryInsertions(player)[buildingId]?.flight) throw new AutomationSkip('工厂插单结果待确认，暂缓领取');
   const account = goldAccountKey(player), key = account + ':' + buildingId;
   // Manual/single-request production uses the shared material guard instead
   // of this module's batch map. Harvesting must preserve that evidence too.
@@ -138,6 +175,8 @@ export async function runFactoryProductionBatch(client, protocol, steps, {
     ensureLive();
     const snapshot = factoryProductionSnapshot(water, buildingId);
     if (!snapshot) throw new AutomationSkip('无法完整确认工厂队列和待收成品');
+    if (steps.some(step => step.factoryStrategy === 'nativeSimulation' && step.simulatedQueueKey !== simulatedFactoryQueueKey(snapshot.building.factory)))
+      throw new AutomationSkip('模拟原生的生产位或主产物已变化，等待重新排产');
     if (snapshot.building.factory.autoProductId && (water.autoProduceForever || water.autoProduceEndTime > clock(client))) throw new AutomationSkip('游戏自动生产已开启，保留原队列和目标');
     const slots = Number(rows(config, 'BuildingProduceParamCfg').find(row => row.paramName === '制造位上限')?.paramValue);
     if (!Number.isSafeInteger(slots) || slots < 1) throw new AutomationSkip('无法确认工厂制造位上限');
@@ -168,6 +207,9 @@ export async function runFactoryProductionBatch(client, protocol, steps, {
     };
     for (const step of selected) await check(step);
     if (checkSnapshot) { await checkSnapshot(snapshot.building); ensureLive(); }
+    const insertion = selected[0].factoryStrategy ? factoryInsertions(player)[buildingId] : null;
+    const alternativeStock = await readInsertionAlternativeStock(client, protocol, config, insertion, {player,settings:current(),enabled:live});
+    ensureLive();
     batch = { attempted: [], sealed: false };
     batch.operation = factoryProductionOperation(water, buildingId, batch);
     batchStep = { ...selected[0], costs: costsOf(selected), factoryBatch: batch, label: (selected[0].displayFactory || buildingId) + '连续排产' };
@@ -177,20 +219,9 @@ export async function runFactoryProductionBatch(client, protocol, steps, {
     ensureLive();
     const stock = batch.checkedStock ?? farmInventory(normalize(await client.request('AllItemRequest', {}, 'AllItemResponse')));
     ensureLive();
-    const baseCap = Number(rows(config, 'GameParamCfg').find(row => row.paramName === '产品存量初始上限')?.paramValue);
-    const bonus = Number(rows(config, 'VipLevelCfg').find(row => row.level === player?.vip?.vipLevel)?.effects?.find(([id]) => id === '加工品存量上限')?.[1] ?? 0);
-    const cap = baseCap + bonus;
-    if (!Number.isSafeInteger(cap) || cap < 1) throw new AutomationSkip('无法确认加工品库存上限');
-    const projected = new Map();
-    for (const row of water.building ?? []) if (row.factory) {
-      // A legal level-zero factory message may carry two empty repeated
-      // fields. Its known zero stock must not block an unrelated built factory.
-      if (row.level === 0 && Array.isArray(row.factory.factoryQ) && !row.factory.factoryQ.length
-        && Array.isArray(row.factory.finishedProducts) && !row.factory.finishedProducts.length) continue;
-      const other = factoryProductionSnapshot(water, row.buildingId);
-      if (!other) throw new AutomationSkip('其他工厂的在产和待收库存不完整');
-      for (const [id, count] of other.totals) projected.set(id, (projected.get(id) ?? 0) + count);
-    }
+    const cap = factoryStockCapacity(config, player);
+    const incoming = confirmedFactoryIncoming(water);
+    const projected = new Map(incoming);
     for (const step of selected) {
       const id = step.body.productId;
       projected.set(id, (projected.get(id) ?? 0) + 1);
@@ -198,7 +229,7 @@ export async function runFactoryProductionBatch(client, protocol, steps, {
       const preferences = current(), independent = preferences?.alliance?.enabled && (preferences.alliance.recruit && preferences.alliance.recruitProduction
         || preferences.guildShip?.enabled && preferences.guildShip.produceMissing);
       const stockOnly = step.demandDriven === false || step.demandDriven == null && preferences?.factory?.demandFirst === false && !independent;
-      if (stockOnly && preferences && (stock.get(id) ?? 0) + projected.get(id) > preferences.factory.keepStock) throw new AutomationSkip('最新库存已达到备货水位，等待重新排产');
+      if (stockOnly && preferences && step.factoryStrategy !== 'nativeSimulation' && (stock.get(id) ?? 0) + projected.get(id) > preferences.factory.keepStock) throw new AutomationSkip('最新库存已达到备货水位，等待重新排产');
     }
     let stopped = '';
     for (const step of selected) {
@@ -208,7 +239,21 @@ export async function runFactoryProductionBatch(client, protocol, steps, {
         await check(step);
         pending.set(lock, batch);
         batch.attempted.push({ body: { ...step.body }, costs: structuredClone(step.costs ?? []) }); attempted = true;
-        const sent = await client.sendWatch(step.request, step.body, { window, beforeSend: ensureLive });
+        const sent = await client.sendWatch(step.request, step.body, { window, beforeSend: () => {
+          ensureLive();
+          if (!worldActionAllowed(current(), step, config)) throw new AutomationSkip('排产策略或目标已变化，等待重新排产');
+          if (step.latestStart != null && clock(client)>step.latestStart) throw new AutomationSkip('第二生产位剩余时间不足，等待重新排产');
+          if (step.beforeInsertSend) step.beforeInsertSend();
+          else {
+            const entry = factoryInsertions(player)[buildingId];
+            const isFull = id => (stock.get(id) ?? 0) + (incoming.get(id) ?? 0) >= cap;
+            const now = clock(client);
+            const canMake = id => insertionRecipeReady(rows(config,'BuildingProduceCfg').find(row => row.itemId === id),
+              snapshot.building.level, client.festivals, now, item => ((alternativeStock ?? stock).get(item) ?? 0) - resourceReserve(current(),item));
+            if (entry && (entry.revision !== insertion?.revision || batch.attempted.length > 1 ||
+              !insertionYieldsToProduction(entry, now, isFull, canMake))) throw new AutomationSkip('工厂正在执行排产清单中的插单');
+          }
+        } });
         const entry = { step, ok: false, status: 'unknown', sent, reason: '批次已发送，等待统一核对' };
         results.push(entry); attemptedEntries.add(entry);
       } catch (error) {

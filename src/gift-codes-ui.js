@@ -1,6 +1,6 @@
 const giftBatchLabels={success:'成功',used:'已兑换',rejected:'拒绝',unknown:'待确认',skipped:'未发送'};
 const giftLabels={queued:'待兑换',sending:'兑换中',success:'兑换成功',used:'已兑换',rejected:'服务器拒绝',unknown:'待确认',skipped:'未发送'};
-let giftAccounts=[],giftSelected=new Set(),giftChosen=false,giftStarting=false,giftNote='';
+let giftAccounts=[],giftSelected=new Set(current?[current]:[]),giftStarting=false,giftNote='';
 let giftInitial=null,giftLoading=false,giftInitialVersion=0,giftInitialError='';
 let giftViewed='',giftRows=[],giftPage=1,giftPageSize=10,giftPages=1,giftTotal=0,giftStatus='exclude-invalid';
 let giftExporting=false,giftRecordsLoading=false,giftRecordsVersion=0,giftBatchSaving=false;
@@ -10,6 +10,9 @@ const giftVisible=()=>!$('tab-giftcodes').classList.contains('hidden');
 const giftRecordQuery=()=>new URLSearchParams({account:giftViewed,status:giftStatus,page:String(giftPage),pageSize:String(giftPageSize)});
 function giftCanStart(account){return !account.paused&&!account.running&&!account.error;}
 function giftTargets(){return giftAccounts.filter(account=>giftSelected.has(account.id)&&giftCanStart(account)).map(account=>account.id);}
+function paintGiftStart(){
+  $('gift-code-start').disabled=giftStarting||!giftTargets().length||!giftInitial?.tryCodes?.length;
+}
 function giftAccountNote(account){
   if(account.error)return account.error;
   if(account.paused)return '已暂停';
@@ -28,9 +31,8 @@ function paintGiftAccounts(){
     for(const account of giftAccounts){
       const input=el('input');input.type='checkbox';
       input.onchange=()=>{
-        giftChosen=true;
         if(input.checked)giftSelected.add(account.id);else giftSelected.delete(account.id);
-        paintGiftAccounts();void refreshGiftInitial();
+        giftSelectionChanged();
       };
       const automatic=el('button');automatic.type='button';
       automatic.onclick=async event=>{
@@ -48,14 +50,14 @@ function paintGiftAccounts(){
     }
   }
   giftAccounts.forEach((account,index)=>{
-    const row=box.children[index];row.firstChild.checked=giftSelected.has(account.id);row.firstChild.disabled=!giftCanStart(account);
+    const row=box.children[index];row.firstChild.checked=giftSelected.has(account.id);row.firstChild.disabled=giftStarting||!giftCanStart(account);
     const automatic=row.children[2];automatic.textContent=account.autoRedeem?'关闭自动兑换':'开启自动兑换';
     automatic.disabled=giftAutoBusy.has(account.id);automatic.setAttribute('aria-pressed',String(Boolean(account.autoRedeem)));
     automatic.setAttribute('aria-label',account.title+'：'+automatic.textContent);
     row.lastChild.textContent=giftAccountNote(account);
   });
   $('gift-selected-count').textContent='已选 '+giftTargets().length+' / '+giftAccounts.length;
-  $('gift-code-start').disabled=giftStarting||!giftTargets().length;
+  paintGiftStart();
   $('gift-select-all').disabled=giftStarting||!giftAccounts.some(giftCanStart);
   $('gift-select-none').disabled=giftStarting||!giftSelected.size;
   const picker=$('gift-record-account');
@@ -65,6 +67,7 @@ function paintGiftAccounts(){
   picker.value=giftViewed;picker.disabled=!giftAccounts.length;
 }
 function paintGiftInitial(){
+  paintGiftStart();
   paintGiftChannels(giftInitial?.channels??[]);
   $('gift-load-initial').disabled=giftLoading;
   $('gift-load-initial').textContent=giftLoading?'正在载入…':'载入未兑换码';
@@ -216,8 +219,20 @@ $('gift-channel-preview').onclick=async()=>{
 };
 for(const field of ['name','url','mode','json','pattern'])$('gift-channel-'+field).oninput=()=>{$('gift-channel-result').textContent='';};
 $('gift-channel-mode').onchange=paintGiftChannelMode;
-$('gift-select-all').onclick=()=>{giftChosen=true;giftSelected=new Set(giftAccounts.filter(giftCanStart).map(account=>account.id));paintGiftAccounts();void refreshGiftInitial();};
-$('gift-select-none').onclick=()=>{giftChosen=true;giftSelected.clear();paintGiftAccounts();void refreshGiftInitial();};
+function resetGiftSelectionView(){
+  ++giftInitialVersion;
+  giftInitial=null;giftInitialError='';giftNote='';
+  paintGiftAccounts();paintGiftInitial();paintGiftState();
+}
+function giftSelectionChanged(){
+  const [only]=giftSelected;
+  if(giftSelected.size===1&&only!==giftViewed){
+    giftViewed=only;giftRecordsReset();void refreshGiftRecords();
+  }
+  resetGiftSelectionView();void refreshGiftInitial();
+}
+$('gift-select-all').onclick=()=>{giftSelected=new Set(giftAccounts.filter(giftCanStart).map(account=>account.id));giftSelectionChanged();};
+$('gift-select-none').onclick=()=>{giftSelected.clear();giftSelectionChanged();};
 function paintGiftPage(){
   $('gift-prev').disabled=giftRecordsLoading||giftPage<=1;
   $('gift-next').disabled=giftRecordsLoading||giftPage>=giftPages;
@@ -316,19 +331,20 @@ $('gift-batch-save').onclick=async()=>{
   finally{giftBatchBusy(false);}
 };
 function giftAccountChanged(){
-  ++giftContext;++giftVersion;++giftInitialVersion;clearTimeout(giftTimer);
-  giftNote='';giftInitial=null;giftInitialError='';giftViewed=current||'';giftRecordsReset();
-  if(!giftChosen)giftSelected=new Set(current?[current]:[]);
+  ++giftContext;++giftVersion;clearTimeout(giftTimer);
+  giftSelected=new Set(current?[current]:[]);giftViewed=current||'';
+  giftRecordsReset();resetGiftSelectionView();
   if(giftVisible())void refreshGiftCodes();
 }
 async function refreshGiftCodes(){
   const version=++giftVersion,context=giftContext;clearTimeout(giftTimer);
-  if(!giftChosen)giftSelected=new Set(current?[current]:[]);
   try{
     const list=await call('/api/gift-codes/accounts');
     if(version!==giftVersion||context!==giftContext)return;
     giftAccounts=list.accounts;
+    const selectedCount=giftSelected.size;
     for(const id of [...giftSelected])if(!giftAccounts.some(account=>account.id===id))giftSelected.delete(id);
+    if(giftSelected.size!==selectedCount)resetGiftSelectionView();
     if(!giftAccounts.some(account=>account.id===giftViewed)){
       giftViewed=giftAccounts.some(account=>account.id===current)?current:giftAccounts[0]?.id||'';giftRecordsReset();
     }

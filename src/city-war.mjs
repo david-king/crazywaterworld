@@ -209,12 +209,12 @@ export async function readCityWar(client, protocol, config, player, preferences,
   return snapshot;
 }
 
-// 原生委任策略：-1 沿用服务器 VIP 额度；0 关闭所选舰队的原生委任；N>0 让原生先用 N 次
-// （不超过 VIP 额度），达到后关闭开关并由工具接续。
+// 防守队从开战起交给工具，避免原生委任把它派往联盟集结的敌城。
+// 进攻队按全局设置等待 VIP 额度（-1）、直接接管（0）或先用指定次数。
 function nativeState(fleet, snapshot, p) {
-  const mode = p?.nativeCommissionLimit ?? -1;
+  const mode = fleetRole(p, fleet.buildingId) === 'defence' ? 0 : (p?.nativeCommissionLimit ?? -1);
   if (snapshot.nativeLimit === 0) return { mode, target: 0, close: false, off: false };
-  if (mode === 0) return { mode, target: 0, close: true, off: fleet?.autoFight?.isOn === true };
+  if (mode === 0) return { mode, target: 0, close: true, off: fleet.autoFight?.isOn !== false };
   if (!integer(snapshot.nativeLimit)) return { mode, reason: '无法确认账号委任额度' };
   if (mode === -1) {
     if (!fleet?.autoFight || !integer(fleet.autoFight.todayTimes)) return { mode, reason: '无法确认今日原生委任次数' };
@@ -227,7 +227,7 @@ function nativeState(fleet, snapshot, p) {
   return { mode, target, close: true, off: fleet?.autoFight?.isOn === true };
 }
 
-function fleetGate(fleet, snapshot, p) {
+function fleetGate(fleet, snapshot, native) {
   const building = snapshot.buildings.find(row => row.buildingId === fleet.buildingId);
   if (!fleetNo(fleet.buildingId) || !(building?.level > 0)) return '远征船尚未建成或无法识别';
   if (!(building.fleet?.formation?.heroPositions ?? []).some(row => row.heroId)) return '请先保存舰队英雄编队';
@@ -237,7 +237,6 @@ function fleetGate(fleet, snapshot, p) {
   if (fleet.curGridIdx > 0) return '舰队驻守在外';
   if (fleet.chipWar?.rewardTs > 0) return '舰队仍有矿场任务';
   if (!integer(fleet.durability) || !integer(fleet.maxDura, 1) || fleet.durability > fleet.maxDura) return '无法确认舰队耐久';
-  const native = nativeState(fleet, snapshot, p);
   if (native.reason) return native.reason;
   if (native.close && native.off) return '原生委任待关闭后接续';
   return '';
@@ -280,11 +279,12 @@ export function planCityWar(snapshot, settings, { keys = {}, pendingPetrol = 0 }
   for (const [, record] of currentKeys) if (!record.confirmed && record.details?.buildingId) plan.reservedFleetIds.push(record.details.buildingId);
   if (!p) return plan;
   for (const id of p.fleetIds) {
-    const fleet = snapshot.fleets.find(row => row.buildingId === id), native = fleet ? nativeState(fleet, snapshot, p) : null;
+    const fleet = snapshot.fleets.find(row => row.buildingId === id);
     if (!fleet) continue;
-    plan.fleets.push({ buildingId: id, role: fleetRole(p, id), name: nameOf(id), state: fleet ? fleetStateName(fleet) : '未取得', used: fleet?.autoFight?.todayTimes ?? null,
-      limit: snapshot.nativeLimit, nativeMode: p.nativeCommissionLimit, nativeTarget: native?.target ?? null,
-      durability: fleet?.durability, maxDura: fleet?.maxDura, reason: fleet ? fleetGate(fleet, snapshot, p) : '未取得舰队状态' });
+    const native = nativeState(fleet, snapshot, p);
+    plan.fleets.push({ buildingId: id, role: fleetRole(p, id), name: nameOf(id), state: fleetStateName(fleet), used: fleet.autoFight?.todayTimes ?? null,
+      limit: snapshot.nativeLimit, nativeMode: native.mode, nativeTarget: native.target ?? null,
+      durability: fleet.durability, maxDura: fleet.maxDura, reason: fleetGate(fleet, snapshot, native) });
   }
   if (!p.enabled) plan.notes.push('城战接续未开启');
   if (snapshot.reason) plan.notes.push(snapshot.reason);
@@ -378,9 +378,30 @@ async function disableNativeCommission(client, protocol, ids) {
   await client.sendWatch('SetFleetAutoFightRequest', { buildingIds: ids, isOn: false }, { window: 600 });
   const reply = await client.request('MyFleetsRequest', {}, 'MyFleetsResponse', 8000);
   if (!Array.isArray(reply.fleets)) throw new Error('舰队状态未同步');
-  const missing = ids.filter(id => !reply.fleets.some(row => row.buildingId === id));
+  const missing = ids.filter(id => typeof reply.fleets.find(row => row.buildingId === id)?.autoFight?.isOn !== 'boolean');
   const on = ids.filter(id => reply.fleets.find(row => row.buildingId === id)?.autoFight?.isOn === true);
   return { ok: !missing.length && !on.length, on, missing };
+}
+
+async function confirmNativeCommissionOff(client, protocol, plan) {
+  const ids = plan.nativeOffFleetIds;
+  const signature = JSON.stringify([plan.nativeCommissionLimit, ids]);
+  const failure = nativeRejected.get(client);
+  if (failure?.signature === signature && failure.until > Date.now()) return { closed: false, note: failure.reason };
+  try {
+    const off = await disableNativeCommission(client, protocol, ids);
+    if (off.ok) return { closed: true, note: '已关闭原生委任：' + ids.map(nameOf).join('、') };
+    const reason = '原生委任关闭结果待确认：' + (off.missing.length ? '舰队状态未同步' : off.on.map(nameOf).join('、'));
+    nativeRejected.set(client, { until: Date.now() + 30000, signature, reason });
+    return { closed: false, note: reason };
+  } catch (error) {
+    if (error.prompt && error.request === 'SetFleetAutoFightRequest') {
+      const reason = '关闭原生委任被拒绝：' + error.message;
+      nativeRejected.set(client, { until: Date.now() + 300000, signature, reason });
+      return { closed: false, note: reason };
+    }
+    return { closed: false, note: '关闭原生委任结果未知：' + error.message };
+  }
 }
 
 export async function runCityWar(client, protocol, config, player, { getSettings, ledger, enabled = () => true, mapLoader, onStep, canUseFleet = () => true } = {}) {
@@ -402,40 +423,18 @@ export async function runCityWar(client, protocol, config, player, { getSettings
     const settings = getSettings();
     let plan = planCityWar(snapshot, settings, { keys: ledger.keyRecords(), pendingPetrol: pending() });
     if (plan.nativeOffFleetIds.length) {
-      const ids = [...plan.nativeOffFleetIds], signature = JSON.stringify([settings.cityWar.nativeCommissionLimit, ids]);
-      const failure = nativeRejected.get(client);
-      if (failure && failure.until > Date.now() && failure.signature === signature) {
-        plan.notes.push(failure.reason);
+      const now = nowOf(client);
+      if (!enabled() || settings !== getSettings() || !cityWarEnabled(getSettings()) || !client.connected ||
+          now < snapshot.startTime || now >= snapshot.endTime) {
         return { ...plan, results, remainingFuel: snapshot.fuel };
       }
-      if (!enabled() || settings !== getSettings() || !cityWarEnabled(getSettings()) || !client.connected) {
-        return { ...plan, results, remainingFuel: snapshot.fuel };
-      }
-      try {
-        const off = await disableNativeCommission(client, protocol, ids);
-        if (!off.ok) {
-          const reason = '原生委任关闭结果待确认：' + (off.missing.length ? '舰队状态未同步' : off.on.map(nameOf).join('、'));
-          nativeRejected.set(client, { until: Date.now() + 30000, signature, reason });
-          plan.notes.push(reason);
-          return { ...plan, results, remainingFuel: snapshot.fuel };
-        }
-        const closedNote = '已关闭原生委任：' + ids.map(nameOf).join('、');
+      const off = await confirmNativeCommissionOff(client, protocol, plan);
+      if (off.closed) {
         snapshot = await read();
-        snapshot.attackDura = rows(config, 'WorldParamCfg').find(row => row.paramName === '攻城战消耗耐久')?.paramValue;
         plan = planCityWar(snapshot, settings, { keys: ledger.keyRecords(), pendingPetrol: pending() });
-        plan.notes.unshift(closedNote);
-        if (plan.nativeOffFleetIds.length) {
-          plan.notes.push('原生委任关闭结果待确认：' + plan.nativeOffFleetIds.map(nameOf).join('、'));
-          return { ...plan, results, remainingFuel: snapshot.fuel };
-        }
-      } catch (error) {
-        if (error.prompt && error.request === 'SetFleetAutoFightRequest') {
-          const reason = '关闭原生委任被拒绝：' + error.message;
-          nativeRejected.set(client, { until: Date.now() + 300000, signature, reason });
-          plan.notes.push(reason);
-        } else plan.notes.push('关闭原生委任结果未知：' + error.message);
-        return { ...plan, results, remainingFuel: snapshot.fuel };
       }
+      // 原计划已经排除待关闭舰队。关闭未确认时，其他合格舰队仍可独立复核并派遣。
+      plan.notes.unshift(off.note);
     }
     let remainingFuel = snapshot.fuel;
     for (const proposed of plan.actions) {
@@ -444,7 +443,10 @@ export async function runCityWar(client, protocol, config, player, { getSettings
       const fresh = await read(); fresh.attackDura = snapshot.attackDura;
       fresh.fuel = Math.min(fresh.fuel, remainingFuel);
       const reviewed = planCityWar(fresh, settings, { keys: ledger.keyRecords(), pendingPetrol: pending() });
-      if (reviewed.nativeOffFleetIds.length) { plan.notes.push('原生委任状态变化，暂停本轮接续'); break; }
+      if (reviewed.nativeOffFleetIds.includes(proposed.buildingId)) {
+        plan.notes.push(nameOf(proposed.buildingId) + '的原生委任尚待确认关闭，暂停本队接续');
+        continue;
+      }
       const step = reviewed.actions.find(row => row.uniqueKey === proposed.uniqueKey && row.kind === proposed.kind && row.cityId === proposed.cityId && row.role === proposed.role && row.cost === proposed.cost);
       if (!step || !canUseFleet(step.buildingId) || legacyFleetReservationReason(client,step.buildingId) || settings !== getSettings() || !enabled() || exactAutomationId(player.guildId) !== fresh.guildId) continue;
       const limitChanged = nativeCommissionQuota(config, player) !== fresh.nativeLimit;

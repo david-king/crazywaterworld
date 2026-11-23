@@ -23,6 +23,7 @@ fs.writeFileSync(process.env.CW_CONFIG_PACK, JSON.stringify([[1, 'HeroCfg', { da
   [4, 'BuildingCfg', { data: [{ buildingType: '精铁厂', name: '冶炼厂' }] }],
   [5, 'BuildingUpgradeCfg', { data: [{ buildingType: '精铁厂', product: [['精铁', 1]] }] }],
   [6, 'ItemJumpCfg', { data: [{ id: '耐火砖', accessList: ['折扣商店'] }] }],
+  [9, 'BuildingProduceCfg', { data: ['耐火砖','高温合金'].map(itemId => ({ itemId,buildType:'精铁厂',unlockLevel:1,produceTime:20,costItem:[] })) }],
   [7, 'TrialRaidCfg', { data: ['英雄经验副本', '强化石副本', '海兽经验副本'].map((title, i) => ({ raidId: i + 1, title })) }],
   [8, 'TrialRaidStageCfg', { data: [1, 2, 3].flatMap(raidId => Array.from({ length: 15 }, (_, i) => ({
     raidId, stageId: raidId * 1000 + i + 1, stageLevel: i + 1, openLevel: raidId === 3 ? 25 : 14,
@@ -633,6 +634,18 @@ try {
 
   await page.locator('[data-config-family=production]').click();
   const factory = page.locator('#config-field-factory-enabled');
+  const strategy = page.locator('#config-field-factory-strategy');
+  assert.equal(await strategy.inputValue(),'smart');
+  await strategy.selectOption('nativeSimulation');
+  const targets = page.locator('#config-field-factory-simulatedTargets');
+  await targets.locator('summary').click();
+  await targets.getByRole('checkbox',{name:'冶炼厂 · 耐火砖',exact:true}).check();
+  await targets.getByRole('checkbox',{name:'冶炼厂 · 高温合金',exact:true}).check();
+  assert.equal(await targets.getByRole('checkbox',{checked:true}).count(),1);
+  await targets.locator('summary').click(); await saved();
+  assert.deepEqual(loadAutomationSettings('config-a').settings.factory.simulatedTargets,['高温合金']);
+  assert.equal(loadAutomationSettings('config-b').settings.factory.strategy,'smart');
+  await strategy.selectOption('smart'); await saved();
   const exclusions = page.locator('#config-field-factory-blockedCollectionTypes');
   await exclusions.locator('summary').click();
   await exclusions.getByRole('checkbox', { name: '冶炼厂', exact: true }).check();

@@ -67,8 +67,7 @@ export function nextOrderTier(config, { orderNum = 0, rewardedNum = 0, player, n
   return { tier, reqNums, claimable: orderNum >= tier };
 }
 
-// 只读探测：把三类任务和每日订单档位都拉一遍，算出每一条能不能领。
-export async function surveyTasks(client, protocol, { config = null, water = null, timeout = 8000, scheduler, player } = {}) {
+export async function surveyTaskRewards(client, { config = null, timeout = 8000 } = {}) {
   const main = normalize(await client.request('MainTaskInfoRequest', {}, 'MainTaskInfoResponse', timeout));
   const achievement = normalize(await client.request('AchievementInfoRequest', {}, 'AchievementInfoResponse', timeout));
 
@@ -159,19 +158,30 @@ export async function surveyTasks(client, protocol, { config = null, water = nul
     achievementView.push(view);
   }
 
-  // 每日订单档位奖励：空体请求，服务端按 reqNum 发下一档。
-  const summary = { main: mainView, branch: branchView, achievement: achievementView, orderOfTheDay: null, plan, notes };
+  return { main: mainView, branch: branchView, achievement: achievementView, plan, notes };
+}
+
+// 每日订单档位奖励：空体请求，服务端按 reqNum 发下一档。
+export async function surveyOrderDaily(client, { config, water, timeout = 8000, scheduler, player } = {}) {
+  const summary = { orderOfTheDay: null, plan: [], notes: [] };
   if (scheduler && !scheduler.due('orderDaily')) return summary;
+  function note(text, state = 'waiting') {
+    summary.notes.push('每日订单：' + text);
+    scheduler?.observe?.('orderDaily', text, state);
+  }
   let order;
   try {
     const waterBody = normalize(water ?? await client.request('OnWaterRequest', {}, 'OnWaterResponse', timeout));
     order = waterBody?.orderOfTheDay;
   } catch (error) {
     summary.orderError = error.message;
-    notes.push('未能查询每日订单：' + error.message);
+    note('读取订单进度失败：' + error.message, 'error');
     return summary;
   }
-  if (!order) return summary;
+  if (!order) {
+    note('今日订单进度尚未同步', 'unsynced');
+    return summary;
+  }
   const now = scheduler?.now() ?? Math.floor((Date.now() + (client.serverClockOffsetMs || 0)) / 1000);
   const tier = nextOrderTier(config, { ...order, player, now });
   const orderView = {
@@ -181,15 +191,16 @@ export async function surveyTasks(client, protocol, { config = null, water = nul
     claimable: tier.claimable,
   };
   summary.orderOfTheDay = orderView;
-  if (!tier.reqNums.length) notes.push('每日订单：未能确认当前赛季的奖励档位');
+  if (!tier.reqNums.length) note('未能确认当前赛季的奖励档位', 'unsynced');
   else if (tier.tier === null) {
-    notes.push('每日订单：已领完本日全部档位');
+    note(`已领完本日全部档位，最高 ${orderView.rewardedNum} 单档`);
     scheduler?.defer('orderDaily', scheduler.nextDay());
   } else if (!tier.claimable) {
-    notes.push(`每日订单：下一档要 ${tier.tier} 单，现在 ${orderView.orderNum} 单`);
+    const claimed = orderView.rewardedNum > 0 ? `已领至 ${orderView.rewardedNum} 单档，` : '';
+    note(`${claimed}今日已交 ${orderView.orderNum} 单，下一档需 ${tier.tier} 单`);
     scheduler?.defer('orderDaily', Math.min(now + 180, scheduler.nextDay()));
   } else {
-    plan.push({
+    summary.plan.push({
       kind: 'orderDaily',
       id: tier.tier,
       request: 'GetNextOrderOTDRewardRequest',
@@ -200,6 +211,13 @@ export async function surveyTasks(client, protocol, { config = null, water = nul
   }
 
   return summary;
+}
+
+// 手动查询和 CLI 计划仍同时展示普通任务与订单进度。
+export async function surveyTasks(client, protocol, options = {}) {
+  const tasks = await surveyTaskRewards(client, options);
+  const order = await surveyOrderDaily(client, options);
+  return { ...tasks, ...order, plan: [...tasks.plan, ...order.plan], notes: [...tasks.notes, ...order.notes] };
 }
 
 // 逐条领取。同一条被服务端拒过就记下来，本轮之后不再重发——否则循环模式里会每轮骚扰一次。

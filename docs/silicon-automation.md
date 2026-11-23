@@ -45,10 +45,10 @@
 | 占领时段 | 北京时间 `HH:mm-HH:mm`，支持多个时段和跨午夜，空列表全天。时段外同样先停派、再按服务器规则撤回已启用队伍。 |
 | 空位和抢占 | 普通模式先空位。只空位时不攻击也不追击；初等矿永不攻击已有玩家。中、高矿只攻击配置战力比例内、非同盟、非安全名单的玩家；战力可升序／降序。 |
 | 每舰每日抢占上限 | 持久独立计数，发送前占用。另读取服务器玩家共享 `fightTimes/maxFightTimes`，不能把三队各 30 次误当成服务器允许总 90 次。上限耗尽仍可普通空位采集。 |
-| 单敌失败限制 | 按“舰队 + 昵称 + 联盟编号”记录当日失败。已确认派出后归队、未曾占领目标位置记一次失败；未知请求不算失败也不重发。次日重新计数。 |
-| 安全名单 | 玩家完整昵称忽略大小写；联盟使用服务器 `guildIdx` 数字编号。同盟永不攻击。矿位协议不返回玩家 UID 或联盟名，因此界面不将昵称当成唯一 UID。 |
+| 单敌失败限制 | 已匹配角色 ID 时按舰队和 ID 记录当日失败，改名后继续计数。仅有昵称时沿用舰队、昵称和联盟编号。已确认派出后归队、未曾占领目标位置记一次失败；未知请求不算失败也不重发。次日重新计数。 |
+| 安全名单 | 按昵称勾选玩家后自动保存角色 ID，也可补充完整昵称。安全 ID 按同服角色的当前昵称和联盟编号核对，资料读取失败的舰队暂缓抢占。手动抢占也遵守保护。补充昵称忽略大小写，联盟使用 `guildIdx` 数字编号。 |
 | 追击 | 三日奖励周期开始后的配置分钟数内，只追击真实游戏黑名单里且本工具已通过个人胜利战报核实击败过的目标。目标必须仍满足矿级、战力、安全名单、失败、用户日上限和服务器次数限制。无匹配时待命，不回退空位／普通敌人。周期窗口结束恢复普通采矿。 |
-| 指定玩家追杀 | 每队独立开关和完整昵称名单，默认关闭。忽略昵称大小写，不做包含匹配，不要求游戏黑名单或历史胜利。名单内合规目标优先于空位，无目标可采空位，不能攻击名单外玩家；开启后优先于旧追击窗口。安全玩家/联盟、同盟、初等矿不抢占、只占空位、战力、耐久、失败/次数及实际汽油库存检查均继续生效。矿位无 UID，无法区分同名玩家。 |
+| 指定玩家追杀 | 每队可按昵称从世界舰队、世界聊天和游戏黑名单中选择对手，也可填写补充昵称，默认关闭。改名后按 ID 读取新资料。补充昵称独立生效，忽略大小写，同一目标换用 ID 后应移除旧昵称。名单内合规目标优先于空位，无目标可采空位，不能攻击名单外玩家；开启后优先于旧追击窗口。安全玩家/联盟、同盟、初等矿不抢占、只占空位、战力、耐久、失败/次数及实际汽油库存检查均继续生效。矿位无 UID。按 ID 查到的同服资料须与矿位的完整昵称和联盟编号相符。多个已查角色或多个可见矿位对应同一组昵称与联盟时，跳过该 ID 的追杀。 |
 | 追杀撤退策略 | `never` 持续采集；`afterReward` 每次占矿首次奖励后撤回，下一轮重新寻找名单目标或空位；`onTarget` 仅发现可攻击的名单目标且满足后续预算时撤回，回港后重新读目标再派遣。两种撤回都服从服务器 `rewardTimes > 0` 首奖限制，不会强行中断首轮15分钟。 |
 | 普通维修 | 自动维修只针对选定空闲舰队，读取 `FleetRepairParam` 实时报价，用 `RepairFleetRequest` 修复；按实际汽油库存扣除待确认消费后检查，不设置额外汽油保留量或费用上限。 |
 | 逐队去程与回城加速 | 每队的去程和回城各设开关、剩余时间目标和每日钻石预算。默认关闭，预算 0 钻石。去程核对已确认派往矿区的航程。回城核对从本次派遣或撤回的矿格返回所属城池的航程。回城可在领奖达限或时段结束后执行。所有消费均受全局钻石预算和保留量约束。 |
@@ -61,6 +61,7 @@
 - `ChipMineListRequest {}` → `ChipMineListResponse {chipMines: DispChipMine[]}`：`gridId/color/occupiedNum/positionNum`。
 - `ChipMineRequest {gridId}` → `ChipMineResponse {occupiedNum,positionNum,occupiedPositions,rewardInfo,fightTimes,maxFightTimes}`。响应不带 gridId，逐矿串行查询避免错配。
 - `DispChipMinePosition {index,player}`；`DispChipMinePlayer {nickname,avatar,power,rewardTimes,guildIdx,title?,fleetId?,skinId?}`。客户端 `ChipMinePop` 将带 `fleetId` 的位置认作己方队伍。
+- `OtherPlayerInfoRequest {playerId}` 按字符串角色 ID 读取当前昵称、区服和联盟编号。角色资料与矿位均在本轮读取，发送前重新核对。
 - `ChipMineRewardRequest {}` → `ChipMineRewardResponse {rewardInfo}`。`LoginProxy` 将其作为世界信息初次读取的一部分；没有领道具或扣费参数。
 - `ChipMineRewardInfo {myRewardTimes,rewardResetTime,maxRewardTimes}`；`SCChipMineRewardInfo` 只推送 `maxRewardTimes`，不能根据它推断已领次数增加。
 - `ChipMineSendFleetRequest {gridId,index,fleetId}`。`SelectTroopPop` 限制一次选一队，汽油使用 `WorldParamCfg` 的“采集硅矿消耗汽油”（当前 500）。

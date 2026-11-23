@@ -252,14 +252,14 @@ function listedParticipants(target, preferences, snapshot, chase = false) {
   if (!(chase ? preferences.chase : preferences.follow)) return [];
   const { playerId: ownId, nickname: ownName } = snapshot;
   const names = chase ? preferences.chaseNames : preferences.followNames;
-  const ids = chase ? [] : preferences.followPlayerIds;
+  const ids = (chase ? preferences.chasePlayerIds : preferences.followPlayerIds) ?? [];
   const matchesDeparture = chase ? matchesChaseDeparture : matchesFollowDeparture;
   const found = [];
   for(const fleet of snapshot?.travelers??[]){
     if(!matchesDeparture(fleet,preferences,ownId,snapshot.travelers)||fleet.arriveAt<=snapshot.now||snapshot.now-fleet.seenAt>45)continue;
     if(!integer(target.gridIdx,1)||fleet.targetGrid!==target.gridIdx||fleet.uid>0&&fleet.uid!==target.uid)continue;
     const idIndex=ids.indexOf(fleet.playerId),nameIndex=names.indexOf(fleet.name);
-    found.push({name:fleet.name,playerId:fleet.playerId,phase:'departing',departedAt:fleet.startedAt,seenAt:fleet.seenAt,priority:idIndex>=0?idIndex:ids.length+nameIndex});
+    found.push({name:fleet.name || fleet.playerId,playerId:fleet.playerId,phase:'departing',departedAt:fleet.startedAt,seenAt:fleet.seenAt,priority:idIndex>=0?idIndex:ids.length+nameIndex});
   }
   function matchMember(member, phase) {
     if (member.isNpc || (phase === 'defending' && member.guildIdx !== target.ownerGuildIdx)) return;
@@ -298,7 +298,7 @@ const speedEnabled = (p, mode) => mode === 'chase' ? p.chase && p.chaseSpeedUp :
   p.marchSpeedUp && (mode === 'return' ? p.returnSpeedUp : p.outboundSpeedUp !== false);
 const speedCounter = mode => ({ outbound: 'treasureOutboundDiamonds', return: 'treasureReturnDiamonds', chase: 'treasureChaseDiamonds' })[mode];
 const speedThreshold = (p, mode) => mode === 'chase' ? p.chaseTargetSeconds : mode === 'return' ? p.returnTargetSeconds : p.marchTargetSeconds;
-const sameOpponent = (name, playerId, expectedName, expectedId) => name === expectedName && (!expectedId || playerId === expectedId);
+const sameOpponent = (name, playerId, expectedName, expectedId) => expectedId ? playerId === expectedId : name === expectedName;
 
 function planTreasureSpeed(snapshot, config, settings, fleet, keys, usage, pendingDiamonds, plannedDiamonds, speedMode) {
   const p = settings.treasure, resources = settings.resources;
@@ -335,7 +335,7 @@ function planTreasureSpeed(snapshot, config, settings, fleet, keys, usage, pendi
   if (reason) return { reason };
   return { action: { kind: 'treasureSpeed', request: 'SpeedUpFleetRequest', body: { buildingId: fleet.buildingId },
     buildingId: fleet.buildingId, targetUid: fleet.treasureLootUid, worldId: snapshot.worldId, uniqueKey,
-    direction, speedMode, ...(speedMode === 'chase' ? { chaseName: d.chaseName, chasePlayerId: d.chasePlayerId } : {}),
+    direction, speedMode,
     beforeEnd: fleet.moveEndTs, moveStartTs: fleet.moveStartTs, targetGridIdx: fleet.targetGridIdx,
     ...(returning ? { startGridIdx: fleet.startGridIdx, targetCityId: fleet.targetCityId } : {}),
     costs: [{ id: 'RUBY', num: cost }], label: `${fleetName(fleet.buildingId)}巨轮${speedLabel(speedMode)}加速（剩余 ${remaining} 秒，目标 ${threshold} 秒），消耗 ${cost} 钻石` } };
@@ -435,13 +435,15 @@ export function planTreasureLoot(snapshot, config, settings, { usage = { counter
     if (rewardBlocked && !chaseTargets.size && !isTreasureReturn(fleet)) continue;
     if (speedEnabled(p, speedMode) && !acceleratedFleetIds.includes(buildingId) && fleet?.state === 2 && fleet.treasureLootUid > 0) {
       const speed = planTreasureSpeed(snapshot, config, settings, fleet, keys, usage, pendingDiamonds, plannedDiamonds, speedMode);
+      const opponent = speedMode === 'chase' && chaseTargets.get(fleet.treasureLootUid)?.find(member => sameOpponent(member.name, member.playerId, prior.chaseName, prior.chasePlayerId));
       const reason = unavailableFleets[buildingId] || (reservedFleetIds.includes(buildingId) ? '城战时段保留给城战接续' : '') ||
         (speedMode !== 'return' && windowWait) ||
-        (speedMode === 'chase' && !chaseTargets.get(fleet.treasureLootUid)?.some(member => sameOpponent(member.name, member.playerId, prior.chaseName, prior.chasePlayerId)) ? chaseWait || '追杀对手已离开或身份未确认，暂停去程加速' : '') ||
+        (speedMode === 'chase' && !opponent ? chaseWait || '追杀对手已离开或身份未确认，暂停去程加速' : '') ||
         (speedMode === 'outbound' && (rewardBlocked || !speedTargets.has(fleet.treasureLootUid) || !(p.autoJoin || p.follow)) ? '当前货轮已不满足参与条件，暂停行军加速' : '') || speed.reason;
       const view = plan.fleets.find(row => row.name === fleetName(buildingId));
       if (reason) { if (view) view.reason = reason; plan.notes.push(fleetName(buildingId) + '：' + reason); }
       else {
+        if (opponent) Object.assign(speed.action, { chaseName: opponent.name, chasePlayerId: opponent.playerId });
         plan.actions.push(speed.action);
         plannedDiamonds[speedMode] += speed.action.costs[0].num;
         plannedDiamonds.total += speed.action.costs[0].num;
@@ -591,7 +593,7 @@ export async function runTreasureLoot(client, protocol, config, player, { getSet
         (!proposed.chaseName || sameOpponent(action.chaseName, action.chasePlayerId, proposed.chaseName, proposed.chasePlayerId)) &&
         (proposed.kind !== 'treasureSpeed' || action.speedMode === proposed.speedMode && action.moveStartTs === proposed.moveStartTs && action.beforeEnd === proposed.beforeEnd && action.targetGridIdx === proposed.targetGridIdx && action.startGridIdx === proposed.startGridIdx && action.targetCityId === proposed.targetCityId) &&
         (proposed.mode !== 'follow' || (action.mode === 'follow' && (proposed.repeatFollow ? action.repeatFollow :
-          action.followName === proposed.followName && action.followPlayerId === proposed.followPlayerId))));
+          action.followPlayerId === proposed.followPlayerId && (proposed.followPlayerId || action.followName === proposed.followName)))));
       if (!step) {
         emitDiagnostic(client, 'treasure-recheck', { proposed, snapshot: fresh, reviewed });
         const entry = { step: proposed, skipped: true, reason: '执行前目标、玩家或舰队条件已变化，跳过本次操作' };
@@ -640,7 +642,7 @@ export async function runTreasureLoot(client, protocol, config, player, { getSet
           ...(speed ? { direction: step.direction, startGridIdx: step.startGridIdx, targetCityId: step.targetCityId, beforeEnd: step.beforeEnd, moveStartTs: step.moveStartTs, targetGridIdx: step.targetGridIdx } : {}),
           beforeDurability: step.beforeDurability ?? fresh.fleets.find(row => row.buildingId === step.buildingId)?.durability, sentAt: fresh.now,followName:step.followName,followPlayerId:step.followPlayerId,followPhase:step.followPhase,followDepartedAt:step.followDepartedAt,followSeenAt:step.followSeenAt } });
       if (!enabled() || !client.connected || current !== getSettings() || !treasureAutomationEnabled(getSettings()) ||
-          step.chaseName && (!current.treasure.chase || !current.treasure.chaseNames.includes(step.chaseName)) ||
+          step.chaseName && (!current.treasure.chase || !(current.treasure.chasePlayerIds?.includes(step.chasePlayerId) || current.treasure.chaseNames.includes(step.chaseName))) ||
           speed && (!speedEnabled(current.treasure, step.speedMode) || !current.resources.allowDiamonds || !current.treasure.fleetIds.includes(step.buildingId) ||
             step.beforeEnd - serverNow(client) <= speedThreshold(current.treasure, step.speedMode)) || legacyFleetReservationReason(client,step.buildingId)) { ledger.cancel(ticket); break; }
       const closed = timeRestriction();

@@ -9,6 +9,7 @@ const temporary = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), 'cw-off
 const cases = [
   ['selftest-start-console.mjs'],
   ['selftest-campaign-report-rewards.mjs'],
+  ['selftest-daily-schedule.mjs'],
   ['selftest-world-boss-fleets.mjs'],
   ['selftest-world-boss-lineups.mjs'],
   ['selftest-league-challenge.mjs'],

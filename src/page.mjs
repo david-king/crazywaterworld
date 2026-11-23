@@ -337,7 +337,6 @@ function openConfirm(title, bodyNodes, onOk, okLabel = '确认') {
     try {
       await run();
     } catch (error) {
-      $('hint').textContent = '';
       reportError(error);
     }
   };
@@ -695,6 +694,15 @@ function subscribe() {
   if (stream) return;
   stream = new EventSource('/api/events?scope=all' + (compactLogs ? '&compact=1' : ''));
   stream.addEventListener('logs-cleared', event => clearLogBefore(JSON.parse(event.data)));
+  stream.addEventListener('fleets-changed', event => {
+    if (JSON.parse(event.data).account === current) worldMapRefreshRequested = true;
+  });
+  stream.addEventListener('player-names-changed', event => {
+    const { account, playerNames } = JSON.parse(event.data);
+    if (account !== current || account !== configEditor.owner || !configEditor.data) return;
+    configEditor.data.playerNames = { ...configEditor.data.playerNames, ...playerNames };
+    for (const widget of configEditor.widgets.values()) widget.nameHistory?.paint();
+  });
   stream.addEventListener('chat-changed', event => {
     const detail = JSON.parse(event.data);
     if (detail.account === current) window.dispatchEvent(new CustomEvent('cw-chat-update', { detail }));
@@ -859,9 +867,13 @@ function renderAccountSelect() {
   if(worldMapOwner!==null&&worldMapOwner!==current)resetWorldMap();
   siliconAccountChanged();
   resourceFieldsAccountChanged();
-  if (productionPlanOwner !== null && (productionPlanOwner !== current || !snapshot.connected || snapshot.paused || disconnected.has(current))) resetProductionPlan();
-  $('production-plan-refresh').disabled = productionPlanBusy || !snapshot.connected || snapshot.paused || disconnected.has(current);
-  if (productionPlanOwner === null) $('production-plan-status').textContent = $('production-plan-refresh').disabled ? '连接账号后可生成计划' : '';
+  const planReady = current && snapshot.connected && !snapshot.syncingProduction && !snapshot.paused && !disconnected.has(current);
+  if (productionPlanOwner !== null && (productionPlanOwner !== current || !planReady)) resetProductionPlan();
+  $('production-plan-refresh').disabled = productionPlanBusy || !planReady;
+  if (productionPlanOwner === null) {
+    $('production-plan-status').textContent = snapshot.syncingProduction ? '正在同步生产状态' : planReady ? '' : '连接账号后自动加载';
+    if (consoleStore.getState().view.page === 'manual') void refreshProductionPlan();
+  }
   renderHostingControl();
   paintConnection();
   $('connect').disabled = snapshot.paused || snapshot.reconnecting || snapshot.connected || connectingAccounts.has(current) || !accounts.length;
@@ -1039,7 +1051,6 @@ async function refreshOverview() {
     renderAccountSelect();
     if(!$('tab-overview').classList.contains('hidden'))maybeRefreshWorldMap();
     maybeRefreshSilicon();
-    $('hint').textContent = '';
     paintConnection();
   } catch (error) {
     reportError(error, '刷新总览');
@@ -1458,8 +1469,7 @@ function residentOrderButton(order) {
   button.dataset.residentOrder = String(order.index);
   const ready = Boolean(order.orderKey) && order.manualDecision?.status === 'ready';
   button.disabled = pending || !ready || !account || snapshot.paused || disconnected.has(account);
-  button.title = pending ? '账号忙时自动排队，结果见运行日志'
-    : ready ? '提交这份居民订单' : order.manualDecision?.reason || '请先刷新订单状态';
+  button.title = pending ? '账号忙时自动排队，结果见运行日志' : order.manualDecision?.reason || '请先刷新订单状态';
   button.setAttribute('aria-label', '提交' + (order.workerName || '居民') + '的订单 #' + order.index);
   button.onclick = async () => {
     if (button.disabled || pendingResidentOrders.has(key) || current !== account || snapshot.paused || disconnected.has(account)) return;
@@ -1547,9 +1557,8 @@ function productionSpeedButton(target, stock, label) {
     pendingProductionSpeeds.add(key);
     updateProductionSpeedButton(button, now());
     try {
-      const result = await call('/api/world/production-speed', { method: 'POST',
+      await call('/api/world/production-speed', { method: 'POST',
         body: JSON.stringify({ ...target, maxUse, confirm: true }) });
-      if (current === account) $('hint').textContent = result.label;
     } catch (error) {
       if (current === account) reportError(error, '手动生产加速');
     } finally {
@@ -1789,6 +1798,61 @@ function factoryCurrentProduction(factory, recipes) {
   return current;
 }
 
+const pendingNativeFactorySwitches = new Set();
+
+function factoryAutoSwitch(factory) {
+  const account = current, key = JSON.stringify([account, factory.buildingId]);
+  const name = factory.displayName || factory.buildingId;
+  const cell = el('span', 'factory-auto-control');
+  cell.dataset.factoryAuto = key;
+  const button = component('config-switch-template');
+  const status = el('small', 'dim');
+  status.setAttribute('role', 'status');
+  cell.append(button, status);
+  const connected = () => current === account && !!account && snapshot.connected && !snapshot.paused && !disconnected.has(account);
+  cell.updateAutoSwitch = (message = '') => {
+    const control = factory.autoControl, on = factory.autoEnabled;
+    const busy = pendingNativeFactorySwitches.has(key);
+    button.setAttribute('aria-checked', String(on === true));
+    button.dataset.state = on ? 'checked' : 'unchecked';
+    button.setAttribute('aria-label', name + '原生自动生产');
+    button.title = control?.reason || (!control ? '请刷新工厂状态' : (on ? '关闭' : '开启') + name + '原生自动生产 · ' + control.name);
+    cell.title = button.title;
+    button.disabled = busy || !connected() || !control?.key || !!control.reason || on == null;
+    status.textContent = message || (busy ? '切换中…' : on == null ? '未同步' : on ? '已开启' : '');
+    status.hidden = !status.textContent;
+  };
+  cell.updateAutoSwitch();
+  button.onclick = async () => {
+    if (button.disabled || !connected() || pendingNativeFactorySwitches.has(key)) return;
+    pendingNativeFactorySwitches.add(key);
+    cell.updateAutoSwitch();
+    let message = '';
+    try {
+      const control = factory.autoControl;
+      const result = await call('/api/world/production-auto', { method:'POST', body:JSON.stringify({
+        buildingId:factory.buildingId, on:!factory.autoEnabled, productId:control.productId, key:control.key, confirm:true,
+      }) });
+      if (result.control) {
+        factory.autoControl = result.control;
+        factory.autoEnabled = result.control.on;
+      }
+      if (!result.confirmed) message = result.label;
+    } catch (error) {
+      message = error.message;
+    } finally {
+      try { if (connected()) await refreshManualWorld(true); }
+      finally {
+        pendingNativeFactorySwitches.delete(key);
+        if (current === account) for (const visible of document.querySelectorAll('[data-factory-auto]')) {
+          if (visible.dataset.factoryAuto === key) visible.updateAutoSwitch(message);
+        }
+      }
+    }
+  };
+  return cell;
+}
+
 function factoryProductionSection(factories, expanded, recipes, accelerators) {
   const headers = ['建筑', '类型', '等级', '当前产物', '自动生产', '游戏排队'];
   const result = table(headers, factories.map(b => {
@@ -1803,7 +1867,7 @@ function factoryProductionSection(factories, expanded, recipes, accelerators) {
     if (first) preview.appendChild(factoryProduct(first, recipes));
     if (queued?.length > 1) preview.appendChild(el('small', 'dim', '共 ' + queued.length + ' 件'));
     return [button, b.typeName || b.type, 'lv' + b.level, factoryCurrentProduction(b, recipes),
-      chip(b.autoEnabled ? 'ready' : 'unknown', b.autoEnabled == null ? '未同步' : b.autoEnabled ? '已开启' : '未开启'), preview];
+      factoryAutoSwitch(b), preview];
   }), 'sea-records');
   const toggleAll = component('ui-button');
   toggleAll.type = 'button';
@@ -1882,6 +1946,34 @@ function buildingListSection(title, className, content, collapsed) {
   return buildingSection(title, className, content, button);
 }
 
+function residentOrderProgress(daily) {
+  if (!Number.isSafeInteger(daily?.orderNum) || daily.orderNum < 0) {
+    return el('p', 'dim', '今日交付进度未同步');
+  }
+  const count = daily.orderNum;
+  const target = daily.dailyLimit;
+  if (!Number.isSafeInteger(target) || target <= 0) return el('p', '', '今日已完成 ' + fmt(count) + ' 单 · 每日上限未同步');
+
+  const box = el('div', 'resident-order-progress');
+  const ring = el('div', 'resident-order-ring');
+  const filled = Math.min(count, target);
+  ring.style.setProperty('--order-fill', (filled / target * 100) + '%');
+  ring.setAttribute('role', 'progressbar');
+  ring.setAttribute('aria-label', '今日居民订单交付进度');
+  ring.setAttribute('aria-valuemin', '0');
+  ring.setAttribute('aria-valuemax', String(target));
+  ring.setAttribute('aria-valuenow', String(filled));
+  ring.title = '今日已交付 ' + fmt(count) + ' 单，每日上限 ' + fmt(target) + ' 单';
+  ring.setAttribute('aria-valuetext', ring.title);
+  const fraction = el('strong', '', fmt(count));
+  fraction.appendChild(el('small', '', '/' + fmt(target)));
+  ring.append(fraction, el('span', '', '每日上限'));
+
+  const status = count >= target ? '今日已达上限' : '今日还可交 ' + fmt(target - count) + ' 单';
+  box.append(ring, el('span', 'resident-order-remaining', status));
+  return box;
+}
+
 function renderWorld(data) {
   stateActions.setGameData(current, 'world', data);
   orderClockOffset=Number.isFinite(data.serverNow)?data.serverNow*1000-Date.now():0;
@@ -1939,6 +2031,7 @@ function renderWorld(data) {
     (button || $('tab-manual')).focus({ preventScroll: true });
   }
   const obox = clear($('world-orders'));
+  if (data.orderOfTheDay || data.orders.length) obox.appendChild(residentOrderProgress(data.orderOfTheDay));
   if (data.orders.length) {
     const ordersTable = table(['订单', '居民', '需求', '挂机交付', '手动操作'], data.orders.map((o) => [
       '#' + o.index,
@@ -2675,7 +2768,10 @@ function activateConsolePage(button, resource = selectedResource) {
       refreshAccountCards();
       pollCapture();
     }
-    if (button.dataset.tab === 'manual') refreshManualWorld();
+    if (target === 'manual') {
+      refreshManualWorld();
+      void refreshProductionPlan();
+    }
     if (button.dataset.tab === 'settings') {
       if (!location.hash.startsWith('#config-group-')) configActivate(configEditor.category);
       void configLoad(); void refreshLoop();
@@ -2709,7 +2805,6 @@ async function boot() {
     await loadAccounts(true, initialTab !== 'account'
       && !(initialTab === 'resources' && ['shops', 'chat', 'items'].includes(savedView?.resource)));
   } catch (error) {
-    $('hint').textContent = '';
     reportError(error);
     return;
   }
@@ -2745,7 +2840,11 @@ consoleStore.subscribe((state, previous) => {
 boot();
 setInterval(refreshOverview, 20000);
 setInterval(() => { if (!document.hidden && accounts.some(account => account.status?.reconnecting)) paintConnection(); }, 1000);
-document.addEventListener('visibilitychange',()=>{if(!document.hidden){void refreshAccountStatuses();refreshLoop();refreshStages();}});
+document.addEventListener('visibilitychange',()=>{
+  if (document.hidden) return;
+  void refreshAccountStatuses(); refreshLoop(); refreshStages();
+  if (consoleStore.getState().view.page === 'manual') void refreshProductionPlan();
+});
 setInterval(() => { void refreshAccountStatuses(); if (!loopReads) refreshLoop(); }, 3000);
 setInterval(refreshStages, 3000);
 </script>

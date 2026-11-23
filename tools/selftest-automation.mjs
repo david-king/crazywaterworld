@@ -78,6 +78,15 @@ try {
   assert.equal((await api('a', '')).running, true);
   assert.equal(finishedLogins, logins);
   assert.equal(app.sessions.get('a').client.festivals[0].type, '捞尸人联动活动');
+  const session = app.sessions.get('a');
+  const rewards = rewardSchedule(session.client);
+  rewards.observe('orderDaily', '已领完本日全部档位');
+  session.loop.controlStatus ??= new Map();
+  session.loop.controlStatus.set('orderDaily', { state: 'sent', text: '每日订单 40 单档位奖励',
+    checkedAt: rewards.status('orderDaily').checkedAt });
+  const rewardControl = (await api('a', '')).controls.find(control => control.key === 'resident.rewards');
+  assert.equal(rewardControl.observation.text, '已领完本日全部档位', '同秒回读覆盖之前的发送日志');
+  assert.equal(rewardControl.observation.state, 'waiting');
   const request = (route, payload) => fetch('http://127.0.0.1:' + app.server.address().port + '/api/' + route + '?account=a',
     payload && { method: 'POST', body: JSON.stringify(payload) });
   const player = app.sessions.get('a').player;

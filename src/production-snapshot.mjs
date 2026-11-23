@@ -71,7 +71,7 @@ export function buildProductionSnapshot(raw, config, settings = {}) {
   if (!Array.isArray(raw.water?.building)) incomplete('OnWaterRequest', '建筑清单未完整返回');
   const buildings = list(raw.water?.building).map(building => ({
     id: building?.buildingId, buildingId: building?.buildingId, type: typeof building?.buildingId === 'string' ? resolveType(building.buildingId) : null,
-    level: amount(building?.level), upgradingUntil: timestamp(building?.buildFinishTime),
+    level: amount(building?.level), skinId: building?.skinId ?? null, upgradingUntil: timestamp(building?.buildFinishTime),
     buildStartTime: amount(building?.buildStartTime) ?? 0, buildFinishTime: amount(building?.buildFinishTime) ?? 0,
     farm: building?.farm ?? null, factory: building?.factory ?? null,
     petBreed: building?.petBreed ?? null, petServe: building?.petServe

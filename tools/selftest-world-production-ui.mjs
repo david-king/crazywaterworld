@@ -18,6 +18,7 @@ function element(tag = 'div', className = '', value = '') {
   let text = String(value ?? '');
   const node = {
     tagName: tag, className, children: [], dataset: {}, attributes: {},
+    style: { setProperty(name, value) { this[name] = value; } },
     get textContent() { return text + this.children.map(child => child.textContent).join(' '); },
     set textContent(value) { text = String(value ?? ''); this.children = []; },
     appendChild(child) { this.children.push(child); child.parent = this; return child; },
@@ -114,7 +115,7 @@ function fixture() {
     const resetInventory = () => {};
     const call = (...args) => env.call ? env.call(...args) : new Promise(() => {});
     const openConfirm = (title, body, confirm, label) => { env.dialog = { title, body, confirm, label }; };
-    const snapshot = { paused: false }, disconnected = new Set();
+    const snapshot = { paused: false, connected: true }, disconnected = new Set();
     let current = 'account-a';
     let orderClockOffset = 0;
     ${script.slice(script.indexOf('function orderState('), script.indexOf('const pendingResidentOrders'))}
@@ -180,6 +181,32 @@ test('海面依次展示工厂、农田、空位，活动工坊并入工厂表�
   assert.deepEqual(env.tables[1].headers, ['农田', '等级', '当前作物', '状态与计时']);
   assert.deepEqual(env.tables[1].rows.map(row => row[0]?.text ?? row[0]), ['1农田', '2农田', '10农田']);
   assert.equal(JSON.stringify(data), original, '展示排序不能修改服务器快照');
+});
+
+test('居民订单按账号每日上限显示交付进度，空订单列表也能查看', () => {
+  const env = fixture();
+  const box = env.node('world-orders');
+  for (const [orderNum, target, detail] of [
+    [0, 40, '今日还可交 40 单'],
+    [37, 40, '今日还可交 3 单'],
+    [37, 45, '今日还可交 8 单'],
+    [45, 45, '今日已达上限'],
+    [43, 40, '今日已达上限'],
+  ]) {
+    env.render(worldData(env, { orderOfTheDay: { orderNum, dailyLimit: target } }));
+    assert(box.textContent.includes(detail));
+    const ring = box.querySelector('[role="progressbar"]');
+    assert.equal(ring.children[0].textContent, orderNum + '/' + target);
+    assert.equal(ring.children[1].textContent, '每日上限');
+    assert.equal(ring.attributes['aria-valuemax'], String(target));
+    assert.equal(ring.attributes['aria-valuenow'], String(Math.min(orderNum, target)));
+    assert.equal(ring.style['--order-fill'], Math.min(orderNum / target, 1) * 100 + '%');
+  }
+  env.render(worldData(env, { orderOfTheDay: { orderNum: 3, tier: 6, reqNums: [6, 12] } }));
+  assert.equal(box.textContent, '今日已完成 3 单 · 每日上限未同步');
+  assert.equal(box.querySelector('[role="progressbar"]'), null);
+  env.refreshUnavailable('account');
+  assert.equal(box.textContent, '');
 });
 
 test('居民订单以材料标签和逐项需缺留数量展示缺口，关闭自动交付也显示缺料', () => {
@@ -376,13 +403,59 @@ test('当前产物区分等待开工、已完成和空闲，缺少队列显示�
   }
 });
 
-test('自动生产按实际开关显示，缺少状态时显示未同步', () => {
-  for (const [autoEnabled, expected] of [[true, '已开启'], [false, '未开启'], [undefined, '未同步']]) {
+test('自动生产关闭时只显示开关，缺少状态时显示未同步', () => {
+  for (const [autoEnabled, expected] of [[true, '已开启'], [false, ''], [undefined, '未同步']]) {
     const env = fixture();
     env.render(worldData(env, { factories: [factory([], { autoEnabled })] }));
-    assert.equal(cellText(env.tables[0].rows[0][4]), expected);
+    const cell = env.tables[0].rows[0][4];
+    assert.equal(cell.children[1].textContent, expected);
+    assert.equal(cell.children[1].hidden, !expected);
+    assert.equal(cell.children[0].attributes['aria-checked'], String(autoEnabled === true));
+    assert(cell.children[0].disabled);
   }
 });
+
+{
+  const env = fixture(), building = factory([], {autoControl:{on:false,key:'off',productId:'面包',name:'面包'}});
+  const data = worldData(env,{factories:[building]});
+  const cell = () => env.tables.at(-1).rows[0][4];
+  const writes = [];
+  let resolveWrite;
+  env.call = (url,options) => {
+    if (url === '/api/world') return Promise.resolve(data);
+    assert.equal(url,'/api/world/production-auto');
+    writes.push(JSON.parse(options.body));
+    return new Promise(resolve=>{resolveWrite=resolve;});
+  };
+  await env.refresh(true);
+  const button = cell().children[0];
+  assert(!button.disabled);
+  assert.match(button.title,/开启.*面包/);
+  const operation = button.onclick();
+  assert.equal(cell().children[1].textContent, '切换中…');
+  assert(!cell().children[1].hidden);
+  await button.onclick();
+  assert(button.disabled);
+  assert.equal(button.attributes['aria-checked'],'false');
+  assert.equal(writes.length,1);
+  assert.deepEqual(writes[0],{buildingId:'1食品厂',on:true,productId:'面包',key:'off',confirm:true});
+  const active = {...building.autoControl, on:true,key:'on'};
+  resolveWrite({confirmed:true,control:active});
+  await operation;
+  assert.equal(cell().children[0].attributes['aria-checked'],'true');
+  const closing = cell().children[0].onclick();
+  assert.equal(writes[1].on,false);
+  resolveWrite({confirmed:false,control:active,label:'切换已提交，游戏状态待同步'});
+  await closing;
+  assert.equal(cell().children[0].attributes['aria-checked'],'true');
+  assert.match(cell().children[1].textContent,/待同步/);
+  assert(!cell().children[0].disabled);
+  building.autoControl.reason = '权益已到期';
+  env.render(data);
+  assert(cell().children[0].disabled);
+  passed++;
+  console.log('通过：在自动生产列直接切换，等待回读、防重复点击，权益过期禁用');
+}
 
 test('生产格容量变化或缺失时仍完整显示全部已排产项目', () => {
   const jobs = Array.from({ length: 7 }, (_, index) => ({ index: 100 + index, productId: '物品' + index, name: '物品' + index, finishTime: null }));

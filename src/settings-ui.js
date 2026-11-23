@@ -1,5 +1,5 @@
 // 游戏配置编辑器：按账号合并连续输入，校验后自动保存，预览仍使用独立只读接口。
-const configEditor = { owner: null, data: null, draft: null, baseline: null, recoveryBlocked: false, category: 'base', busy: false, loading: false, serial: 0, saveTimer: null, savePromise: null, saving: false, saveError: null, saveRetries: 0, fields: new Map(), widgets: new Map(), groups: new Map(), selectedGroups: {}, errors: {}, playerData: null, playerRequest: null, playerError: '', playerWidgets: [] };
+const configEditor = { owner: null, data: null, draft: null, baseline: null, recoveryBlocked: false, category: 'base', busy: false, loading: false, serial: 0, saveTimer: null, savePromise: null, saving: false, saveError: null, saveRetries: 0, fields: new Map(), widgets: new Map(), groups: new Map(), selectedGroups: {}, errors: {}, playerData: null, playerRequest: null, playerError: '', worldPlayers: {}, playerWidgets: [] };
 // 排行是独立的只读视图，不参与配置草稿、版本和自动保存。
 const configWeeklyRanking = { owner: null, serial: 0, data: null, error: '', pending: null, at: 0 };
 bindConsoleObject('configuration', configEditor, ['owner', 'data', 'draft', 'baseline', 'category', 'busy', 'loading', 'saving', 'saveError', 'saveRetries', 'selectedGroups', 'errors', 'playerData', 'playerError', 'previewSummary']);
@@ -155,9 +155,10 @@ const configGroups = [
     configField('alliance.autoHelp','自动送出物料','switch',{ parent: 'alliance.mutual',when:d=>d.alliance.mutual,help:'响应盟友的求助，从自己的库存中送出物料，遵守下方赠送限制。关闭只停止送出，自动求助和已收到援助的领取仍独立执行。'}),
     configField('alliance.allowedMaterials','允许赠送物料','multi',{ parent: 'alliance.autoHelp',catalog:'materials',empty:'未选择，按库存与禁用物料筛选',when:d=>d.alliance.mutual&&d.alliance.mutualMode==='custom'}),
     configField('alliance.blockedMaterials','禁止赠送物料','multi',{ parent: 'alliance.autoHelp',catalog:'materials',when:d=>d.alliance.mutual}),
-    configField('alliance.memberKeywords','盟友昵称筛选','names',{ parent: 'alliance.autoHelp',when:d=>d.alliance.mutual,help:'每行一个关键词，忽略大小写；空表示不限制。每次赠送均遵守筛选。'}),
+    configField('alliance.memberIds','指定帮助的盟友','players',{ parent:'alliance.autoHelp',when:d=>d.alliance.mutual, nameList:'alliance.memberKeywords', help:'按昵称勾选盟友，控制台自动保存角色 ID。角色改名后仍可匹配。ID 与下方昵称关键词命中任一项即可，两项均空时可帮助所有盟友。'}),
+    configField('alliance.memberKeywords','补充盟友昵称关键词','names',{ parent: 'alliance.autoHelp',when:d=>d.alliance.mutual,help:'每行一个关键词，忽略大小写；与角色 ID 同时留空表示不限制。'}),
     configField('alliance.stockReserve','赠送后物料保留','number',{ parent: 'alliance.autoHelp',unit:'件',when:d=>d.alliance.mutual}),
-    configField('alliance.helpDailyLimit','每日赠送上限','number',{ parent: 'alliance.autoHelp',unit:'次',when:d=>d.alliance.mutual,help:'连续处理符合物料、昵称和库存限制的盟友求助，直到达到本工具每日赠送上限；暂无可赠送求助时等待后续检查。0 表示不赠送。'}),
+    configField('alliance.helpDailyLimit','每日赠送上限','number',{ parent: 'alliance.autoHelp',unit:'次',when:d=>d.alliance.mutual,help:'按本工具今日确认成功的赠送次数计算。赠送失败会跳过该条求助，继续处理其他合格求助。达到此上限或游戏提示当日赠送已满时停止赠送。0 表示不赠送。'}),
     configField('alliance.autoAsk','自动求助物料','switch',{ parent: 'alliance.mutual',when:d=>d.alliance.mutual,help:'向盟友发布物料求助，等待盟友赠送。与自动送出物料独立；收到的援助由联盟互助总开关控制自动领取。'}),
     configField('alliance.askDailyLimit','每日求助次数','number',{ parent: 'alliance.autoAsk',unit:'次',when:d=>d.alliance.mutual,help:'同一轮连续发起求助，直到游戏今日已用次数达到设定值，包含手动求助；超过游戏每日上限时按游戏上限执行。设为20且今日已求助5次时，再发起15次。0 表示不发起求助。'}),
     configField('alliance.requestMaterials','主动求助物料','multi',{ parent: 'alliance.autoAsk',catalog:'materials',empty:'未选择，按当前缺料请求',when:d=>d.alliance.mutual&&d.alliance.mutualMode==='custom',help:'选定后可在当前不缺料时请求；仍遵守服务器共享的每日求助次数。'}),
@@ -209,10 +210,12 @@ const configGroups = [
         configField(key+'maxPowerRatio',label+'敌我最高战力比例','number',{unit:'%',parent:key+'enabled',when}),
         configField(key+'failureLimit',label+'同一对手每日失败上限','number',{parent:key+'enabled',when}),configField(key+'dailyAttackLimit',label+'每日进攻上限','number',{parent:key+'enabled',when,help:'0 表示不额外限制，仍受服务器每日抢占次数及失败限制。'}),
         configField(key+'pursuit',label+'追击已击败对手','switch',{parent:key+'enabled',when,help:'仅在三日奖励重置窗口追击已击败且在游戏黑名单中的对手。开启指定玩家追杀后，优先使用追杀名单。'}),
-        configField(key+'huntEnabled',label+'追杀指定玩家','switch',{parent:key+'enabled',when,help:'优先攻击追杀名单中的完整昵称，不需要先击败或添加游戏黑名单；没有合规目标时可占空位，不攻击名单外玩家。仍遵守只占空位、矿级、安全名单、战力、次数和实际汽油库存。'}),
-        configField(key+'huntPlayers',label+'追杀名单','names',{parent:key+'huntEnabled',when:d=>when(d)&&d.silicon.fleets[i].huntEnabled,help:'每行一个完整昵称，忽略大小写，不做包含匹配。矿位没有玩家ID，同名玩家无法进一步区分；安全名单与同盟保护优先。'}),
+        configField(key+'huntEnabled',label+'追杀指定玩家','switch',{parent:key+'enabled',when,help:'优先攻击名单中的合规玩家。没有合规目标时可占空位。安全玩家、同盟、战力和次数限制继续生效。'}),
+        configField(key+'huntPlayerIds',label+'追杀玩家','players',{worldPlayers:true,nameList:key+'huntPlayers',parent:key+'huntEnabled',when:d=>when(d)&&d.silicon.fleets[i].huntEnabled,help:'按昵称搜索并勾选对手。控制台保存角色 ID，按当前区服、昵称和联盟核对矿位。遇到同名歧义时跳过。'}),
+        configField(key+'huntPlayers',label+'补充追杀昵称','names',{parent:key+'huntEnabled',when:d=>when(d)&&d.silicon.fleets[i].huntEnabled,help:'每行一个完整昵称，忽略大小写。昵称独立生效，换用角色 ID 后请移除对应旧昵称，以免匹配到接用旧名的玩家。'}),
         configField(key+'huntRetreat',label+'追杀撤退策略','choice',{parent:key+'huntEnabled',options:[['never','持续采集'],['afterReward','采一次矿就撤回'],['onTarget','发现名单目标先撤再打']],when:d=>when(d)&&d.silicon.fleets[i].huntEnabled,help:'采一次后撤回：每次占矿首次产奖后撤回，下轮重新寻找名单目标或空位。发现目标后撤回：仅有符合限制的名单目标时撤回，回港确认后重新核对再攻打。游戏要求首轮15分钟产矿完成后才能撤回；返航期间不强行出征。'}),
-        configField(key+'safePlayers',label+'安全玩家','names',{parent:key+'enabled',when,help:'完整昵称，每行一个，忽略大小写；不主动攻击这些玩家。'}),configField(key+'safeGuilds',label+'安全联盟编号','names',{parent:key+'enabled',when,help:'游戏显示的联盟数字编号，每行一个；矿位协议不包含联盟名称。'}),
+        configField(key+'safePlayerIds',label+'安全玩家','players',{worldPlayers:true,nameList:key+'safePlayers',parent:key+'enabled',when,help:'按昵称勾选需要避让的玩家。自动与手动抢占均按角色当前资料核对；资料未同步时，该队仍可采空位。'}),
+        configField(key+'safePlayers',label+'补充安全玩家昵称','names',{parent:key+'enabled',when,help:'完整昵称，每行一个，忽略大小写；不主动攻击这些玩家。'}),configField(key+'safeGuilds',label+'安全联盟编号','names',{parent:key+'enabled',when,help:'游戏显示的联盟数字编号，每行一个；矿位协议不包含联盟名称。'}),
         configField(key+'minDurabilityPercent',label+'最低耐久','number',{unit:'%',parent:key+'enabled',when}),configField(key+'autoRepair',label+'自动维修','switch',{parent:key+'enabled',when}),
         ...[['march','去程'],['return','回城']].flatMap(([mode,title])=>{
           const toggle = mode+'SpeedUp', parent = key+toggle;
@@ -282,12 +285,14 @@ const configGroups = [
     configField('factory.enabled', '总开关'), configField('factory.gain', '自动领取产品'),
     configField('factory.blockedCollectionTypes', '禁止自动领取', 'multi', { catalog: 'collectionBuildings', empty: '未禁止任何建筑类型', help: '按类型选择要保留产物的建筑。挂机会跳过该类型所有建筑的产出、工厂成品或成熟作物。' }),
     configField('factory.produce', '自动生产', 'switch', { help: '按原料、库存、在产和待收数量填充空余队列格。已建成的工厂升级时仍可生产当前等级的配方。' }),
-    configField('factory.cooperateNative', '按需求调整游戏自动生产目标', 'switch', { help:'只控制游戏中已开启的原生自动生产目标；关闭后，普通排产仍由“自动生产”和“按需优先生产”控制。开启时补齐种子及上游需求，保留正在生产队列，目标调整后回读确认并间隔至少60秒，不购买材料。' }),
+    configField('factory.strategy', '排产策略', 'choice', { options: [['smart','新版智能排产（推荐）'],['nativeSimulation','模拟游戏原生自动生产']], help: '智能排产使用账号加成、需求和备货水位。模拟原生按空闲生产位逐件选品，最多补到游戏仓容。' }),
+    configField('factory.simulatedTargets', '模拟原生主产物', 'multi', { catalog: 'factoryProducts', empty: '使用工厂已设目标或首个解锁配方', when: d => d.factory.strategy === 'nativeSimulation', help: '每类工厂可选一个主产物。缺料或满仓时优先选实际耗时小于 5 秒的候补，再选库存最少的。' }),
+    configField('factory.cooperateNative', '按需求调整游戏自动生产目标', 'switch', { when: d => d.factory.strategy !== 'nativeSimulation', help:'只控制游戏中已开启的原生自动生产目标；关闭后，普通排产仍由“自动生产”和“按需优先生产”控制。开启时补齐种子及上游需求，保留正在生产队列，目标调整后回读确认并间隔至少60秒，不购买材料。' }),
     configField('factory.disabledTypes', '禁用工厂', 'multi', { catalog: 'factories', empty: '未选择，允许全部工厂', help: '控制台不再新增生产或加速，已完成产品仍按领取开关处理。游戏内已有的原生自动生产设置保持原状。' }),
-    configField('factory.keepStock', '备货水位', 'number', { unit: '件 / 产品', help: '计入库存、待领取与在产数量，实际不超过游戏仓库上限。0 表示只为需求生产。' }),
+    configField('factory.keepStock', '备货水位', 'number', { when: d => d.factory.strategy !== 'nativeSimulation', unit: '件 / 产品', help: '计入库存、待领取与在产数量，实际不超过游戏仓库上限。0 表示只为需求生产。' }),
     configField('factory.checkEverySeconds', '兜底检查间隔', 'number', { unit: '秒', help: '优先按服务端完工时间和建筑状态推送领取、补产；没有可靠完工时间、缺料、满仓或发生错误时，按此间隔复查。独立于主循环间隔；账号队列占用时等待。' }),
     configField('factory.demandFirst', '按需优先生产', 'switch', { help: '开启后先补所选需求来源。同级需求先选耗时短的产品，有效月卡开启双生产位时可调整同批顺序以缩短工期。关闭后按备货水位从短到长补库存。联盟募兵、红船的独立备料开关仍各自生效。' }),
-    configField('factory.demandPriority', '需求优先级', 'priority', { wide: true, help: '按列表顺序优先补料。开启按需优先生产并选择海兽进阶后，同轮进阶投喂、培育喂养和博物馆也按此顺序使用材料。勾选“工厂加速”后，会加速该来源仍缺少的在产物品；移除的来源不会自动补回。' }),
+    configField('factory.demandPriority', '需求优先级', 'sortableOrder', { wide: true, catalog: 'demandSources', help: '开启按需优先生产后，智能排产按列表顺序分配原料和生产位。「工厂补料」排在某项需求前时，优先补至备货水位。海兽进阶、培育喂养和博物馆也按相对顺序使用材料。勾选“工厂加速”后，会加速该来源仍缺少的在产物品。移除的来源不会自动补回。' }),
     configField('factory.speedUp', '自动加速生产', 'switch', { help: '与按来源加速独立；两种方式都遵守加速器保留量。' }),
     configField('factory.speedUpItems', '加速物品', 'multi', { parent: 'factory.speedUp', catalog: 'materials', empty: '未选择，允许全部在产物品', when: d => d.factory.speedUp }),
   ] },
@@ -390,10 +395,11 @@ const configGroups = [
     configField('treasure.follow', '跟随指定玩家', 'switch', { help: '识别名单中正在前往货轮的舰队，也兼容当前守军。开启反复攻占后，可选择首次跟随后自主攻占或每次重新跟随。收到可识别的出发推送后会提前唤醒检查，每次发送前仍核对目标、汽油库存、避战和舰队占用。历史排名、已返航或过期行军不会触发跟随；不能保证同时抵达或必得奖励。' }),
     configField('treasure.followMode', '跟随后续出征方式', 'radio', { parent: 'treasure.follow', when: d => d.treasure.follow && d.treasure.repeatAttack, options: [['trigger', '首次跟随后自主攻占'], ['eachTime', '每次重新跟随']], help: '默认首次跟随后自主攻占：同一舰队对同一货轮首次跟随确认后，可在跟随玩家离开后继续攻占，重启和换日保留确认。每次重新跟随：每次出征前都重新匹配名单玩家的有效行军或当前守军，没有匹配就等待，历史确认不再放行。两种方式都需要开启反复攻占才能再次参与同一货轮；另行开启的中小货轮兜底仍可独立派遣。' }),
     configField('treasure.fleetIds', '参与舰队', 'multi', { catalog: 'expeditionFleets', empty: '请选择参与舰队，空选不派遣', help: '只使用已建成、有英雄编队且实际空闲的舰队；行军、战斗、维修和驻外等占用会跳过。游戏自动作战开关开启不等于正在作战。' }),
-    configField('treasure.followPlayerIds', '跟随名单', 'players', { parent: 'treasure.follow', when: d => d.treasure.follow, help: '从当前账号的盟友名单搜索多选，按选择顺序优先跟随。使用完整角色 ID 区分同名玩家；也可补充未列出的角色 ID。未列出的已选 ID 仍保留，需要时手动移除。' }),
+    configField('treasure.followPlayerIds', '跟随名单', 'players', { nameList:'treasure.followNames', parent: 'treasure.follow', when: d => d.treasure.follow, help: '从当前账号的盟友名单搜索多选，按选择顺序优先跟随。选中后按角色 ID 识别，改名后仍可跟随。' }),
     configField('treasure.followNames', '补充跟随昵称（可选）', 'names', { parent: 'treasure.follow', when: d => d.treasure.follow, help: '保留原有手填名单。每行一个完整昵称，角色 ID 名单优先；同名无法确认身份时跳过。', placeholder: '每行输入一位其他玩家的完整昵称' }),
     configField('treasure.chase', '是否开启追杀', 'switch', { help: '名单对手正在前往、驻守或交战的货轮优先出征。追杀跳过货轮类型、奖励、进度、避战、外盟、反复攻占、每日出征上限和最低耐久比例。只用所选可用舰队，服从其他挂机项目的占用和预留。' }),
-    configField('treasure.chaseNames', '追杀名单', 'names', { parent: 'treasure.chase', when: d => d.treasure.chase, placeholder: '每行一位对手的完整昵称', help: '按填写顺序优先追击。每次派遣前重新核对对手位置。对手离开后停止追击，单独开启追杀时会等待下次出现。' }),
+    configField('treasure.chasePlayerIds', '追杀玩家', 'players', { worldPlayers:true, nameList:'treasure.chaseNames', parent: 'treasure.chase', when: d => d.treasure.chase, help: '按昵称搜索并勾选对手。按选择顺序优先追击，改名后继续识别同一角色。' }),
+    configField('treasure.chaseNames', '补充追杀昵称', 'names', { parent: 'treasure.chase', when: d => d.treasure.chase, placeholder: '每行一位对手的完整昵称', help: '角色 ID 名单优先。这里的昵称也独立生效，换用角色 ID 后请移除对应旧昵称。' }),
     configField('treasure.chaseWindows', '追杀时间范围', 'names', { parent: 'treasure.chase', when: d => d.treasure.chase, placeholder: '08:00-12:00\n22:00-02:00', help: '在巨轮参与时间内进一步限定追杀。每行一个北京时间 HH:mm-HH:mm 时段，可跨午夜。留空或起止相同表示沿用全部参与时间。' }),
     configField('treasure.chaseSpeedUp', '追杀去程钻石加速', 'switch', { parent: 'treasure.chase', when: d => d.treasure.chase, help: '仅加速已确认的追杀去程。对手离开后停止花钻。回城可单独使用下方的回城加速。' }),
     configField('treasure.chaseTargetSeconds', '追杀去程剩余目标', 'number', { parent: 'treasure.chaseSpeedUp', when: d => d.treasure.chase && d.treasure.chaseSpeedUp, unit: '秒', help: '剩余时间超过此值时才加速。' }),
@@ -411,8 +417,8 @@ const configGroups = [
     configField('treasure.fallbackSmallRewardPriority', '小型货轮奖励优先级', 'priority', { parent: 'treasure.fallbackQualities', when: smallFallbackVisible, catalog: 'treasureRewards', checkboxes: true, empty: '不筛选奖励', help: '多艘小型货轮通过兜底筛选时，优先选择含排名靠前奖励的货轮。留空接受所有奖励。' }),
     configField('treasure.fallbackSmallRewardMatchMode', '小型兜底奖励筛选方式', 'radio', { parent: 'treasure.fallbackQualities', when: smallFallbackVisible, options: treasureMatchOptions }),
     configField('treasure.fallbackSmallRewardMinHits', '小型兜底至少命中', 'number', { parent: 'treasure.fallbackQualities', when: d => smallFallbackVisible(d) && d.treasure.fallbackSmallRewardMatchMode === 'multiple', unit: '项', help: treasureMinHitsHelp }),
-    configField('treasure.avoidNames', '避战玩家名称', 'names', { help: '每行填写一位玩家的完整昵称，按名称完全匹配，同名玩家都会避开。只判断货轮当前守军和战斗者；历史排名中已离开的玩家不会单独触发。避战优先于跟随。', placeholder: '每行输入一位玩家的完整昵称' }),
-    configField('treasure.avoidPlayerIds', '已有避战角色 ID', 'names', { when: d => d.treasure.avoidPlayerIds.length > 0, help: '保留此前保存的精确角色 ID，每行一个。可删除不再需要的条目；新玩家请在上方填写名称。', placeholder: '每行一个已有的完整角色 ID' }),
+    configField('treasure.avoidPlayerIds', '避战玩家', 'players', { worldPlayers:true, nameList:'treasure.avoidNames', help: '按昵称勾选要避开的玩家。当前守军或交战者与货轮排名中的身份相符时避战。追杀模式仍按追杀名单执行。' }),
+    configField('treasure.avoidNames', '补充避战昵称', 'names', { help: '每行填写一位玩家的完整昵称，按名称完全匹配，同名玩家都会避开。只判断货轮当前守军和战斗者；历史排名中已离开的玩家不会单独触发。避战优先于跟随。', placeholder: '每行输入一位玩家的完整昵称' }),
     configField('treasure.allowHostile', '允许争夺其他联盟货轮', 'switch', { help: '默认关闭，只参与无人占领或本联盟货轮。开启后可能与其他联盟交战，跟随名单也受此开关约束。' }),
     configField('treasure.minDurabilityPercent', '最低舰队耐久', 'number', { unit: '%', help: '低于此比例时先维修；关闭自动维修则跳过。0 不设比例阈值，但零耐久仍需维修。未知耐久上限不会自动维修或出征。' }),
     configField('treasure.autoRepair', '耐久不足自动维修', 'switch', { help: '有符合条件的货轮时，按服务器报价普通维修至满耐久，完成后重新检查目标再派。不会使用钻石或加速维修。' }),
@@ -466,11 +472,11 @@ const configGroups = [
     configField('schedule.guildWelfare', '领取联盟福利礼包'),
     configField('schedule.guildTitleReward', '联盟每日职级礼包', 'switch', { help:'默认关闭。按服务器提供的可领取职级核对每日礼包，不以当前职位替代；确认奖励回执及当日领取时间后才记为成功。' }),
     configField('schedule.worldOnlineRewards', '领取城战在线奖励', 'switch', { help: '在服务器城战时段内，按实际计时逐档领取免费在线奖励。独立于下方城战接续开关；默认关闭，保存后随挂机检查，不自动启动挂机。请求结果未知时等待计数确认，不重复领取。' }),
-    configField('cityWar.enabled', '城战接续总开关', 'switch', { help: '按下方原生委任次数决定何时接续正常出战，每支参与舰队可指定进攻或防守。可在本页只读预览各队的接续条件。' }),
+    configField('cityWar.enabled', '城战接续总开关', 'switch', { help: '防守队从开战起由工具接管，进攻队按原生委任次数接续。可在本页只读预览各队的接续条件。' }),
     configField('cityWar.fleetIds', '城战参与舰队', 'multi', { catalog: 'expeditionFleets', empty: '请选择参与接续的舰队' }),
-    configField('cityWar.defenceFleetIds', '舰队职责与策略', 'cityWarRoles', { parent: 'cityWar.fleetIds', wide: true, help: '为已选舰队分别选择进攻或防守；展开后可设置本队策略、维修加速和派遣加速。策略可跟随全局，也可独立设置目标来源、城市和优先策略。加速需开启城战接续和“基础 → 加速与钻石”中的自动钻石消耗总开关，每队每项上限与全局钻石预算同时生效。切换职责保留本队另一套策略；新加入的舰队默认进攻。进攻只选择本盟已宣战且仍属于敌方的城市，防守只选择被宣战且仍属于本盟的城市；没有对应目标时等待，不自动换职责。使用舰队已保存的英雄编队，不自动换阵。职责仅约束工具接管后的派遣；已解锁原生委任的账号要立即按此分工执行，将原生委任次数设为 0。' }),
-    configField('cityWar.nativeCommissionLimit', '原生委任次数', 'number', { unit: '次', help: '未解锁原生委任时，工具直接按所选舰队的攻守设置接管，无需修改次数。已解锁时，-1 表示等待服务器 VIP 额度用尽，0 表示立即关闭原生委任，正数表示先用指定次数（最多用完 VIP 额度）。需要关闭时，工具会回读确认后再接管。' }),
-    configField('cityWar.targetMode', '进攻目标来源', 'choice', { options: [['alliance', '跟随联盟有效进攻目标'], ['selected', '只选择指定城市']], help: '进攻队使用本组目标来源、城市和优先策略。目标须为本盟已宣战且当前属于敌方的城市。攻守目标设置在工具接管后生效，已解锁原生委任的账号需要立即执行时将原生委任次数设为 0。' }),
+    configField('cityWar.defenceFleetIds', '舰队职责与策略', 'cityWarRoles', { parent: 'cityWar.fleetIds', wide: true, help: '为已选舰队分别选择进攻或防守；展开后可设置本队策略、维修加速和派遣加速。策略可跟随全局，也可独立设置目标来源、城市和优先策略。加速需开启城战接续和“基础 → 加速与钻石”中的自动钻石消耗总开关，每队每项上限与全局钻石预算同时生效。切换职责保留本队另一套策略；新加入的舰队默认进攻。进攻只选择本盟已宣战且仍属于敌方的城市，防守只选择被宣战且仍属于本盟的城市；没有对应目标时等待，不自动换职责。使用舰队已保存的英雄编队，不自动换阵。城战开始后，工具先关闭防守队的原生委任，确认后按防守目标派遣。进攻队按下方次数接管。' }),
+    configField('cityWar.nativeCommissionLimit', '进攻队原生委任次数', 'number', { unit: '次', help: '此项仅对进攻队生效。-1 等待该队用完 VIP 每日额度，0 直接接管，正数表示先用指定次数（最多用完 VIP 额度）。防守队和未解锁原生委任的舰队从开战起直接接管。需要关闭原生委任时，工具会回读确认。' }),
+    configField('cityWar.targetMode', '进攻目标来源', 'choice', { options: [['alliance', '跟随联盟有效进攻目标'], ['selected', '只选择指定城市']], help: '进攻队使用本组目标来源、城市和优先策略。目标须为本盟已宣战且当前属于敌方的城市。如需进攻队从开战起就按这些目标派遣，将进攻队原生委任次数设为 0。' }),
     configField('cityWar.targetPriority', '进攻目标优先', 'choice', { options: [['fewestAllied', '按队数与距离选择'], ['original', '沿用集结／指定城市顺序']], help: '合计本盟排队、交战、已同步在途和本轮安排的舰队。以队数最少的城为基准，相差 0–9 队时选较近目标，差 10 队及以上时优先队数较少的城。多盟同攻时，攻方队列为空或排队明细与总数吻合即可确认本盟排队数。队数不明时，按队数选城会跳过该城，按集结或指定顺序仍可派舰。发送前重新核对。' }),
     configField('cityWar.cityRefs', '指定进攻城市', 'multi', { parent: 'cityWar.targetMode', catalog: 'cityTargets', empty: '请选择当前场景的进攻城市', when: d => d.cityWar.targetMode === 'selected', help: '进攻队在本名单内选择有效目标。启用队数与距离优先时按上述规则排序，勾选顺序用于同条件时的次序。场景不匹配、未宣战或城市归属不符合进攻职责时跳过，没有有效目标时等待。' }),
     configField('cityWar.defenceTargetMode', '防守目标来源', 'choice', { options: [['alliance', '跟随联盟有效防守目标'], ['selected', '只选择指定城市']], help: '防守队使用本组目标来源、城市和优先策略，可与进攻队分别选择自动选城或指定城市。目标须为正在受宣战且当前属于本盟的城市。' }),
@@ -601,6 +607,7 @@ function configSet(key, value) {
     draft.cityWar.defenceFleetIds = (draft.cityWar.defenceFleetIds ?? []).filter(id => value.includes(id));
   }
   if (key === 'heroes.heroIds' && value.length) draft.heroes.needsSelection = false;
+  if (key === 'factory.demandPriority') draft.factory.speedUpSources = draft.factory.speedUpSources.filter(source => value.includes(source));
   if (key === 'farm.autoPlant' && value) draft.farm.customPlant = false;
   if (key === 'farm.customPlant' && value) draft.farm.autoPlant = false;
   configEditor.draft = draft;
@@ -904,6 +911,7 @@ function configUpdateVisibility() {
       widget.moduleNote.hidden = !widget.moduleNote.textContent;
     }
     if (['lineup', 'trialLineups', 'fleetLineups'].includes(widget.spec.kind)) widget.control?.refresh?.();
+    widget.nameHistory?.paint();
     if (widget.childPanel) {
       if (hasError) configCollapsed.delete(key);
       const available = children.some(child => !child.node.hidden);
@@ -1025,6 +1033,7 @@ function configRender() {
   closeHelpTip(false);
   configEditor.previewSummary = null;
   clear($('config-preview-result'));
+  for (const widget of configEditor.widgets.values()) widget.nameHistory?.dispose();
   configEditor.fields.clear(); configEditor.widgets.clear(); configEditor.groups.clear(); configEditor.playerWidgets = [];
   const root = clear($('config-fields'));
   const groups = configGroups.map(group => ({ ...group, fields: [...group.fields] }));
@@ -1235,6 +1244,7 @@ function configRenderField(spec) {
   }
   box.append(error); row.append(name, box);
   const widget = { row, node: row, control, error, spec, clearError() { error.hidden = true; error.textContent = ''; control?.removeAttribute('aria-invalid'); } };
+  if (spec.nameList) widget.nameHistory = configListNameHistory(widget, box);
   if (spec.moduleControl) {
     widget.moduleNote = el('span', 'config-help'); widget.moduleNote.hidden = true;
     widget.moduleNote.id = id + '-note'; widget.moduleNote.setAttribute('role', 'status');
@@ -1248,14 +1258,21 @@ function configRenderField(spec) {
 function configSortableOrder(spec, id) {
   const root = el('div', 'config-dispatch-order'); root.id = id;
   root.setAttribute('role', 'group'); root.setAttribute('aria-label', spec.label);
+  const factory = spec.key === 'factory.demandPriority';
   const hint = el('p', 'config-help', '拖动左侧手柄调整顺序，也可使用上移、下移按钮。');
   const list = el('div'); list.setAttribute('role', 'list');
   const status = el('span', 'sr-only'); status.setAttribute('role', 'status');
+  const add = factory ? el('div', 'config-add') : null;
   const labels = new Map(spec.options ?? (configEditor.data.catalog?.[spec.catalog] ?? []).map(item => [item.value, item.label]));
   const owner = configEditor.owner;
   let drag = null;
-  const editable = () => owner === current && configEditor.owner === owner && !configEditor.busy && !configEditor.loading
+  const editable = () => owner === current && configEditor.owner === owner && (!configEditor.busy || factory && configEditor.saving) && !configEditor.loading
     && root.isConnected && root.getClientRects().length > 0;
+  const commit = (values, focusValue) => {
+    configSet(spec.key, values);
+    paint(focusValue);
+    if (factory) void configFlush();
+  };
   const clearDrop = () => { for (const row of list.children) delete row.dataset.drop; };
   const cancelDrag = () => {
     const previous = drag; drag = null; clearDrop();
@@ -1271,7 +1288,7 @@ function configSortableOrder(spec, id) {
     const values = [...configGet(spec.key)], from = values.indexOf(value);
     if (from < 0 || to < 0 || to >= values.length || from === to) return;
     values.splice(from, 1); values.splice(to, 0, value);
-    configSet(spec.key, values); paint(value);
+    commit(values, value);
     status.textContent = (labels.get(value) || value) + '已移至第' + (to + 1) + '位';
   };
   const startDrag = (event, value, row, handle) => {
@@ -1291,8 +1308,8 @@ function configSortableOrder(spec, id) {
       const before = others.findIndex(item => { const rect = item.getBoundingClientRect(); return event.clientY < rect.top + rect.height / 2; });
       drag.to = before < 0 ? others.length : before;
       clearDrop();
-      if (before < 0 && others.length) others.at(-1).dataset.drop = 'after';
-      else if (others[before]) others[before].dataset.drop = 'before';
+      if (others[drag.to]) others[drag.to].dataset.drop = 'before';
+      else if (others.length) others.at(-1).dataset.drop = 'after';
       if (event.clientY < 48) window.scrollBy(0, -16);
       else if (event.clientY > window.innerHeight - 48) window.scrollBy(0, 16);
     };
@@ -1309,8 +1326,10 @@ function configSortableOrder(spec, id) {
     cancelDrag(); clear(list);
     const values = configGet(spec.key);
     values.forEach((value, index) => {
-      const row = el('div', 'config-dispatch-row config-dispatch-sortable');
-      row.dataset.dispatch = value; row.setAttribute('role', 'listitem');
+      const row = el('div', (factory ? 'config-demand-row' : 'config-dispatch-row') + ' config-dispatch-sortable');
+      if (factory) row.dataset.demandSource = value;
+      else row.dataset.dispatch = value;
+      row.setAttribute('role', 'listitem');
       const label = labels.get(value) || value;
       const handle = configButton('⠿', () => {}); handle.classList.add('config-dispatch-handle');
       handle.setAttribute('aria-label', '拖动排序：' + label); handle.title = '拖动排序，或按上下方向键移动';
@@ -1321,17 +1340,43 @@ function configSortableOrder(spec, id) {
         if (to !== null) { event.preventDefault(); cancelDrag(); move(value, to); }
       };
       const actions = el('div', 'config-order-tools');
+      if (factory) {
+        const speed = el('label', 'config-option'), check = el('input');
+        check.type = 'checkbox'; check.checked = configGet('factory.speedUpSources').includes(value);
+        check.setAttribute('aria-label', label + '工厂加速');
+        check.onchange = () => {
+          const sources = configGet('factory.speedUpSources');
+          configSet('factory.speedUpSources', check.checked ? [...sources, value] : sources.filter(source => source !== value));
+        };
+        speed.append(check, el('span', '', '工厂加速')); actions.append(speed);
+      }
       for (const [offset, text] of [[-1, '上移'], [1, '下移']]) {
         const button = configButton(text, () => { cancelDrag(); move(value, index + offset); });
         button.disabled = index + offset < 0 || index + offset >= values.length;
         button.setAttribute('aria-label', label + text); actions.append(button);
       }
+      if (factory) {
+        const remove = configButton('移除', () => {
+          if (editable()) commit(configGet(spec.key).filter(source => source !== value));
+        }, 'remove');
+        remove.setAttribute('aria-label', '移除' + label); actions.append(remove);
+      }
       row.append(handle, el('span', 'config-order-num', String(index + 1)), el('span', 'config-order-name', label), actions);
       list.append(row);
       if (value === focusValue) handle.focus({ preventScroll: true });
     });
+    if (add) {
+      if (!values.length) list.append(el('p', 'config-empty', '尚未选择需求来源。当前只按备货水位生产。'));
+      configOrderAdd(add, labels, values, '需求来源', value => {
+        if (!editable()) return;
+        const values = configGet(spec.key);
+        if (!values.includes(value)) commit([...values, value]);
+      });
+    }
   }
-  root.append(hint, list, status); paint();
+  root.append(hint, list, status);
+  if (add) root.append(add);
+  paint();
   return root;
 }
 
@@ -1623,19 +1668,19 @@ async function configLoad(force = false) {
       }
       configEditor.runtime=runtime;configEditor.data={...configEditor.data,usage:data.usage,pendingUsage:data.pendingUsage};
       const displayChanged=JSON.stringify(data.rules)!==JSON.stringify(configEditor.data.rules)||JSON.stringify(data.tasks)!==JSON.stringify(configEditor.data.tasks);
-      configEditor.data={...configEditor.data,rules:data.rules,tasks:data.tasks,compatibility:data.compatibility,
+      configEditor.data={...configEditor.data,rules:data.rules,tasks:data.tasks,compatibility:data.compatibility,playerNames:data.playerNames,
         recovery:configEditor.recoveryBlocked ? data.recovery ?? configEditor.data.recovery : data.recovery,recoveryToken:data.recoveryToken};
       configEditor.recoveryNotice = null;
       configCompatibilityMessage(data);
       // 活动开放状态独立于保存版本；更新入口时保留草稿和原基线，避免覆盖编辑或绕过版本冲突。
-      if(displayChanged){configEditor.previewSummary=null;configRender();}else configRenderUsage();
+      if(displayChanged){configEditor.previewSummary=null;configRender();}else {configRenderUsage();configUpdateVisibility();}
       return data;
     }
     configEditor.runtime=runtime;configEditor.previewSummary=null;
     if(force||configEditor.owner!==account){configCollapsed.clear();configDisclosureSeen.clear();configCollapsedSections.clear();}
     configEditor.owner = account; configEditor.data = data; configEditor.draft = structuredClone(data.settings); configEditor.baseline = structuredClone(data.settings); configEditor.errors = {}; configEditor.recoveryBlocked = data.recovery?.reason === 'unavailable'; configEditor.recoveryNotice = null;
     configCancelSaveTimer(); configEditor.saveError = null; configEditor.saveRetries = 0;
-    configEditor.playerData = null; configEditor.playerRequest = null; configEditor.playerError = '';
+    configEditor.playerData = null; configEditor.playerRequest = null; configEditor.playerError = ''; configEditor.worldPlayers = {};
     $('config-account-name').textContent = (accounts.find(row => row.id === account)?.title || '当前账号') + '的挂机配置';
     configRender(); configCompatibilityMessage(data);
     return data;
@@ -1663,12 +1708,13 @@ async function configMayChangeAccount(next) {
 function configAccountChanged() {
   resetWorldMap();
   if (configEditor.owner === current) return;
+  for (const widget of configEditor.widgets.values()) widget.nameHistory?.dispose();
   if ($('config-history-dialog')?.open) $('config-history-dialog').close();
   configWeeklyRankingReset();
   configCancelSaveTimer(); configEditor.savePromise = null; configEditor.saving = false; configEditor.saveError = null; configEditor.saveRetries = 0; configEditor.busy = false;
   configEditor.serial++; configEditor.owner = null; configEditor.data = null; configEditor.draft = null; configEditor.baseline = null; configEditor.loading = false; configEditor.errors = {}; configEditor.recoveryBlocked = false; configEditor.recoveryNotice = null; configEditor.recoverySync = null;
   configEditor.runtime=null;configEditor.previewSummary=null;
-  configEditor.playerData = null; configEditor.playerRequest = null; configEditor.playerError = ''; configEditor.playerWidgets = [];
+  configEditor.playerData = null; configEditor.playerRequest = null; configEditor.playerError = ''; configEditor.worldPlayers = {}; configEditor.playerWidgets = [];
   configCollapsed.clear();configDisclosureSeen.clear();configCollapsedSections.clear();
   clear($('config-fields')).append(el('p', 'config-empty', '正在切换账号配置…')); clear($('config-preview-result')); clear($('config-preview-summary')); clear($('config-usage')).renderKey = null; configBusy(false); configUpdateState();
   if (configVisible()) void configLoad(true);
@@ -1711,40 +1757,155 @@ function configCheckForm({ focus = true } = {}) {
   return true;
 }
 
-async function configRefreshPlayers() {
+async function configRefreshPlayers(world = false) {
+  const state = world ? configEditor.worldPlayers : configEditor;
   const account = configEditor.owner, serial = configEditor.serial;
   if (!account || !configEditor.draft) return;
-  if (configEditor.playerRequest?.account === account && configEditor.playerRequest.serial === serial) return configEditor.playerRequest.promise;
+  if (state.playerRequest?.account === account && state.playerRequest.serial === serial) return state.playerRequest.promise;
   const job = { account, serial, promise: null };
-  configEditor.playerRequest = job; configEditor.playerError = '';
+  state.playerRequest = job; state.playerError = '';
   for (const paint of configEditor.playerWidgets) paint();
   job.promise = (async () => {
     try {
-      const data = await call('/api/settings/players');
+      const data = await call(world ? '/api/settings/players?scope=world' : '/api/settings/players');
       if (account !== current || account !== configEditor.owner || serial !== configEditor.serial) return;
-      configEditor.playerData = data;
+      state.playerData = data;
     } catch (error) {
-      if (account === current && serial === configEditor.serial) configEditor.playerError = error.message;
+      if (account === current && serial === configEditor.serial) state.playerError = error.message;
     } finally {
-      if (configEditor.playerRequest === job) { configEditor.playerRequest = null; for (const paint of configEditor.playerWidgets) paint(); }
+      if (state.playerRequest === job) { state.playerRequest = null; for (const paint of configEditor.playerWidgets) paint(); }
     }
   })();
   return job.promise;
 }
 
+function configListNameHistory(widget, box) {
+  const { spec } = widget, namesKey = spec.nameList, idKey = spec.key;
+  const root = el('div', 'config-list-history'), list = el('div', 'config-player-tags'), status = el('small', 'config-help');
+  const refresh = configButton('刷新昵称', () => { void sync(true); });
+  refresh.setAttribute('aria-label', '刷新' + spec.label + '昵称');
+  root.append(list, refresh, status); box.append(root);
+  let visible = false, pending = false, disposed = false, painted = '', checked = new Set();
+  const fold = value => idKey.startsWith('treasure.') ? value : value.toLocaleLowerCase();
+  function entries() {
+    const ids = configGet(idKey) ?? [], names = configGet(namesKey) ?? [], history = configEditor.data?.playerNames ?? {};
+    const relevant = name => names.some(value => fold(value) === fold(name));
+    return [...new Set([...ids, ...Object.keys(history).filter(id => [history[id].name, ...history[id].previous].some(relevant))])];
+  }
+  function change(key, values) {
+    configSet(key, values);
+    const control = configEditor.widgets.get(key)?.control;
+    if (control?.tagName === 'TEXTAREA') control.value = values.join('\n');
+    for (const repaint of configEditor.playerWidgets) repaint();
+  }
+  function lastGate(key) {
+    const ids = configGet(idKey) ?? [], names = configGet(namesKey) ?? [];
+    const last = (key === idKey ? ids.length === 1 && !names.length : names.length === 1 && !ids.length);
+    let gate = '';
+    if (last && idKey.endsWith('.huntPlayerIds')) gate = idKey.replace(/huntPlayerIds$/, 'huntEnabled');
+    if (last && idKey === 'treasure.chasePlayerIds') gate = 'treasure.chase';
+    if (last && idKey === 'treasure.followPlayerIds') gate = 'treasure.follow';
+    if (last && idKey === 'alliance.memberIds') gate = 'alliance.autoHelp';
+    return gate && configGet(gate) ? gate : '';
+  }
+  function removeButton(text, key, value) {
+    const gate = lastGate(key), gateLabel = gate === 'alliance.autoHelp' ? '自动帮助' : gate === 'treasure.follow' ? '跟随' : '追杀';
+    const closeModule = gate.startsWith('treasure.') && configGet('treasure.enabled') && !configGet('treasure.autoJoin')
+      && !configGet(gate === 'treasure.chase' ? 'treasure.follow' : 'treasure.chase');
+    return configButton(text + (gate ? '并关闭' + (closeModule ? '巨轮自动化' : gateLabel) : ''), () => {
+      if (gate) configSet(gate, false);
+      if (closeModule) configSet('treasure.enabled', false);
+      change(key, configGet(key).filter(item => item !== value));
+    }, 'remove');
+  }
+  function paint() {
+    if (disposed || !configEditor.draft) return;
+    const ids = configGet(idKey) ?? [], names = configGet(namesKey) ?? [], history = configEditor.data?.playerNames ?? {};
+    const rows = entries();
+    const signature = JSON.stringify([ids, names, lastGate(idKey), lastGate(namesKey), configGet('treasure.autoJoin'), configGet('treasure.chase'), configGet('treasure.follow'), configGet('treasure.enabled'), rows.map(id => [id, history[id]])]);
+    if (signature !== painted) {
+      painted = signature; clear(list);
+      widget.control?.refreshPlayerNames?.();
+      for (const id of rows) {
+        const record = history[id], aliases = record?.previous ?? [];
+        const tag = el('div', 'config-player-tag');
+        const caption = record ? record.name + ' · ID ' + id + (ids.includes(id) ? '' : '（昵称匹配）') : 'ID ' + id + ' · 尚未同步昵称';
+        tag.append(el('span', '', caption));
+        if (aliases.length) tag.append(el('strong', 'config-name-changed', '已改名 · 曾用名 ' + aliases.join('、')));
+        if (ids.includes(id)) {
+          const button = removeButton('移除 ID', idKey, id);
+          button.setAttribute('aria-label', button.textContent + '（' + id + '）'); tag.append(button);
+        }
+        for (const value of names.filter(name => record && [record.name, ...aliases].some(alias => fold(alias) === fold(name)))) {
+          if (!ids.includes(id)) {
+            const bind = configButton('将“' + value + '”改用此 ID', () => {
+              change(idKey, [...new Set([...configGet(idKey), id])]); change(namesKey, configGet(namesKey).filter(item => item !== value));
+            });
+            bind.disabled = ids.length >= (idKey === 'treasure.avoidPlayerIds' || idKey === 'alliance.memberIds' ? 100 : 30);
+            tag.append(bind);
+          }
+          if (record.name !== value && aliases.some(alias => fold(alias) === fold(value))) tag.append(removeButton('删除旧昵称“' + value + '”', namesKey, value));
+        }
+        list.append(tag);
+      }
+      root.hidden = !rows.length;
+    }
+    if (visible && !pending) void sync(false);
+  }
+  async function sync(force) {
+    if (disposed || pending || !configEditor.draft || configEditor.owner !== current) return;
+    const saved = idKey.split('.').reduce((value, part) => value?.[part], configEditor.baseline) ?? [];
+    const ids = entries().filter(id => (saved.includes(id) || configEditor.data?.playerNames?.[id]) && (force || !checked.has(id)));
+    if (!ids.length) return;
+    const owner = current, serial = configEditor.serial;
+    const active = () => !disposed && current === owner && configEditor.owner === owner && configEditor.serial === serial;
+    pending = true; refresh.disabled = true; status.textContent = '正在读取角色资料…';
+    ids.forEach(id => checked.add(id));
+    let count = 0;
+    try {
+      for (let i = 0; i < ids.length; i += 100) {
+        const batch = ids.slice(i, i + 100);
+        const data = await call('/api/settings/player-names?ids=' + batch.join(','));
+        if (!active()) return;
+        const history = { ...configEditor.data.playerNames };
+        for (const id of batch) if (data.playerNames[id]) history[id] = data.playerNames[id];
+        configEditor.data.playerNames = history;
+        count += data.synced.length;
+        status.textContent = !data.online ? '账号离线，显示上次记录' : count < Math.min(i + 100, ids.length) ? '部分昵称未同步，显示上次记录' : '';
+      }
+    } catch (error) { if (active()) status.textContent = error.message; }
+    finally {
+      pending = false; refresh.disabled = false;
+      if (!disposed && configEditor.owner === owner && current === owner) {
+        if (!active()) { ids.forEach(id => checked.delete(id)); status.textContent = ''; }
+        for (const field of configEditor.widgets.values()) field.nameHistory?.paint();
+      }
+    }
+  }
+  const observer = typeof IntersectionObserver === 'function' ? new IntersectionObserver(([entry]) => {
+    visible = entry.isIntersecting;
+    if (visible) paint();
+  }) : null;
+  observer?.observe(widget.row);
+  paint();
+  return { paint, dispose() { disposed = true; observer?.disconnect(); } };
+}
+
 function configPlayerPicker(spec, id) {
+  const world = !!spec.worldPlayers, noun = world ? '玩家' : '盟友';
+  const state = world ? configEditor.worldPlayers : configEditor;
   const root = el('div', 'config-player-picker'); root.id = id; root.tabIndex = -1; root.setAttribute('role', 'group'); root.setAttribute('aria-label', spec.label);
   const selected = el('div', 'config-player-tags');
   // 点击姓名标签时，焦点须留在下拉框内，避免落到外层分组触发失焦关闭。
   const details = el('details', 'config-multi'); details.tabIndex = -1;
-  const summary = el('summary', '', '选择盟友'); summary.setAttribute('aria-label', '选择' + spec.label); details.append(summary);
-  const panel = el('div', 'config-multi-panel'); const search = el('input', 'config-input'); search.type = 'search'; search.placeholder = '搜索昵称或角色 ID'; search.setAttribute('aria-label', '搜索' + spec.label);
+  const summary = el('summary', '', '选择' + noun); summary.setAttribute('aria-label', '选择' + spec.label); details.append(summary);
+  const panel = el('div', 'config-multi-panel'); const search = el('input', 'config-input'); search.type = 'search'; search.placeholder = '搜索玩家昵称'; search.setAttribute('aria-label', '搜索' + spec.label);
   const status = el('p', 'config-help'); status.setAttribute('role', 'status');
   const list = el('div', 'config-option-list');
-  const refresh = configButton('刷新盟友名单', () => { void configRefreshPlayers(); }); refresh.setAttribute('aria-label', '刷新' + spec.label + '盟友名单');
-  const manual = el('div', 'config-add'); const input = el('input', 'config-input'); input.type = 'text'; input.inputMode = 'numeric'; input.maxLength = 19; input.placeholder = '补充完整角色 ID'; input.setAttribute('aria-label', '补充' + spec.label + '角色ID');
+  const refresh = configButton('刷新' + noun + '名单', () => { void configRefreshPlayers(world); }); refresh.setAttribute('aria-label', '刷新' + spec.label + noun + '名单');
+  const manual = el('div', 'config-add'); const input = el('input', 'config-input'); input.type = 'text'; input.inputMode = 'numeric'; input.maxLength = 19; input.placeholder = '已知角色 ID 时可选填'; input.setAttribute('aria-label', '补充' + spec.label + '角色ID');
   const manualError = el('p', 'config-field-error'); manualError.hidden = true;
-  const limit = spec.key === 'treasure.followPlayerIds' ? 30 : 100;
+  const limit = spec.key === 'treasure.avoidPlayerIds' || spec.key === 'alliance.memberIds' ? 100 : 30;
   function change(value, checked) {
     const values = configGet(spec.key);
     if (checked && !values.includes(value) && values.length >= limit) { manualError.textContent = '最多选择' + limit + '位玩家'; manualError.hidden = false; paint(); return; }
@@ -1761,43 +1922,45 @@ function configPlayerPicker(spec, id) {
     const scrollTop = list.scrollTop;
     clear(list);
     const query = search.value.trim().toLocaleLowerCase(), values = configGet(spec.key);
-    const matches = (configEditor.playerData?.members ?? []).filter(member => (member.name + ' ' + member.id).toLocaleLowerCase().includes(query));
+    const matches = (state.playerData?.members ?? []).filter(member => (member.name + ' ' + member.id).toLocaleLowerCase().includes(query));
     for (const member of matches) {
       const option = el('label', 'config-option'); const check = el('input'); check.type = 'checkbox'; check.value = member.id; check.checked = values.includes(member.id); check.onchange = () => change(member.id, check.checked);
-      const label = el('span'); label.append(el('span', 'config-player-name', member.name), el('small', 'config-help', 'ID ' + member.id + (member.online ? ' · 在线' : '')));
+      const label = el('span'); label.append(el('span', 'config-player-name', member.name), el('small', 'config-help', [member.source, member.guildIdx ? '联盟 ' + member.guildIdx : '', 'ID ' + member.id, member.online ? '在线' : ''].filter(Boolean).join(' · ')));
       option.append(check, label); list.append(option);
       if (member.id === focusId) check.focus({ preventScroll: true });
     }
-    if (configEditor.playerData && !matches.length) list.append(el('p', 'config-help', query ? '没有匹配的盟友，可改用完整角色 ID 或补充昵称。' : '当前没有可选择的盟友，已排除自己及联盟黑名单。'));
+    if (state.playerData && !matches.length) list.append(el('p', 'config-help', query || world ? '未找到玩家，可在补充昵称中填写游戏内的名字。' : '当前没有可选择的盟友，已排除自己及联盟黑名单。'));
     list.scrollTop = scrollTop;
   }
   function paint() {
-    const values = configGet(spec.key), members = configEditor.playerData?.members ?? [];
+    const values = configGet(spec.key), members = state.playerData?.members ?? [];
     if (!values) return;
     clear(selected);
     for (const value of values) {
       const member = members.find(row => row.id === value);
       const duplicateName = member && members.filter(row => row.name === member.name).length > 1;
-      const name = member ? member.name + (duplicateName ? '（' + value + '）' : '') : '角色 ' + value;
+      const displayName = configEditor.data?.playerNames?.[value]?.name || member?.name;
+      const name = displayName ? displayName + (duplicateName ? '（' + value + '）' : '') : '角色 ' + value;
       const tag = el('span', 'config-player-tag'); const text = el('span', '', name); text.title = '角色 ID：' + value;
       const remove = configButton('移除', () => { change(value, false); summary.focus(); }, 'remove'); remove.setAttribute('aria-label', '从' + spec.label + '移除' + name);
       tag.append(text, remove); selected.append(tag);
     }
     selected.hidden = !values.length;
-    summary.textContent = values.length ? '选择盟友 · 已选 ' + values.length + ' 位' : '选择盟友';
-    refresh.disabled = !!configEditor.playerRequest; refresh.textContent = configEditor.playerRequest ? '正在读取…' : '刷新盟友名单';
-    const data = configEditor.playerData;
-    status.textContent = configEditor.playerError || (configEditor.playerRequest ? '' : data?.reason || (data ? (data.guildName || '当前联盟') + ' · 可选 ' + members.length + ' 位盟友' : '尚未读取盟友名单'));
+    summary.textContent = values.length ? '选择' + noun + ' · 已选 ' + values.length + ' 位' : '选择' + noun;
+    refresh.disabled = !!state.playerRequest; refresh.textContent = state.playerRequest ? '正在读取…' : '刷新' + noun + '名单';
+    const data = state.playerData;
+    status.textContent = state.playerError || (state.playerRequest ? '' : data?.reason || (data ? (world ? '世界舰队、世界聊天和黑名单' : data.guildName || '当前联盟') + ' · 可选 ' + members.length + ' 位' : '尚未读取' + noun + '名单'));
     status.hidden = !status.textContent;
     if (details.open) paintList();
   }
   search.oninput = paintList;
   details.ontoggle = () => {
-    if (details.open) { paintList(); configOpenSearchPanel(details, panel, search); if (!configEditor.playerData) void configRefreshPlayers(); }
+    if (details.open) { paintList(); configOpenSearchPanel(details, panel, search); if (!state.playerData) void configRefreshPlayers(world); }
     else details.classList.remove('open-up');
   };
   details.onkeydown = event => { if (event.key === 'Escape') { details.open = false; summary.focus(); event.stopPropagation(); } };
   panel.append(search, status, list, refresh, manual, manualError); details.append(panel); root.append(selected, details);
+  root.refreshPlayerNames = paint;
   configEditor.playerWidgets.push(paint); paint(); return root;
 }
 
@@ -1961,6 +2124,11 @@ function configMultiselect(spec, id, options = {}) {
       input.onchange = () => {
         if (disabled) return;
         const values = read();
+        if (input.checked && spec.catalog === 'factoryProducts') {
+          const sameType = new Set(available.filter(row => row.factoryType === item.factoryType).map(row => row.value));
+          write([...values.filter(value => !sameType.has(value)), item.value]);
+          paintSummary(); paintList(); return;
+        }
         write(input.checked ? [...values, item.value] : values.filter(value => value !== item.value));
         if (spec.key === 'heroes.heroIds' && item.hidden && !input.checked) { paintSummary(); paintList(); return; }
         paintSummary(); paintFooter(available, matches.length, new Set(read()));
@@ -1999,11 +2167,22 @@ function configMultiselect(spec, id, options = {}) {
   panel.append(search, list, more, foot); root.append(panel); paintSummary(); return root;
 }
 
+function configOrderAdd(add, labels, values, itemLabel, onAdd) {
+  clear(add);
+  const select = el('select', 'config-select'); select.setAttribute('aria-label', '添加' + itemLabel);
+  const available = [...labels].filter(([value]) => !values.includes(value));
+  const blank = el('option', '', available.length ? '选择要添加的' + itemLabel : '已添加全部' + itemLabel);
+  blank.value = ''; select.append(blank);
+  for (const [value, label] of available) { const option = el('option', '', label); option.value = value; select.append(option); }
+  const button = configButton('添加', () => { if (select.value) onAdd(select.value); });
+  button.setAttribute('aria-label', '添加所选' + itemLabel); button.disabled = true;
+  select.disabled = !available.length; select.onchange = () => { button.disabled = !select.value; };
+  add.append(select, button);
+}
+
 function configPriorityEditor(spec, id) {
   const root = el('div'); root.id = id; root.tabIndex = -1; root.setAttribute('role', 'group'); root.setAttribute('aria-label', spec.label);
-  const options = spec.options?.map(([value, label]) => ({ value, label })) ?? configEditor.data.catalog[spec.catalog || 'demandSources'] ?? [];
-  const factoryPriority = spec.key === 'factory.demandPriority';
-  const itemLabel = spec.itemLabel || '需求来源';
+  const labels = new Map(spec.options ?? (configEditor.data.catalog[spec.catalog] ?? []).map(item => [item.value, item.label]));
   const picker = spec.checkboxes ? configMultiselect(spec, id + '-picker', {
     write(values) { configSet(spec.key, values); paint(); },
   }) : null;
@@ -2014,20 +2193,14 @@ function configPriorityEditor(spec, id) {
   function paint(focusKey, direction) {
     clear(list); const values = configGet(spec.key); let focus;
     values.forEach((value, index) => {
-      const label = options.find(item => item.value === value)?.label || value;
+      const label = labels.get(value) || value;
       const row = el('li', 'config-order-row'); row.append(el('span', 'config-order-num', String(index + 1)), el('span', 'config-order-name', label));
       const tools = el('div', 'config-order-tools');
-      if (factoryPriority) {
-        const speed = el('label', 'config-option'); const check = el('input'); check.type = 'checkbox'; check.checked = configGet('factory.speedUpSources').includes(value); check.setAttribute('aria-label', label + '工厂加速');
-        check.onchange = () => { const current = configGet('factory.speedUpSources'); configSet('factory.speedUpSources', check.checked ? [...current, value] : current.filter(item => item !== value)); };
-        speed.append(check, el('span', '', '工厂加速')); tools.append(speed);
-      }
       const move = offset => { const next = [...values]; [next[index], next[index + offset]] = [next[index + offset], next[index]]; configSet(spec.key, next); picker?.refresh(); paint(value, offset); };
       const up = configButton('上移', () => move(-1)); up.disabled = index === 0; up.setAttribute('aria-label', label + '上移');
       const down = configButton('下移', () => move(1)); down.disabled = index === values.length - 1; down.setAttribute('aria-label', label + '下移');
       const remove = configButton('移除', () => {
         configSet(spec.key, values.filter(item => item !== value));
-        if (factoryPriority) configSet('factory.speedUpSources', configGet('factory.speedUpSources').filter(item => item !== value));
         picker?.refresh(); paint();
       }, 'remove'); remove.setAttribute('aria-label', '移除' + label);
       tools.append(up, down, remove); row.append(tools); list.append(row);
@@ -2036,13 +2209,9 @@ function configPriorityEditor(spec, id) {
     if (focus && !focus.disabled) focus.focus();
     if (!add) { list.hidden = !values.length; return; }
     if (!values.length) list.append(el('li', 'config-empty', spec.empty || '尚未选择需求来源。当前只按备货水位生产。'));
-    clear(add); const select = el('select', 'config-select'); select.setAttribute('aria-label', '添加' + itemLabel);
-    const available = options.filter(item => !values.includes(item.value));
-    const blank = el('option', '', available.length ? '选择要添加的' + itemLabel : '已添加全部' + itemLabel); blank.value = ''; select.append(blank);
-    for (const item of available) { const option = el('option', '', item.label); option.value = item.value; select.append(option); }
-    const button = configButton('添加', () => { if (select.value) { configSet(spec.key, [...values, select.value]); paint(); } }); button.setAttribute('aria-label', '添加所选' + itemLabel); button.disabled = true;
-    select.disabled = !available.length; select.onchange = () => { button.disabled = !select.value; };
-    add.append(select, button);
+    configOrderAdd(add, labels, values, spec.itemLabel, value => {
+      configSet(spec.key, [...configGet(spec.key), value]); paint();
+    });
   }
   paint(); return root;
 }
@@ -2254,18 +2423,24 @@ function configSave(event, { automatic = false } = {}) {
     configMessage('请修正标出的配置，填写完整后会自动保存。', 'error'); configUpdateState();
     return Promise.resolve(false);
   }
-  const account = current, serial = configEditor.serial, text = JSON.stringify(configEditor.draft);
+  const account = current, serial = configEditor.serial, draft = configEditor.draft, text = JSON.stringify(draft);
   const active = () => account === current && account === configEditor.owner && serial === configEditor.serial;
   configEditor.saving = true; configEditor.saveError = null;
   configBusy(true);
   if (!Object.keys(configEditor.errors).length) configMessage('');
   configUpdateState();
   const job = (async () => { try {
-    const data = await call('/api/settings', { method: 'POST', body: JSON.stringify({ settings: JSON.parse(text), revision: configEditor.data.revision, baseRevision: configEditor.data.baseRevision, recoveryToken: configEditor.data.recoveryToken }) });
+    const body = JSON.stringify({ settings: draft, revision: configEditor.data.revision, baseRevision: configEditor.data.baseRevision, recoveryToken: configEditor.data.recoveryToken });
+    const orderChanged = JSON.stringify(draft.factory.demandPriority) !== JSON.stringify(configEditor.baseline.factory.demandPriority);
+    // 刷新时让已发出的调序请求继续完成；超过浏览器 keepalive 字节上限的配置走常规保存。
+    const keepalive = orderChanged && new Blob([body]).size <= 65536;
+    const data = await call('/api/settings', { method: 'POST', body, keepalive });
     if (!active() || configPageStale()) return false;
     const edited = JSON.stringify(configEditor.draft) !== text;
     const normalized = !edited && JSON.stringify(data.settings) !== text;
     const displayChanged=JSON.stringify(data.rules)!==JSON.stringify(configEditor.data.rules)||JSON.stringify(data.tasks)!==JSON.stringify(configEditor.data.tasks);
+    if (typeof productionPlanOwner !== 'undefined' && productionPlanOwner === account
+      && JSON.stringify(configEditor.baseline?.factory) !== JSON.stringify(data.settings.factory)) resetProductionPlan();
     configEditor.data = data; configEditor.baseline = structuredClone(data.settings);
     configEditor.saveRetries = 0; loopSettingsRevision = data.revision;
     // 在途请求成功只确认它提交的草稿；后续编辑仍需等自己的校验结果。
@@ -2442,12 +2617,12 @@ async function configPreview() {
     }
     if (data.cityWar) {
       const state = data.cityWar;
-      root.append(el('p', 'config-help', '原生每队每日委任额度：' + (state.nativeLimit === 0 ? '0（未解锁，工具直接接管）' : state.nativeLimit ?? '未确认') + '；本工具原生委任设置：' +
+      root.append(el('p', 'config-help', '原生每队每日委任额度：' + (state.nativeLimit === 0 ? '0（未解锁，工具直接接管）' : state.nativeLimit ?? '未确认') + '；进攻队原生委任设置：' +
         (state.nativeCommissionLimit === -1 ? '按 VIP 规则' : state.nativeCommissionLimit === 0 ? '关闭原生委任' : (state.nativeCommissionLimit ?? '?') + ' 次') +
         '；汽油 ' + (state.fuel ?? '未确认') + '。' +
         (state.startTime && state.endTime ? '服务器城战时段：' + new Date(state.startTime * 1000).toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai', hour12: false }) + ' 至 ' + new Date(state.endTime * 1000).toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai', hour12: false }) : '尚未取得有效城战时段。')));
       if (state.fleets?.length) root.append(table(['舰队 / 职责', '实际状态', '今日原生委任', '接续条件'], state.fleets.map(f => [f.name + ' · ' + (f.role === 'defence' ? '防守' : '进攻'), f.state, (f.used ?? '?') + ' / ' + (f.limit ?? '?'), f.reason || '满足舰队条件'])));
-      root.append(el('p', 'config-help', '攻守职责与各自目标配置在工具接续时生效。已解锁原生委任的账号如需立即按设置执行，可将原生委任次数设为 0。守方队列采用服务器计数，可能包含城防 NPC。'));
+      root.append(el('p', 'config-help', '防守队从开战起接管，即使还有原生委任次数，也会在确认关闭委任后按防守目标派遣。进攻队按设置的次数接续。守方队列采用服务器计数，可能包含城防 NPC。'));
       if (state.targets?.length) root.append(table(['城战目标 / 方向', '攻/守队列及交战 + 本盟在途', '单队行军汽油', '目标标记'], state.targets.map(t => {
         const total = t.alliedCount == null || t.transitCount == null ? null : t.alliedCount + t.transitCount;
         return [t.name + ' · ' + (t.role === 'defence' ? '防守' : '进攻'), t.alliedCount == null ? (t.countReason || '未确认')

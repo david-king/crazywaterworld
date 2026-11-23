@@ -49,8 +49,14 @@ export function createPendingOperation(ledger, {
       settled = true;
       finishLog('cancelled', 'not-sent');
     },
-    fail(error) {
+    fail(error, { handled = false } = {}) {
       if (settled) return { rejected: false, pending: false };
+      if (handled) {
+        // The business module already closed this reservation atomically.
+        settled = true;
+        finishLog('failed', 'failed', { reason: error.message });
+        return { rejected: false, pending: false };
+      }
       const notSent = !sent && isNotSent(error);
       const rejected = notSent || !!error.prompt && error.request === request;
       if (ticket && rejected) {

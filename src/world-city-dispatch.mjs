@@ -2,7 +2,7 @@ import { exactAutomationId } from './automation-policy.mjs';
 import { cityPetrolCost } from './city-war.mjs';
 import { toNumber } from './client.mjs';
 import { pendingPetrol } from './dispatch-preview.mjs';
-import { dispatchReservationReason, fleetRecordReason, fleetStateName } from './fleet-availability.mjs';
+import { dispatchReservationReason, fleetRecordHold, fleetStateName } from './fleet-availability.mjs';
 import { cityDispatchObserved, fleetAtHome, recordsInWorld, settleFleetSnapshot } from './fleet-settlement.mjs';
 import { loadMapAsset } from './world.mjs';
 
@@ -115,9 +115,8 @@ async function readDispatch(client, protocol, config, player, settings, ledger, 
         world.cities.some(c => c.id === fleet.cityId && c.state === protocol.CityState.CTS_BATTLING))) return '耐久不足';
     if (!(building?.level > 0)) return '编队未同步';
     if (!building.fleet?.formation?.heroPositions?.some(slot => slot.heroId)) return '未编队';
-    if (fleetRecordReason(records, id, worldId)) return '任务占用';
-    if (dispatchReservationReason(client, settings, 'overview', id)) return '已预留';
-    return '';
+    const dispatchNote = fleetRecordHold(records, id, worldId)?.note || dispatchReservationReason(client, settings, 'overview', id);
+    return dispatchNote ? '空闲 · ' + dispatchNote : '';
   }
   const roster = own.fleets.filter(fleet => fleetNumber(fleet?.buildingId) &&
     (!fleet.owner || exactAutomationId(fleet.owner.playerId) === playerId))

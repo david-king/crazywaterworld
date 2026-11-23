@@ -42,6 +42,19 @@ export function createGiftCodeLibrary({ directory = DATA_DIR, now = Date.now, ca
     if ((data.expired ?? []).some(row => !row || typeof row.code !== 'string')) throw Error('共享礼包码下架记录无效');
     return { ...data, expired: data.expired ?? [] };
   };
+  function recordExpired(codes, reason = '游戏服务器明确返回礼包码已过期') {
+    const missingCodes = state => {
+      const expired = new Set(state.expired.map(row => row.code));
+      return codes.filter(code => !expired.has(code));
+    };
+    if (!codes.length || !missingCodes(read()).length) return;
+    withFileLock(file, () => {
+      const state = read(), additions = missingCodes(state);
+      if (!additions.length) return;
+      state.expired.push(...additions.map(code => ({ code, reason, at: new Date(now()).toISOString() })));
+      atomicJson(file, state);
+    });
+  }
   const readPublic = () => {
     const data = readJson(catalogFile, { version: 1, codes: [], expired: [] });
     if (data?.version !== 1 || !Array.isArray(data.codes) || !Array.isArray(data.expired)
@@ -231,25 +244,13 @@ export function createGiftCodeLibrary({ directory = DATA_DIR, now = Date.now, ca
       if ([...state.expired, ...source.retired].some(row => row.code === code)) return true;
       return merge(state, source).some(row => row.code === code && row.expired);
     },
-    expire(code, reason = '游戏服务器明确返回礼包码已过期') {
-      withFileLock(file, () => {
-        const state = read();
-        if (state.expired.some(row => row.code === code)) return;
-        state.expired.push({ code, reason, at: new Date(now()).toISOString() });
-        atomicJson(file, state);
-      });
+    expire(code, reason) {
+      recordExpired([code], reason);
     },
     reconcile(rows) {
       const codes = [...new Set(rows.filter(row => row.status === 'rejected'
         && (row.promptName === 'GIFT_CODE_EXPIRED' || row.detail === '礼包码已过期')).map(row => row.code))];
-      if (!codes.length) return;
-      withFileLock(file, () => {
-        const state = read(), expired = new Set(state.expired.map(row => row.code));
-        const additions = codes.filter(code => !expired.has(code));
-        if (!additions.length) return;
-        state.expired.push(...additions.map(code => ({ code, reason: '游戏服务器明确返回礼包码已过期', at: new Date(now()).toISOString() })));
-        atomicJson(file, state);
-      });
+      recordExpired(codes);
     },
     addManualBatch(input, expiry) {
       if (!Array.isArray(input) || !input.length || input.length > 500) throw Error('单次请提供 1 至 500 条礼包码');

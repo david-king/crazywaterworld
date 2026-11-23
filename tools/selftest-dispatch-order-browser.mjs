@@ -21,7 +21,10 @@ saveStore({ version: 1, activeId: accountId, accounts: [{
   id: accountId, label: '舰队排序验收', url: 'wss://fixture.invalid', login: {},
   automation: { enabled: false, autoStart: false, paused: true },
 }] });
-saveAutomationSettings(accountId, defaultSettings(), { revision: 0 });
+const initial = defaultSettings();
+initial.factory.demandPriority = ['cargo', 'museum', 'building', 'factory'];
+initial.factory.speedUpSources = ['cargo'];
+saveAutomationSettings(accountId, initial, { revision: 0 });
 const original = defaultSettings().fleetDispatch.priority;
 const app = createConsole({ port: 0, protocol: {} });
 const output = path.resolve('output/playwright');
@@ -42,10 +45,10 @@ const openConfig = async page => {
   await page.locator('[data-config-group=fleet-dispatch]').click();
   await page.locator(rootSelector).waitFor();
 };
-const points = async (page, value, targetIndex, after = false) => {
-  await page.locator(rootSelector).scrollIntoViewIfNeeded();
-  const from = await page.locator(handleSelector(value)).boundingBox();
-  const to = await page.locator(rowSelector).nth(targetIndex).boundingBox();
+const points = async (list, handle, targetIndex, after = false) => {
+  await list.scrollIntoViewIfNeeded();
+  const from = await handle.boundingBox();
+  const to = await list.getByRole('listitem').nth(targetIndex).boundingBox();
   assert(from && to, '起点和落位行应可见');
   return { x: from.x + from.width / 2, y: from.y + from.height / 2,
     targetY: to.y + to.height * (after ? 0.8 : 0.2) };
@@ -78,7 +81,7 @@ try {
   assert.equal(await page.getByRole('button', { name: '资源田占领下移', exact: true }).isDisabled(), true);
   console.log('通过：默认八项完整显示，硅矿和资源田名称与无障碍按钮完整');
 
-  const mouse = await points(page, 'silicon', 0);
+  const mouse = await points(page.locator(rootSelector), page.locator(handleSelector('silicon')), 0);
   const beforeMouse = posts;
   await page.mouse.move(mouse.x, mouse.y); await page.mouse.down();
   await page.mouse.move(mouse.x, mouse.targetY, { steps: 12 });
@@ -109,7 +112,7 @@ try {
   console.log('通过：手柄方向键及上移下移按钮支持键盘并保留焦点');
 
   const beforeCancel = [...order()], cancelPosts = posts;
-  const cancel = await points(page, 'silicon', 6, true);
+  const cancel = await points(page.locator(rootSelector), page.locator(handleSelector('silicon')), 6, true);
   await page.mouse.move(cancel.x, cancel.y); await page.mouse.down();
   await page.mouse.move(cancel.x, cancel.targetY, { steps: 10 });
   await page.keyboard.press('Escape'); await page.mouse.up();
@@ -126,7 +129,7 @@ try {
   const touch = (type, x, y) => cdp.send('Input.dispatchTouchEvent', {
     type, touchPoints: type === 'touchEnd' || type === 'touchCancel' ? [] : [{ x, y, radiusX: 5, radiusY: 5 }],
   });
-  const mobilePoints = await points(mobile, 'silicon', 0);
+  const mobilePoints = await points(mobile.locator(rootSelector), mobile.locator(handleSelector('silicon')), 0);
   const touchSave = saved(mobile);
   await touch('touchStart', mobilePoints.x, mobilePoints.y);
   await touch('touchMove', mobilePoints.x, mobilePoints.targetY);
@@ -134,7 +137,7 @@ try {
   assert.equal((await touchSave).status(), 200); await synced(mobile);
   assert.equal(order()[0], 'silicon'); assert.deepEqual(await displayedOrder(mobile), order());
   const beforeTouchCancel = [...order()], touchCancelPosts = posts;
-  const mobileCancel = await points(mobile, 'silicon', 2, true);
+  const mobileCancel = await points(mobile.locator(rootSelector), mobile.locator(handleSelector('silicon')), 2, true);
   await touch('touchStart', mobileCancel.x, mobileCancel.y);
   await touch('touchMove', mobileCancel.x, mobileCancel.targetY);
   await touch('touchCancel'); await mobile.waitForTimeout(750);
@@ -156,6 +159,84 @@ try {
     assert(layout.every(Boolean), width + 'px 每行手柄、编号、名称和按钮均在行内');
     await mobile.screenshot({ path: path.join(output, 'dispatch-order-' + width + '.png'), animations: 'disabled' });
   }
+  const factoryField = p => p.locator('#config-field-factory-demandPriority');
+  const openFactory = async p => {
+    await p.locator('[data-config-tab=base]').click();
+    await p.locator('[data-config-family=production]').click();
+    await factoryField(p).waitFor();
+  };
+  const factoryOrder = p => factoryField(p).getByRole('listitem').evaluateAll(rows => rows.map(row => row.dataset.demandSource));
+  const storedFactory = () => loadAutomationSettings(accountId).settings.factory;
+  await page.reload(); await openConfig(page); await openFactory(page);
+  const factory = factoryField(page);
+  const cargoDown = factory.getByRole('button', { name: '贸易港口 / 货船下移', exact: true });
+  const refillHandle = p => factoryField(p).getByRole('button', { name: '拖动排序：工厂补料', exact: true });
+  assert(await refillHandle(page).isEnabled());
+  assert(await factory.getByRole('button', { name: '建筑建造 / 升级下移' }).isEnabled());
+  assert(await factory.getByRole('checkbox', { name: '贸易港口 / 货船工厂加速' }).isChecked());
+  page.once('dialog', dialog => dialog.accept());
+  await cargoDown.click();
+  await page.reload(); await openConfig(page); await openFactory(page);
+  assert.deepEqual(await factoryOrder(page), ['museum', 'cargo', 'building', 'factory']);
+  assert.deepEqual(storedFactory().demandPriority, await factoryOrder(page));
+  console.log('通过：需求上移下移立即提交，调序后立即刷新保留顺序');
+
+  // 延迟第一次写入的响应，让下一次编辑发生在自动保存途中。
+  let release;
+  const gate = new Promise(resolve => { release = resolve; });
+  const route = /\/api\/settings\?/;
+  await page.route(route, async intercepted => {
+    if (intercepted.request().method() !== 'POST') return intercepted.continue();
+    const response = await intercepted.fetch(); await gate; await intercepted.fulfill({ response });
+  });
+  const firstRequest = page.waitForRequest(request => route.test(request.url()) && request.method() === 'POST');
+  const drop = await points(factory, refillHandle(page), 0);
+  await page.mouse.move(drop.x, drop.y); await page.mouse.down();
+  await page.mouse.move(drop.x, drop.targetY, { steps: 10 });
+  assert.deepEqual(await factoryOrder(page), ['museum', 'cargo', 'building', 'factory']);
+  await page.mouse.up(); await firstRequest;
+  try {
+    assert.deepEqual(await factoryOrder(page), ['factory', 'museum', 'cargo', 'building']);
+    await refillHandle(page).press('ArrowDown'); await refillHandle(page).press('ArrowDown');
+    assert.deepEqual(await factoryOrder(page), ['museum', 'cargo', 'factory', 'building']);
+  } finally { release(); }
+  await synced(page); await page.unroute(route);
+  assert.deepEqual(storedFactory().demandPriority, await factoryOrder(page));
+  assert.deepEqual(storedFactory().speedUpSources, ['cargo']);
+  console.log('通过：工厂补料可从末位拖至首位，保存期间连续移动到中间后写入最终顺序');
+
+  await factory.getByRole('button', { name: '移除贸易港口 / 货船' }).click(); await synced(page);
+  assert.deepEqual(storedFactory().speedUpSources, []);
+  await factory.getByRole('combobox', { name: '添加需求来源' }).selectOption('cargo');
+  await factory.getByRole('button', { name: '添加所选需求来源' }).click(); await synced(page);
+  assert.deepEqual(storedFactory().demandPriority, ['museum', 'factory', 'building', 'cargo']);
+  const speed = factory.getByRole('checkbox', { name: '贸易港口 / 货船工厂加速' });
+  await speed.check(); await synced(page); assert.deepEqual(storedFactory().speedUpSources, ['cargo']);
+  await speed.uncheck(); await synced(page); assert.deepEqual(storedFactory().speedUpSources, []);
+
+  await mobile.setViewportSize({ width: 390, height: 844 });
+  await mobile.reload(); await openConfig(mobile); await openFactory(mobile);
+  const demandTouch = await points(factoryField(mobile), refillHandle(mobile), 0);
+  await touch('touchStart', demandTouch.x, demandTouch.y); await touch('touchMove', demandTouch.x, demandTouch.targetY);
+  await touch('touchEnd'); await synced(mobile);
+  assert.deepEqual(storedFactory().demandPriority, ['factory', 'museum', 'building', 'cargo']);
+  await mobile.reload(); await openConfig(mobile); await openFactory(mobile);
+  assert.deepEqual(await factoryOrder(mobile), storedFactory().demandPriority);
+  await mobile.setViewportSize({ width: 320, height: 844 });
+  assert(await factoryField(mobile).evaluate(node => node.scrollWidth <= node.clientWidth
+    && document.documentElement.scrollWidth <= innerWidth), '窄屏需求来源和操作按钮应在可视范围内');
+  const mobileFactory = factoryField(mobile);
+  for (const label of ['贸易港口 / 货船', '博物馆探宝', '建筑建造 / 升级', '工厂补料']) {
+    await mobileFactory.getByRole('button', { name: '移除' + label, exact: true }).click(); await synced(mobile);
+  }
+  assert.deepEqual(storedFactory().demandPriority, []);
+  assert(await mobileFactory.getByText(/尚未选择需求来源/).isVisible());
+  for (const value of ['museum', 'factory', 'cargo']) {
+    await mobileFactory.getByRole('combobox', { name: '添加需求来源' }).selectOption(value);
+    await mobileFactory.getByRole('button', { name: '添加所选需求来源' }).click(); await synced(mobile);
+  }
+  assert.deepEqual(storedFactory().demandPriority, ['museum', 'factory', 'cargo']);
+  console.log('通过：触屏拖动需求跨行排序，移除与重新添加需求同步维护来源加速');
   assert.deepEqual(errors, []); assert.equal(connections, 0);
   console.log('通过：320/390/768px 无横向溢出，无脚本错误或游戏连接');
 } finally {

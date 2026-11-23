@@ -1,25 +1,27 @@
 import { runAction } from './actions.mjs';
 import { claimDailies } from './dailies.mjs';
-import { surveyTasks, runTasks } from './tasks.mjs';
+import { surveyTaskRewards, surveyOrderDaily, runTasks } from './tasks.mjs';
 import { claimMail } from './mail.mjs';
 
 export async function claimRewards(client, protocol, config, onResult, enabled = () => true, onAfkDeadline, scheduler, player, { settings = null, getSettings = () => settings } = {}) {
   const results = [];
   const ready = key => enabled(key) && (!scheduler || scheduler.due(key));
-  const report = (label, ok, error, taskKey) => {
-    const entry = { label, ok, error, ...(taskKey?{taskKey}:{}) };
+  const report = entry => {
     results.push(entry);
     onResult?.(entry);
   };
-  async function group(label, work) {
+  async function group(label, keys, work) {
     try { await work(); }
-    catch (error) { const keys=({'任务与成就':['tasks'],'日常与赠礼':['dailyRewards','chests','gift'],'邮件':['mail'],'挂机收益':['afk']})[label]??[];for(const key of keys)if(enabled(key))scheduler?.observe?.(key,error.message,'error');report(label, false, error.message,keys[0]); }
+    catch (error) {
+      for (const key of keys) if (enabled(key)) scheduler?.observe?.(key, error.message, 'error');
+      report({ label, ok: false, error: error.message, taskKey: keys[0] });
+    }
   }
   async function draw(key, label, action, params = {}) {
     if (!ready(key)) return;
-    await group(label, async () => {
+    await group(label, [key], async () => {
       const reply = await runAction(client, protocol, action, params, { allowMutate: true });
-      report(label, true, undefined, key);
+      report({ label, ok: true, taskKey: key });
       if (action === 'afkDraw') setDeadline(reply.body?.afkFinishTime);
     });
   }
@@ -28,22 +30,34 @@ export async function claimRewards(client, protocol, config, onResult, enabled =
     if (finishTime > 0) onAfkDeadline?.(deadline > Date.now() ? deadline : Date.now() + 60_000);
   }
 
-  if (ready('tasks')) await group('任务与成就', async () => {
-    const survey = await surveyTasks(client, protocol, { config, scheduler, player });
-    if (survey.orderError) report('每日订单', false, survey.orderError);
-    await runTasks(client, protocol, survey, { allowMutate: true, enabled: () => enabled('tasks'), settings,
-      onStep: (entry) => report(entry.step.label, entry.ok, entry.error) });
-  });
-  if (['dailyRewards', 'chests', 'gift'].some(ready)) await group('日常与赠礼', () => claimDailies(client, protocol, { config, enabled, scheduler, settings, getSettings,
-    onStep: (entry) => report(entry.note || entry.title, entry.ok, entry.error) }));
-  if (ready('mail')) await group('邮件', async () => {
+  if (ready('tasks')) {
+    const options = { config, scheduler, player };
+    if (!settings || settings.loop.tasks) await group('任务与成就', ['tasks'], async () => {
+      const survey = await surveyTaskRewards(client, options);
+      await runTasks(client, protocol, survey, { allowMutate: true, enabled: () => enabled('tasks'), settings,
+        onStep: entry => report({ label: entry.step.label, ok: entry.ok, error: entry.error }) });
+    });
+    const orderEnabled = () => {
+      const current = getSettings();
+      return enabled('tasks') && (!current || (current.loop.world && current.resident.rewards));
+    };
+    if (orderEnabled()) await group('每日订单', ['orderDaily'], async () => {
+      const survey = await surveyOrderDaily(client, options);
+      if (survey.orderError) throw new Error(survey.orderError);
+      await runTasks(client, protocol, survey, { allowMutate: true, enabled: orderEnabled,
+        onStep: ({ step, ...result }) => report({ label: step.label, taskKey: 'orderDaily', ...result }) });
+    });
+  }
+  if (['dailyRewards', 'chests', 'gift'].some(ready)) await group('日常与赠礼', ['dailyRewards', 'chests', 'gift'], () => claimDailies(client, protocol, { config, enabled, scheduler, settings, getSettings,
+    onStep: (entry) => report({ label: entry.note || entry.title, ok: entry.ok, error: entry.error }) }));
+  if (ready('mail')) await group('邮件', ['mail'], async () => {
     const entry = await claimMail(client, { enabled: () => enabled('mail') });
     if (entry.status === 'empty') {
       scheduler?.observe?.('mail', entry.reason);
       if (scheduler) scheduler.defer('mail', scheduler.now() + 180);
-    } else { results.push(entry); onResult?.(entry); }
+    } else report(entry);
   });
-  if (ready('afk')) await group('挂机收益', async () => {
+  if (ready('afk')) await group('挂机收益', ['afk'], async () => {
     const { afkInfo } = await client.request('AfkInfoRequest', {}, 'AfkInfoResponse');
     if (!afkInfo) throw Error('挂机收益状态未同步');
     setDeadline(afkInfo.afkFinishTime);

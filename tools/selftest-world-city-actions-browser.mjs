@@ -174,7 +174,7 @@ try {
     const page = await browser.newPage({ viewport: { width, height: 900 }, hasTouch: mobile });
     page.setDefaultTimeout(8000);
     const errors = [], posts = [], defenderReads = [], tokens = new Map();
-    let previewGate, writeGate, sequence = 0, member = false, enemyWar = true, rallied = false, recruited = false;
+    let previewGate, writeGate, mapGate, overviewReads = 0, sequence = 0, member = false, enemyWar = true, rallied = false, recruited = false;
     let expireNextQuote = false, defending = true;
     const ownFleets = [
       { buildingId:'1远征船', name:'远征舰队 1 队', status:'行军中' },
@@ -191,10 +191,15 @@ try {
       x: motion.start.x, y: motion.start.y, motion, detail: '行军至 要塞E6 · 耐久 1,900/2,200' };
     let speedFleets = ownFleets.map(f => ({id:f.buildingId,name:f.name,state:'主城空闲',durability:2200,maxDura:2200}));
     page.on('pageerror', error => errors.push(error.message));
-    await page.route('**/api/world/overview?*', route => route.fulfill({ json: { checkedAt: Date.now() / 1000, scenario: 1,
+    await page.route('**/api/world/overview?*', async route => {
+      overviewReads++;
+      const response=JSON.stringify({ checkedAt: Date.now() / 1000, scenario: 1,
       width: 1000, height: 500, regions: [], owners: [], points: [...points, ...nearbyFleets, traffic], routes: [],
-      fleets: speedFleets ?? ownFleets.map(f => ({ id:f.buildingId, name:f.name, state:f.status })),
-      cityWars: [], treasures: [], layers: {}, notes: ['情报未同步'] } }));
+      fleets: speedFleets ?? ownFleets.map(f => ({ id:f.buildingId, name:f.name, state:f.status, dispatchNote:f.dispatchNote })),
+      cityWars: [], treasures: [], layers: {}, notes: ['情报未同步'] });
+      if(mapGate){const gate=mapGate;mapGate=null;gate.started.resolve();await gate.release.promise;}
+      await route.fulfill({contentType:'application/json',body:response});
+    });
     await page.route('**/api/overview?*', async route => {
       await route.fulfill({ json: { player: { nickname: '地图测试', level: 36 }, resources: [], status: { connected: true, paused: false } } });
     });
@@ -542,6 +547,27 @@ try {
     await card.waitFor();
     assert.match(await card.innerText(), /维修中/);
     assert.equal(await detail.getByRole('article').count(), 1);
+    // 等待旧快照时发生返航，连续推送应合并，当前卡片和列表须主动读回最终结果。
+    const interval=page.getByRole('spinbutton',{name:'世界概览刷新秒数'});
+    await interval.fill('300');await interval.dispatchEvent('change');
+    await page.waitForFunction(()=>!worldMapLoading);
+    const pushFleets=id=>page.evaluate(id=>stream.dispatchEvent(new MessageEvent('fleets-changed',{data:JSON.stringify({account:id})})),id);
+    const beforePush=overviewReads;
+    await pushFleets(second);
+    assert.equal(await page.evaluate(()=>worldMapRefreshRequested),false);
+    const staleRead={started:deferred(),release:deferred()};
+    mapGate=staleRead;
+    await pushFleets(account);
+    try{
+      await waitForGate(staleRead);
+      Object.assign(ownFleets[2],{status:'主城空闲',dispatchNote:'占田派遣待核对'});
+      Object.assign(nearbyFleets[1].fleetInfo,{state:'主城空闲',task:'空闲',dispatchNote:'占田派遣待核对'});
+      await pushFleets(account);await pushFleets(account);
+    }finally{staleRead.release.resolve();}
+    await card.getByText('占田派遣待核对',{exact:true}).waitFor();
+    assert.equal(await card.getByText('主城空闲',{exact:true}).count(),1);
+    assert.match(await page.locator('#world-map-fleets tbody tr').last().innerText(),/主城空闲[\s\S]*占田派遣待核对/);
+    assert.equal(overviewReads-beforePush,2,'在途刷新期间的多条推送只追加一次读取');
     await closeCity();
     member = false;
     await marker(12).focus(); await page.keyboard.press('Enter'); await cancelWar.waitFor();

@@ -53,17 +53,24 @@ export function readActivityCatalog(account, now) {
 export function rememberActivityCatalog(account, activities, now) {
   activities = activities.filter(isCatalogActivity);
   const file = catalogPath(account);
-  return withFileLock(file, () => {
+  const incoming = activities.map(row => Object.fromEntries(storedFields.filter(key => row[key] !== undefined).map(key => [key, row[key]])));
+  function mergeSaved() {
     const saved = savedEntries(account);
     const merged = new Map(saved.map(row => [row.instanceId, row]));
-    for (const row of activities) {
-      merged.set(row.instanceId, Object.fromEntries(storedFields.filter(key => row[key] !== undefined).map(key => [key, row[key]])));
-    }
-    const next = [...merged.values()];
-    if (JSON.stringify(saved) !== JSON.stringify(next)) atomicJson(file, { version: 1, activities: next });
-    const observed = new Set(activities.map(row => row.instanceId));
-    return [...activities, ...next.filter(row => !observed.has(row.instanceId)).map(row => historicalEntry(row, now))];
-  });
+    for (const row of incoming) merged.set(row.instanceId, row);
+    const rows = [...merged.values()];
+    return { rows, changed: JSON.stringify(saved) !== JSON.stringify(rows) };
+  }
+  let snapshot = mergeSaved();
+  if (snapshot.changed) {
+    snapshot = withFileLock(file, () => {
+      const latest = mergeSaved();
+      if (latest.changed) atomicJson(file, { version: 1, activities: latest.rows });
+      return latest;
+    });
+  }
+  const observed = new Set(activities.map(row => row.instanceId));
+  return [...activities, ...snapshot.rows.filter(row => !observed.has(row.instanceId)).map(row => historicalEntry(row, now))];
 }
 
 // This display cache contains only server-published activity windows. It never

@@ -337,7 +337,7 @@ function renderGuildMutual(box, state = {}, account) {
   let draft=mutualDrafts.get(account);
   if(!draft){draft={target:20,mode:'all',memberIds:[],askEnabled:false,askTarget:20,askItemId:'',checkEverySeconds:15,...(state.preset??state.options),data:null,loading:false,version:0,savedVersion:0,valid:true,saving:null,saveError:''};mutualDrafts.set(account,draft);}
   const root=el('section','guild-mutual-panel');root.setAttribute('aria-label','单次联盟互助');
-  const heading=el('div','title-with-help');heading.append(el('h4','','单次联盟互助'),makeHelpTip('单次联盟互助','手动开启后逐条处理，不加入常驻挂机。预设按账号自动保存，保存不会开始互助；刷新页面或重启后保留。游戏的20次是发起求助上限；赠送目标统计本工具今日记录，不含游戏内手动赠送，未知结果会预占次数。无合适请求、缺料或等待回赠时，按所设间隔再查，不自动备料。达到赠送目标后不再送，必要时等最后一份回赠。跨日、断开或重启后不自动继续。'));
+  const heading=el('div','title-with-help');heading.append(el('h4','','单次联盟互助'),makeHelpTip('单次联盟互助','手动开启后逐条处理，不加入常驻挂机。预设按账号自动保存，刷新页面或重启后保留。游戏的20次是发起求助上限。赠送目标统计本工具今日确认成功的次数。失败或丢失回执时跳过这条求助，继续赠送。达到目标或游戏提示赠送已达上限时停止赠送。无合适请求、缺料或等待回赠时，按所设间隔再查。跨日、断开或重启后需重新开启。'));
   heading.append(el('span','dim','每次送 1 份，先收回赠。'));
   root.append(heading);
   const fields=el('div','guild-mutual-fields');

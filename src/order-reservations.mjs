@@ -392,5 +392,5 @@ export async function readOrderReservedStock(client, protocol, config, { player,
     available.set(id, Math.max(0, (stock.get(id) ?? 0) - (reserved.get(id) ?? 0)));
   }
   check();
-  return { stock, reservations, reserved, available };
+  return { stock, reservations, reserved, available, water };
 }

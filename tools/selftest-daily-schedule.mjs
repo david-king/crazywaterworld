@@ -1,6 +1,11 @@
 import assert from 'node:assert/strict';
+import { EventEmitter } from 'node:events';
 import { claimRewards } from '../src/claim-rewards.mjs';
 import { nextOrderTier, surveyTasks } from '../src/tasks.mjs';
+import { runLoop } from '../src/loop.mjs';
+import { defaultSettings } from '../src/automation-settings.mjs';
+import { rewardSchedule } from '../src/reward-schedule.mjs';
+import { runtimeSources } from '../src/runtime-progress.mjs';
 
 let now = 1000;
 const deadlines = new Map();
@@ -131,4 +136,81 @@ assert(scheduler.due('orderDaily'), 'order count is not proof the highest tier w
 order.rewardedNum = 40;
 await surveyTasks(orderClient, {}, { config: orderConfig, scheduler });
 assert(scheduler.due('orderDaily'), 'unknown player season must not postpone claims until tomorrow');
-console.log('daily schedule ok: confirmed claims, server reset, partial progress, live mail and manual bypass');
+
+// 居民奖励通过共享领奖入口执行，概览按居民奖励自己的键读取结果。
+const settings = defaultSettings();
+settings.loop.tasks = false;
+settings.loop.world = settings.resident.rewards = true;
+const clientForLoop = new EventEmitter();
+clientForLoop.setMaxListeners(100);
+clientForLoop.connected = true;
+const requests = [], writes = [], reports = [];
+let waterError, sendError;
+clientForLoop.request = async name => {
+  requests.push(name);
+  if (name === 'MainTaskInfoRequest') throw Error('主线读取失败');
+  assert.equal(name, 'OnWaterRequest');
+  if (waterError) throw Error(waterError);
+  return { orderOfTheDay: order };
+};
+clientForLoop.sendWatch = async name => {
+  assert.equal(name, 'GetNextOrderOTDRewardRequest');
+  writes.push(name);
+  if (sendError) throw Error(sendError);
+  return { sent: writes.length, name };
+};
+const schedule = rewardSchedule(clientForLoop);
+const { key } = runtimeSources({ key: 'resident.rewards' }, settings);
+const round = (config = orderConfig) => runLoop(clientForLoop, { GetNextOrderOTDRewardRequest: true }, {
+  allowMutate: true, config, player: firstSeason, getSettings: () => settings,
+  isEnabled: key => key === 'tasks', onStep: entry => reports.push(entry),
+});
+function checkStatus(state, text) {
+  assert.equal(schedule.status(key)?.state, state);
+  assert.match(schedule.status(key).text, text);
+}
+
+order = { orderNum: 3, rewardedNum: 0 };
+await round();
+checkStatus('waiting', /已交 3 单.*下一档需 40 单/);
+assert.deepEqual(requests, ['OnWaterRequest']);
+await round();
+assert.equal(requests.length, 1, '冷却中沿用已检查结果');
+assert.equal(writes.length, 0);
+
+clientForLoop.emit('message', { name: 'SCOrderOfTheDay' });
+order.orderNum = 70;
+settings.loop.tasks = true;
+sendError = '服务端拒绝领取';
+await round();
+checkStatus('error', /服务端拒绝领取/);
+assert(reports.some(entry => entry.taskKey === 'tasks' && entry.error === '主线读取失败'));
+assert.equal(writes.length, 1, '主线读取失败仍可独立核对订单');
+settings.loop.tasks = false;
+sendError = null;
+await round();
+checkStatus('sent', /40 单档位奖励/);
+assert.equal(reports.at(-1).taskKey, key);
+assert.equal(writes.length, 2);
+
+order.rewardedNum = 40;
+await round();
+checkStatus('waiting', /已领完本日全部档位.*40 单档/);
+assert.equal(schedule.nextCheck(key), schedule.nextDay());
+assert.equal(writes.length, 2, '回读已领后不再发送');
+clientForLoop.emit('message', { name: 'SCOrderOfTheDay' });
+await round({ tables: {} });
+checkStatus('unsynced', /赛季.*档位/);
+order = null;
+await round();
+checkStatus('unsynced', /订单进度尚未同步/);
+waterError = '订单读取超时';
+await round();
+checkStatus('error', /订单读取超时/);
+assert.equal(reports.at(-1).taskKey, key);
+assert.equal(writes.length, 2);
+settings.resident.rewards = false;
+const beforeDisabled = requests.length;
+await round();
+assert.equal(requests.length, beforeDisabled);
+console.log('daily schedule ok: confirmed claims, server reset, partial progress, resident reward status, live mail and manual bypass');

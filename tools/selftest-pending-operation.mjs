@@ -80,17 +80,30 @@ try {
     }
   });
 
-  await test('赠送丢回包跨客户端与账本重建保持未知且不重发', async () => {
+  await test('重建后旧赠送仍在列表也按失败处理并释放同日额度，旧归档只退款一次', async () => {
     const file = path.join(directory, 'gift-unknown.json');
     const f = fixture();
-    f.state.failure = 'giftUnknown';
-    assert.equal((await run(f, ledger(file), { target: 2 })).pending, true);
-    f.state.failure = '';
+    const old = ledger(file);
+    for (const [index,row] of f.state.requests.slice(0,2).entries()) {
+      const key = `guildAidGift:${f.player.worldId}:${f.player.playerId}:${row.reqId}`;
+      const ticket = old.reserve({ guildAidGifts:1 }, {}, {}, {uniqueKey:key, details:{
+        kind:'guildAidGift',day:old.snapshot().day,worldId:f.player.worldId,playerId:f.player.playerId,guildId:f.player.guildId,reqId:row.reqId,
+      }});
+      if (index === 1) {
+        const store = JSON.parse(fs.readFileSync(file,'utf8'));
+        store.accounts.offline.keys[key].expired = true;
+        delete store.accounts.offline.pending[ticket.id];
+        fs.writeFileSync(file,JSON.stringify(store));
+      }
+    }
+    const nextId = f.state.requests[2].reqId;
     const recovered = fixture(f.state), usage = ledger(file);
-    assert.equal((await run(recovered, usage, { target: 2 })).pending, true);
-    assert.equal(f.state.writes.filter(row => row.name === 'GuildAidHelpRequest').length, 1);
+    assert.equal((await run(recovered, usage, { target: 1 })).sent, 1);
+    assert.equal((await run(recovered, usage, { target: 1 })).sent, 0);
+    assert.deepEqual(f.state.writes.map(row => row.id), [nextId]);
+    assert.equal(usage.snapshot().uncertain, 0);
     assert.equal(usage.snapshot().counters.guildAidGifts, 1);
-    assert.equal(usage.snapshot().uncertain, 1);
+    assert.equal(usage.confirmedCounters().guildAidGifts, 1);
     assert.equal(f.client.listenerCount('sent'), 0);
   });
 

@@ -16,6 +16,7 @@ fs.writeFileSync(process.env.CW_CONFIG_PACK, '[]');
 const { GameClient } = await import('../src/client.mjs');
 const { loadStore, saveStore } = await import('../src/accounts.mjs');
 const { createConsole } = await import('../src/server.mjs');
+const { createUsageLedger } = await import('../src/usage-ledger.mjs');
 const { automationTasks } = await import('../src/automation.mjs');
 
 const connected = new Set();
@@ -62,8 +63,8 @@ let closed = false;
 let passed = 0;
 const session = () => app.sessions.get('background');
 const automation = () => loadStore().accounts[0].automation;
-const waitFor = async (predicate, label) => {
-  const deadline = Date.now() + 10000;
+const waitFor = async (predicate, label, timeout = 10000) => {
+  const deadline = Date.now() + timeout;
   while (Date.now() < deadline) {
     if (predicate()) return;
     await sleep(25);
@@ -234,6 +235,33 @@ try {
     await sleep(1100);
     assert.equal(session().loop.completed, stoppedAt);
     assert.ok(sinkEntries.some(entry => entry.message === '自动挂机结束'));
+  });
+
+  await test('地图漏收归队推送后补核历史派遣，真实 SSE 通知卡片重新读取', async () => {
+    const client=session().client,ledger=createUsageLedger('background');
+    const fleet={buildingId:'1远征船',state:1,curGridIdx:0,cityId:1,durability:100,maxDura:100};
+    const key='cityWar:9001:1';
+    ledger.confirm(ledger.reserve({}, {}, {}, {uniqueKey:key,details:{kind:'cityDispatch',buildingId:fleet.buildingId,cityId:2}}));
+    const original=client.request;
+    client.request=function(name,...args){
+      return name==='MyFleetsRequest'?Promise.resolve({fleets:[fleet]}):original.call(this,name,...args);
+    };
+    const changes=()=>survivor.text.split('event: fleets-changed').length-1;
+    try{
+      const read=async()=>{
+        const response=await fetch(root+'/api/world/overview?account=background');
+        const data=await response.json();
+        assert.equal(response.status,200,JSON.stringify(data));
+        return data.fleets[0];
+      };
+      const before=changes(),view=await read();
+      assert.equal(view.state,'主城空闲');assert.equal(view.dispatchNote,'城战派遣待核对');
+      await waitFor(()=>!ledger.hasKey(key)&&changes()>before,'停挂时补核已确认返航并通知页面',20000);
+      assert.equal((await read()).dispatchNote,'');
+      const after=changes();
+      client.emit('message',{name:'SCMyFleetUpdate',body:{fleets:[fleet]}});
+      await waitFor(()=>changes()>after,'本人舰队推送唤醒地图');
+    }finally{client.request=original;}
   });
 
   await test('关闭控制台会结束仍打开的 SSE，不等待浏览器自行断开', async () => {

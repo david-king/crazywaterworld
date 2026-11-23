@@ -516,12 +516,6 @@ try {
       assert.equal(nodes().some(node => node.tag === 'li'), false);
     }
     assert.deepEqual(draft.factory.speedUpSources, ['cargo']);
-    const factory = render(groups.find(group => group.id === 'factory').fields.find(field => field.key === 'factory.demandPriority'), draft,
-      { demandSources: [{ value: 'cargo', label: '贸易港口' }] }, el, clear, button);
-    const cargo = descendants(factory).find(node => node.attrs['aria-label'] === '贸易港口工厂加速');
-    assert.equal(cargo.checked, true);
-    cargo.checked = false; cargo.onchange();
-    assert.deepEqual(draft.factory.speedUpSources, []);
   });
 
   await check('两版任务设置迁移保留有效开关，退役装备及互助开关与缺省消费任务保持关闭', () => {

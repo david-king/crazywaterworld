@@ -92,6 +92,22 @@ try {
     await assert.rejects(() => run(f, quote), /行军/);
     assert.deepEqual(f.client.writes, []);
   });
+  await test('手动抢占遵守每支舰队的安全 ID，确认前重新核对改名和资料读取失败', async () => {
+    const f = fixture(), id = '9007199254740995';
+    f.settings.silicon.fleets[0].safePlayerIds = [id];
+    const profile = f.state.profiles[id] = { nickname: '旧名', worldId: f.player.worldId, guildIdx: 8 };
+    f.enemy(0);
+    const quote = await preview(f, attack());
+    assert.ok(quote.fleets[0].step);
+    profile.nickname = '敌方船长';
+    await assert.rejects(() => run(f, quote), /安全名单/);
+    const renamed = await preview(f, attack());
+    assert.match(renamed.fleets[0].reason, /安全名单/);
+    assert.ok(renamed.fleets[1].step);
+    delete f.state.profiles[id];
+    assert.match((await preview(f, attack())).fleets[0].reason, /资料未同步/);
+    assert.deepEqual(f.client.writes, []);
+  });
   await test('初等矿、空位、同盟和自己的舰队不能抢占', async () => {
     for (const [grid, setup] of [[3000, f => f.enemy(0, '敌方船长', 900, 8, 3000)], [5000, () => {}],
       [5000, f => f.enemy(0, '敌方船长', 900, 7)], [5000, f => f.occupy('2远征船')]]) {

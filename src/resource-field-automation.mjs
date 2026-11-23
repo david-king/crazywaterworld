@@ -6,7 +6,7 @@ import { observeResourceFieldHoldings, forgetReleasedResourceField } from './res
 import { pendingPetrol } from './dispatch-preview.mjs';
 import { fleetRecordReason, dispatchReservationReason, reserveDispatch } from './fleet-availability.mjs';
 import { registerFleetReservations, isFleetReserved } from './fleet-reservations.mjs';
-import { settleFleetSnapshot, cancelResourceFieldReplacement, releaseResourceFieldReplacementLock } from './fleet-settlement.mjs';
+import { resourceFieldFleetIdle, settleFleetSnapshot, cancelResourceFieldReplacement, releaseResourceFieldReplacementLock } from './fleet-settlement.mjs';
 import { readCityWar, cityWarReservedFleets } from './city-war.mjs';
 import { settleResourceFieldGiveUps } from './resource-field-giveup.mjs';
 export { previewResourceFieldGiveUp, runResourceFieldGiveUp } from './resource-field-giveup.mjs';
@@ -17,7 +17,6 @@ const now = client => Math.floor((Date.now() + (client.serverClockOffsetMs || 0)
 const day = time => Math.floor((time + 28800) / 86400);
 const identity = player => [player?.worldId, player?.playerId, player?.guildId].map(exactAutomationId).join(':');
 const active = new WeakSet();
-const idle = fleet => fleet?.state === 1 && fleet.curGridIdx === 0 && !fleet.targetGridIdx && !fleet.treasureLootUid && !fleet.chipWar?.rewardTs && !fleet.autoFight?.isOn;
 const keyFor = (world, grid) => `resource-field:${world}:${grid}`;
 const replacementKey = (world, grid) => `resource-field-replace:${world}:${grid}`;
 function quantity(value) {
@@ -214,7 +213,7 @@ export async function readResourceFieldState(client, protocol, config, player, o
   state.fleets = state.rawFleets.map(fleet => {
     const formation = water?.building?.find(b => b.buildingId === fleet.buildingId && b.level > 0)?.fleet?.formation;
     const reason = fleet.ownerPlayerId && fleet.ownerPlayerId !== exactAutomationId(player.playerId) ? '舰队不属于当前角色'
-      : !idle(fleet) ? '舰队正在执行任务或原生委任' : !integer(fleet.durability, 1) || !integer(fleet.maxDura, 1) ? '耐久不足或未同步'
+      : !resourceFieldFleetIdle(fleet) ? '舰队未在主城空闲待命' : !integer(fleet.durability, 1) || !integer(fleet.maxDura, 1) ? '耐久不足或未同步'
       : !formation?.heroPositions?.some(h => h.heroId) ? '缺少英雄编队'
       : cityReserved.includes(fleet.buildingId) ? '舰队预留给城战时段'
       : fleetRecordReason(visibleRecords, fleet.buildingId, state.worldId)

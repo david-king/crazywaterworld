@@ -376,6 +376,45 @@ try {
     s.silicon.fleets[0].huntPlayers = []; assert.equal((await plan(f, s, ledger)).actions[0]?.opponent, null);
     s.silicon.fleets[0].huntEnabled = false; f.enemy(2, '其他船长', 100); assert((await plan(f, s, ledger)).actions[0].opponent);
   });
+  await test('按角色 ID 追杀改名后的同服矿位，旧昵称被接用、跨服、同名歧义及资料缺失均跳过', async () => {
+    const f = siliconFixture(), s = siliconSettings(), ledger = usage(f), id = '9007199254740995';
+    const policy = hunt(s, []);
+    policy.huntPlayerIds = [id];
+    const profile = f.state.profiles[id] = { worldId: f.player.worldId, nickname: '旧名', guildIdx: 8 };
+    f.enemy(0, '旧名');
+    const target = async () => (await plan(f, s, ledger)).actions[0]?.opponent;
+    assert.equal((await target()).matchedPlayerId, id);
+    profile.nickname = '新名'; f.enemy(1, '新名');
+    assert.equal((await target()).nickname, '新名');
+    f.enemy(2, '新名', 800, 9);
+    assert.equal((await target()).guildIdx, 8);
+    f.state.positions[5000][2].player.guildIdx = 8;
+    assert.equal(await target(), undefined);
+    f.state.positions[5000].pop();
+    profile.worldId = 3001002;
+    assert.equal(await target(), null);
+    profile.worldId = f.player.worldId;
+    policy.safePlayerIds = [id];
+    assert.equal(await target(), null);
+    delete f.state.profiles[id]; policy.huntEnabled = false;
+    assert.equal(await target(), null);
+    f.state.positions[5000].push({ index: 2, player: { ...f.state.positions[5000][0].player, nickname: '第三人' } });
+    assert.equal(await target(), undefined);
+  });
+  await test('按 ID 派遣前重读角色资料，换人则取消，已确认的同敌失败上限跟随角色改名', async () => {
+    const f = siliconFixture(), s = siliconSettings(), ledger = usage(f), id = '9007199254740995';
+    hunt(s, []).huntPlayerIds = [id];
+    const profile = f.state.profiles[id] = { worldId: f.player.worldId, nickname: '旧名', guildIdx: 8 };
+    f.enemy(0, '旧名');
+    let reads = 0;
+    f.beforeRead = name => { if (name === 'OtherPlayerInfoRequest' && ++reads === 2) profile.nickname = '新名'; };
+    await run(f, s, ledger); assert.deepEqual(f.client.writes, []);
+    f.state.positions[5000][0].player.nickname = '新名';
+    await run(f, s, ledger); assert.equal(f.client.writes[0].body.index, 0);
+    f.returnFleet('1远征船');
+    f.state.positions[5000][0].player.nickname = profile.nickname = '再次改名';
+    await run(f, s, ledger); assert.equal(f.client.writes.filter(w => w.body.index === 0).length, 1);
+  });
   await test('显式追杀名单覆盖旧追击窗口筛选，普通追击关闭名单后仍保持原规则', async () => {
     const f = siliconFixture(), s = siliconSettings(), ledger = usage(f); const policy = hunt(s); policy.pursuit = true; f.enemy(0, '名单目标', 800);
     f.state.reward.rewardResetTime = Math.floor(Date.now() / 1000) + 3 * 86400 - 60;

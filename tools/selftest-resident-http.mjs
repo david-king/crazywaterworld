@@ -54,6 +54,7 @@ export async function testResidentHttp(app) {
     { buildingId: '8农田', level: 0, buildFinishTime: now - 1 },
   ];
   const writes = [];
+  let weekUnavailable = false;
   let onNextRead;
   game.request = async (name, body, responseType) => {
     switch (name) {
@@ -67,7 +68,9 @@ export async function testResidentHttp(app) {
       case 'AllResourceRequest': return { list: [] };
       case 'MyResFieldsRequest': return {};
       case 'MyFleetsRequest': return { fleets: [] };
-      case 'WeekInfoRequest': return { activityTime: [] };
+      case 'WeekInfoRequest':
+        if (weekUnavailable) throw Error('商人订单暂不可读');
+        return { activityTime: [] };
       case 'FinishWorkerOrderRequest':
         assert.equal(responseType, 'FinishWorkerOrderResponse');
         writes.push(body.index);
@@ -136,7 +139,11 @@ export async function testResidentHttp(app) {
   assert.equal(timedView.data.factories[1].autoEnabled, false);
   assert.equal(timedView.data.factories[0].jobs[0].estimatedFinishTime, null, '首项开工时间待同步时不推算完成时间');
   buildings = [];
-  const [first, second] = firstView.data.orders;
+  weekUnavailable = true;
+  const manualView = await request('world');
+  assert.equal(manualView.status, 200);
+  const [first, second] = manualView.data.orders;
+  assert.equal(second.decision.status, 'unknown', '挂机交付仍然需要确认商人订单的预留');
   assert(first.orderKey && second.orderKey && first.orderKey !== second.orderKey);
   assert.equal(second.manualDecision.status, 'ready', '只能交一单时第二个槽也可手动选择');
   const startRead = () => {

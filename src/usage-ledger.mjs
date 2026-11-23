@@ -27,6 +27,7 @@ import { atomicJson, readJson, withFileLock } from './json-store.mjs';
  * @property {(uniqueKey: string) => number | null} reservationTime
  * @property {() => Counters} pendingCounters
  * @property {(uniqueKey: string, confirmed: boolean, details?: Record<string, unknown>) => void} resolveKey
+ * @property {(uniqueKey: string, expected: KeyRecord, dailyLimit?: boolean) => boolean} failGuildAidGift
  * @property {(counters: Counters, limits?: Counters, minimums?: Counters, options?: {uniqueKey?: string | null, details?: Record<string, unknown> | null, paidGold?: PaidGoldBaseline}) => LedgerTicket} reserve
  * @property {(ticket: LedgerTicket) => boolean} markPaidGoldReward
  * @property {(info: {paidTimes?: number, resetTime?: number} | null | undefined, account?: string | null) => boolean} reconcilePaidGold
@@ -80,9 +81,19 @@ export function accountKey(accountId) {
 
 export function beijingDay(now = Date.now()) { return new Date(now + 8 * 3600_000).toISOString().slice(0, 10); }
 
+/** @param {Record<string, unknown>} state */
+export function guildAidGiftLimitKey(state) {
+  return `guildAidGiftLimit:${state.worldId}:${state.playerId}:${state.day}`;
+}
+
 /** @param {LedgerEntry} entry */
 function hasPendingPaidGold(entry) {
   return Object.values(entry.pending).some(row => (row.day ?? entry.day) === entry.day && row.counters.goldPaidTimes > 0);
+}
+
+/** @param {KeyRecord} record */
+function closedUnknownGuildAidGift(record) {
+  return record.expired === true && record.details?.kind === 'guildAidGift' && !record.confirmed;
 }
 
 /** @param {LedgerEntry} entry @param {string} id @param {string} day */
@@ -195,6 +206,32 @@ export function createUsageLedger(accountId, { file = usageFile(), now = Date.no
           record.confirmed = true;
         } else record.expired = true;
         atomicJson(file, store);
+      });
+    },
+    failGuildAidGift(uniqueKey, expected, dailyLimit = false) {
+      return withFileLock(file, () => {
+        const { store, entry } = forUpdate();
+        const record = entry.keys[uniqueKey];
+        if (record?.details?.kind !== 'guildAidGift' || record.confirmed || record.details.outcome === 'failed' ||
+            !isDeepStrictEqual(record, expected)) return false;
+        const reservation = entry.pending[record.id];
+        if (reservation && reservation.uniqueKey !== uniqueKey) throw new Error('赠送预留与求助编号不一致');
+        const day = reservation?.day ?? record.details.day ?? (reservation ? entry.day : null);
+        if (day === entry.day) {
+          const used = entry.counters.guildAidGifts ?? 0;
+          entry.counters.guildAidGifts = Math.max(entry.confirmed.guildAidGifts ?? 0, used - (reservation?.counters.guildAidGifts ?? 1));
+        }
+        delete entry.pending[record.id];
+        if (dailyLimit) {
+          const details = { kind: 'guildAidGiftLimit', worldId: record.details.worldId, playerId: record.details.playerId, day };
+          entry.keys[guildAidGiftLimitKey(details)] ??= { id: crypto.randomUUID(), confirmed: true, details };
+          delete entry.keys[uniqueKey];
+        } else {
+          record.expired = true;
+          record.details.outcome = 'failed';
+        }
+        atomicJson(file, store);
+        return true;
       });
     },
     reserve(counters, limits = {}, minimums = {}, { uniqueKey = null, details = null, paidGold } = {}) {
@@ -328,7 +365,18 @@ export function createUsageLedger(accountId, { file = usageFile(), now = Date.no
         if (entry.keys['forgeHistory:' + ticket.id]?.details?.disposition === 'manual-handoff-sync') return;
         if (!Object.hasOwn(entry.pending, ticket.id)) {
           const record = Object.values(entry.keys).find(value => value.id === ticket.id);
-          if (record) { record.confirmed = true; atomicJson(file, store); }
+          if (record && !record.confirmed) {
+            if (closedUnknownGuildAidGift(record)) {
+              if (ticket.day === entry.day) {
+                if (record.details?.outcome === 'failed') entry.counters.guildAidGifts = (entry.counters.guildAidGifts ?? 0) + 1;
+                entry.confirmed.guildAidGifts = (entry.confirmed.guildAidGifts ?? 0) + 1;
+              }
+              if (record.details) delete record.details.outcome;
+              delete record.expired;
+            }
+            record.confirmed = true;
+            atomicJson(file, store);
+          }
           return;
         }
         confirmReservation(entry, ticket.id, ticket.day);
@@ -344,7 +392,9 @@ export function createUsageLedger(accountId, { file = usageFile(), now = Date.no
           const uniqueKey = Object.keys(entry.keys).find(value => entry.keys[value].id === ticket.id);
           // A delayed rejection cannot undo a confirmation committed elsewhere.
           // Confirmed keys are released explicitly through releaseCompletedKey.
-          if (uniqueKey && !entry.keys[uniqueKey].confirmed) { delete entry.keys[uniqueKey]; atomicJson(file, store); }
+          if (uniqueKey && !entry.keys[uniqueKey].confirmed && !closedUnknownGuildAidGift(entry.keys[uniqueKey])) {
+            delete entry.keys[uniqueKey]; atomicJson(file, store);
+          }
           return;
         }
         if ((entry.pending[ticket.id].day ?? ticket.day) === entry.day) for (const [name, amount] of Object.entries(entry.pending[ticket.id].counters)) entry.counters[name] = Math.max(0, Number(entry.counters[name] ?? 0) - amount);

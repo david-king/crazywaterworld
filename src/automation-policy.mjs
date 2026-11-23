@@ -50,7 +50,7 @@ export function worldPreferenceEnabled(settings, kind) {
     case 'upgrade': case 'weekFactory': return b.enabled && b.upgrade;
     case 'finishOrder': return r.enabled;
     case 'denyOrder': return r.enabled && r.reroll;
-    case 'startProduce': return f.enabled && (f.produce || f.cooperateNative);
+    case 'startProduce': return f.enabled && (f.produce || f.cooperateNative && f.strategy !== 'nativeSimulation');
     case 'farm': return settings.farm.enabled;
     case 'speedUpUpgrade': return b.enabled && b.speedUp;
     case 'speedUpProduce': return f.enabled && (f.speedUp || f.speedUpSources.length > 0);
@@ -127,8 +127,11 @@ export function worldActionAllowed(settings, step, config) {
   const type = typeof id === 'string' ? (config?.tables?.BuildingCfg?.data ?? []).map(row => row.buildingType).sort((a, b) => b.length - a.length).find(t => id.endsWith(t)) : null;
   if (['build', 'upgrade', 'weekFactory'].includes(step.kind) && settings.building.disabledTypes.some(value => value === id || value === type)) return false;
   if (['startProduce', 'speedUpProduce'].includes(step.kind) && settings.factory.disabledTypes.some(value => value === id || value === type)) return false;
-  if (step.request === 'SetFactoryAutoProduceRequest' && !settings.factory.cooperateNative) return false;
-  if (step.request === 'StartFactoryProduceRequest' && !settings.factory.produce) return false;
+  if (step.request === 'SetFactoryAutoProduceRequest' && (!settings.factory.cooperateNative || settings.factory.strategy === 'nativeSimulation')) return false;
+  if (step.request === 'StartFactoryProduceRequest') {
+    if (!settings.factory.produce || (step.factoryStrategy ?? 'smart') !== (settings.factory.strategy ?? 'smart')) return false;
+    if (step.factoryStrategy === 'nativeSimulation' && step.simulatedTargetsKey !== JSON.stringify(settings.factory.simulatedTargets ?? [])) return false;
+  }
   if (step.request === 'FarmHarvestRequest') return settings.farm.enabled && settings.farm.harvest;
   if (step.request === 'FarmPlantRequest') return settings.farm.enabled && (settings.farm.autoPlant || settings.farm.customPlant);
   if (step.request === 'FarmSpeedUpRequest') return settings.farm.enabled && settings.farm.speedUp;

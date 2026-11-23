@@ -34,6 +34,65 @@ function fixture() {
 }
 const products = plan => plan.actions.filter(step => step.request === 'StartFactoryProduceRequest').map(step => step.body.productId);
 
+test('模拟原生先做主产物，候补按账号实际小于5秒分档，再按库存；不填等待格', () => {
+  const f = fixture(), rows = f.config.tables.BuildingProduceCfg.data;
+  const [short, long] = rows;
+  Object.assign(f.settings.factory,{strategy:'nativeSimulation',simulatedTargets:[long.itemId],keepStock:0,demandFirst:true});
+  f.survey.cargoOrder.set(short.itemId,10);
+  assert.deepEqual(products(f.plan()),[long.itemId]);
+  f.stock.set(long.itemId,f.survey.stockCap);
+  rows.push({...short,itemId:'另一候补',produceTime:200});
+  const observed = seconds => ({ kind:'factory',buildingId:f.factory.buildingId,productId:'另一候补',seconds,samples:1 });
+  f.survey.productionTiming = {observedDurations:[observed(4)]};
+  assert.deepEqual(products(f.plan()),['另一候补']);
+  f.survey.productionTiming.observedDurations=[observed(5)];
+  assert.deepEqual(products(f.plan()),[short.itemId]);
+  short.produceTime=8;
+  f.survey.productionTiming.observedDurations=[observed(80)];
+  assert.deepEqual(products(f.plan()),['另一候补']);
+  long.costItem=[['缺料',1]]; f.stock.set(long.itemId,0);
+  assert.deepEqual(products(f.plan()),['另一候补']);
+  f.factory.factory.factoryQ=[{idx:1,productId:short.itemId,finishTime:200}];
+  assert.deepEqual(products(f.plan()),[]);
+  f.factory.factory.factoryQ=[]; f.survey.autoProduceForever=true; f.factory.factory.autoProductId=short.itemId;
+  f.settings.factory.cooperateNative=true;
+  assert(!f.plan().actions.some(job=>job.kind==='startProduce'));
+});
+
+test('模拟原生只用已解锁的并行位，两个开工计划共同扣料并检查月卡到期', () => {
+  const f=fixture(), primary='长时品';
+  Object.assign(f.settings.factory,{strategy:'nativeSimulation',simulatedTargets:[primary]});
+  f.config.tables.MonthCardCfg=table([{id:'普通月卡',effectList:[['第二生产位',1]]}]);
+  const card={type:1,endTime:200};
+  f.survey.productionTiming={monthCards:{cardItem:[card]}};
+  assert.deepEqual(products(f.plan()),[primary,primary]);
+  f.stock.set('木材',1);
+  assert.deepEqual(products(f.plan()),[primary]);
+  f.stock.set('木材',100);
+  card.endTime=120;
+  assert.deepEqual(products(f.plan()),[primary,'短时品']);
+  card.endTime=90;
+  assert.deepEqual(products(f.plan()),[primary]);
+});
+
+test('新版按本号耗时补足两段短件再回到长单，同步保留长单原料', () => {
+  const f=fixture(), [source,urgent]=f.config.tables.BuildingProduceCfg.data;
+  urgent.produceTime=600;f.stock.set(source.itemId,0);
+  f.settings.factory.demandFirst=f.settings.factory.gain=true;
+  f.survey.cargoOrder.set(urgent.itemId,1);
+  for(const [type,item,input,count,seconds] of [['中间厂','中间件',source.itemId,2,2],['装配厂','总成','中间件',1,60]]){
+    const b={...f.factory,buildingId:'1'+type,type,factory:{factoryQ:[],finishedProducts:[]}};
+    f.survey.factories.push(b);f.survey.buildings.push(b);
+    f.config.tables.BuildingProduceCfg.data.push({itemId:item,buildType:type,unlockLevel:1,produceTime:seconds,costItem:[[input,count]]});
+  }
+  const heads=()=>products(planWorld(f.survey,{config:f.config,settings:f.settings,enabled:k=>['gainFactory','startProduce'].includes(k)}));
+  assert.deepEqual(heads().slice(0,3),[source.itemId,source.itemId,urgent.itemId]);
+  f.stock.set('木材',2);
+  assert.equal(heads()[0],urgent.itemId);
+  f.stock.set('木材',100);source.produceTime=100;
+  assert.equal(heads()[0],urgent.itemId);
+});
+
 test('升级规划记录逐栋结构化原因，预览保留原文，补齐材料后安排升级', () => {
   const f = fixture();
   f.config.tables.BuildingUpgradeCfg = table([
@@ -55,7 +114,7 @@ test('升级规划记录逐栋结构化原因，预览保留原文，补齐材�
 
 test('低优先级工厂保留海兽已齐的整批进阶材料，优先级反转后正常生产', () => {
   const f = fixture();
-  Object.assign(f.settings.factory, { demandFirst: true, demandPriority: ['petAdvance', 'cargo'] });
+  Object.assign(f.settings.factory, { demandFirst: true, demandPriority: ['petAdvance', 'cargo'], checkEverySeconds: 300 });
   f.settings.pet.enabled = f.settings.pet.advance = true;
   f.stock.set('木材', 6);
   f.survey.cargoOrder.set('长时品', 3);
@@ -98,6 +157,20 @@ test('工厂加速跳过等待格，按服务器时钟计算零号位，只加�
   f.settings.factory.speedUp = true;
   f.stock.set('加速器', 4);
   assert.deepEqual(speed(), [[0, 1], [2, 1]], '独立物品加速仍可使用保留量以上的两个加速器');
+});
+
+test('补料与订单都需要同一件在产货物时，按顺序归属来源加速', () => {
+  const f = fixture();
+  f.stock.set('加速器', 10);
+  f.factory.factory.factoryQ = [{ productId: '长时品', finishTime: 160 }];
+  f.survey.cargoOrder.set('长时品', 1);
+  Object.assign(f.settings.factory, { keepStock: 1, demandFirst: true, demandPriority: ['factory', 'cargo'], speedUpSources: ['factory'] });
+  const extraDemand = baseDemands({ world: f.survey, now: f.survey.now }, f.config, f.settings);
+  const speed = () => planWorld(f.survey, { config: f.config, settings: f.settings, extraDemand, allowSpeedUp: true })
+    .actions.filter(step => step.kind === 'speedUpProduce').map(step => step.demandSources);
+  assert.deepEqual(speed(), [['factory']]);
+  f.settings.factory.demandPriority.reverse();
+  assert.deepEqual(speed(), []);
 });
 
 {
@@ -209,14 +282,15 @@ test('升级中按当前等级派单，初建和下一等级配方仍不可用',
   calls.length = 0;
   replies.MonthCardRequest = { cardItem: [] };
   assert.deepEqual(await assign(), shortestFirst);
-  assert(!calls.includes('GameEffectRequest'), '单生产位维持原队列顺序，无需额外读取耗时加成');
+  assert(calls.includes('GameEffectRequest'), '单生产位也需要账号工时来选择候选');
   calls.length = 0;
   await read({ ordersOnly: true });
   await read({ includeProductionTiming: false });
   assert(!calls.includes('MonthCardRequest'));
   f.factory.factory.factoryQ = Array.from({ length: 5 }, (_, idx) => ({ idx, productId: '短时品' }));
   await read();
-  assert(!calls.includes('MonthCardRequest'), '只剩一格时无需为换序读取权益');
+  assert(calls.includes('MonthCardRequest'), '最后一个排队格也要核对实际开放的生产位');
+  calls.length = 0;
   replies.OnWaterRequest.building = [{ buildingId: '1民居', level: 1, factory: { factoryQ: [] } }];
   await read();
   assert(!calls.includes('MonthCardRequest'), '非加工建筑的空嵌套消息不算空闲工厂');
@@ -454,5 +528,174 @@ test('建筑备料遵守新增人口上限，已有施工占用人口空间', ()
     f.config.tables.BuildingUpgradeCfg.data[level].effect = [['人口增加', level * 10]];
     assert.deepEqual(products(plan()), ['长时品', '长时品'], '不增加人口的工程仍可备料');
   }
+});
+test('跨厂急单先分配共享原料，交换建筑枚举顺序结果相同', () => {
+  const f = fixture();
+  const other = { ...f.factory, buildingId: '1机械厂', type: '机械厂', factory: { factoryQ: [], finishedProducts: [] } };
+  f.config.tables.BuildingProduceCfg.data.push({ itemId: '电机', buildType: other.type, unlockLevel: 1, costItem: [['木材', 1]], produceTime: 180 });
+  f.survey.factories.push(other);
+  f.survey.buildings.push(other);
+  f.stock.set('木材', 1);
+  f.settings.factory.demandFirst = true;
+  f.settings.factory.demandPriority = ['cargo', 'merchant'];
+  f.survey.weekOrder.set('长时品', 1);
+  f.survey.cargoOrder.set('电机', 1);
+  assert.deepEqual(products(f.plan()), ['电机']);
+  f.survey.factories.reverse();
+  assert.deepEqual(products(f.plan()), ['电机']);
+});
+
+test('备货塞进已知来料空档，等待中的材料不进入可花库存', () => {
+  const f = fixture();
+  const [clay, salt] = f.config.tables.BuildingProduceCfg.data;
+  clay.produceTime = 108;
+  salt.costItem = [['待到材料', 1], ['木材', 1]];
+  f.survey.cargoOrder.set(salt.itemId, 1);
+  f.stock.set(clay.itemId, 0);
+  f.settings.factory.demandFirst = true;
+  f.survey.factories.push({ ...f.factory, buildingId: '1上游厂', type: '上游厂',
+    factory: { factoryQ: [{ idx: 1, productId: '待到材料', finishTime: f.survey.serverNow + 300 }], finishedProducts: [] } });
+  assert.deepEqual(products(f.plan()), [clay.itemId, clay.itemId]);
+  f.stock.set('待到材料', 1);
+  assert.equal(products(f.plan())[0], salt.itemId);
+});
+
+test('下游同轮占用现货后，先遍历过的上游也能补回备货缺口', () => {
+  const f = fixture();
+  const other = { ...f.factory, buildingId: '1机械厂', type: '机械厂', factory: { factoryQ: [], finishedProducts: [] } };
+  f.config.tables.BuildingProduceCfg.data.push({ itemId: '电机', buildType: other.type, unlockLevel: 1, costItem: [['短时品', 1]], produceTime: 100 });
+  f.survey.factories.push(other);
+  f.survey.buildings.push(other);
+  f.stock.set('长时品', 6); f.stock.set('短时品', 6); f.stock.set('电机', 5);
+  f.settings.factory.demandFirst = true;
+  assert.deepEqual(products(f.plan()), ['电机', '短时品']);
+});
+test('工厂补料与订单竞争同一队列，按配置顺序生产且同一产物只补一次', () => {
+  const f = fixture();
+  f.stock.set('短时品', 0);
+  Object.assign(f.settings.factory, { keepStock: 1, demandFirst: true, checkEverySeconds: 180 });
+  f.survey.cargoOrder.set('长时品', 2);
+  const extra = baseDemands({ world: f.survey, now: f.survey.now }, f.config, f.settings);
+  assert(extra.some(record => record.source === 'factory'));
+  for (const [order, expected] of [
+    [['factory', 'cargo'], [['短时品', false], ['长时品', false], ['长时品', true]]],
+    [['cargo', 'factory'], [['长时品', true], ['长时品', true], ['短时品', false]]],
+  ]) {
+    f.settings.factory.demandPriority = order;
+    const result = planWorld(f.survey, { config: f.config, settings: f.settings, enabled: k => k === 'startProduce', extraDemand: extra });
+    const jobs = result.actions.filter(job => job.request === 'StartFactoryProduceRequest');
+    assert.deepEqual(jobs.map(job => [job.body.productId, job.demandDriven]), expected);
+    assert.deepEqual(jobs.find(job => job.demandDriven).demandSources, ['cargo']);
+  }
+});
+
+test('补料排在两类订单之间，按水位计入现货、在产和待收，移除后回到兜底备货', () => {
+  const f = fixture();
+  f.config.tables.BuildingProduceCfg.data.push({ ...f.config.tables.BuildingProduceCfg.data[0], itemId: '备货品' });
+  f.stock.set('短时品', 1); f.stock.set('长时品', 1);
+  f.survey.cargoOrder.set('长时品', 2); f.survey.weekOrder.set('短时品', 2);
+  Object.assign(f.settings.factory, { keepStock: 1, demandFirst: true, demandPriority: ['cargo', 'factory', 'merchant'], checkEverySeconds: 180 });
+  assert.deepEqual(products(f.plan()), ['长时品', '备货品', '短时品']);
+  f.factory.factory.finishedProducts = [{ id: '备货品', num: 1 }];
+  assert.deepEqual(products(f.plan()), ['长时品', '短时品']);
+  f.factory.factory.finishedProducts = [];
+  f.factory.factory.factoryQ = [{ productId: '备货品', finishTime: 120 }];
+  assert.deepEqual(products(f.plan()), ['长时品', '短时品']);
+  f.factory.factory.factoryQ = [];
+  f.settings.factory.demandPriority = ['cargo', 'merchant'];
+  assert.deepEqual(products(f.plan()), ['长时品', '短时品', '备货品']);
+});
+test('满仓的优先品不占住空厂，两个空厂只为同一断货品补一件', () => {
+  const f = fixture();
+  const [empty, urgent] = f.config.tables.BuildingProduceCfg.data;
+  f.survey.stockCap = 4;
+  f.stock.set(empty.itemId, 0); f.stock.set(urgent.itemId, 4);
+  f.settings.factory.demandFirst = true;
+  // Both shipments need more of the urgent product in total than its cap.
+  f.survey.cargoOrders = [3, 3].map(num => ({ requirements: [{ id: urgent.itemId, num }] }));
+  const second = { ...f.factory, buildingId: '2食品厂', factory: { factoryQ: [], finishedProducts: [] } };
+  f.survey.factories.push(second); f.survey.buildings.push(second);
+  assert.deepEqual(products(f.plan()), [empty.itemId]);
+  f.stock.set(empty.itemId, 4);
+  assert.deepEqual(products(f.plan()), []);
+  f.stock.set(empty.itemId, 0); f.stock.set(urgent.itemId, 3);
+  f.stock.set('木材', 1);
+  assert.deepEqual(products(f.plan()), [urgent.itemId], '有仓位、材料只够一件时，原订单先做');
+  f.stock.set(urgent.itemId, 4); f.settings.factory.keepStock = 0;
+  assert.deepEqual(products(f.plan()), []);
+  f.settings.factory.demandPriority = ['cargo', 'merchant'];
+  f.survey.weekOrder.set(empty.itemId, 1);
+  assert.deepEqual(products(f.plan()), [empty.itemId], '水位为零时仍可补已启用的正式需求');
+});
+test('断货成品缺两份中间料，空闲上游可补差额，已在途的同一份不重复排', () => {
+  const f = fixture();
+  const [input, urgent] = f.config.tables.BuildingProduceCfg.data;
+  f.survey.stockCap = 4;
+  f.stock.set(input.itemId, 1); f.stock.set(urgent.itemId, 4);
+  f.survey.cargoOrders = [3, 3].map(num => ({ requirements: [{ id: urgent.itemId, num }] }));
+  f.settings.factory.demandFirst = true;
+  const downstream = { ...f.factory, type: '装配厂', buildingId: '1装配厂', factory: { factoryQ: [], finishedProducts: [] } };
+  f.survey.factories.push(downstream); f.survey.buildings.push(downstream);
+  f.config.tables.BuildingProduceCfg.data.push({ itemId: '断货成品', buildType: downstream.type, unlockLevel: 1,
+    costItem: [[input.itemId, 2]], produceTime: 15 });
+  assert.deepEqual(products(f.plan()), [input.itemId]);
+  f.factory.factory.factoryQ = [{ idx: 1, productId: input.itemId, finishTime: f.survey.now + 1 }];
+  assert.deepEqual(products(f.plan()), []);
+  f.factory.factory.factoryQ = []; f.stock.set('木材', 0);
+  assert.deepEqual(products(f.plan()), []);
+});
+test('未知来料先保护急单，长期同一缺料只放行一件长任务，换账号独立计时', () => {
+  const f = fixture();
+  const [urgent, filler] = f.config.tables.BuildingProduceCfg.data;
+  urgent.costItem = [['外部材料', 1]];
+  filler.produceTime = 600;
+  f.stock.set(urgent.itemId, 0);
+  Object.assign(f.settings.factory, { demandFirst: true, keepStock: 3, checkEverySeconds: 30 });
+  f.survey.cargoOrder.set(urgent.itemId, 1);
+  const history = new Map();
+  const at = (time, state = history) => {
+    f.survey.now = f.survey.serverNow = time;
+    return products(planWorld(f.survey, { config: f.config, settings: f.settings, factoryWaitHistory: state,
+      enabled: kind => kind === 'startProduce' }));
+  };
+  assert.deepEqual(at(100), []);
+  assert.deepEqual(at(189), []);
+  assert.deepEqual(at(190), [filler.itemId]);
+  assert.deepEqual(at(190, new Map()), []);
+  f.stock.set('外部材料', 1);
+  assert.equal(at(191)[0], urgent.itemId);
+  assert.equal(history.size, 0);
+});
+
+test('双生产位按各批真实到料时间保护急单，两批同到时长任务不能抢第二位', () => {
+  const f = timedDemand();
+  const [urgent, filler] = f.config.tables.BuildingProduceCfg.data;
+  urgent.costItem = [['在途料', 1]]; filler.produceTime = 600;
+  Object.assign(f.settings.factory, { keepStock: 1 });
+  f.survey.cargoOrder = new Map([[urgent.itemId, 2]]);
+  const supply = finishTime => ({ buildingId: '供应' + finishTime, type: '供应厂', level: 1, product: [],
+    factory: { factoryQ: [{ idx: 1, productId: '在途料', finishTime }], finishedProducts: [] } });
+  const a = supply(150), b = supply(150); b.buildingId += 'B';
+  f.survey.factories.push(a,b);
+  assert.deepEqual(products(f.plan()), []);
+  b.factory.factoryQ[0].finishTime = 800;
+  assert.deepEqual(products(f.plan()), [filler.itemId]);
+});
+
+test('同级单线先给下游送一秒速料，长料同时加工，已有优先级保持不变', () => {
+  const f = timedDemand();
+  f.settings.factory.gain = true;
+  f.survey.productionTiming.monthCards = [];
+  const [a,b] = f.config.tables.BuildingProduceCfg.data;
+  a.produceTime = 100; b.produceTime = 1;
+  const downstream = { ...f.factory, buildingId: '1下游厂', type: '下游厂', factory: { factoryQ: [], finishedProducts: [] } };
+  f.survey.factories.push(downstream); f.survey.buildings.push(downstream);
+  for (const [input, time] of [[a,120],[b,9]]) f.config.tables.BuildingProduceCfg.data.push({
+    itemId: input.itemId + '成品', buildType: downstream.type, unlockLevel: 1, costItem: [[input.itemId,1]], produceTime: time,
+  });
+  f.survey.cargoOrder = new Map([[a.itemId+'成品',1],[b.itemId+'成品',1]]);
+  assert.deepEqual(products(f.plan()), [b.itemId,a.itemId]);
+  f.survey.cargoOrder.delete(b.itemId+'成品'); f.survey.weekOrder.set(b.itemId+'成品',1);
+  assert.deepEqual(products(f.plan()), [a.itemId,b.itemId]);
 });
 console.log('工厂排产计划专项 ' + passed + '/' + passed + ' 通过');

@@ -16,14 +16,18 @@ export function bridgeFleetReservations(client, getSettings, ledger, worldId) {
  };
  registerFleetReservations(client, migrationOwner, contains, hasAny);
 }
-// 配置勾选只表示允许使用；实际占用依据舰队状态与持久化在途记录判断。
-export function fleetRecordReason(records,buildingId,worldId){
- for(const [key,r]of Object.entries(recordsInWorld(records??{},worldId))){
-  if(r.expired||r.details?.buildingId!==buildingId)continue;
+const recordNotes={
+ radarSend:'情报派遣待核对', pirateFirst:'首杀战果待确认', worldBoss:'世界Boss首战待核对',
+ cityDispatch:'城战派遣待核对', citySlot:'城战派遣待核对', cityRepair:'维修待核对',
+ treasureDispatch:'货轮派遣待核对', treasureRepair:'维修待核对', treasureSpeed:'货轮加速待核对',
+ siliconDispatch:'硅矿派遣待核对', siliconRepair:'硅矿维修待核对', siliconRetreat:'硅矿撤回待核对',
+ siliconSpeed:'硅矿加速待核对', resourceFieldDispatch:'占田派遣待核对', fleetSpeed:'舰队加速待核对'
+};
+function recordReason(key,r){
   if(r.details.kind==='worldBossLineup'&&r.details.active!==false)return '舰队的世界Boss临时阵容尚待恢复';
   if(r.details.kind==='pirateLineup'&&r.details.active!==false)return '舰队的海盗挑战阵容尚待恢复';
-  if(r.details.kind==='pirateFirst'&&r.details.active===false)continue;
-  if(r.details.kind==='worldBoss'&&r.details.active===false)continue;
+  if(r.details.kind==='pirateFirst'&&r.details.active===false)return '';
+  if(r.details.kind==='worldBoss'&&r.details.active===false)return '';
   if(!r.confirmed)return '舰队有结果待确认的任务';
   if(r.details.kind==='worldBoss'&&r.details.active!==false)return '舰队的世界Boss首战尚未结束';
   if(r.details.kind==='siliconDispatch'&&r.details.active!==false)return '舰队的硅矿任务尚未结束';
@@ -32,8 +36,19 @@ export function fleetRecordReason(records,buildingId,worldId){
   if(r.details.kind==='radarSend'&&r.details.active!==false)return '舰队的联盟情报尚未结束';
   if(r.details.kind==='pirateFirst'&&!['won','lost'].includes(r.details.outcome))return '舰队的首杀战果尚未确认';
   if(key.startsWith('cityWar:'))return '舰队的城战任务尚未结束';
- }
  return '';
+}
+// 配置勾选只表示允许使用；持久记录会限制派遣，不能单凭它推断舰队的位置。
+export function fleetRecordHold(records,buildingId,worldId){
+ for(const [key,r] of Object.entries(recordsInWorld(records??{},worldId))){
+  if(r.expired||!r.details||r.details.buildingId!==buildingId)continue;
+  const reason=recordReason(key,r);
+  if(reason)return {reason,note:recordNotes[r.details.kind]??reason};
+ }
+ return null;
+}
+export function fleetRecordReason(records,buildingId,worldId){
+ return fleetRecordHold(records,buildingId,worldId)?.reason??'';
 }
 
 // 同一连接共享城战时段预留和正在启动的手动首杀；不抢占在途任务。
@@ -49,7 +64,7 @@ export function reconcileBossFleets(ledger,fleets,worldId){
  settleFleetSnapshot(ledger,{worldId,fleets,kinds:['worldBoss']});
 }
 export function fleetDispatchView(client,settings,ledger,fleets,worldId){
- const order=dispatchOrder(settings),time=Date.now();
+ const records=ledger.keyRecords(),order=dispatchOrder(settings),time=Date.now();
  return fleets.map(f=>{
   const intents=order.filter(k=>{
    if(k==='radar'&&settings?.radar?.runEnabled===false)return false;
@@ -60,8 +75,9 @@ export function fleetDispatchView(client,settings,ledger,fleets,worldId){
    return p.fleetIds?.includes(f.buildingId)||k==='worldBoss'&&!p.fleetIds?.length;
   });
   const held=[...(dispatchStates.get(client)??[])].filter(([,r])=>r.until>time&&r.ids.includes(f.buildingId)).map(([k])=>dispatchLabels[k]);
-  const reason=fleetRecordReason(ledger.keyRecords(),f.buildingId,worldId)|| (f.state!==1||f.curGridIdx||f.treasureLootUid||f.chipWar?.rewardTs?'舰队已有在途或驻守任务':'');
-  return {buildingId:f.buildingId,intents:intents.map(k=>({key:k,label:dispatchLabels[k]})),reserved:held,reason,targetGrid:f.state===2?f.targetGridIdx:f.curGridIdx||null};
+  const hold=fleetRecordHold(records,f.buildingId,worldId);
+  const reason=hold?.reason|| (f.state!==1||f.curGridIdx||f.treasureLootUid||f.chipWar?.rewardTs?'舰队已有在途或驻守任务':'');
+  return {buildingId:f.buildingId,intents:intents.map(k=>({key:k,label:dispatchLabels[k]})),reserved:held,reason,recordNote:hold?.note??'',targetGrid:f.state===2?f.targetGridIdx:f.curGridIdx||null};
  });
 }
 export const dispatchOrder = settings => [...new Set([...(settings?.fleetDispatch?.priority ?? []),'cityWar','pirateHunt','worldBoss','follow','treasure','radar','silicon','resourceFields'])];

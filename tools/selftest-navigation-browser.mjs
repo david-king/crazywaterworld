@@ -551,6 +551,50 @@ try {
     await page.reload();
     await tab('overview');
     assert.equal(new URL(page.url()).hash, '');
+    // Only the browser sees a connected account. The real console fixture stays paused.
+    let ready = false, planReads = 0, releasePlan;
+    const readGate = new Promise(resolve => { releasePlan = resolve; });
+    await page.route(/\/api\/accounts(?:\?|$)/, async route => {
+      const response = await route.fetch(), data = await response.json();
+      if (ready) Object.assign(data.accounts[0].status, { connected:true, paused:false, syncingProduction:false });
+      await route.fulfill({ response, json:data });
+    });
+    await page.route('**/api/world?*', route => route.fulfill({ json:{ factories:[], farms:[], orders:[], stock:[] } }));
+    await page.route('**/api/world/production-plan?*', async route => {
+      assert.equal(new URL(route.request().url()).searchParams.get('account'), account);
+      assert.equal(route.request().method(), 'GET');
+      const read = ++planReads, now = 1767225600;
+      if (read === 2) await readGate;
+      await route.fulfill({ json:{ snapshotTime:now, orders:[], forecast:{ startAt:now, endAt:now+86400,
+        completions:[], factories:[{ id:'1金属厂', name:'金属厂', runs:[{ name:'铜锭', quantity:read,
+          from:now, to:now+read, lane:1, status:'queued' }] }] } } });
+    });
+    await main('manual');
+    const card = page.locator('#production-day-card');
+    await card.getByText('连接账号后自动显示排产清单。').waitFor();
+    assert.equal(planReads,0);
+    ready = true;
+    await page.evaluate(() => refreshAccountStatuses());
+    const quantity = card.locator('.production-batch-quantity');
+    await quantity.filter({ hasText:'×1' }).waitFor();
+    const preview = page.locator('#production-day-preview');
+    await preview.getByText('游戏内排队中 · 铜锭 ×1').waitFor();
+    assert(await preview.evaluate(n => n.getBoundingClientRect().top >= 0 && n.getBoundingClientRect().bottom <= innerHeight));
+    await page.locator('#production-day-jump').click();
+    assert.equal(await page.locator('#production-day-title').evaluate(node => node === document.activeElement),true);
+    await main('settings');
+    await main('manual');
+    await page.locator('#production-day-result[aria-busy="true"]').waitFor();
+    await main('manual');
+    await quantity.filter({ hasText:'×1' }).waitFor();
+    releasePlan();
+    await quantity.filter({ hasText:'×2' }).waitFor();
+    assert.equal(planReads,2);
+    await page.reload();
+    await tab('manual');
+    await quantity.filter({ hasText:'×3' }).waitFor();
+    await preview.getByText('游戏内排队中 · 铜锭 ×3').waitFor();
+    assert.equal(planReads,3);
     await context.close();
     console.log('通过：' + name + ' 页头搜索位置、快捷键、配置项滚动定位、总览与仓库分类跳转，导航刷新恢复、深链与无效状态回退');
   }

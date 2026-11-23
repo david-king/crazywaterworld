@@ -115,10 +115,11 @@ try {
   });
 
   await test('共享码对不同账号可见，成功和待确认的兑换历史按账号独立过滤', async () => {
-    saveStore({ version: 1, activeId: 'a', accounts: [account('a'), account('b'), account('records')] });
+    saveStore({ version: 1, activeId: 'b', accounts: [account('a'), account('b'), account('records')] });
     writeHistory('a', [historyRow('HTTP_SHARED_A', 'success', '金币 ×10'), historyRow('HTTP_SHARED_B', 'unknown', '待确认')]);
     const a = await get(initialQuery(['a']));
     const b = await get(initialQuery(['b']));
+    assert.deepEqual((await get('/api/gift-codes/initial')).tryCodes, b.tryCodes, '默认查看当前账号的码库');
     for (const code of ['HTTP_SHARED_A', 'HTTP_SHARED_B']) {
       assert(a.displayRows.some(row => row.code === code), '已处理码仍可供显示已处理视图使用');
       assert.equal(a.displayRows.find(row => row.code === code).eligible, false);
@@ -135,6 +136,33 @@ try {
     await get(initialQuery(['missing']), 400);
     await get('/api/gift-codes/initial?accounts=not-json', 400);
     assert.equal(connections, 0);
+  });
+
+  await test('A 已成功或待确认的共享码仍可发给 B，B 完成后独立去重', async () => {
+    publicGiftCodes.setChannelEnabled('ali213', false);
+    const session = app.sessions.get('b'), sent = [];
+    session.player = {};
+    session.client = { connected: true, async request(name, { giftCode }) {
+      assert.equal(name, 'GotGiftCodeRequest');
+      sent.push(giftCode);
+      return { reward: { asset: [{ id: 'RUBY', num: 1 }] } };
+    } };
+    try {
+      const payload = { confirm: true, library: true, accounts: ['b'] };
+      const before = giftCodeStatus('a').rows;
+      assert.equal((await post('/api/gift-codes/redeem?account=a', payload)).accepted, 1);
+      for (let i = 0; i < 200 && giftCodeStatus('b').running; i++) await new Promise(resolve => setTimeout(resolve, 10));
+      assert.deepEqual(sent, ['HTTP_SHARED_A', 'HTTP_SHARED_B']);
+      assert.deepEqual(giftCodeStatus('b').rows.map(row => row.status), ['success', 'success']);
+      assert.deepEqual(giftCodeStatus('a').rows, before);
+      assert.deepEqual((await get(initialQuery(['b']))).tryCodes, []);
+      await post('/api/gift-codes/redeem?account=a', payload, 400);
+      assert.equal(sent.length, 2);
+    } finally {
+      session.client = null;
+      session.player = null;
+      publicGiftCodes.setChannelEnabled('ali213', true);
+    }
   });
 
   const recordRows = [

@@ -25,7 +25,7 @@ try {
     'AllResourceRequest', 'AllResourceResponse', 'MyResFieldsRequest', 'MyResFieldsResponse',
     'MyFleetsRequest', 'MyFleetsResponse', 'WeekInfoRequest', 'WeekInfoResponse',
     'GuildInfoRequest', 'GuildInfoResponse', 'GainFactoryProduceRequest', 'GainFactoryProduceResponse',
-    'StartFactoryProduceRequest',
+    'StartFactoryProduceRequest', 'GameEffectRequest', 'GameEffectResponse',
   ]) : loadProtocol();
 
   function integration({ rounds = 2, mainEveryMs = 3600000, cli = false, offset = 0, finishAfterMs = 5000, fallbackSeconds = 30 } = {}) {
@@ -101,6 +101,7 @@ try {
         if (name === 'OnWaterRequest') result = { building: [state.building], workerOrder: [] };
         else if (name === 'AllItemRequest') result = { items: [...state.stock].map(([itemId, num]) => ({ itemId, num })) };
         else if (name === 'AllResourceRequest') result = { list: [] };
+        else if (name === 'GameEffectRequest') result = { effects: [{ id: 1, value: 0 }, { id: 2, value: 0 }] };
         else if (name === 'MyResFieldsRequest') result = { fields: [] };
         else if (name === 'MyFleetsRequest') result = { fleets: [] };
         else if (name === 'WeekInfoRequest') result = { activityTime: [] };

@@ -91,9 +91,28 @@ try{
   const f=guildMutualFixture();f.state.black=[{playerId:'9007199254740999',nickname:'黑名单'}];f.state.requests=f.state.requests.slice(0,5);f.state.requests[0].asker.playerId=f.player.playerId;f.state.requests[1].asker.playerId='9007199254740999';f.state.requests[2].endTime=1;f.state.requests[3].reqItemId='钻石';f.state.stock.橡胶圈=0;
   const s=await readMutualAid(f.client,f.config,f.player,mutualOptions());assert.equal(s.candidates.length,0);assert.equal(f.state.writes.length,0);
  });
- await check('赠送回包未知或空奖励不算确认，持久预占额度且重建不重复',async()=>{
-  for(const failure of ['giftUnknown','giftEmpty']){const f=guildMutualFixture(),file=path.join(dir,failure+'.json');let l=createUsageLedger('qa',{file});f.state.failure=failure;const first=await run(f,l,{target:2});assert.equal(first.pending,true);assert.equal(first.sent,0);assert.equal(l.snapshot().counters.guildAidGifts,1);
-   const g=guildMutualFixture(f.state);g.state.failure='';l=createUsageLedger('qa',{file});const second=await run(g,l,{target:2});assert.equal(second.pending,true);assert.equal(g.state.writes.filter(r=>r.name==='GuildAidHelpRequest').length,1);}
+ await check('丢回执或空奖励跳过当笔，同一任务继续送到上限，重建后不会重复扣次',async()=>{
+  for (const failure of ['giftUnknown','giftEmpty']) {
+   const f=guildMutualFixture(), file=path.join(dir,failure+'.json'), old=f.state.requests[0];
+   const firstLedger=createUsageLedger('qa',{file});
+   f.state.stock.橡胶圈=4;
+   f.state.onGift=id=>{f.state.failure=id===old.reqId?failure:'';};
+   const result=await run(f,firstLedger,{target:2},{wait:async()=>{
+    if(!f.state.requests.includes(old))f.state.requests.unshift(old);
+   }});
+   assert.equal(result.sent,2); assert.equal(result.pending,undefined);
+   const g=guildMutualFixture(f.state), l=createUsageLedger('qa',{file});
+   g.state.failure='';
+   assert.equal((await run(g,l,{target:1})).sent,0);
+   const [record]=Object.values(l.keyRecords());
+   assert.equal(record.confirmed,false); assert.equal(record.expired,true);
+   assert.equal(l.snapshot().uncertain,0); assert.equal(l.snapshot().counters.guildAidGifts,2);
+   assert.equal(l.confirmedCounters().guildAidGifts,2);
+   assert.equal((await run(g,l,{target:2})).sent,0);
+   const gifts=g.state.writes.filter(r=>r.name==='GuildAidHelpRequest');
+   assert.equal(gifts.length,3); assert.equal(new Set(gifts.map(row=>row.id)).size,3);
+   assert.equal(l.snapshot().counters.guildAidGifts,2);
+  }
  });
  await check('赠送成功同时补产，完整新库存不必低于赠送前数量',async()=>{
   const f=guildMutualFixture(),l=ledger();f.state.onGift=()=>{f.state.stock.橡胶圈+=2;};
@@ -203,8 +222,40 @@ try{
   assert.equal((await run(f,l,{target:1})).pending,true);f.state.onRead=null;f.client.serverClockOffsetMs=86400000;
   const result=await run(f,l,{target:0});assert.equal(result.sent,0);assert.equal(l.snapshot().uncertain,0);assert.equal(l.snapshot().counters.guildAidGifts,undefined);assert.equal(f.state.writes.length,1);
  });
+ await check('跨日首次核对丢回执赠送保留原单，迟到结算不会影响今日额度',async()=>{
+  const f=guildMutualFixture(), file=path.join(dir,'gift-unknown-next-day.json');
+  const l=createUsageLedger('qa',{file,now:()=>Date.now()+f.client.serverClockOffsetMs});
+  const key=`guildAidGift:${f.player.worldId}:${f.player.playerId}:${f.state.requests[0].reqId}`;
+  const ticket=l.reserve({guildAidGifts:1},{},{},{uniqueKey:key,details:{
+   kind:'guildAidGift',day:l.snapshot().day,worldId:f.player.worldId,playerId:f.player.playerId,guildId:f.player.guildId,reqId:f.state.requests[0].reqId,
+  }});
+  f.client.serverClockOffsetMs=86400000; f.state.failure='';
+  await run(f,l,{target:0});
+  assert.equal(l.keyRecords()[key].expired,true);
+  assert.equal(l.snapshot().uncertain,0);
+  l.cancel(ticket);
+  assert.equal(l.hasKey(key),true);
+  l.confirm(ticket); l.confirm(ticket);
+  assert.equal(l.keyRecords()[key].confirmed,true);
+  assert.equal(l.snapshot().counters.guildAidGifts??0,0);
+  assert.equal(l.confirmedCounters().guildAidGifts??0,0);
+  assert.equal(f.state.writes.length,0);
+ });
  await check('明确拒绝不消耗赠送预算，停止等待后不重发',async()=>{
   const f=guildMutualFixture(),l=ledger(),control=new AbortController();f.state.failure='giftReject';await assert.rejects(run(f,l,{target:1},{signal:control.signal,wait:async()=>control.abort(new Error('测试停止'))}));assert.equal(l.snapshot().counters.guildAidGifts,0);assert.equal(f.state.stock.橡胶圈,1);
+ });
+ await check('单次互助遇对方接收上限继续，遇自己的赠送上限结束并记住当天限额',async()=>{
+  const f=guildMutualFixture(),l=ledger(),ids=f.state.requests.slice(0,2).map(row=>row.reqId);
+  f.state.onGift=id=>{
+   const reason=id===ids[0]?'对方接收次数已达上限':'今日赠送次数已用完';
+   throw Object.assign(Error(reason),{request:'GuildAidHelpRequest',prompt:{args:[reason]}});
+  };
+  assert.match((await run(f,l,{target:3})).reason,/游戏今日赠送已达上限/);
+  f.state.onGift=null;
+  assert.match((await run(f,l,{target:3})).reason,/游戏今日赠送已达上限/);
+  assert.deepEqual(f.state.writes.map(row=>row.id),ids);
+  assert.equal(l.snapshot().counters.guildAidGifts,0);
+  assert.equal(l.snapshot().uncertain,0);
  });
  await check('赠送明确未发送释放持久预算和防重键，重新检查后可安全重试',async()=>{
   const f=guildMutualFixture(),l=ledger(),original=f.client.request;let unsent=true,attempts=0;

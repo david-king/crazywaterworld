@@ -7,7 +7,7 @@ import { Switch } from "./switch"
 import { HelpTip } from "./help-tip"
 import { Badge } from "./badge"
 import { DialogFooter, DialogHeader, DialogTitle } from "./dialog"
-import { Backpack, Gem, Gift, LayoutGrid, MessageCircle, Music2, Plus, QrCode, Search, Shirt, Smartphone, Sprout, X } from "lucide-react"
+import { Backpack, Factory, Gem, Gift, LayoutGrid, MessageCircle, Music2, Plus, QrCode, Search, Shirt, Smartphone, Sprout, X } from "lucide-react"
 
 function Panel({title, help, titleAfter, children}: {title: string; help?: string; titleAfter?: React.ReactNode; children: React.ReactNode}) {
   return <Card><CardHeader><CardTitle className="title-with-help">{title}{help && <HelpTip title={title}>{help}</HelpTip>}</CardTitle>{titleAfter && <CardAction className="row-span-1 self-center max-md:col-span-2 max-md:col-start-1 max-md:row-start-2 max-md:justify-self-start">{titleAfter}</CardAction>}</CardHeader><CardContent>{children}</CardContent></Card>
@@ -210,15 +210,29 @@ export function activitiesPage() {
 
 export function manualPage() {
   return renderToStaticMarkup(<div className="grid gap-3">
+    <div className="flex flex-wrap items-center justify-between gap-2">
+      <div id="production-day-preview" aria-label="排产队列摘要" />
+      <Button id="production-day-jump" variant="outline" size="sm" aria-controls="production-day-card">查看排产清单</Button>
+    </div>
     <div id="world-view" className="dim" role="status" aria-label="海面" />
     <div id="world-factories" />
     <div className="world-orders-panel"><Panel title="居民订单" help="材料已齐时可手动提交，结果见运行日志。「需」为订单需求，「缺」为仍欠的数量，「留」为库存中已预留或被本轮其他操作占用的数量。">
       <div id="world-orders" />
     </Panel></div>
-    <Panel title="智能排产规划" help="按需求优先级估算备齐时间。点击带箭头的产物可逐层查看原料，数量按从头制作所需的整批用量计算。计划仅供查看。">
-      <div className="bar"><Button id="production-plan-refresh" variant="outline">生成计划</Button><span id="production-plan-status" className="dim" role="status">连接账号后可生成计划</span></div>
+    <Panel title="智能排产规划" help="按需求优先级估算备齐时间。点击带箭头的产物可逐层查看原料，数量按从头制作所需的整批用量计算。">
+      <div className="bar"><Button id="production-plan-refresh" variant="outline">刷新计划</Button><span id="production-plan-status" className="dim" role="status">连接账号后自动加载</span></div>
       <div id="production-plan-result" aria-live="polite" />
     </Panel>
+    <Card id="production-day-card" className="gap-2 max-md:gap-2" aria-labelledby="production-day-title" hidden>
+      <CardHeader className="items-center">
+        <CardTitle><h2 id="production-day-title" tabIndex={-1}>24 小时排产清单</h2></CardTitle>
+        <CardAction id="production-day-picker" className="row-span-1 self-center" hidden>
+          <Factory size={15} aria-hidden="true" />
+          <select id="production-day-factory" aria-label="选择排产工厂" aria-controls="production-day-result" />
+        </CardAction>
+      </CardHeader>
+      <CardContent><div id="production-day-result" /></CardContent>
+    </Card>
   </div>)
 }
 

@@ -150,6 +150,29 @@ try {
     automatic(t).ratios = { fuel: 0, seeds: 2, tech: 0 }; await run(t);
     assert.equal(t.f.client.writes[0].body.resFieldGridIdx, 11); assert.equal(t.f.client.writes.length, 1);
   });
+  await test('开启原生城战委任的主城舰队可自动占田，归队后可继续派遣', async () => {
+    const t = setup(); automatic(t);
+    const [fleet] = t.f.state.fleets;
+    t.f.state.fleets = [fleet];
+    fleet.autoFight = { isOn: true };
+
+    reserveDispatch(t.f.client, 'maintenance', [fleet.buildingId]);
+    await run(t); assert.equal(t.f.client.writes.length, 0);
+    reserveDispatch(t.f.client, 'maintenance', []);
+    fleet.targetGridIdx = 21;
+    await run(t); assert.equal(t.f.client.writes.length, 0);
+
+    fleet.targetGridIdx = 0;
+    assert.equal((await preview(t)).fleets[0].available, true);
+    await run(t); await run(t);
+    assert.equal(t.f.client.writes.length, 1);
+    t.f.finish(10, true);
+    await run(t);
+    assert.deepEqual(t.f.client.writes.map(write => write.body), [
+      { resFieldGridIdx: 10, fleetBuildingIds: [fleet.buildingId] },
+      { resFieldGridIdx: 20, fleetBuildingIds: [fleet.buildingId] },
+    ]);
+  });
   await test('自动策略遵守战力、耐久、最低等级和闲置舰队保留', async () => {
     for (const change of [t => { t.f.state.fleets[0].power = 1; }, t => { t.f.state.fleets[0].durability = 1; },
       t => { t.settings.resourceFields.minLevel = 9; }, t => { t.settings.resourceFields.reserveFleetCount = 3; }]) {
@@ -353,9 +376,10 @@ try {
     t.f.state.merge.executeTs = Math.floor(Date.now() / 1000) + 1800;
     await run(t); assert.equal(t.f.client.writes.length, 0);
   });
-  await test('自动化关闭且不刷新资源田页面，公共结算仍释放手动占田返航锁', async () => {
+  await test('自动化关闭且归队时开启原生委任，公共结算仍释放手动占田返航锁', async () => {
     const t = setup(); assert.equal(t.settings.resourceFields.enabled, false);
     await send(t, await preview(t)); t.f.finish(10, true);
+    t.f.state.fleets[0].autoFight = { isOn: true };
     const before = t.f.client.reads.length;
     const changes = await checkFleetSettlement(t.f.client, t.f.player, t.ledger);
     assert(changes.length > 0);

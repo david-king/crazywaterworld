@@ -62,6 +62,9 @@ const clear = async account => {
 };
 
 try {
+  fs.writeFileSync(path.join(directory, 'factory-report-logs-a.json'), JSON.stringify({
+    time: '2026/11/23 18:33:27', lines: ['工厂历史记录'],
+  }));
   base = await app.listen();
   await fetch(base + '/api/accounts');
   const a = app.sessions.get('logs-a'), b = app.sessions.get('logs-b');
@@ -69,6 +72,7 @@ try {
   app.emit(null, 'info', '共享系统旧记录');
   const all = await subscribe('?scope=all'), scoped = await subscribe('?account=logs-a'), system = await subscribe();
   await waitFor(() => messages(all).includes('乙账号旧记录') && messages(scoped).includes('甲账号旧记录') && messages(system).includes('共享系统旧记录'), '历史回放');
+  assert(!messages(scoped).some(message => message.includes('上次工厂检查')), '暂停托管账号首次加载时不应将旧工厂报告作为新日志回放');
   assert(!messages(scoped).includes('乙账号旧记录'));
   assert(!messages(system).includes('甲账号旧记录'));
   assert(all.events.some(event => event.data.account === 'logs-b' && event.data.level === 'warn'));

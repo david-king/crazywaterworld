@@ -44,8 +44,11 @@ function fixture(accountList=[{id:'a',title:'账号A',paused:false,running:false
     env.calls.push({path:url.pathname,query:url.searchParams,body});
     if(url.pathname==='/api/gift-codes/accounts')return {accounts:env.accounts};
     if(url.pathname==='/api/gift-codes/initial'||url.pathname==='/api/gift-codes/load'){
+      const selected=body?.accounts??JSON.parse(url.searchParams.get('accounts'));
+      const rows=env.libraryFor?.(selected)??env.library;
       if(env.initialGate)await env.initialGate;
-      return {channels:env.channels,displayRows:env.library,tryCodes:env.library.filter(row=>row.eligible).map(row=>row.code),available:env.library.length,total:env.library.length};
+      const tryCodes=rows.filter(row=>row.eligible).map(row=>row.code);
+      return {channels:env.channels,displayRows:rows,tryCodes,available:tryCodes.length,total:rows.length};
     }
     if(url.pathname==='/api/gift-codes/channels/preview')return {codes:['中文_礼包','VIP888']};
     if(url.pathname==='/api/gift-codes/channels/save'){env.channels=[{...body,id:'custom',enabled:true}];return {channels:env.channels};}
@@ -204,6 +207,44 @@ await test('切换账号后晚到的旧账号记录不能显示',async()=>{
   const job=e.api.refreshRecords();await tick();e.api.switchAccount('b');await tick();
   gate.resolve({rows:[record('A-LATE')],total:1,pages:1,page:1});await job;await tick();
   assert.equal(e.api.state().giftViewed,'b');assert.equal(e.api.state().rows[0].code,'B-ROW');
+});
+await test('A 兑换后手动选过 A，再切到 B 仍可兑换同一码',async()=>{
+  const e=fixture([{id:'a',title:'A'},{id:'b',title:'B'}]);
+  const redeemed=new Set();
+  e.libraryFor=ids=>[{code:'SHARED',eligible:ids.some(id=>!redeemed.has(id))}];
+  await e.api.refresh();
+  e.node('gift-select-none').onclick();
+  const [a,b]=e.node('gift-account-list').children.map(row=>row.firstChild);
+  a.checked=true;a.onchange();await tick();
+  await e.node('gift-code-start').onclick();
+  redeemed.add('a');await e.api.refresh();
+  assert.deepEqual(e.api.state().library.tryCodes,[]);
+
+  const late=deferred();e.initialGate=late.promise;
+  const oldRequest=e.api.refreshLibrary();
+  e.initialGate=null;e.api.switchAccount('b');await tick();
+  late.resolve();await oldRequest;
+  assert.equal(a.checked,false);assert.equal(b.checked,true);
+  assert.deepEqual(e.api.state().library.tryCodes,['SHARED']);
+  assert.equal(e.node('gift-code-start').disabled,false);
+  await e.node('gift-code-start').onclick();
+  assert.deepEqual(e.calls.filter(call=>call.path.endsWith('/redeem')).map(call=>call.body.accounts),[['a'],['b']]);
+});
+await test('手动更换兑换目标后立即清除旧码库，单选记录跟随目标，多选可持续刷新',async()=>{
+  const e=fixture([{id:'a',title:'A'},{id:'b',title:'B'}]);
+  e.libraryFor=ids=>[{code:'SHARED',eligible:ids.includes('a')}];
+  await e.api.refresh();
+  e.node('gift-select-all').onclick();await tick();await e.api.refresh();
+  assert.deepEqual(JSON.parse(e.calls.filter(call=>call.path.endsWith('/initial')).at(-1).query.get('accounts')),['a','b']);
+  const gate=deferred();e.initialGate=gate.promise;
+  const a=e.node('gift-account-list').firstChild.firstChild;
+  a.checked=false;a.onchange();await tick();
+  assert.equal(e.api.state().giftViewed,'b');
+  assert.equal(e.node('gift-code-library-rows').children.length,0);
+  assert.equal(e.node('gift-code-start').disabled,true);
+  gate.resolve();await tick();
+  assert.deepEqual(e.api.state().library.tryCodes,[]);
+  assert.equal(e.node('gift-code-start').disabled,true);
 });
 await test('CSV使用独立导出接口并携带页面版本及筛选条件',async()=>{
   const e=fixture();await e.api.refresh();e.node('gift-record-status').value='success';e.node('gift-record-status').onchange();await tick();
