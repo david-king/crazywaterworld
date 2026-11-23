@@ -483,25 +483,82 @@ await test('复查或动作预留期间调大轮询间隔，配置与挂机动�
     assert(!Object.keys(f.ledger.keyRecords()).some(key => key.startsWith('event-action:')));
   }
 });
+await test('满舱往返真实入口：刷新前后分两批采购，复查少一格取消发船，抵港按实价逐批出售', async () => {
+  const f = setup();
+  f.settings.merchant.fullCargoRoutes = true;
+  f.state.trade.player.coins = 50000;
+  const quote = f.state.markets[10].goods[0];
+  quote.stock = 59600;
+  const step = () => f.run(merchantActivity, 'merchantTrade');
+  f.client.serverClockOffsetMs = (f.now - 60) * 1000 - Date.now();
+  await step();
+  assert.equal(f.sent('TradeBuyRequest')[0].body.buyNum, 400);
+  await step();
+  assert.equal(f.state.writes.length, 1);
+  f.client.serverClockOffsetMs = (f.now + 60) * 1000 - Date.now();
+  Object.assign(quote, { stock: 0, price: 38 });
+  await step();
+  assert.equal(f.sent('TradeBuyRequest')[1].body.buyNum, 600);
+  let reads = 0;
+  f.state.onRead = name => {
+    if (name === 'TradeInfo' && ++reads === 2) f.state.trade.player.goods[1].num--;
+  };
+  await step();
+  assert.equal(f.sent('TradeMoveRequest').length, 0);
+  f.state.onRead = null;
+  f.state.trade.player.goods[1].num++;
+  await step();
+  assert.equal(f.sent('TradeMoveRequest')[0].body.mvToCityId, 20);
+  Object.assign(f.state.trade.cargo, { cityId: 20, moveToCityId: 0, moveEndTime: 0 });
+  Object.assign(f.state.markets[20], { specGoodsId: 1002, rareGoodsId: 1001 });
+  await step(); await step();
+  assert.equal(f.sent('TradeSellRequest').length, 2);
+  assert.equal(f.state.trade.player.goods.length, 0);
+});
 await test('海商王进度区分持仓、计划商品和城池；无共享仍显示并执行出售', async () => {
   const f = setup();
   const progress = () => merchantProgress(f.config, f.window, f.state.trade, f.player, f.now,
-    async (name) => name === 'TradeGuildRadar' ? f.state.radar : f.state.markets[f.state.trade.cargo.cityId], f.ledger);
+    async (name) => name === 'TradeGuildRadar' ? f.state.radar : f.state.markets[f.state.trade.cargo.cityId], f.ledger, f.settings);
   const buy = await progress();
   assert.match(buy, /当前商品：空载/);
   assert.match(buy, /计划买入：.+目标城池：/);
+  assert.match(buy, /预期收益：约 2,575 商会币/);
   await f.run(merchantActivity, 'merchantTrade');
   await f.run(merchantActivity, 'merchantTrade');
   const sailing = await progress();
   assert.match(sailing, /当前商品：.+ ×250/);
   assert.match(sailing, /目标城池：.+航行中/);
+  assert.match(sailing, /预期收益：约 2,575 商会币/);
   Object.assign(f.state.trade.cargo, { cityId: 20, moveToCityId: 0, moveEndTime: 0 });
-  assert.match(await progress(), /计划卖出：.+目标城池：/);
+  assert.match(await progress(), /计划卖出：.+目标城池：.+预期收益：约 6,438 商会币/);
   for (const port of f.state.radar.radar) port.rareGoodsId = 0;
   assert.match(await progress(), /计划卖出：.+目标城池：/);
   await f.run(merchantActivity, 'merchantTrade');
   assert.equal(f.sent('TradeSellRequest').length, 1);
   assert.equal(f.state.writes.length, 3);
+});
+await test('航行中沿用出发估值，旧记录按同期快照还原，寻价或缺少依据时保留待定', async () => {
+  const f = setup();
+  await f.run(merchantActivity, 'merchantTrade');
+  await f.run(merchantActivity, 'merchantTrade');
+  const records = f.ledger.keyRecords();
+  const move = Object.values(records).find(row => row.details?.expected?.request === 'TradeMoveRequest');
+  const expected = move.details.expected;
+  const progress = () => merchantProgress(f.config, f.window, f.state.trade, f.player, f.now,
+    () => assert.fail('航行中不应查询港口报价'), { keyRecords: () => records });
+  assert.equal(expected.estimatedProfit, 2575);
+  delete expected.estimatedProfit;
+  assert.match(await progress(), /预期收益：约 2,575 商会币/);
+  delete records['merchant-journal:' + f.window.startTime + ':' + f.window.period];
+  assert.match(await progress(), /预期收益：待估算/);
+  for (const amount of [0, -100]) {
+    expected.estimatedProfit = amount;
+    assert.match(await progress(), new RegExp('预期收益：约 ' + amount + ' 商会币'));
+  }
+  expected.exploration = true;
+  assert.match(await progress(), /预期收益：待到港询价/);
+  f.state.trade.cargo.moveStartTime -= 3600;
+  assert.match(await progress(), /预期收益：待估算/);
 });
 await test('展示计划使用传入策略且不写账本或刷新本港历史时间戳', async () => {
   const f = setup();

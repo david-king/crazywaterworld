@@ -549,7 +549,7 @@ function ChatPanel({
   account: string | null;
   hint: string;
 }) {
-  const [channel, setChannel] = useState<Channel>("world");
+  const [channel, setChannel] = useState<Channel | null>(null);
   const [peer, setPeer] = useState<Peer | null>(null);
   const [profile, setProfile] = useState<ProfileTarget | null>(null);
   function openPeer(target: Peer) {
@@ -587,9 +587,9 @@ function ChatPanel({
           <strong>{peer.name}</strong>
         </div>
       )}
-      {hint || !account ? (
+      {hint || !account || !channel ? (
         <p className={styles.empty} role="status">
-          {hint}
+          {hint || "请选择频道查看聊天记录。"}
         </p>
       ) : (
         <Feed

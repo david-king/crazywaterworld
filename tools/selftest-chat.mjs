@@ -239,10 +239,26 @@ try {
       const page = await browser.newPage({ viewport: { width, height: 800 } });
       const errors = [];
       page.on('pageerror', error => errors.push(error.message));
-      await page.addInitScript(() => history.replaceState({ consoleView: { tab: 'chat' } }, ''));
+      const chatRequests = [];
+      page.on('request', request => {
+        const url = new URL(request.url());
+        if (url.pathname.startsWith('/api/chat') || url.pathname.startsWith('/ui/chunks/chat-'))
+          chatRequests.push(url);
+      });
       await page.goto(base);
+      await page.locator('#tabs [data-tab="overview"][aria-current="page"]').waitFor();
+      await page.locator('#tabs [data-tab="resources"]').click();
+      await page.locator('[data-resource-tab="guild"][aria-current="page"]').waitFor();
+      assert.deepEqual(chatRequests, []);
+      await page.locator('[data-resource-tab="chat"]').click();
       const pane = page.locator('#chat-root');
+      const chooseWorld = () => pane.getByRole('button', { name: '世界', exact: true }).click();
+      await pane.getByText('请选择频道查看聊天记录。').waitFor();
+      assert(chatRequests.some(url => url.pathname.startsWith('/ui/chunks/chat-')));
+      assert(!chatRequests.some(url => url.pathname.startsWith('/api/chat')));
+      await chooseWorld();
       await pane.getByText('chat-a 的历史消息').waitFor();
+      assert(chatRequests.filter(url => url.pathname === '/api/chat').every(url => url.searchParams.get('channel') === 'world'));
       const input = pane.getByLabel('聊天消息');
       const openEmojis = pane.getByRole('button', { name: '选择表情' });
       await input.fill('未发出的草稿');
@@ -336,11 +352,22 @@ try {
       assert(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth));
       await page.locator('#account-picker-trigger').click();
       await page.getByRole('option', { name: /chat-b/ }).click();
+      await pane.getByText('请选择频道查看聊天记录。').waitFor();
+      await chooseWorld();
       await pane.getByText('chat-b 的历史消息').waitFor();
       assert.equal(await pane.getByText(payload).count(), 0);
       await page.locator('#account-picker-trigger').click();
       await page.getByRole('option', { name: /chat-a/ }).click();
+      await pane.getByText('请选择频道查看聊天记录。').waitFor();
+      await chooseWorld();
       await pane.getByText('chat-a 的历史消息').waitFor();
+      await page.locator('[data-resource-tab="giftcodes"]').click();
+      await input.waitFor({state:'detached'});
+      const previousReads = chatRequests.length;
+      await page.evaluate(() => window.dispatchEvent(new Event('cw-chat-update')));
+      await page.locator('[data-resource-tab="chat"]').click();
+      await pane.getByText('请选择频道查看聊天记录。').waitFor();
+      assert.equal(chatRequests.length, previousReads);
       assert.deepEqual(errors, []);
       await page.close();
     }
@@ -350,6 +377,9 @@ try {
       await page.addInitScript(() => history.replaceState({ consoleView: { tab: 'chat' } }, ''));
       await page.goto(base);
       const pane = page.locator('#chat-root');
+      await page.locator('[data-resource-tab="chat"][aria-current="page"]').waitFor();
+      assert.deepEqual(await page.evaluate(() => history.state.consoleView), { tab: 'resources', resource: 'chat' });
+      await pane.getByRole('button', { name: '世界', exact: true }).click();
       await pane.getByLabel('聊天消息').waitFor();
       await pane.getByRole('button', {name:'选择表情'}).click();
       const picker = pane.getByRole('dialog', {name:'选择表情'});

@@ -24,7 +24,7 @@ export const activityAutomationFields = [
       help: '活动开放期间，当天累计投够3票后领取一次；与自动投票分别控制。' },
   ] },
   { key: 'activityAutomation.fish', label: '钓鱼图鉴', taskKeys: ['fishBook'] },
-  { key: 'activityAutomation.vip', label: 'VIP 每日奖励', taskKeys: ['vipDaily', 'vipDailyGift'] },
+  { key: 'activityAutomation.vip', label: 'VIP 每日奖励', taskKeys: ['vipDaily'] },
   { key: 'activityAutomation.pirates', label: '海盗战报奖励', taskKeys: ['campaignReports', 'battleReportRewards'] },
   { key: 'activityAutomation.openRank', label: '开服冲榜', taskKeys: ['openRankRewards', 'pirateRankRewards', 'warRankRewards'] },
 ];

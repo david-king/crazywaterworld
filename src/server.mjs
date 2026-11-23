@@ -1,5 +1,7 @@
 import { createSettingsHistory } from './settings-history.mjs';
 import { createGameChat } from './chat.mjs';
+import { createGameItems } from './items.mjs';
+import { autoRerollStatus, normalizeRequirements, startAutoReroll, stopAutoReroll } from './reroll-runner.mjs';
 import { planDiscountShop } from './discount-shop-automation.mjs';
 import { SHOP_CATALOG, createShopState, readShop, buyShopProduct, refreshDiscountShop } from './shops.mjs';
 import { serveClientAsset } from './ui-assets.mjs';
@@ -17,6 +19,7 @@ import { readResourceFieldsOverview, previewResourceField, runResourceFieldShort
 import {activityRankCatalog,readActivityRanking} from './activity-rankings.mjs';
 import {readActivityStatistics} from './activity-statistics.mjs';
 import { merchantActivity, readMerchantStatus, readMerchantOverview, readMerchantJournal, merchantJournalSummary } from './merchant-activity.mjs';
+import { saveMerchantIntel } from './merchant-intel.mjs';
 import { watchMerchant } from './merchant-monitor.mjs';
 import { giftCodeStatus, giftCodeSummary, startGiftCodes, startGiftCodeBatch } from './gift-codes.mjs';
 import { publicGiftCodes } from './gift-code-library.mjs';
@@ -3417,6 +3420,29 @@ export function createConsole({ host = '127.0.0.1', port = 17321, onLog, recover
         if(started.length>1)Promise.allSettled(started.map(result=>result.done)).then(()=>emit(null,'info','批量礼包兑换结束：共 '+started.length+' 个账号，请查看账号结果汇总'));
         json({accepted:started.length,results:results.map(({id,title,accepted,error})=>({id,title,accepted,error}))});return;
       }
+      if (route === 'POST /api/merchant/intel') {
+        const { session } = scoped_(parsed), client = session.client, player = session.player;
+        const enabled = () => client?.connected && session.client === client && session.player === player && !session.paused;
+        if (!enabled()) throw Error('请先连接当前角色再保存港口情报');
+        const payload = jsonBody();
+        const result = await readJob(session, () => saveMerchantIntel(client, loadConfigSafe(), player, usageFor(session), payload, enabled));
+        watchMerchant(client).invalidate('手动港口情报已更新');
+        json(result); return;
+      }
+      if (route === 'GET /api/merchant/overview') {
+        const { session } = scoped_(parsed);
+        const { client, player, generation } = session;
+        const connected = () => client?.connected && !session.paused && session.client === client &&
+          session.generation === generation && player && session.player === player;
+        if (!connected()) throw Error('请先连接当前角色再刷新海商王');
+        json(await readJob(session, async () => {
+          if (!connected()) throw Error('账号连接已变化，请重新刷新海商王');
+          const panel = await readMerchantOverview(client, loadConfigSafe(), { player, ledger: usageFor(session), settings: session.preferences });
+          if (!connected()) throw Error('账号连接已变化，请重新刷新海商王');
+          return panel;
+        }, { recoverFormation: false }));
+        return;
+      }
       if(route==='GET /api/merchant/history'){
         const { session } = scoped_(parsed), ledger = usageFor(session);
         json({ summary: merchantJournalSummary(ledger), entries: readMerchantJournal(ledger) }); return;
@@ -3560,6 +3586,56 @@ export function createConsole({ host = '127.0.0.1', port = 17321, onLog, recover
         const peerId = parsed.searchParams.get('peer');
         json(route === 'GET /api/chat/profile' ? await client.chat.profile(peerId, schedule, current)
           : await client.chat.read(parsed.searchParams.get('channel'), peerId, schedule, current));
+        return;
+      }
+      if (['GET /api/items', 'GET /api/items/auto', 'POST /api/items/reroll', 'POST /api/items/decide',
+        'POST /api/items/auto', 'POST /api/items/auto/stop'].includes(route)) {
+        const id = parsed.searchParams.get('account');
+        if (!id) throw Error('请选择装备账号');
+        const { session } = scoped_(parsed);
+        if (id !== session.id) throw Error('装备账号不匹配');
+        const client = session.client, player = session.player, generation = session.generation;
+        const current = () => {
+          if (!client?.connected || !player || session.paused || session.generation !== generation || session.client !== client || session.player !== player)
+            throw Error('请先连接当前账号，再使用装备');
+        };
+        current();
+        client.items ??= createGameItems(client, { config: loadConfigSafe({ allowStale: true }), accountId: id });
+        res.setHeader('cache-control', 'no-store');
+        const schedule = work => readJob(session, work, { recoverFormation: false });
+        const work = item => enqueue(session, item, '装备洗炼', { recoverFormation: false });
+        if (route === 'GET /api/items') {
+          json(await client.items.read(schedule, current));
+          return;
+        }
+        if (route === 'GET /api/items/auto') {
+          json(autoRerollStatus(id));
+          return;
+        }
+        const payload = jsonBody();
+        needConfirm(payload);
+        if (route === 'POST /api/items/auto/stop') {
+          stopAutoReroll(id);
+          json(autoRerollStatus(id));
+          return;
+        }
+        if (route === 'POST /api/items/auto') {
+          const equip = await client.items.read(schedule, current);
+          const row = equip.rows.find(item => item.uid === String(payload.uid ?? ''));
+          if (!row) throw Error('仓库里找不到这件装备');
+          if (!row.rerollable) throw Error('只有橙装和红装能洗炼');
+          if (row.quality !== 'RED' && Array.isArray(payload.lockedSlots) && payload.lockedSlots.length)
+            throw Error('只有红装能锁定词条');
+          json(startAutoReroll(id, client.items, {
+            uid: row.uid, name: row.name, quality: row.quality, requirements: normalizeRequirements(payload.requirements, row.slots),
+            maxRolls: payload.maxRolls, materialFloor: payload.materialFloor, lockedSlots: payload.lockedSlots ?? [],
+            run: work, current,
+          }));
+          return;
+        }
+        json(route === 'POST /api/items/reroll'
+          ? await client.items.reroll(payload, work, current)
+          : await client.items.decide(payload, work, current));
         return;
       }
       if (route === 'GET /api/accounts/card') {

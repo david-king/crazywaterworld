@@ -119,6 +119,23 @@ try {
     assert.equal(connections, before);
   });
 
+  await test('第50版配置缺少满舱航线时可直接启动并完成原定挂机任务', async () => {
+    const { id, state } = await seed({ autoStart: false });
+    const store = JSON.parse(fs.readFileSync(file));
+    store.version = 50;
+    store.accounts[id].settingsVersion = 50;
+    delete store.accounts[id].settings.merchant.fullCargoRoutes;
+    fs.writeFileSync(file, JSON.stringify(store));
+    await open();
+    ok(await api(id, 'loop/start', { rounds: 1 }));
+    await waitFor(() => !app.sessions.get(id).loop.running, '旧版配置完成一轮挂机');
+    assert(state.reads.includes('EmailBoxRequest'));
+    const view = ok(await api(id, 'settings'));
+    assert.equal(view.recovery, null);
+    assert.equal(view.settings.merchant.fullCargoRoutes, defaultSettings().merchant.fullCargoRoutes);
+    assert.equal(view.settings.schedule.mail, true);
+  });
+
   await test('已配置账号丢失整个文件时恢复默认并关闭开机自启，重建服务仍要求重新配置', async () => {
     const { id } = await seed(); fs.unlinkSync(file);
     const before = connections; await open();

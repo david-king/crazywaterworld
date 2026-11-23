@@ -310,19 +310,294 @@ function refreshOverviewFilter() {
 $('overview-task-search').oninput = refreshOverviewFilter;
 $('overview-task-filter').onchange = refreshOverviewFilter;
 
+const merchantNumber = value => value == null ? '未同步' : value.toLocaleString('zh-CN');
+const merchantAmount = value => value >= 10000 && value % 100 === 0
+  ? merchantNumber(value / 10000) + ' 万' : merchantNumber(value);
+
+function merchantFacts(rows) {
+  const list = el('dl', 'merchant-facts');
+  for (const [label, value] of rows) {
+    const pair = el('div');
+    pair.append(el('dt', null, label), el('dd', null, value));
+    list.append(pair);
+  }
+  return list;
+}
+
+function merchantTierNode(tier, previousTarget, goal, items, state) {
+  const node = el('li', 'merchant-tier');
+  node.dataset.state = state;
+  const states = { claimed: '已领取', ready: '可领取', reached: '已达成', next: '下一档', locked: '未达成', unknown: '待同步' };
+  const caption = el('div', 'merchant-tier-caption');
+  caption.append(el('span', null, '第 ' + tier.id + ' 档'), el('span', 'merchant-tier-state', states[state]));
+  const rail = el('div', 'merchant-rail');
+  const fill = el('span');
+  rail.append(fill);
+  if (state === 'next') {
+    node.setAttribute('aria-current', 'step');
+    const span = tier.target - previousTarget;
+    fill.style.width = (span > 0 ? Math.max(0, (goal.profit - previousTarget) / span) * 100 : 0) + '%';
+    rail.setAttribute('role', 'progressbar');
+    rail.setAttribute('aria-label', '前往第 ' + tier.id + ' 档');
+    rail.setAttribute('aria-valuemin', previousTarget);
+    rail.setAttribute('aria-valuemax', tier.target);
+    rail.setAttribute('aria-valuenow', Math.max(previousTarget, goal.profit));
+    rail.setAttribute('aria-valuetext', '累计利润 ' + merchantNumber(goal.profit) + '，目标 ' + merchantNumber(tier.target));
+  }
+  const target = el('p', 'merchant-tier-target');
+  target.append(el('strong', null, merchantAmount(tier.target)), el('span', null, '利润'));
+  node.append(caption, rail, target);
+  for (const [id, count] of tier.rewards) {
+    const reward = el('div', 'merchant-reward');
+    const item = items?.[id];
+    if (item?.icon) reward.append(iconEl(item.icon, 22, item.name));
+    const label = el('span', null, item?.name || id);
+    label.append(' ', el('b', null, '×' + merchantAmount(count)));
+    reward.title = id + ' ×' + merchantNumber(count);
+    reward.append(label);
+    node.append(reward);
+  }
+  if (!tier.rewards.length) node.append(el('span', 'merchant-caption', '奖励待同步'));
+  return node;
+}
+
+let merchantRewardObserver;
+function renderMerchantRewardStrip(section, actions, nodes, focusIndex, position) {
+  const list = el('ol', 'merchant-tiers');
+  list.id = 'merchant-reward-tiers';
+  list.setAttribute('aria-label', '累计利润奖励档位');
+  if (position != null) list.dataset.position = position;
+  list.append(...nodes);
+  section.append(list);
+
+  let width = 0, stride = 0, cardsPerGroup = 1, lastLeft = 0;
+  const controls = el('div', 'merchant-tier-controls');
+  function arrow(id, label, direction) {
+    const button = smallButton('');
+    button.id = id;
+    button.title = label;
+    button.setAttribute('aria-label', label);
+    button.setAttribute('aria-controls', list.id);
+    button.onclick = () => {
+      const groupWidth = cardsPerGroup * stride;
+      const target = direction > 0 ? Math.floor((list.scrollLeft + 1) / groupWidth) + 1
+        : Math.ceil((list.scrollLeft - 1) / groupWidth) - 1;
+      list.scrollLeft = target * groupWidth;
+      rememberPosition();
+    };
+    return button;
+  }
+  const prev = arrow('merchant-tier-prev', '上一组奖励', -1);
+  const next = arrow('merchant-tier-next', '下一组奖励', 1);
+  controls.append(prev, next);
+  actions.append(controls);
+
+  function updateArrows() {
+    prev.disabled = list.scrollLeft <= 1;
+    next.disabled = list.scrollLeft >= list.scrollWidth - width - 1;
+  }
+  function layout() {
+    if (!list.clientWidth || width === list.clientWidth) return;
+    width = list.clientWidth;
+    const first = nodes[0].getBoundingClientRect();
+    stride = nodes.length > 1 ? nodes[1].getBoundingClientRect().left - first.left : first.width;
+    cardsPerGroup = Math.max(1, Math.round(width / stride));
+    controls.hidden = list.scrollWidth <= width;
+    list.tabIndex = controls.hidden ? -1 : 0;
+    if (list.dataset.position != null) list.scrollLeft = Number(list.dataset.position) * stride;
+    else if (controls.offsetWidth) list.scrollLeft = Math.floor(focusIndex / cardsPerGroup) * cardsPerGroup * stride;
+    else list.scrollLeft = focusIndex * stride - (width - first.width) / 2;
+    lastLeft = list.scrollLeft;
+    updateArrows();
+  }
+  function rememberPosition() {
+    if (list.clientWidth !== width || !stride || list.scrollLeft === lastLeft) return;
+    lastLeft = list.scrollLeft;
+    list.dataset.position = String(lastLeft / stride);
+    updateArrows();
+  }
+  list.onscroll = rememberPosition;
+  list.onkeydown = event => {
+    if (event.key !== 'Home' && event.key !== 'End') return;
+    event.preventDefault();
+    list.scrollLeft = event.key === 'Home' ? 0 : list.scrollWidth;
+  };
+  layout();
+  merchantRewardObserver = new ResizeObserver(layout);
+  merchantRewardObserver.observe(list);
+}
+
+function renderMerchantRewards(section, goal, items, position, intel) {
+  const tiers = goal.tiers ?? [];
+  const claimed = tier => goal.claimed != null && tier.id <= goal.claimed;
+  const reached = tier => claimed(tier) || (goal.profit != null && goal.profit >= tier.target);
+  const nextIndex = tiers.findIndex(tier => !reached(tier));
+  const next = goal.profit != null ? tiers[nextIndex] : null;
+  const head = el('div', 'merchant-scoreboard');
+  const score = el('div', 'merchant-score');
+  score.append(el('span', 'merchant-caption', '个人累计利润'), el('strong', null, merchantNumber(goal.profit)));
+  head.append(score);
+  if (next) {
+    const gap = el('div', 'merchant-gap');
+    gap.append(el('span', 'merchant-caption', '距第 ' + next.id + ' 档还差'), el('strong', null, merchantNumber(next.target - goal.profit)));
+    head.append(gap);
+  }
+  const actions = el('div', 'merchant-score-actions');
+  if (intel) {
+    const button = smallButton('港口情报');
+    button.id = 'merchant-intel-toggle';
+    button.setAttribute('aria-haspopup', 'dialog');
+    button.setAttribute('aria-controls', 'merchant-intel-dialog');
+    button.onclick = openMerchantIntel;
+    actions.append(button);
+  }
+  head.append(actions);
+  section.append(head);
+  if (!tiers.length) {
+    section.append(el('p', 'merchant-caption', '本期奖励档位待同步'));
+    return;
+  }
+  const ready = goal.claimed == null ? 0 : tiers.filter(tier => reached(tier) && !claimed(tier)).length;
+  const status = goal.claimed == null ? '领取记录待同步' : tiers.every(claimed) ? '奖励已全部领取' : ready ? ready + ' 档可领取' : '';
+  if (status) actions.before(el('span', 'merchant-caption', status));
+  const nodes = tiers.map((tier, i) => {
+    let state = 'locked';
+    if (claimed(tier)) state = 'claimed';
+    else if (reached(tier)) state = goal.claimed == null ? 'reached' : 'ready';
+    else if (goal.profit == null) state = 'unknown';
+    else if (tier === next) state = 'next';
+    const node = merchantTierNode(tier, tiers[i - 1]?.target ?? 0, goal, items, state);
+    node.value = tier.id;
+    return node;
+  });
+  renderMerchantRewardStrip(section, actions, nodes, nextIndex < 0 ? tiers.length - 1 : nextIndex, position);
+}
+
+function renderMerchantTrade(section, goal, trade, purchaseDetailsOpen) {
+  const heading = el('div', 'merchant-trade-heading');
+  heading.append(el('h3', null, '商船动态'), el('span', null, trade.voyage.status));
+  const rows = [...trade.voyage.facts, ['商会币', merchantNumber(trade.coins)], ['商船等级', merchantNumber(trade.level)]];
+  if (goal.remainingTradingSeconds != null) rows.push(['剩余交易时间', goal.remainingTradingSeconds === 0
+    ? '交易时段已结束' : (goal.remainingTradingSeconds / 3600).toLocaleString('zh-CN', { maximumFractionDigits: 2 }) + ' 小时']);
+  const voyage = el('div', 'merchant-voyage');
+  voyage.append(heading, merchantFacts(rows));
+  if (trade.voyage.purchaseDetails?.length) {
+    const details = el('details');
+    const summary = el('summary', 'merchant-caption', '采购明细');
+    summary.id = 'merchant-purchase-summary';
+    details.open = purchaseDetailsOpen;
+    details.append(summary, merchantFacts(trade.voyage.purchaseDetails));
+    voyage.append(details);
+  }
+  section.append(voyage);
+
+  const trades = el('section', 'merchant-trade-group');
+  trades.append(el('h3', null, '本期已核实交易'), merchantFacts([
+    ['买入', merchantNumber(trade.buys) + ' 笔'], ['卖出', merchantNumber(trade.sells) + ' 笔'],
+    ['已实现净利润', merchantNumber(trade.realizedProfit)], ['已用指南针', merchantNumber(trade.pointerUsed) + ' 根'],
+    ['指南针加速', trade.autoSpeedUp ? '已开启' : '已关闭'], ['钻石补购', trade.autoBuyPointers ? '已开启' : '已关闭'],
+  ]));
+  const estimate = [['距目标还差', merchantNumber(goal.remaining)]];
+  if (goal.requiredPerHour != null) estimate.push(['每小时需赚', merchantNumber(goal.requiredPerHour)]);
+  if (goal.observedPerHour != null) estimate.push(['开放时段每小时实赚', merchantNumber(goal.observedPerHour)]);
+  if (goal.remaining > 0 && goal.freeTrips != null) {
+    estimate.push(['剩余免费卖货机会', '最多 ' + merchantNumber(goal.freeTrips) + ' 程']);
+    if (goal.requiredPerFreeTrip != null) estimate.push(['每程需赚', merchantNumber(goal.requiredPerFreeTrip)]);
+  }
+  const forecast = el('section', 'merchant-trade-group');
+  forecast.append(el('h3', null, merchantAmount(goal.target) + ' 利润目标'), merchantFacts(estimate));
+  if (goal.remaining > 0 && goal.freeTrips != null) forecast.append(el('p', null, '免费航程按每程一批、当日到港卖出估算。'));
+  for (const note of trade.notes) forecast.append(el('p', null, note));
+  section.append(trades, forecast);
+}
+
+let merchantAutoRefresh = true, merchantRefreshSeconds = 30;
+let merchantRefreshPending = false, merchantLastRefresh = 0, merchantRenderRevision = 0;
+const merchantIntervalInput = $('merchant-refresh-seconds');
+const merchantRefreshToggle = $('merchant-auto-refresh');
+const validMerchantInterval = seconds => Number.isInteger(seconds) && seconds >= 5 && seconds <= 300;
+try {
+  const saved = JSON.parse(localStorage.getItem('cw.merchant.refresh'));
+  if (typeof saved?.enabled === 'boolean') merchantAutoRefresh = saved.enabled;
+  if (validMerchantInterval(saved?.seconds)) merchantRefreshSeconds = saved.seconds;
+} catch { /* 存储不可用时沿用本页设置。 */ }
+
+function paintMerchantRefresh() {
+  merchantRefreshToggle.setAttribute('aria-pressed', String(merchantAutoRefresh));
+  merchantRefreshToggle.textContent = '自动刷新：' + (merchantAutoRefresh ? '开' : '关');
+  merchantIntervalInput.value = String(merchantRefreshSeconds);
+  merchantIntervalInput.setCustomValidity('');
+}
+function saveMerchantRefresh() {
+  try { localStorage.setItem('cw.merchant.refresh', JSON.stringify({ enabled: merchantAutoRefresh, seconds: merchantRefreshSeconds })); } catch {}
+}
+function merchantPollingActive() {
+  return merchantAutoRefresh && current && snapshot.connected && !snapshot.paused && !snapshot.loginBlocked &&
+    !disconnected.has(current) && !document.hidden && !$('tab-overview').classList.contains('hidden') && !$('merchant-overview').hidden;
+}
+async function maybeRefreshMerchant() {
+  if (!merchantPollingActive() || merchantRefreshPending || overviewPending?.account === current ||
+    Date.now() - merchantLastRefresh < merchantRefreshSeconds * 1000) return;
+  const account = current, revision = merchantRenderRevision;
+  const stillCurrent = () => current === account && revision === merchantRenderRevision && merchantPollingActive();
+  merchantRefreshPending = true;
+  try {
+    const panel = await call('/api/merchant/overview?account=' + encodeURIComponent(account));
+    if (stillCurrent()) renderMerchantOverview(panel);
+  } catch (error) {
+    if (stillCurrent()) reportError(error, '刷新海商王', account);
+  } finally {
+    merchantRefreshPending = false;
+    merchantLastRefresh = Date.now();
+  }
+}
+merchantRefreshToggle.onclick = () => {
+  merchantAutoRefresh = !merchantAutoRefresh;
+  paintMerchantRefresh();
+  saveMerchantRefresh();
+  if (merchantAutoRefresh) { merchantLastRefresh = 0; void maybeRefreshMerchant(); }
+};
+merchantIntervalInput.oninput = () => merchantIntervalInput.setCustomValidity('');
+merchantIntervalInput.onchange = () => {
+  const seconds = merchantIntervalInput.valueAsNumber;
+  if (!validMerchantInterval(seconds)) {
+    merchantIntervalInput.setCustomValidity('请输入 5–300 之间的整数秒数');
+    merchantIntervalInput.reportValidity();
+    return;
+  }
+  merchantRefreshSeconds = seconds;
+  saveMerchantRefresh();
+  void maybeRefreshMerchant();
+};
+paintMerchantRefresh();
+setInterval(maybeRefreshMerchant, 1000);
+
 let merchantOverviewTimer;
 function renderMerchantOverview(merchant) {
+  merchantRenderRevision++;
+  merchantLastRefresh = Date.now();
+  merchantRewardObserver?.disconnect();
   clearTimeout(merchantOverviewTimer);
   merchantOverviewTimer = null;
   const card = $('merchant-overview');
-  const section = clear($('merchant-overview-progress'));
+  const section = $('merchant-overview-progress');
+  const key = merchant ? JSON.stringify([current, merchant.startTime, merchant.trade?.period]) : '';
+  const samePeriod = key === section.dataset.period;
+  const purchaseDetailsOpen = samePeriod && !!section.querySelector('.merchant-voyage details[open]');
+  const position = samePeriod ? section.querySelector('.merchant-tiers')?.dataset.position : undefined;
+  const focused = samePeriod && section.contains(document.activeElement) && document.activeElement.id;
+  clear(section);
+  section.dataset.period = key;
   card.hidden = true;
+  syncMerchantIntel(merchant && merchant.serverNow >= merchant.startTime && merchant.serverNow < merchant.endTime ? merchant : null);
   if (!merchant || !(merchant.serverNow < merchant.endTime)) return;
   const upcoming = merchant.serverNow < merchant.startTime;
   const boundary = upcoming ? merchant.startTime : merchant.endTime;
   const delay = Math.ceil((boundary - merchant.serverNow) * 1000);
   if (delay <= 2147483647) merchantOverviewTimer = setTimeout(() => {
     merchantOverviewTimer = null;
+    merchantRewardObserver?.disconnect();
+    syncMerchantIntel(null);
     card.hidden = true;
     clear(section);
     if (upcoming && !document.hidden && !$('tab-overview').classList.contains('hidden')) void refreshOverview();
@@ -330,33 +605,14 @@ function renderMerchantOverview(merchant) {
   if (upcoming) return;
   card.hidden = false;
   const goal = merchant.goal;
-  if (goal) {
-    const fmt = value => value == null ? '未同步' : value.toLocaleString('zh-CN');
-    section.appendChild(el('strong', null, '个人累计利润 ' + fmt(goal.profit) + ' / ' + fmt(goal.target)));
-    const bar = el('progress');
-    bar.max = goal.target;
-    if (goal.profit != null) bar.value = Math.min(goal.profit, goal.target);
-    bar.setAttribute('aria-label', '5000 万利润目标');
-    section.appendChild(bar);
-    const reward = goal.reward.map(([item, count]) => item + ' ×' + count).join('、');
-    const gap = goal.remaining == null ? '进度待同步' : goal.remaining === 0 ? '已达标' : '还差 ' + fmt(goal.remaining);
-    section.appendChild(el('p', null, '5000 万目标' + (reward ? '奖励 ' + reward : '') + ' · ' + gap));
-    if (goal.totalTiers && goal.claimed != null) {
-      const next = goal.nextTier;
-      const claimed = goal.claimed ? '已领至第 ' + goal.claimed + ' 档' : '尚未领取利润奖励';
-      section.appendChild(el('p', null, next ? claimed + ' · 第 ' + next.id + ' 档需 ' + fmt(next.target) +
-        ' 利润' + (goal.ready ? '（可领取）' : '') : '本期利润奖励已全部领取'));
-    } else section.appendChild(el('p', 'dim', '本期利润奖励档位待同步'));
-    if (goal.remaining > 0 && goal.remainingTradingSeconds != null) {
-      section.appendChild(el('p', null, goal.remainingTradingSeconds > 0
-        ? '剩余交易时间 ' + (goal.remainingTradingSeconds / 3600).toLocaleString('zh-CN', { maximumFractionDigits: 2 }) +
-          ' 小时 · 达标需每小时 ' + fmt(goal.requiredPerHour) + ' 利润' +
-          (goal.observedPerHour == null ? '' : ' · 本期已开放时段平均 ' + fmt(goal.observedPerHour) + ' / 小时')
-        : '本期交易时段已结束'));
-    }
+  if (goal) renderMerchantRewards(section, goal, merchant.rewardItems, position, merchant.trade?.intel);
+  if (goal && merchant.trade) renderMerchantTrade(section, goal, merchant.trade, purchaseDetailsOpen);
+  else for (const line of merchant.lines ?? ['本期商船数据待同步，请刷新']) section.append(el('p', 'merchant-caption', line));
+  if (goal?.checkedAt) {
+    const period = merchant.trade ? '第 ' + merchant.trade.period + ' 期 · ' : '';
+    section.append(el('p', 'merchant-updated', period + '更新于 ' + activityDate(goal.checkedAt) + '（北京时间）'));
   }
-  for (const line of merchant.lines ?? ['本期商船数据待同步，请刷新']) section.appendChild(el('p', null, line));
-  if (goal?.checkedAt) section.appendChild(el('p', 'dim', '数据更新于 ' + activityDate(goal.checkedAt) + '（北京时间）'));
+  if (focused) document.getElementById(focused)?.focus({ preventScroll: true });
 }
 
 consoleStore.subscribe((state, previous) => {

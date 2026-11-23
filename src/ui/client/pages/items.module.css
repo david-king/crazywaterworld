@@ -1,0 +1,248 @@
+.page {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  height: 100%;
+  min-height: 0;
+}
+
+.bar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  align-items: center;
+}
+
+.kinds {
+  display: flex;
+  gap: 4px;
+}
+
+.filters {
+  display: grid;
+  gap: 6px;
+  padding: 8px;
+  border: 1px dashed var(--border);
+  border-radius: 10px;
+}
+
+.row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+}
+
+.row label {
+  font-size: 0.78rem;
+  color: var(--muted-foreground);
+}
+
+.chips {
+  display: flex;
+  gap: 4px;
+  overflow-x: auto;
+  padding-bottom: 2px;
+}
+
+.chips button {
+  flex: 0 0 auto;
+  white-space: nowrap;
+  border-radius: 999px;
+  font-size: 0.75rem;
+}
+
+.status {
+  font-size: 0.75rem;
+  color: var(--muted-foreground);
+  min-height: 1em;
+}
+
+.list {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding-right: 2px;
+}
+
+.item {
+  display: grid;
+  grid-template-columns: 30px 1fr auto;
+  gap: 8px;
+  align-items: center;
+  border: 1px solid var(--border);
+  border-radius: 9px;
+  padding: 6px 8px;
+  cursor: pointer;
+  text-align: left;
+  background: var(--card);
+  color: inherit;
+}
+
+.item:hover {
+  border-color: var(--ring);
+}
+
+.tile {
+  width: 28px;
+  height: 28px;
+  border-radius: 7px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 0.8rem;
+  font-weight: 600;
+  color: #fff;
+  overflow: hidden;
+}
+
+.tile img {
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+}
+
+.main {
+  min-width: 0;
+}
+
+.title {
+  display: flex;
+  gap: 5px;
+  align-items: baseline;
+  font-size: 0.86rem;
+  font-weight: 600;
+}
+
+.sub {
+  font-size: 0.7rem;
+  color: var(--muted-foreground);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.line {
+  font-size: 0.74rem;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.side {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 2px;
+  font-size: 0.75rem;
+  white-space: nowrap;
+}
+
+.stars {
+  letter-spacing: 0.5px;
+}
+
+.grade {
+  font-weight: 700;
+  padding: 0 4px;
+  border-radius: 4px;
+  border: 1px solid currentColor;
+  font-size: 0.68rem;
+}
+
+.gradeS {
+  color: #c8483f;
+}
+
+.gradeA {
+  color: #d98a2b;
+}
+
+.gradeB {
+  color: #3f7fbf;
+}
+
+.gradeC {
+  color: #5b8c5a;
+}
+
+.empty {
+  padding: 10px;
+  font-size: 0.85rem;
+  color: var(--muted-foreground);
+}
+
+.dialog {
+  max-width: min(94vw, 460px);
+}
+
+.attrs {
+  display: grid;
+  gap: 3px;
+  font-size: 0.82rem;
+  min-height: 3em;
+}
+
+.attrRow {
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+  border-bottom: 1px dashed var(--border);
+  padding: 2px 0;
+}
+
+.columns {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 10px;
+}
+
+.columns h4 {
+  font-size: 0.82rem;
+  color: var(--muted-foreground);
+  margin-bottom: 2px;
+}
+
+/* 主题启用 appearance: base-select 后，收起的选择框会渲染 option::checkmark（浅色 ✓）；本页恢复普通下拉外观。 */
+.page select {
+  appearance: none;
+}
+
+.auto {
+  border-top: 1px dashed var(--border);
+  margin-top: 10px;
+  padding-top: 8px;
+  display: grid;
+  gap: 6px;
+}
+
+.requirement {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  align-items: center;
+}
+
+.requirement select {
+  font-size: 0.78rem;
+  padding: 0.15rem 0.3rem;
+}
+
+.autoLog {
+  max-height: 12em;
+  overflow: auto;
+  display: grid;
+  gap: 2px;
+  font-size: 0.75rem;
+}
+
+.autoLogLine[data-level="error"] {
+  color: #c8483f;
+}
+
+.autoLogLine[data-level="warn"] {
+  color: #b07c1e;
+}

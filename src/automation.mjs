@@ -70,7 +70,6 @@ export const automationTasks = [
   ['leagueChallenge', '积分赛每日挑战', '挑战', false],
   ['leaguePassRewards', '积分赛战令奖励', '挑战', false],
   ['limitedFreeGifts', '商城限购免费礼包', '领奖', false],
-  ['vipDailyGift', 'VIP每日免费礼包', '领奖', false],
   ['heroAdRecruit', '英雄免广告招募（按今日剩余次数）', '招募', false],
   ['antiqueAdRecruit', '藏品免广告招募（按今日剩余次数）', '招募', false],
   ['weekTimes', '周抽奖次数奖励', '周期活动', false],
@@ -122,6 +121,7 @@ export const automationTasks = [
 ].map(([key, label, group, initial]) => ({ key, label, group, initial }));
 
 export function taskSettings(saved = {}) {
+  if (saved?.vipDailyGift === true) saved = { ...saved, vipDaily: true };
   // 旧、新世界 Boss 领奖开关原先按“任一开启”执行，读取旧任务时保留此选择。
   if (saved?.worldBossDamage === true) saved = { ...saved, worldBossRewards: true };
   return Object.fromEntries(automationTasks.map(({ key, initial }) =>

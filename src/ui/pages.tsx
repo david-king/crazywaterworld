@@ -7,7 +7,7 @@ import { Switch } from "./switch"
 import { HelpTip } from "./help-tip"
 import { Badge } from "./badge"
 import { DialogFooter, DialogHeader, DialogTitle } from "./dialog"
-import { ArrowDown, ArrowUp, Backpack, Gem, Gift, LayoutGrid, MessageCircle, Music2, Plus, QrCode, RefreshCw, Search, Shirt, Smartphone, Sprout, X } from "lucide-react"
+import { Backpack, Gem, Gift, LayoutGrid, MessageCircle, Music2, Plus, QrCode, Search, Shirt, Smartphone, Sprout, X } from "lucide-react"
 
 function Panel({title, help, titleAfter, children}: {title: string; help?: string; titleAfter?: React.ReactNode; children: React.ReactNode}) {
   return <Card><CardHeader><CardTitle className="title-with-help">{title}{help && <HelpTip title={title}>{help}</HelpTip>}</CardTitle>{titleAfter && <CardAction className="row-span-1 self-center max-md:col-span-2 max-md:col-start-1 max-md:row-start-2 max-md:justify-self-start">{titleAfter}</CardAction>}</CardHeader><CardContent>{children}</CardContent></Card>
@@ -102,7 +102,29 @@ export function overviewPage() {
       </div>
     </Panel>
     <section id="merchant-overview" aria-label="海商王" hidden>
-      <Panel title="海商王"><div id="merchant-overview-progress" className="merchant-progress" /></Panel>
+      <Panel title="海商王" titleAfter={<div className="world-refresh-controls">
+        <Button id="merchant-auto-refresh" size="sm" variant="outline" aria-pressed="true">自动刷新：开</Button>
+        <label className="world-refresh-setting">每<input id="merchant-refresh-seconds" aria-label="海商王刷新间隔（秒）" type="number" min="5" max="300" step="1" defaultValue="30" />秒</label>
+      </div>}><div id="merchant-overview-progress" className="merchant-progress" /></Panel>
+      <dialog id="merchant-intel-dialog" aria-labelledby="merchant-intel-title">
+        <div className="account-dialog-heading"><DialogHeader><DialogTitle id="merchant-intel-title">港口情报</DialogTitle>
+          <p id="merchant-intel-context" className="merchant-caption" /></DialogHeader>
+          <Button id="merchant-intel-close" type="button" size="icon-sm" variant="ghost" aria-label="关闭港口情报"><X aria-hidden="true" /></Button></div>
+        <div id="merchant-intel-list" />
+        <form id="merchant-intel-form" hidden>
+          <h3 id="merchant-intel-city" />
+          <label>特产<select id="merchant-intel-specialty" /></label>
+          <label>紧缺商品<select id="merchant-intel-shortage" /></label>
+          <label>共享人<Input id="merchant-intel-reporter" maxLength={80} autoComplete="off" /></label>
+          <p className="merchant-caption">保存后，后台走商会用这份情报比较采购和航线。游戏更新该港情报后自动以游戏为准。</p>
+          <div className="merchant-intel-actions">
+            <Button type="button" variant="ghost" size="sm" id="merchant-intel-reset">恢复游戏情报</Button>
+            <Button type="button" variant="outline" size="sm" id="merchant-intel-cancel">取消</Button>
+            <Button type="submit" size="sm">保存情报</Button>
+          </div>
+        </form>
+        <p id="merchant-intel-notice" className="merchant-caption" role="status" />
+      </dialog>
     </section>
     <Panel title="世界概览" help="点击城池可查看攻守队列、驻防和可用操作。地图刷新间隔可设为 5–300 秒。" titleAfter={<div className="world-refresh-controls"><Button id="world-map-auto-refresh" size="sm" variant="outline" aria-pressed="true">自动刷新：开</Button><label className="world-refresh-setting">每<input id="world-map-refresh-seconds" aria-label="世界概览刷新秒数" type="number" min="5" max="300" step="1" defaultValue="10" />秒</label></div>}>
       <div id="world-map-fleets" className="fleet-summary" aria-label="我的舰队" />
@@ -240,7 +262,6 @@ export function lineupsPage() {
   return renderToStaticMarkup(<div className="grid gap-3">
     <Panel title="我的阵容" help="管理已保存的自定义阵容，点击查看或在弹窗中编辑。主线和试炼可在各自入口选择阵容，挑战结束后自动还原到挑战前的搭配。">
       <div id="saved-lineup-view" className="progression-view" />
-      <template id="league-order-icons"><ArrowUp /><ArrowDown /><RefreshCw /></template>
     </Panel>
   </div>)
 }

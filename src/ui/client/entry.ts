@@ -68,6 +68,9 @@ lazyPage("daily-tasks-root", "dailies", "日常任务", async (host) =>
 lazyPage("chat-root", "chat", "聊天", async (host) =>
   (await import("./pages/chat")).mountChat(host),
 );
+lazyPage("items-root", "items", "装备与徽章", async (host) =>
+  (await import("./pages/items")).mountItems(host),
+);
 lazyPage("shops-root", "shops", "商店", async (host) =>
   (await import("./pages/shops")).mountShops(host),
 );

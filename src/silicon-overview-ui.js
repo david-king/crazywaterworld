@@ -159,7 +159,11 @@ function paintSiliconAction(action, body, footer) {
   }
   if (!action.fleetId) {
     const message = el('p', 'dim', quote.reason || '暂无可用舰队');
-    message.setAttribute('role', 'status'); body.append(message); return;
+    message.setAttribute('role', 'status'); body.append(message);
+    for (const fleet of quote.fleets) {
+      if (fleet.reason && fleet.reason !== quote.reason) body.append(el('p', 'dim', fleet.name + ' · ' + fleet.reason));
+    }
+    return;
   }
   if (quote.reason) body.append(el('p', 'warn', quote.reason));
   const field = el('div', 'silicon-fleet-choice'), picker = el('cw-select'), select = el('select');
@@ -304,13 +308,21 @@ function paintSiliconOverview(data) {
   for (const fleet of data.fleets) {
     const card = el('article', 'silicon-fleet'), heading = el('div', 'silicon-fleet-heading');
     heading.append(el('h3', '', fleet.name), el('span', fleet.mining ? 'silicon-mining-status' : 'dim', fleet.status)); card.append(heading);
-    card.append(el('p', 'silicon-fleet-location', fleet.mineName ? fleet.mineName + (fleet.slot ? ' · ' + fleet.slot + '号位' : '') : fleet.mining ? '采矿位置待同步' : '当前未占领硅矿'));
-    if (fleet.timerKind) card.append(siliconTimer(fleet.endAt, ({ reward: '下次产奖', arrival: '预计抵达', repair: '维修剩余' })[fleet.timerKind], ({ reward: '产奖时间已到，等待服务器结算', arrival: '抵达时间已到，等待同步', repair: '维修时间已到，等待同步' })[fleet.timerKind]));
-    siliconFacts(card, [['战力', siliconNumber(fleet.power)], ['耐久', siliconNumber(fleet.durability) + ' / ' + siliconNumber(fleet.maxDura)]]);
-    if (fleet.collected !== null) card.append(el('p', 'dim', '本次占矿已采 ' + fleet.collected + ' 次 · ' + (fleet.retreatAllowed === null ? '撤回状态待同步' : fleet.retreatAllowed ? '已满足首奖撤回条件' : '首奖后可撤回')));
+    const activity = el('div', 'silicon-fleet-activity');
+    activity.append(el('p', 'silicon-fleet-location', fleet.mineName ? fleet.mineName + (fleet.slot ? ' · ' + fleet.slot + '号位' : '') : fleet.mining ? '采矿位置待同步' : '当前未占领硅矿'));
+    if (fleet.collected != null) activity.append(el('span', 'dim silicon-fleet-collected', '已采 ' + siliconNumber(fleet.collected) + ' 次'));
+    if (fleet.timerKind) activity.append(siliconTimer(fleet.endAt, ({ reward: '下次产奖', arrival: '预计抵达', repair: '维修剩余' })[fleet.timerKind], ({ reward: '产奖时间已到，等待服务器结算', arrival: '抵达时间已到，等待同步', repair: '维修时间已到，等待同步' })[fleet.timerKind]));
     if (fleet.mining) {
-      const button = siliconRetreatButton(fleet.id); button.id = 'silicon-fleet-retreat-' + fleet.id; card.append(button);
+      const button = siliconRetreatButton(fleet.id);
+      button.id = 'silicon-fleet-retreat-' + fleet.id;
+      if (button.dataset.unavailable) {
+        button.textContent = fleet.retreatAllowed === false ? '首奖后可撤回' : '撤回待同步';
+        button.setAttribute('aria-label', '撤回舰队，' + button.textContent);
+      }
+      activity.append(button);
     }
+    card.append(activity);
+    siliconFacts(card, [['战力', siliconNumber(fleet.power)], ['耐久', siliconNumber(fleet.durability) + ' / ' + siliconNumber(fleet.maxDura)]]);
     fleets.append(card);
   }
   for (const mine of data.mines) mines.append(paintSiliconMine(mine));

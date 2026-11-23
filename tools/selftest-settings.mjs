@@ -525,7 +525,7 @@ try {
   });
 
   await check('两版任务设置迁移保留有效开关，退役装备及互助开关与缺省消费任务保持关闭', () => {
-    const keys = ['festivalActive', 'festivalGifts', 'snowballFree', 'weekLotterySpin', 'weekCharge', 'weekChipFree', 'weekUniqueFree', 'weekOrderFinal', 'weekOrderSubmit', 'vipDaily', 'campaignReports', 'openRankRewards',
+    const keys = ['festivalActive', 'festivalGifts', 'snowballFree', 'weekLotterySpin', 'weekCharge', 'weekChipFree', 'weekUniqueFree', 'weekOrderFinal', 'weekOrderSubmit', 'campaignReports', 'openRankRewards',
       'guildOrders', 'guildAidCollect', 'guildAidHelp', 'radarAuto', 'radarRepair', 'equipmentCollect', 'equipmentCraft', 'museumCollect', 'museumExplore', 'petCollect', 'petBreed'];
     for (const enabled of [true, false]) {
       const tasks = Object.fromEntries(keys.map(key => [key, enabled]));
@@ -554,7 +554,7 @@ try {
     const restored = importAutomationSettings(oldDocument);
     for (const key of ['guildOrders', 'radarAuto', 'radarRepair', 'equipmentCollect', 'equipmentCraft', 'museumCollect', 'museumExplore', 'petCollect', 'petBreed', 'weekLotterySpin', 'weekOrderSubmit', 'merchantTrade', 'beautyVotes', 'compassSpin']) assert.equal(restored.schedule[key], removedScheduleKeys.has(key) ? undefined : false, key);
     assert.equal(restored.schedule.weekOrderFinal, false);
-    assert.equal(restored.schedule.vipDaily, false);
+    assert.equal(restored.activityAutomation.vip, false);
   });
 
   await check('每日额度持久化、跨账号、跨日、未知结果和发送前取消', () => {

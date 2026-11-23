@@ -27,7 +27,7 @@ const config = { tables: {
 } };
 function fixture() {
   const id = ++serial, settings = defaultSettings(), calls = [], reports = [];
-  Object.assign(settings.merchant, { autoSpeedUp:true, autoBuyPointers:true, speedUpMode:'refresh', speedUpMinProfit:100, pointerDailyDiamondLimit:4000 });
+  Object.assign(settings.merchant, { fullCargoRoutes:false, autoSpeedUp:true, autoBuyPointers:true, speedUpMode:'refresh', pointerDailyDiamondLimit:4000 });
   Object.assign(settings.resources, {allowDiamonds:true,diamondDailyLimit:10000});
   const event = { period:1001,startTime:at-86400,endTime:at+86400 }, file = path.join(folder, 'usage-'+id+'.json');
   const state = { period:1001,player:{coins:1000,profit:2000,buySpeedTimes:0,goods:[{pid:1,goodsId:1001,num:100,buyPrice:10,cityId:10}]},
@@ -157,16 +157,18 @@ try {
       const f = fixture(); change(f); await f.run(); assert.deepEqual(f.writes(), []);
     }
   });
-  await test('库存一根足以达标或第二根的边际收益太小时直接用库存', async () => {
+  await test('库存足以达标时直接用针，差一币时按已开启的预算只补一根', async () => {
     for (const gap of [3500, 3606]) {
       const f = fixture(); f.stock(1);
+      f.settings.merchant.estimateDiscountPercent = 10;
       f.event.endTime = at + 2700;
       f.state.cargo.moveEndTime = at + 4410;
       f.state.worldCargo = [];
       f.state.player.goods.push({ ...f.state.player.goods[0], pid: 2, num: 1 });
       f.state.player.profit = 50_000_000 - gap;
       await f.run();
-      assert.deepEqual(f.writes().map(c => [c.name, c.body]), [['TradeSpeedRequest', { useNum: 1 }]]);
+      assert.deepEqual(f.writes().map(c => [c.name, c.body]), gap === 3500
+        ? [['TradeSpeedRequest', { useNum: 1 }]] : [['TradeBuySpeedItemRequest', { buyNum: 1 }]]);
     }
     const f = fixture(); f.state.worldCargo = [];
     f.event.endTime = at + 90;
@@ -199,7 +201,7 @@ try {
       if(expected[0]==='TradeBuySpeedItemRequest')assert.deepEqual(f.writes()[0].body,{buyNum:1});
     }
   });
-  await test('次优货能补足利润、缺少可比行情、本金不足或低于用户门槛时保留指针',()=>{
+  await test('次优货能补足利润、缺少可比行情、本金不足或低于整船最低利润时保留指针',()=>{
     const f=fixture(), stock=new Map([['海商王加速',4]]);
     const plan=history=>planMerchantSpeed(config,f.event,f.state,f.radar,stock,f.settings.merchant,at,
       {actor:f.ctx.player,marketHistory:history});
@@ -210,6 +212,10 @@ try {
     const alternate=f.marketHistory.map(m=>({...m,goods:[...m.goods,{goodsId:1003,price:10,stock:0}]}));
     assert.notEqual(plan(alternate).kind,'speed');
     assert.notEqual(plan(f.marketHistory.slice(0,1)).kind,'speed');
+    f.state.player.coins=10;
+    const smallGain=plan(f.marketHistory);
+    assert.equal(smallGain.accelerationReason,'stockRace');
+    assert(smallGain.estimatedIncrementalProfit > 0 && smallGain.estimatedIncrementalProfit < 1000);
     f.state.player.coins=1;assert.notEqual(plan(f.marketHistory).kind,'speed');
     f.state.player.coins=1000;f.settings.merchant.minExpectedProfit=50000;assert.notEqual(plan(f.marketHistory).kind,'speed');
   });

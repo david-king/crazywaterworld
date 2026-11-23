@@ -22,7 +22,7 @@ export const settingsFile = () => path.join(dataDirectory(), 'automation-setting
 export const SETTINGS_FORMAT = 'crazywaterworld-automation';
 // 文件 version / 账号 settingsVersion 是格式编号，只随结构迁移调整；
 // revision 是每次保存递增的修订号，仅用于并发冲突检查，不能用作格式版本。
-export const SETTINGS_SCHEMA_VERSION = 49;
+export const SETTINGS_SCHEMA_VERSION = 53;
 const LEGACY_SETTINGS_FORMAT = 'crazywaterword-automation';
 const treasureQualityLabels = { ORANGE: '万吨货轮', PURPLE: '中型货轮', BLUE: '小型货轮' };
 const treasureChaseDefaults = {
@@ -41,6 +41,9 @@ export const DEMAND_SOURCES = [
   ['petAdvance', '海兽进阶'], ['petFeed', '海兽喂养'], ['factory', '工厂补料'],
 ];
 
+// VIP 任务直接读取 activityAutomation.vip，无需另存 schedule 开关。
+function savedSchedule({ vipDaily, ...schedule }) { return schedule; }
+
 // 新账号的功能开关和执行细项全部关闭，必须由用户逐项开启。
 // ads.noPrivilege 是固定的旧格式兼容字段，不是自动执行开关。
 export const DEFAULT_SETTINGS = {
@@ -48,15 +51,15 @@ export const DEFAULT_SETTINGS = {
   // 连接被顶号后，挂机可按当前账号的策略自动恢复连接。
   // 时间使用北京时间（HH:mm）；深夜窗口支持跨午夜配置。
   login: { autoReconnect: false, intervalSeconds: 900, jitterSeconds: 0, quietHours: false, quietStart: '02:00', quietEnd: '07:00', quietIntervalSeconds: 60, maxRetries: 5 },
-  schedule: taskSettings(),
+  schedule: savedSchedule(taskSettings()),
   discountShop: { rules: [], fallbackCheapest: false },
   eventActions: { compassThreshold: 10, compassDrawCount: 10 },
   activityAutomation: activityAutomationDefaults,
   weeklyActivity: WEEKLY_ACTIVITY_DEFAULTS,
   weekOrder: { enabled: false, allowDiamonds: false },
-  merchant: { enabled: false, autoShareIntel: false, quoteMaxAgeSeconds: 300, estimateDiscountPercent: 0, refreshWaitSeconds: 120, liquidationMinutes: 120,
-    maxLossPercent: 0, minExpectedProfit: 1, autoSpeedUp: false, speedUpMinProfit: 1000, keepPointers: 0,
-    speedUpMode: 'profit', guardLastPointer: false, speedUpMaxPerLeg: 4, monitorSeconds: 60,
+  merchant: { enabled: false, fullCargoRoutes: false, autoShareIntel: false, quoteMaxAgeSeconds: 300, estimateDiscountPercent: 0, refreshWaitSeconds: 120, liquidationMinutes: 120,
+    maxLossPercent: 0, minExpectedProfit: 1, autoSpeedUp: false, keepPointers: 0,
+    speedUpMode: 'deadline', guardLastPointer: false, speedUpMaxPerLeg: 4, monitorSeconds: 60,
     refreshWindowMinutes: 8, dailyPointerLimit: 28, autoBuyPointers: false, pointerDailyDiamondLimit: 0,
     profitLimit: 0, firstDepartureMode: 'smart', firstDepartureTime: '10:00', firstDepartureWaitMinutes: 29,
     autoUpgrade: false },
@@ -128,8 +131,8 @@ const constraints = {
   'eventActions.compassThreshold':int(999999,1), 'eventActions.compassDrawCount':int(50,1),
   'merchant.quoteMaxAgeSeconds': int(86400, 1), 'merchant.estimateDiscountPercent': int(100),
   'merchant.refreshWaitSeconds': int(3600), 'merchant.liquidationMinutes': int(1440), 'merchant.maxLossPercent': int(100),
-  'merchant.minExpectedProfit': int(1000000000, 1), 'merchant.speedUpMinProfit': int(1000000000, 1), 'merchant.keepPointers': int(1000000),
-  'merchant.speedUpMode': { kind: 'choice', values: ['deadline', 'profit', 'refresh', 'arrival', 'race', 'full'] }, 'merchant.speedUpMaxPerLeg': int(100, 1),
+  'merchant.minExpectedProfit': int(1000000000, 1), 'merchant.keepPointers': int(1000000),
+  'merchant.speedUpMode': { kind: 'choice', values: ['deadline', 'refresh', 'arrival', 'race', 'full'] }, 'merchant.speedUpMaxPerLeg': int(100, 1),
   'merchant.refreshWindowMinutes': int(30, 1), 'merchant.dailyPointerLimit': int(1000), 'merchant.pointerDailyDiamondLimit': int(100000),
   'merchant.profitLimit': int(1000000000), 'merchant.firstDepartureMode': { kind: 'choice', values: ['smart', 'time'] },
   'merchant.firstDepartureTime': { kind: 'time' }, 'merchant.firstDepartureWaitMinutes': int(120),
@@ -225,6 +228,7 @@ export function defaultSettings() { return copy(DEFAULT_SETTINGS); }
 
 // 兼容上游已有的快捷开关。未保存细化配置时，执行仍沿用上游行为。
 const nativeFields = {
+  vipDaily: ['activityAutomation.vip'],
   heroGrowth: ['loop.heroes'],
   stageAuto: ['progression.mainline'],
   trialPaidSweep: ['trials.paid'], trialAdSweep: ['trials.ads'],
@@ -301,6 +305,7 @@ export function settingsFromLegacyNative(tasks, options) {
 export function nativeTaskValues(settings, current) {
   const result = { ...current, ...settings.schedule };
   delete result.weekFactory;
+  delete result.vipDailyGift;
   for (const [key, fields] of Object.entries(nativeFields)) result[key] = fields.some(field => { const [group, name] = field.split('.'); return settings[group][name]; });
   result.heroGrowth = false; // The old mainline-only job has been retired.
   for (const key of retiredAutomationTasks) result[key] = false;
@@ -360,6 +365,9 @@ function validateCurrentSettings(input, { partial = false, catalog = null } = {}
   input = migrateVersion46Settings(input);
   input = migrateVersion47Settings(input);
   input = migrateVersion48Settings(input);
+  input = migrateVersion49Settings(input);
+  input = migrateVersion51Settings(input);
+  input = migrateVersion52Settings(input);
   if (plain(input?.resourceFields) && !Object.hasOwn(input.resourceFields, 'refillAfterLoss')) {
     input = { ...input, resourceFields: { ...input.resourceFields, refillAfterLoss: false } };
   }
@@ -533,7 +541,7 @@ function validateCurrentSettings(input, { partial = false, catalog = null } = {}
   }
   if (Object.keys(errors).length) throw new SettingsError(errors);
   output.ads.noPrivilege = true;
-  output.schedule = nativeTaskValues(output, output.schedule);
+  output.schedule = savedSchedule(nativeTaskValues(output, output.schedule));
   return output;
 }
 
@@ -714,7 +722,7 @@ export function importAutomationSettings(document, options) {
   return validateSettings(migrateSettingsVersion(document.settings, document.version), { ...options, partial: false });
 }
 
-const settingsMigrations = new Map([[1, migrateVersion1Settings], [2, migrateVersion2Settings], [3, migrateVersion3Settings], [4, migrateVersion4Settings], [5, migrateVersion5Settings], [6, migrateVersion6Settings], [7, migrateVersion7Settings], [8, migrateVersion8Settings], [9, migrateVersion9Settings], [10, migrateVersion10Settings], [11, migrateVersion11Settings], [12, migrateVersion12Settings], [13, migrateVersion13Settings], [14, migrateVersion14Settings], [15, migrateVersion15Settings], [16, migrateVersion16Settings], [17, migrateVersion17Settings], [18, migrateVersion18Settings], [19, migrateVersion19Settings], [20, migrateVersion20Settings], [21, migrateVersion21Settings], [22, migrateVersion22Settings], [23, migrateVersion23Settings], [24, migrateVersion24Settings], [25, migrateVersion25Settings], [26, migrateVersion26Settings], [27, migrateVersion27Settings], [28, migrateVersion28Settings], [29, migrateVersion29Settings], [30, migrateVersion30Settings], [31, migrateVersion31Settings], [32, migrateVersion32Settings], [33, migrateVersion33Settings], [34, migrateVersion34Settings], [35, migrateVersion35Settings], [36, migrateVersion36Settings], [37, migrateVersion37Settings], [38, migrateVersion38Settings], [39, migrateVersion39Settings], [40, migrateVersion40Settings], [41, migrateVersion41Settings], [42, migrateVersion42Settings], [43, migrateVersion43Settings], [44, migrateVersion44Settings], [45, migrateVersion45Settings], [46, migrateVersion46Settings], [47, migrateVersion47Settings], [48, migrateVersion48Settings]]);
+const settingsMigrations = new Map([[1, migrateVersion1Settings], [2, migrateVersion2Settings], [3, migrateVersion3Settings], [4, migrateVersion4Settings], [5, migrateVersion5Settings], [6, migrateVersion6Settings], [7, migrateVersion7Settings], [8, migrateVersion8Settings], [9, migrateVersion9Settings], [10, migrateVersion10Settings], [11, migrateVersion11Settings], [12, migrateVersion12Settings], [13, migrateVersion13Settings], [14, migrateVersion14Settings], [15, migrateVersion15Settings], [16, migrateVersion16Settings], [17, migrateVersion17Settings], [18, migrateVersion18Settings], [19, migrateVersion19Settings], [20, migrateVersion20Settings], [21, migrateVersion21Settings], [22, migrateVersion22Settings], [23, migrateVersion23Settings], [24, migrateVersion24Settings], [25, migrateVersion25Settings], [26, migrateVersion26Settings], [27, migrateVersion27Settings], [28, migrateVersion28Settings], [29, migrateVersion29Settings], [30, migrateVersion30Settings], [31, migrateVersion31Settings], [32, migrateVersion32Settings], [33, migrateVersion33Settings], [34, migrateVersion34Settings], [35, migrateVersion35Settings], [36, migrateVersion36Settings], [37, migrateVersion37Settings], [38, migrateVersion38Settings], [39, migrateVersion39Settings], [40, migrateVersion40Settings], [41, migrateVersion41Settings], [42, migrateVersion42Settings], [43, migrateVersion43Settings], [44, migrateVersion44Settings], [45, migrateVersion45Settings], [46, migrateVersion46Settings], [47, migrateVersion47Settings], [48, migrateVersion48Settings], [49, migrateVersion49Settings], [50, migrateVersion50Settings], [51, migrateVersion51Settings], [52, migrateVersion52Settings]]);
 const supportedSettingsVersion = version => Number.isSafeInteger(version) && version >= 1;
 const entrySettingsVersion = entry => Object.hasOwn(entry, 'settingsVersion') ? entry.settingsVersion : 1;
 function newestSettingsVersion(store) {
@@ -793,7 +801,7 @@ export function migrateSettingsVersion(settings, version, { source = 'import' } 
 // listed here; stored partial settings retain their original default-fill rules.
 function migrateVersion1Settings(settings, { source }) {
   if (!plain(settings)) return settings;
-  const input = { ...settings };
+  const input = { ...migrateVersion49Settings(settings) };
   if (plain(input.weeklyActivity)) input.weeklyActivity = migrateWeeklyActivitySettings(input.weeklyActivity);
   if (plain(input.heroes) && !Object.hasOwn(input.heroes, 'needsSelection')) {
     input.heroes = { ...input.heroes, needsSelection: !input.heroes.heroIds?.length };
@@ -850,7 +858,7 @@ function migrateVersion1Settings(settings, { source }) {
       if (!Object.hasOwn(input[group], field)) input[group][field] = copy(DEFAULT_SETTINGS[group][field]);
     }
   }
-  if (plain(input.schedule)) input.schedule = { ...taskSettings(), worldOnlineRewards: false, ...input.schedule };
+  if (plain(input.schedule)) input.schedule = { ...DEFAULT_SETTINGS.schedule, worldOnlineRewards: false, ...input.schedule };
   return input;
 }
 
@@ -1125,6 +1133,34 @@ function migrateVersion22Settings(settings) {
   const next = { ...settings };
   for (const group of ['arena', 'league']) {
     if (plain(next[group])) next[group] = { maxPowerRatio: 0, ...next[group] };
+  }
+  return next;
+}
+
+function migrateVersion52Settings(settings) {
+  if (settings?.merchant?.speedUpMode !== 'profit') return settings;
+  return { ...settings, merchant: { ...settings.merchant, speedUpMode: 'deadline' } };
+}
+
+function migrateVersion51Settings(settings) {
+  if (!plain(settings?.merchant) || !Object.hasOwn(settings.merchant, 'speedUpMinProfit')) return settings;
+  const { speedUpMinProfit, ...merchant } = settings.merchant;
+  return { ...settings, merchant };
+}
+
+// Version 50 was written both before and after the full-cargo option was introduced.
+function migrateVersion50Settings(settings) {
+  if (!plain(settings?.merchant) || Object.hasOwn(settings.merchant, 'fullCargoRoutes')) return settings;
+  return { ...settings, merchant: { ...settings.merchant, fullCargoRoutes: DEFAULT_SETTINGS.merchant.fullCargoRoutes } };
+}
+
+// Keep the saved VIP master switch. Native-only selections predate that switch.
+function migrateVersion49Settings(settings) {
+  if (!plain(settings?.schedule) || !['vipDaily', 'vipDailyGift'].some(key => Object.hasOwn(settings.schedule, key))) return settings;
+  const { vipDaily, vipDailyGift, ...schedule } = settings.schedule;
+  const next = { ...settings, schedule };
+  if (settings.activityAutomation === undefined || (plain(settings.activityAutomation) && !Object.hasOwn(settings.activityAutomation, 'vip'))) {
+    next.activityAutomation = { ...settings.activityAutomation, vip: vipDaily === true || vipDailyGift === true };
   }
   return next;
 }

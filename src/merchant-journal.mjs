@@ -37,7 +37,7 @@ function cleanExpected(expected) {
     'start', 'marketEpoch', 'cargoSignature', 'exploration', 'period', 'moveStartTime', 'beforeEndTime', 'afterEndTime', 'useNum',
     'diamondCost', 'cost', 'beforeLevel', 'afterLevel', 'level', 'cargoLv', 'beforeDiamonds', 'afterDiamonds',
     'startTime', 'fromLevel', 'toLevel', 'diamonds', 'accelerationReason', 'incrementalProfit',
-    'estimatedIncrementalProfit', 'savedSeconds', 'estimatedProfit', 'saleCount', 'saleSeconds', 'evidenceExpiresAt']);
+    'estimatedIncrementalProfit', 'savedSeconds', 'estimatedProfit', 'priceNote', 'saleCount', 'saleSeconds', 'evidenceExpiresAt']);
 }
 function emptyJournal(event) {
   return { version: 1, event, snapshots: [], trades: [], archivedTotals: totals(), archivedIds: [], batches: [],
@@ -106,14 +106,17 @@ export function recordMerchantSnapshot(ledger, { event, state, market, radar, ti
   const marketData = { cityId: observed.cargo.cityId, goods: market.goods.map(g => fields(g, ['goodsId', 'price', 'stock'])).sort((a, b) => a.goodsId - b.goodsId),
     ...fields(market, ['specGoodsId', 'rareGoodsId', 'isReport']) };
   const radarData = { radar: (Array.isArray(radar?.radar) ? radar.radar : []).filter(r => positive(r?.cityId))
-    .map(r => fields(r, ['cityId', 'specGoodsId', 'rareGoodsId'])).sort((a, b) => a.cityId - b.cityId) };
-  const epoch = config ? merchantTiming(config, event, time).marketEpoch : market.marketEpoch ?? 'sample:' + Math.floor(time / 300);
+    .map(r => fields(r, ['cityId', 'specGoodsId', 'rareGoodsId', 'manualIntel'])).sort((a, b) => a.cityId - b.cityId) };
+  const observedAt = market.observedAt ?? time;
+  if (!positive(observedAt) || observedAt > time) return { recorded: false, reason: '港口报价采集时间无效' };
+  const epoch = config ? merchantTiming(config, event, observedAt).marketEpoch : market.marketEpoch ?? 'sample:' + Math.floor(observedAt / 300);
   const id = hash([eventId(event), epoch, observed, marketData, radarData, policy, interval]);
   const journal = loadJournal(ledger, event);
   if (journal.snapshots.some(entry => entry.id === id)) return { recorded: false, reason: '本采样周期已有相同观察', id };
   const entry = { type: 'snapshot', id, event, time, marketEpoch: epoch, state: observed, settings: policy, actionSeconds: interval,
-    market: { ...marketData, observedAt: time, period: event.period, startTime: event.startTime, source: 'visited-port', confidence: 'observed' },
-    radar: { ...radarData, observedAt: time, source: 'guild-radar', reportedAt: null, confidence: 'signal-only' } };
+    market: { ...marketData, observedAt, period: event.period, startTime: event.startTime, source: 'visited-port', confidence: 'observed' },
+    radar: { ...radarData, observedAt: time, source: radarData.radar.some(port => port.manualIntel) ? 'guild-radar-with-manual-intel' : 'guild-radar',
+      reportedAt: null, confidence: 'signal-only' } };
   journal.snapshots.push(entry);
   journal.snapshots.sort((a, b) => a.time - b.time || a.id.localeCompare(b.id));
   if (journal.snapshots.length > MAX_SNAPSHOTS) journal.droppedSnapshots += journal.snapshots.splice(0, journal.snapshots.length - MAX_SNAPSHOTS).length;
@@ -210,6 +213,16 @@ export function readMerchantJournal(ledger, event) {
   return entries.sort((a, b) => a.time - b.time || (a.type === b.type ? a.id.localeCompare(b.id) : a.type === 'snapshot' ? -1 : 1));
 }
 
+export function knownMerchantMarkets(ledger, event) {
+  const records = ledger?.keyRecords?.() ?? {};
+  const latest = Object.values(records).map(record => record.details?.merchantMarket)
+    .filter(m => m?.period === event.period && m.startTime === event.startTime);
+  const record = records[keyOf(event)];
+  if (!record) return latest;
+  const journal = validateJournal(record.details?.merchantJournal, event);
+  return latest.concat(journal.snapshots.map(entry => entry.market));
+}
+
 export function merchantJournalSummary(ledger, event, { time = Math.floor(Date.now() / 1000) } = {}) {
   if (!event) {
     return Object.entries(ledger?.keyRecords?.() ?? {}).filter(([key]) => key.startsWith('merchant-journal:'))
@@ -264,15 +277,19 @@ export function replayMerchantJournal(config, entries, { variants = [{ name: '�
       let expectedProfit = 0, verifiedProfit = 0, verifiedDecisions = 0, unverifiedDecisions = 0;
       for (const snapshot of snapshots) {
         const event = cleanEvent(snapshot.event), identity = eventId(event);
-        const settings = variant.settings == null ? snapshot.settings : { ...snapshot.settings, ...(variant.settings?.merchant ?? variant.settings) };
+        const settings = { fullCargoRoutes: false, ...snapshot.settings, ...(variant.settings?.merchant ?? variant.settings) };
         const markets = [...history.values()].filter(m => m.period === event.period && m.startTime === event.startTime && m.observedAt <= snapshot.time);
         const pastTrades = trades.filter(trade => trade.status === 'confirmed' && eventId(trade.event) === identity && trade.time < snapshot.time);
         const signature = hash([snapshot.state.player.coins, snapshot.state.player.goods]);
         const visited = pastTrades.filter(trade => trade.expected?.request === 'TradeMoveRequest' && trade.before &&
           hash([trade.before.player.coins, trade.before.player.goods]) === signature).map(trade => trade.expected.city);
+        const previous = pastTrades.findLast(t => t.expected?.request === 'TradeMoveRequest' && t.expected.destination === snapshot.state.cargo.cityId);
         const plan = planMerchant(config, event, snapshot.state, snapshot.market, snapshot.radar, snapshot.time, visited,
-          { settings, markets, actionSeconds: actionSeconds ?? snapshot.actionSeconds });
-        history.set(identity + ':' + snapshot.market.cityId, snapshot.market);
+          { settings, markets, preferredPort: previous?.expected.city, actionSeconds: actionSeconds ?? snapshot.actionSeconds });
+        const round = merchantTiming(config, event, snapshot.market.observedAt).marketEpoch;
+        const marketKey = identity + ':' + snapshot.market.cityId + ':' + round;
+        if (!history.has(marketKey) || snapshot.market.observedAt >= history.get(marketKey).observedAt)
+          history.set(marketKey, snapshot.market);
         const nextObservation = snapshots.find(next => next.time > snapshot.time && eventId(next.event) === identity);
         const matching = trades.find(trade => !usedTrades.has(trade.id) && trade.status === 'confirmed' && trade.metrics?.unverifiedConfirmations === 0 &&
           eventId(trade.event) === identity && trade.time >= snapshot.time && (!nextObservation || trade.time <= nextObservation.time) &&

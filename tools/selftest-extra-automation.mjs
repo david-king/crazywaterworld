@@ -1,7 +1,7 @@
 process.on('uncaughtException',error=>{console.error(error.stack);process.exitCode=1;});
 import assert from 'node:assert/strict';import fs from'node:fs';import os from'node:os';import path from'node:path';import{EventEmitter}from'node:events';
 import{claimVipDaily,claimLimitedFree,claimWeekHeroStar,claimLinkageFree,recruitWithSkipAds,watchFreeRewardClock}from'../src/extra-free-rewards.mjs';
-import{createUsageLedger,defaultSettings}from'../src/automation-settings.mjs';import{loadProtocol}from'../src/proto.mjs';import{claimWeekly}from'../src/activities.mjs';import{runAllianceRadar}from'../src/alliance-radar.mjs';
+import{createUsageLedger,defaultSettings,nativeTaskValues}from'../src/automation-settings.mjs';import{loadProtocol}from'../src/proto.mjs';import{claimWeekly}from'../src/activities.mjs';import{runAllianceRadar}from'../src/alliance-radar.mjs';
 import{runLoop}from'../src/loop.mjs';
 import { rewardSchedule } from '../src/reward-schedule.mjs';
 import{planBaseAutomation,runBaseAutomation,watchBasePushes}from'../src/base-automation.mjs';import{pirateAdvanceFixture}from'./fixtures/pirate-advance.mjs';
@@ -10,7 +10,23 @@ const ledger=()=>createUsageLedger('test',{file:path.join(dir,String(++serial)+'
 const reward={reward:{asset:[{id:'RUBY',num:1}]}};const now=()=>Math.floor(Date.now()/1000);
 const test=async(name,fn)=>{await fn();total++;console.log('通过：'+name);};
 function client(handler){const c=new EventEmitter();c.connected=true;c.writes=[];c.request=async(name,body={},response)=>{if(p[name])p[name].decode(p[name].encode(body).finish());const value=await handler(name,body,c);return response&&p[response]?p[response].decode(p[response].encode(value??{}).finish()):value;};return c;}
-await test('VIP仅领取当前已解锁档，重复不领并按客户端规则跨日',async()=>{const c=client((n,b,c)=>{assert.equal(n,'GotVipDailyRewardRequest');assert.equal(b.vipLevel,3);c.writes.push(n);return reward;}),player={vip:{vipLevel:3,dailyReward:[]}},cfg={tables:{VipFreeCfg:{data:[{level:3}]}}},l=ledger(),args={player,enabled:()=>true,ledger:l,report:()=>{}};watchFreeRewardClock(c);await claimVipDaily(c,cfg,args);await claimVipDaily(c,cfg,args);assert.equal(c.writes.length,1);c.serverClockOffsetMs=86400000;await claimVipDaily(c,cfg,args);assert.equal(c.writes.length,2);});
+await test('VIP 领取全部已解锁未领档位，重复检查不重领，跨日只重置当前档', async () => {
+  const c = client((name, body) => {
+    assert.equal(name, 'GotVipDailyRewardRequest');
+    c.writes.push(body.vipLevel);
+    return reward;
+  });
+  const player = { vip: { vipLevel: 3, dailyReward: [{ vipLevel: 2, isGot: true }] } };
+  const cfg = { tables: { VipFreeCfg: { data: [1, 2, 3, 4].map(level => ({ level })) } } };
+  const args = { player, enabled: () => true, ledger: ledger(), report: () => {} };
+  watchFreeRewardClock(c);
+  await claimVipDaily(c, cfg, args);
+  await claimVipDaily(c, cfg, args);
+  assert.deepEqual(c.writes, [1, 3]);
+  c.serverClockOffsetMs = 86400000;
+  await claimVipDaily(c, cfg, args);
+  assert.deepEqual(c.writes, [1, 3, 3]);
+});
 await test('VIP未知结果不假报成功且重建后仍防重',async()=>{const l=ledger(),player={vip:{vipLevel:3,dailyReward:[]}},out=[],cfg={tables:{VipFreeCfg:{data:[{level:3}]}}};let calls=0;for(let i=0;i<2;i++){const c=client(()=>{calls++;throw Error('超时');});await claimVipDaily(c,cfg,{player,enabled:()=>true,ledger:l,report:e=>out.push(e)});}assert.equal(calls,1);assert(!out.some(e=>e.ok));});
 await test('商城日周月赛季逐项只领当前资格的零元礼包',async()=>{const got=new Map(),cfg={tables:{LimitedPackCfg:{data:[1,2,3,4].flatMap((type)=>[{id:type*100,price:0,limitedTimes:1,season:type===4?1:0,vipLevel:0,weekDay:0,type:({1:'日礼包',2:'周礼包',3:'月礼包',4:'赛季礼包'})[type]},{id:type*100+1,price:6,limitedTimes:1,type:({1:'日礼包',2:'周礼包',3:'月礼包',4:'赛季礼包'})[type]}])}}};const c=client((n,b,c)=>{if(n==='LimitedShopRequest')return{shopItem:[{id:b.type*100,gotTimes:got.get(b.type)??0},{id:b.type*100+1,gotTimes:0}],resetTime:now()+1000};assert.equal(n,'LimitedShopGotFreeRequest');assert.equal(b.id,b.type*100);got.set(b.type,1);c.writes.push(b.id);return reward;});const args={player:{worldId:1001001,vip:{vipLevel:0}},enabled:()=>true,ledger:ledger(),report:()=>{}};await claimLimitedFree(c,cfg,args);await claimLimitedFree(c,cfg,args);assert.equal(c.writes.length,4);});
 await test('升星达标要求两名英雄实际持有和星级均达标',async()=>{let stage=0;const c=client((n,b,c)=>{if(n==='WeekInfoRequest')return{activityTime:[{type:3,period:1001,startTime:now()-100,endTime:now()+1000}]};if(n==='AllHeroRequest')return{heroes:[{heroId:'甲',star:5},{heroId:'乙',star:5}]};if(n==='WeekHeroStarInfoRequest')return{gotStage:stage};assert.equal(n,'WeekHeroStarGotRewardRequest');c.writes.push(n);return{gotStage:++stage,...reward};});const cfg={tables:{WeekHeroStarPeriodCfg:{data:[{periodId:1001,showHero1:'甲',showHero2:'乙'}]},WeekHeroStarRwdCfg:{data:[{periodId:1001,rwdId:1,hero1Star:0,hero2Star:0},{periodId:1001,rwdId:2,hero1Star:10,hero2Star:10}]}}};await claimWeekHeroStar(c,cfg,{enabled:()=>true,ledger:ledger(),report:()=>{}});assert.equal(c.writes.length,1);});
@@ -23,16 +39,31 @@ await test('默认枚举省略时仍能识别勇士战令，档位须真实回�
 await test('随机事件拓展并要求真实回执，未知结果不重复选择',async()=>{const cfg={tables:{EventChoiceCfg:{data:[{eventId:1007,title:'发现海上资源补给',option1:'私吞',option2:'建造居民房'},{eventId:1001,title:'淡水紧缺',option1:'淡水提取器',option2:'接雨水'}]}}};const settings=defaultSettings();settings.events.enabled=true;settings.loop.world=true;settings.museum.enabled=false;settings.pet.enabled=false;const c=client((n,b,c)=>{assert.equal(n,'SelectChoiceRequest');c.writes.push(b);if(b.optionIndex===1)throw Error('超时');return reward;});const snapshot={choices:[{uid:'9007199254740995',eventId:1007},{uid:'9007199254740996',eventId:1001}],choiceObserved:true,raids:[],notes:[],world:{stock:new Map(),buildings:[]},heroes:[],pets:[]};const plan=planBaseAutomation(snapshot,cfg,settings);const choices={...plan,actions:plan.actions.filter(a=>a.kind==='choiceEvent')};assert.equal(choices.actions.length,2);const l=ledger();await runBaseAutomation(c,p,cfg,choices,{getSettings:()=>settings,ledger:l});await runBaseAutomation(c,p,cfg,choices,{getSettings:()=>settings,ledger:l});assert.equal(c.writes.length,2);});
 await test('情报派遣及重复防护，未知派遣保留预算',async()=>{for(const unknown of [false,true]){const f=pirateAdvanceFixture(),s=f.settings;s.radar={enabled:true,fleetIds:['1远征船'],types:['pirate'],allowMaterials:false,minDurabilityPercent:80,petrolReserve:100,dailyPetrolLimit:1000,checkEverySeconds:30};f.player.guildId='1001007';f.config.tables.ModuleOpenCfg.data.push({moduleId:'联盟情报',playerLevel:18});f.config.tables.WorldParamCfg.data.push({paramName:'情报事件消耗汽油',paramValue:500});let state=1;const read=f.client.request;f.client.request=async(n,b,r)=>n==='RadarInfoRequest'?p.RadarInfoResponse.decode(p.RadarInfoResponse.encode({radarInfo:{events:[{uid:'9007199254740995',eventId:10001,state,createTime:10,reward:{asset:[]},pirate:{type:1,level:1}}]}}).finish()):read(n,b,r);f.client.sendWatch=async(n,b)=>{assert.equal(n,'RadarSendFleetsRequest');f.client.writes.push({n,b});if(unknown)throw Error('超时');state=3;};const l=ledger(),args={getSettings:()=>s,ledger:l,enabled:()=>true,report:()=>{}};await runAllianceRadar(f.client,f.config,f.player,args);await runAllianceRadar(f.client,f.config,f.player,args);assert.equal(f.client.writes.length,1);assert.equal(l.snapshot().counters.radarPetrol,500);assert.equal(l.snapshot().uncertain,unknown?1:0);}});
 await test('VIP和两类免广告招募已接入真实整轮挂机入口',async()=>{
- const c=client((n,b,c)=>{assert.equal(n,'GotVipDailyRewardRequest');c.writes.push(n);return reward;});await runLoop(c,p,{config:{tables:{VipFreeCfg:{data:[{level:3}]}}},player:{vip:{vipLevel:3,dailyReward:[]}},allowMutate:true,rounds:1,usageLedger:ledger(),isEnabled:k=>k==='vipDailyGift'});assert.equal(c.writes.length,1);
+ for (const enabled of [false, true]) {
+   const settings = defaultSettings();
+   settings.activityAutomation.vip = enabled;
+   const tasks = nativeTaskValues(settings, {});
+   const c = client((name, body) => {
+     assert.equal(name, 'GotVipDailyRewardRequest');
+     c.writes.push(body.vipLevel);
+     return reward;
+   });
+   await runLoop(c, p, {
+     config: { tables: { VipFreeCfg: { data: [{ level: 1 }, { level: 3 }, { level: 4 }] } } },
+     player: { vip: { vipLevel: 3, dailyReward: [] } }, allowMutate: true, rounds: 1, usageLedger: ledger(),
+     getSettings: () => settings, isEnabled: key => tasks[key] === true,
+   });
+   assert.deepEqual(c.writes, enabled ? [1, 3] : []);
+ }
  const f=adFixture();await runLoop(f.c,p,{config:f.config,player:f.player,adChannel:{clientInfo:{appId:'14021170',channelId:'1400',originVersion:'74'},language:'zh_CN'},allowMutate:true,rounds:1,usageLedger:ledger(),isEnabled:k=>['heroAdRecruit','antiqueAdRecruit'].includes(k)});assert.deepEqual(f.recruits,{hero:3,antique:3});
 });
-await test('共享领奖检查回填已启用的 VIP 和战报行，每轮只查一次', async () => {
+await test('VIP 只记录一次检查结果，战报共用一次检查并回填已启用行', async () => {
   const settings = defaultSettings();
   settings.activityAutomation.vip = settings.activityAutomation.pirates = true;
   for (const flags of [
-    ['vipDailyGift', 'battleReportRewards'],
+    ['vipDaily', 'battleReportRewards'],
     ['vipDaily', 'campaignReports'],
-    ['vipDaily', 'vipDailyGift', 'campaignReports', 'battleReportRewards'],
+    ['vipDaily', 'campaignReports', 'battleReportRewards'],
   ]) {
     let reportReads = 0;
     const c = client(name => {
@@ -48,17 +79,17 @@ await test('共享领奖检查回填已启用的 VIP 和战报行，每轮只查
     });
     assert.equal(reportReads, 1);
     const schedule = rewardSchedule(c);
-    for (const [key, service, message] of [
-      ['vipDaily', 'vipDailyGift', '今日礼包已领取'],
-      ['campaignReports', 'battleReportRewards', '当前战报没有待领取奖励'],
-    ]) {
-      assert.equal(schedule.status(service)?.text, message);
-      if (flags.includes(key)) {
-        assert.equal(schedule.status(key)?.text, message);
-        assert.equal(schedule.status(key)?.state, 'waiting');
-        assert(schedule.nextCheck(key) > schedule.now());
-      } else assert.equal(schedule.status(key), null);
-    }
+    assert.equal(schedule.status('vipDaily')?.text, '今日礼包已领取');
+    assert.equal(schedule.status('vipDaily')?.state, 'waiting');
+    assert(schedule.nextCheck('vipDaily') > schedule.now());
+    assert.equal(schedule.status('vipDailyGift'), null);
+    const message = '当前战报没有待领取奖励';
+    assert.equal(schedule.status('battleReportRewards')?.text, message);
+    if (flags.includes('campaignReports')) {
+      assert.equal(schedule.status('campaignReports')?.text, message);
+      assert.equal(schedule.status('campaignReports')?.state, 'waiting');
+      assert(schedule.nextCheck('campaignReports') > schedule.now());
+    } else assert.equal(schedule.status('campaignReports'), null);
   }
 });
 await test('情报已完成奖励逐条领取，无需月卡批量接口，空类型不派遣',async()=>{

@@ -3,7 +3,8 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { createUsageLedger } from '../src/automation-settings.mjs';
-import { recordMerchantSnapshot, recordMerchantTrade, readMerchantJournal, merchantJournalSummary, replayMerchantJournal } from '../src/merchant-journal.mjs';
+import { knownMerchantMarkets, recordMerchantSnapshot, recordMerchantTrade, readMerchantJournal, merchantJournalSummary, replayMerchantJournal } from '../src/merchant-journal.mjs';
+import { planMerchant } from '../src/merchant-planner.mjs';
 import { readMerchantReplayFile, runMerchantBacktest } from './merchant-backtest.mjs';
 
 const folder = fs.mkdtempSync(path.join(os.tmpdir(), 'cw-merchant-journal-'));
@@ -20,7 +21,8 @@ const batch = (extra = {}) => ({ pid: 1, goodsId: 1, cityId: 10, buyPrice: 50, n
 const radar = { radar: [{ cityId: 10, specGoodsId: 1, rareGoodsId: 0 }, { cityId: 20, specGoodsId: 2, rareGoodsId: 0 }] };
 const market = (price = 50) => ({ goods: [{ goodsId: 1, price, stock: 0 }], specGoodsId: 1 });
 const ledger = name => createUsageLedger(name, { file, now: () => now * 1000 });
-const snapshot = (book, extra = {}) => recordMerchantSnapshot(book, { event, state: state(), market: market(), radar, time: now, config, ...extra });
+const snapshot = (book, extra = {}) => recordMerchantSnapshot(book, { event, state: state(), market: market(), radar, time: now, config,
+  settings: { fullCargoRoutes: false }, ...extra });
 const buyExpected = { request: 'TradeBuyRequest', city: 10, goodsId: 1, price: 50, owned: 10, coins: 500 };
 const trade = (book, extra = {}) => recordMerchantTrade(book, { event, expected: buyExpected, before: state(), after: state([batch()], 500),
   time: now + 1, attemptedAt: now, status: 'confirmed', actionKey: 'buy-1', ...extra });
@@ -229,6 +231,25 @@ try {
     snapshot(book, { state: state([], 1000, 0, 20), market: market(1), time: now + 7200 });
     const appended = replayMerchantJournal(config, readMerchantJournal(book)).variants[0].decisions[0];
     assert.deepEqual(appended, first);
+  });
+
+  test('重启和观察回放用相同的跨轮实测涨跌幅，刷新边界按读价时间归档', () => {
+    const book = ledger('round-prices'), observedCity = state([], 1000, 0, 20);
+    const local = price => ({ ...market(price), specGoodsId: 2, rareGoodsId: 3 });
+    const ports = { radar: [{ cityId: 20, specGoodsId: 2, rareGoodsId: 3 }] };
+    const refresh = now - 600;
+    snapshot(book, { time: refresh + 1, state: observedCity, market: { ...local(90), observedAt: refresh - 1 }, radar: ports });
+    snapshot(book, { time: now, state: observedCity, market: local(130), radar: ports });
+    const decisionTime = now + 7200;
+    snapshot(book, { time: decisionTime, market: market(95), radar: ports });
+    const reopened = ledger('round-prices');
+    const live = planMerchant(config, event, state(), market(95), ports, decisionTime, [], {
+      settings: { fullCargoRoutes: false }, markets: knownMerchantMarkets(reopened, event) });
+    assert.equal(live.expectedProfit, 155);
+    const replay = replayMerchantJournal(config, readMerchantJournal(reopened, event)).variants[0].decisions.at(-1);
+    assert.equal(replay.estimatedProfit, live.expectedProfit);
+    assert.equal(replay.reason, live.label);
+    assert.match(replay.reason, /预计卖价 110/);
   });
 
   test('快照有界保留且无关执行记录不变，丢弃数量明确可见', () => {

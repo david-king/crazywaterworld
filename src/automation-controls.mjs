@@ -58,6 +58,10 @@ for (const [key,label,group,gates] of [
 const nativeKeys = new Set(['trialPaidSweep','trialAdSweep','diveEnhance','autoDive','salvageEnhance','autoSalvage','autoFish','fishEnhance','floaters','antiqueFloaters','cargo','farm','collect','finishUpgrade','build','buildSupply','upgrade','finishOrder','startProduce','speedUp','denyOrder','paidGold','dailyRewards','chests','gift','tasks']);
 const combatGroups = { arena: '竞技场', leagueChallenge: '积分赛', leagueCollect: '积分赛', leaguePassRewards: '积分赛' };
 for (const task of automationTasks) {
+ if (task.key === 'vipDaily') {
+   add('activityAutomation.vip', 'VIP 每日自动领奖', '任务与领奖', { taskKey: task.key });
+   continue;
+ }
  if (task.key === 'stageAuto' || task.key === 'heroGrowth' || retiredAutomationTasks.has(task.key)) continue;
  if (nativeKeys.has(task.key)) continue;
  const group = ['freeRecruit','heroRecruitRewards','heroAdRecruit'].includes(task.key) ? '英雄' : ['freeAntiqueRecruit','antiqueRecruitRewards','antiqueAdRecruit'].includes(task.key) ? '藏品' : ['周期活动','限时活动'].includes(task.group) ? '活动' : ['联盟','挑战'].includes(task.group) ? '世界与挑战' : task.group === '日常' ? '日常行动' : task.group === '海面' ? '基地' : '任务与领奖';

@@ -95,7 +95,9 @@ try {
     await page.reload(); await slot(2).waitFor();
     assert.match(await slot(1).textContent(), /已派遣/); assert.match(await slot(2).textContent(), /抢占中/);
     await open(3, '派遣采集'); await ready();
-    assert.equal(await detail.locator('.silicon-detail-body').innerText(), '暂无可用舰队');
+    const unavailable = await detail.locator('.silicon-detail-body').innerText();
+    assert.match(unavailable, /1号舰队.*(?:驻守|采矿)/);
+    for (const id of [2, 3]) assert.match(unavailable, new RegExp(id + '号舰队.*硅矿任务尚未结束'));
     assert.equal(await detail.getByRole('button', { name: '确认派遣' }).isDisabled(), true);
     assert.deepEqual(await geometry(), initial, '无可用舰队时保持相同高度');
     f.returnFleet('3远征船');

@@ -66,7 +66,7 @@
     "check:ui": "biome check .",
     "format:ui": "biome check --write .",
     "test:state": "node tools/selftest-console-state.mjs",
-    "test:client": "npm run test:state && node tools/selftest-react-client.mjs && node tools/selftest-chat.mjs && npm run test:shops",
+    "test:client": "npm run test:state && node tools/selftest-react-client.mjs && node tools/selftest-chat.mjs && node tools/selftest-items.mjs && node tools/selftest-items-http.mjs && npm run test:shops",
     "test:client:browser": "npm run test:browser -- client",
     "test:weekly-activity": "node tools/run-tests.mjs weekly-activity",
     "test:weekly-activity:browser": "npm run test:browser -- weekly-activity",

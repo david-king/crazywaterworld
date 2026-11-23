@@ -55,7 +55,7 @@ const output = path.resolve('output/silicon-overview'); fs.mkdirSync(output, { r
 let browser; const errors = [];
 try {
   browser = await chromium.launch({ executablePath, headless: true });
-  for (const [name, width, theme] of [['desktop', 1440, 'light'], ['dark', 1440, 'dark'], ['mobile', 390, 'light'], ['small-mobile', 320, 'light']]) {
+  for (const [name, width, theme] of [['desktop', 1440, 'light'], ['dark', 1440, 'dark'], ['tablet', 768, 'light'], ['mobile', 390, 'light'], ['small-mobile', 320, 'light']]) {
     const page = await browser.newPage({ viewport: { width, height: 1000 }, hasTouch: width <= 600, isMobile: width <= 600 }); page.setDefaultTimeout(10000);
     page.on('pageerror', error => errors.push(error.message));
     await page.goto(url); await page.evaluate(value => document.documentElement.dataset.theme = value, theme);
@@ -64,6 +64,27 @@ try {
     assert.equal(await page.locator('.silicon-mine[data-tier=ORANGE] .silicon-slot').count(), 16);
     assert.match(await page.locator('#silicon-summary').textContent(), /42 \/ 130/);
     assert.equal(await page.locator('#silicon-notes').textContent(), fixtureView.notes.join(' '));
+    const fleetCards = page.locator('.silicon-fleet');
+    assert.match(await fleetCards.nth(0).innerText(), /已采 7 次/);
+    assert.equal(await fleetCards.nth(0).getByRole('button', { name: '撤回舰队' }).isEnabled(), true);
+    assert.match(await fleetCards.nth(1).innerText(), /已采 0 次/);
+    assert.equal(await fleetCards.nth(1).getByText('首奖后可撤回', { exact: true }).isDisabled(), true);
+    if (width > 900) {
+      const [mining, firstReward, marching] = await fleetCards.evaluateAll(cards => cards.map(card => {
+        const stats = card.querySelector('.silicon-facts').getBoundingClientRect();
+        return [card.offsetHeight, stats.top, stats.bottom];
+      }));
+      assert.deepEqual(mining, marching, '采矿卡与行军卡等高，战力和耐久对齐');
+      assert.deepEqual(firstReward, marching, '首奖前后保持相同布局');
+      const naturalHeight = await fleetCards.nth(2).evaluate(card => {
+        card.style.alignSelf = 'start';
+        const height = card.offsetHeight;
+        card.style.removeProperty('align-self');
+        return height;
+      });
+      assert.equal(mining[0], naturalHeight, '以行军卡的内容高度为准');
+    }
+    if (name === 'desktop') await page.locator('#silicon-fleets').screenshot({ path: path.join(output, 'fleets-desktop.png') });
     const controls = page.locator('.silicon-controls');
     const bounds = await controls.locator('a, button, input').evaluateAll(nodes => nodes.map(node => {
       const rect = node.getBoundingClientRect(); return [rect.left, rect.right, rect.top + rect.height / 2];

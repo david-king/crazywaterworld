@@ -93,8 +93,11 @@ export async function checkedAction(
     return;
   }
   const identity = { ...expected };
-  // 同一程调港按起点和终点防重，兼容早期未记录目标商品的账本。
-  if (identity.request === 'TradeMoveRequest') delete identity.goodsId;
+  // 目标商品与出发估值仅用于展示，不改变同一程调港的防重标识。
+  if (identity.request === 'TradeMoveRequest') {
+    delete identity.goodsId;
+    delete identity.estimatedProfit;
+  }
   delete identity.start; // 发送时刻用于回读核对，不改变动作的防重标识。
   const key = 'event-action:' + digest([scope, identity, before]);
   if (ctx.ledger.hasKey(key)) return waiting(ctx, '本次状态已处理，等待下一次更新');

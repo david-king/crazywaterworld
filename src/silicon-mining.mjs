@@ -2,7 +2,7 @@ import { fleetSpeedBudgetLimits, siliconSpeedCounter, speedBudgetAllows } from '
 import { createHash } from 'node:crypto';
 import { exactAutomationId, automationWireId } from './automation-policy.mjs';
 import { gameplayOpenDay, worldOpenDays } from './extra-rewards.mjs';
-import { isMiningSilicon,  dispatchReservationReason, fleetRecordReason, reserveDispatch } from './fleet-availability.mjs';
+import { isMiningSilicon, fleetStateName, dispatchReservationReason, fleetRecordReason, reserveDispatch } from './fleet-availability.mjs';
 import { registerFleetReservations, isFleetReserved } from './fleet-reservations.mjs';
 import { pendingPetrol } from './dispatch-preview.mjs';
 import { recordsInWorld } from './fleet-settlement.mjs';
@@ -21,7 +21,9 @@ const active = new WeakSet(), watchers = new WeakMap();
 const stateKey = world => 'silicon-state:' + world;
 const slotKey = (world, id) => 'silicon:' + world + ':' + fleetNumber(id);
 const ownSlot = (snapshot, id) => snapshot.mines.filter(mine => !mine.reason).flatMap(mine => mine.positions.map(position => ({ mine, position }))).find(row => row.position.player?.fleetId === id);
-const idle = fleet => fleet?.state === 1 && !fleet.curGridIdx && !fleet.targetGridIdx && !fleet.treasureLootUid && !fleet.chipWar?.rewardTs && !fleet.autoFight?.isOn;
+// 游戏按舰队实际位置和任务判定能否采矿；开启原生城战委任的舰队也可能在主城待命。
+const idle = fleet => fleet?.state === 1 && !fleet.curGridIdx && !fleet.targetGridIdx && !fleet.treasureLootUid && !fleet.chipWar?.rewardTs;
+const canStartRepair = fleet => idle(fleet) && !fleet.autoFight?.isOn;
 
 function quantity(value) {
   if (integer(value)) return value;
@@ -132,7 +134,7 @@ export async function readSiliconMining(client, protocol, config, player, { sett
   if (!snapshot.mines.length) snapshot.reason ||= '当前没有已确认的硅矿';
   for (const policy of p.fleets.filter(fleet => fleet.enabled && fleet.autoRepair)) {
     const fleet = snapshot.fleets.find(row => row.buildingId === policy.id);
-    if (!idle(fleet) || !(fleet.durability < fleet.maxDura)) continue;
+    if (!canStartRepair(fleet) || !(fleet.durability < fleet.maxDura)) continue;
     try { snapshot.repairs[policy.id] = await get(client, protocol, 'FleetRepairParam', { buildingId: policy.id }); }
     catch { snapshot.notes.push(policy.id + '维修报价未同步'); }
   }
@@ -169,7 +171,11 @@ function fleetReason(snapshot, policy, settings, ledger, client) {
   const ready = fleetReadinessReason(snapshot, policy, fleet);
   if (ready) return ready;
   const held = fleetRecordReason(ledger.keyRecords(), policy.id, snapshot.worldId) || dispatchReservationReason(client, settings, 'silicon', policy.id);
-  return held || (!idle(fleet) ? '舰队在行军、维修、驻守或战斗' : '');
+  if (held || idle(fleet)) return held;
+  if (isMiningSilicon(fleet) || fleet.chipWar?.rewardTs) return '舰队正在采矿';
+  if (fleet.treasureLootUid) return '舰队正在参与货轮';
+  if (fleet.state === 1 && fleet.targetGridIdx) return '舰队仍有行军目标';
+  return '舰队状态：' + fleetStateName(fleet);
 }
 function huntReservationReason(snapshot, policy, own, settings, keys, client) {
   // 当前已核实的采矿占用可撤回，其余玩法/未知操作仍须避让。
@@ -295,11 +301,7 @@ async function reconcile(client, protocol, snapshot, ledger) {
     const fleet = snapshot.fleets.find(row => row.buildingId === details.buildingId), position = ownSlot(snapshot, details.buildingId);
     if (fleet?.ownerPlayerId && fleet.ownerPlayerId !== snapshot.playerId) continue;
     if (['siliconDispatch','siliconRetreat'].includes(details.kind) && !snapshot.mines.some(mine => mine.gridId === details.gridId && !mine.reason)) continue;
-    // 城战原生委任是偏好设置，已回城的活动召回舰队可结束旧采矿占用。
-    const recall = keys['silicon-retreat:' + snapshot.worldId + ':' + fleetNumber(details.buildingId)]?.details;
-    const recalledHome = recall?.recallSource && recall.gridId === details.gridId && !position && fleet?.state === 1 &&
-      !fleet.curGridIdx && !fleet.targetGridIdx && !fleet.treasureLootUid && !fleet.chipWar?.rewardTs;
-    const miningFinished = idle(fleet) || recalledHome;
+    const miningFinished = idle(fleet) && !position;
     if (details.kind === 'siliconDispatch') {
       const occupied = position?.mine.gridId === details.gridId && (position.position.index === details.index || details.manualShortcut && details.color === protocol.Color.BLUE);
       const traveling = fleet?.state === 2 && !fleet.treasureLootUid && !fleet.targetCityId && fleet.targetGridIdx === details.gridId;
@@ -383,7 +385,7 @@ async function sendAndCheck(client, protocol, player, options, snapshot, step, c
     if (!fleet || (fleet.owner && exactAutomationId(fleet.owner.playerId) !== snapshot.playerId)) return false;
     if (step.recallSource && (fleet.state !== 5 || fleet.curGridIdx !== step.gridId ||
         fleet.chipWar?.rewardTs !== step.beforeRewardTs || !options.recallCurrent?.(step.buildingId))) return false;
-    if (step.kind === 'siliconRepair' && (!idle(fleet) || fleet.durability !== step.beforeDurability)) return false;
+    if (step.kind === 'siliconRepair' && (!canStartRepair(fleet) || fleet.durability !== step.beforeDurability)) return false;
     if (step.kind === 'siliconSpeed' && (!sameSiliconMove(fleet, step) || fleet.moveEndTs !== step.beforeEnd)) return false;
   }
   const details = { kind: step.kind, worldId: snapshot.worldId, buildingId: step.buildingId, gridId: step.gridId ?? 0, index: step.index ?? 0,
@@ -649,7 +651,7 @@ export async function planSiliconMaintenance(client, protocol, config, settings,
     const fleet = snapshot.fleets.find(row => row.buildingId === policy.id);
     if (!fleet || !integer(fleet.durability) || !integer(fleet.maxDura, 1) ||
         (fleet.ownerPlayerId && fleet.ownerPlayerId !== snapshot.playerId)) continue;
-    if (gathering && !heldForEvent(policy.id) && policy.autoRepair && idle(fleet) && fleet.durability < fleet.maxDura && !fleetRecordReason(records, policy.id, snapshot.worldId) && !dispatchReservationReason(client, settings, 'silicon', policy.id)) {
+    if (gathering && !heldForEvent(policy.id) && policy.autoRepair && canStartRepair(fleet) && fleet.durability < fleet.maxDura && !fleetRecordReason(records, policy.id, snapshot.worldId) && !dispatchReservationReason(client, settings, 'silicon', policy.id)) {
       const quote = snapshot.repairs[policy.id];
       if (!(quote?.unitRepairCost > 0 && quote.unitRepairTime > 0)) continue;
       const cost = Math.ceil((fleet.maxDura - fleet.durability) * quote.unitRepairCost);

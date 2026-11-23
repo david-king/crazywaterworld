@@ -1,0 +1,1 @@
+import"./rolldown-runtime-WkwZ5CU-.js";import{a as e,s as t}from"./client-Ds0HtU8K.js";t();var n=e();function r({type:e,...t}){return(0,n.jsx)(`input`,{type:e,"data-slot":`input`,...t})}export{r as t};

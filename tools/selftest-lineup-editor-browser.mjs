@@ -125,6 +125,7 @@ try {
     } else await tab.click();
     const panel = page.locator('#tab-lineups');
     await panel.locator('#saved-lineup-view').getByRole('button', { name: '编辑阵容 ' + savedName, exact: true }).waitFor();
+    assert.deepEqual(await panel.locator('#saved-lineup-view > .bar button').allTextContents(), ['新建阵容', '保存游戏当前阵容']);
     assert.equal(await panel.locator('#lineup-view, #lineup-refresh, #saved-lineup-refresh').count(), 0);
     assert.equal(await panel.getByText('推荐阵容', { exact: true }).count(), 0);
     assert.equal(await tab.getAttribute('aria-current'), 'page');
@@ -138,18 +139,15 @@ try {
   const page = desktop.page;
   const orderUrl = base + '/api/league/order?account=' + accountId;
   const originalOrder = await fetch(orderUrl).then(response => response.json());
-  const orderToggle = page.getByRole('button', { name: '积分赛出战顺序', exact: true });
-  await orderToggle.click();
-  const firstTeam = page.locator('#league-order-rows .saved-lineup-row').first();
-  await firstTeam.getByText(originalOrder.teams[0][0], { exact: true }).waitFor();
-  await firstTeam.getByRole('button', { name: '下移第 1 队' }).click();
-  await firstTeam.getByText(originalOrder.teams[1][0], { exact: true }).waitFor();
-  const stale = await fetch(orderUrl, { method: 'POST', headers: { 'Content-Type': 'application/json' },
+  const swapTeams = () => fetch(orderUrl, { method: 'POST', headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ confirm: true, signature: originalOrder.signature, from: 1, to: 2 }) });
+  const moved = await swapTeams();
+  assert.equal(moved.status, 200);
+  assert.deepEqual((await moved.json()).teams, [originalOrder.teams[1], originalOrder.teams[0], originalOrder.teams[2]]);
+  const stale = await swapTeams();
   assert.match((await stale.json()).error, /已变化/);
   assert.deepEqual(leagueWrites, [[2, 1, 3]]);
-  await orderToggle.click();
-  console.log('通过：阵容页积分赛队序、服务端换位回读、过期队序防重');
+  console.log('通过：积分赛队序接口换位回读、过期队序防重');
   const modal = page.locator('#saved-lineup-dialog');
   const editorRequests = () => requests.filter(name => name === 'GetFormationRequest').length;
   const openEditor = async (targetPage, name) => {

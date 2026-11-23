@@ -405,7 +405,7 @@ export async function runLoop(client, protocol, {
     const allowDaily = (id, action) => !(getSettings() && action.request === 'ClickGoldRequest' && !action.body.free) && enabled(dailyTaskKey(id, action));
     const allowWorld = kind => enabled(worldTaskKey(kind));
     const active = key => !!isEnabled && selected(key) && runtimeActive();
-    const aliases = { vipDailyGift:['vipDaily'], worldOnlineRewards:['worldOnline'],
+    const aliases = { worldOnlineRewards:['worldOnline'],
       festivalActiveRewards:['festivalActive'], battleReportRewards:['campaignReports'],
       weekSupplyFree:['weekChipFree','weekUniqueFree'],
       merchantRewards:['tradeTasks'], festivalFreeGift:['festivalGifts'],
@@ -976,23 +976,22 @@ export async function runLoop(client, protocol, {
       }
       if (isEnabled) {
         const extraReport=entry=>{summary.tasks.results.push(entry);if(!entry.skipped)summary.tasks.planned++;logReward(entry,'免费领奖');};
-        for(const [key,service] of [['vipDailyGift',claimVipDaily],['guildTitleReward',claimGuildTitleReward],['limitedFreeGifts',claimLimitedFree],['weekHeroStar',claimWeekHeroStar],['pirateRankRewards',(c,f,o)=>claimOpenRank(c,f,o,3)],['warRankRewards',(c,f,o)=>claimOpenRank(c,f,o,4)],['festivalActiveRewards',claimFestivalActive],['battleReportRewards',claimReportRewards],['leagueCollect',claimLeagueCollect],['leaguePassRewards',claimLeaguePass],['weekSupplyFree',claimWeekSupply],['worldBossRewards',claimWorldBossDamage],['comicDrama',claimComicDrama],['tournamentDailyGift',claimTournamentDaily]]) {
+        for(const [key,service] of [['vipDaily',claimVipDaily],['guildTitleReward',claimGuildTitleReward],['limitedFreeGifts',claimLimitedFree],['weekHeroStar',claimWeekHeroStar],['pirateRankRewards',(c,f,o)=>claimOpenRank(c,f,o,3)],['warRankRewards',(c,f,o)=>claimOpenRank(c,f,o,4)],['festivalActiveRewards',claimFestivalActive],['battleReportRewards',claimReportRewards],['leagueCollect',claimLeagueCollect],['leaguePassRewards',claimLeaguePass],['weekSupplyFree',claimWeekSupply],['worldBossRewards',claimWorldBossDamage],['comicDrama',claimComicDrama],['tournamentDailyGift',claimTournamentDaily]]) {
           yield;
           if (!settings && key === 'weekHeroStar') continue;
+          if (!settings && !usageLedger && key === 'vipDaily') continue;
           if (!serviceEnabled(key)) continue;
-          const allLevels = key === 'vipDailyGift' && active('vipDaily');
-          // 这两个开关共享一次检查。只给本次实际覆盖的兼容项回填状态，不重复记任务或发领奖请求。
+          // 战报两个开关共享一次检查。
           const checkCampaignReports = key === 'battleReportRewards' && active('campaignReports');
           let reported = false;
           const report = entry => {
             reported = true;
-            if (settings && allLevels) observeStep('vipDaily', entry);
             if (checkCampaignReports) observeStep('campaignReports', entry);
             extraReport({ ...entry, taskKey: key });
           };
           const label = automationTasks.find(task => task.key === key).label;
           try {
-            await service(client, config, { player, getSettings, allLevels, enabled: () => serviceActive(key), ledger: usageLedger, scheduler: rewards, report });
+            await service(client, config, { player, getSettings, enabled: () => serviceActive(key), ledger: usageLedger, scheduler: rewards, report });
             if (!reported) report({ label, skipped: true, reason: '已检查，当前没有新增可执行的领取动作' });
           } catch (error) { report({ label, ok: false, error: error.message }); }
         }
@@ -1052,7 +1051,7 @@ export async function runLoop(client, protocol, {
           try { await claimWeeklyRewards(client, config, await weekSchedule(client), key=>weeklyDue.has(key)&&rewardActive(key), report, {scheduler:rewards,readOrder:readWeekOrder,player}); }
           catch(error) { phaseFailure('tasks','周活动免费奖励',error); }
         }
-        if (!settings && rewardEnabled('vipDaily')) {
+        if (!settings && !usageLedger && rewardEnabled('vipDaily')) {
           try { await claimLegacyVipDaily(client,config,player,rewardActive,report,rewards); }
           catch(error) { phaseFailure('tasks','VIP免费奖励',error); }
         }

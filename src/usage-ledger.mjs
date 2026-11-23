@@ -11,7 +11,8 @@ import { atomicJson, readJson, withFileLock } from './json-store.mjs';
 /** @typedef {{at: number, day?: string, counters: Counters, uniqueKey?: string, paidGold?: PaidGoldReservation}} Reservation */
 /** @typedef {{id: string, confirmed: boolean, expired?: boolean, details?: Record<string, unknown>}} KeyRecord */
 /** @typedef {{revision: number, owned: Record<string,string>, lost: Record<string,string>, settled?: Record<string,string>}} FieldHistory */
-/** @typedef {{day: string, counters: Counters, pending: Record<string, Reservation>, confirmed: Counters, keys: Record<string, KeyRecord>, fieldHistory?: Record<string,FieldHistory>}} LedgerEntry */
+/** @typedef {Record<string, {revision:string, specialtyId:number, shortageId:number, reporter:string|null}>} MerchantEdits */
+/** @typedef {{day: string, counters: Counters, pending: Record<string, Reservation>, confirmed: Counters, keys: Record<string, KeyRecord>, fieldHistory?: Record<string,FieldHistory>, merchantIntel?: Record<string,{expiresAt:number, ports:MerchantEdits}>}} LedgerEntry */
 /** @typedef {{version: number, accounts: Record<string, LedgerEntry>}} LedgerStore */
 /**
  * @typedef {object} UsageLedger
@@ -19,6 +20,8 @@ import { atomicJson, readJson, withFileLock } from './json-store.mjs';
  * @property {() => Counters} confirmedCounters
  * @property {(uniqueKey: string) => boolean} hasKey
  * @property {() => Record<string, KeyRecord>} keyRecords
+ * @property {(scope: string) => MerchantEdits} merchantEdits
+ * @property {(scope: string, previous: MerchantEdits, ports: MerchantEdits, expiresAt: number, time: number) => boolean} saveMerchantEdits
  * @property {(scope: string) => FieldHistory} resourceFieldHistory
  * @property {(scope: string, history: FieldHistory) => boolean} saveResourceFieldHistory
  * @property {(uniqueKey: string) => number | null} reservationTime
@@ -114,7 +117,7 @@ export function createUsageLedger(accountId, { file = usageFile(), now = Date.no
       for (const [id, reservation] of Object.entries(entry?.pending ?? {})) {
         if (reservation.uniqueKey) pending[id] = { ...reservation, day: reservation.day ?? entry?.day ?? day };
       }
-      entry = { day, counters: {}, pending, confirmed: {}, keys: entry?.keys ?? {}, fieldHistory: entry?.fieldHistory };
+      entry = { day, counters: {}, pending, confirmed: {}, keys: entry?.keys ?? {}, fieldHistory: entry?.fieldHistory, merchantIntel: entry?.merchantIntel };
     }
     if (!plain(entry.counters) || !plain(entry.pending) || !plain(entry.confirmed) || (entry.keys != null && !plain(entry.keys))) throw new Error('额度账本损坏，已停止消费动作');
     return entry.keys == null ? { ...entry, keys: {} } : entry;
@@ -135,6 +138,21 @@ export function createUsageLedger(accountId, { file = usageFile(), now = Date.no
     confirmedCounters() { return { ...read().confirmed }; },
     hasKey(uniqueKey) { return Object.hasOwn(read().keys, uniqueKey); },
     keyRecords() { return copy(read().keys); },
+    merchantEdits(scope) {
+      return copy(read().merchantIntel?.[scope]?.ports ?? {});
+    },
+    saveMerchantEdits(scope, previous, ports, expiresAt, time) {
+      return withFileLock(file, () => {
+        const { store, entry } = forUpdate();
+        const intel = entry.merchantIntel ??= {};
+        if (!isDeepStrictEqual(intel[scope]?.ports ?? {}, previous)) return false;
+        for (const [key, saved] of Object.entries(intel)) if (saved.expiresAt <= time) delete intel[key];
+        if (Object.keys(ports).length) intel[scope] = { expiresAt, ports: copy(ports) };
+        else delete intel[scope];
+        atomicJson(file, store);
+        return true;
+      });
+    },
     resourceFieldHistory(scope) {
       return copy(read().fieldHistory?.[scope] ?? { revision: 0, owned: {}, lost: {} });
     },

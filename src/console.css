@@ -165,7 +165,7 @@ section h2:first-child { margin-top:0 }
 /* ---- 世界地图 ---- */
 .world-refresh-controls { display:flex; align-items:center; flex-wrap:wrap; gap:8px; font-weight:400 }
 .world-refresh-setting { display:inline-flex; align-items:center; gap:6px; font-weight:400 }
-#world-map-refresh-seconds { width:72px }
+#world-map-refresh-seconds,#merchant-refresh-seconds { width:72px }
 .fleet-summary td { overflow-wrap:anywhere; font-variant-numeric:tabular-nums }
 @container main (width > 46.5rem) {
   .fleet-summary table { width:100%; table-layout:fixed }
@@ -702,8 +702,69 @@ button.factory-empty:disabled { cursor:wait; opacity:.6 }
 .activity-tab-time.soon { color:var(--warning); font-weight:500 }
 .activity-heading [data-slot=card-title] { flex:1; min-width:0 }
 .activity-body { display:grid; gap:12px }
-.merchant-progress { display:grid; gap:6px; font-variant-numeric:tabular-nums }
-.merchant-progress progress { width:100%; height:8px; accent-color:var(--primary) }
+.merchant-progress { --merchant-sea:#116975; --merchant-wash:color-mix(in srgb,var(--merchant-sea) 8%,var(--card)); display:grid; grid-template-columns:minmax(0,1fr); gap:14px; min-width:0; font-variant-numeric:tabular-nums }
+[data-theme=dark] .merchant-progress { --merchant-sea:#7bd3de }
+.merchant-progress > * { min-width:0 }
+.merchant-scoreboard,.merchant-trade-heading { display:flex; align-items:center; flex-wrap:wrap; gap:8px 20px }
+.merchant-score,.merchant-gap { display:grid; gap:2px }
+.merchant-score strong { font-size:clamp(26px,3vw,34px); font-weight:650; line-height:1.15; letter-spacing:-.035em }
+.merchant-gap { padding-inline-start:20px; border-inline-start:1px solid var(--border) }
+.merchant-gap strong { color:var(--merchant-sea); font-size:22px; font-weight:600; line-height:1.25 }
+.merchant-caption,.merchant-updated,.merchant-facts dt { font-size:12px; color:var(--muted-foreground) }
+.merchant-score-actions { display:flex; align-items:center; gap:8px; margin-inline-start:auto }
+.merchant-tier-controls { display:flex; gap:6px }
+.merchant-tier-controls button { width:32px; padding:0 }
+.merchant-tier-controls button::after { content:""; width:8px; height:8px; border:solid currentColor; border-width:0 1.6px 1.6px 0; transform:rotate(-45deg) }
+#merchant-tier-prev::after { transform:rotate(135deg) }
+.merchant-tiers { display:grid; grid-auto-flow:column; grid-auto-columns:calc((100% - 24px) / 4); gap:8px; list-style:none; margin:0; padding:0; overflow-x:auto; overscroll-behavior-x:contain; scrollbar-width:none }
+.merchant-tiers::-webkit-scrollbar { display:none }
+.merchant-tiers:focus-visible { outline:2px solid var(--ring); outline-offset:2px }
+.merchant-tier { min-width:0; padding:12px; border-radius:7px; background:color-mix(in srgb,var(--muted) 65%,var(--card)); overflow-wrap:anywhere }
+.merchant-tier[data-state=next] { background:var(--merchant-wash); outline:1px solid color-mix(in srgb,var(--merchant-sea) 46%,var(--card)); outline-offset:-1px }
+.merchant-tier-caption { display:flex; align-items:baseline; justify-content:space-between; flex-wrap:wrap; gap:2px 4px; font-size:12px; color:var(--muted-foreground) }
+.merchant-tier[data-state=next] .merchant-tier-state { color:var(--merchant-sea); font-weight:650 }
+.merchant-tier[data-state=ready] .merchant-tier-state { color:var(--warning); font-weight:650 }
+.merchant-tier[data-state=claimed] .merchant-tier-state { color:var(--success) }
+.merchant-rail { position:relative; margin:9px 3px 8px 0; height:3px; background:color-mix(in srgb,var(--muted-foreground) 30%,var(--card)); border-radius:2px }
+.merchant-rail::after,.merchant-tier[data-state=next] .merchant-rail span::after { content:""; position:absolute; top:50%; right:0; width:8px; height:8px; border:2px solid color-mix(in srgb,var(--muted-foreground) 45%,var(--card)); border-radius:50%; background:var(--card); transform:translate(50%,-50%) }
+.merchant-rail span { display:block; position:relative; width:0; height:100%; background:var(--merchant-sea); border-radius:inherit }
+.merchant-tier:is([data-state=claimed],[data-state=ready],[data-state=reached]) .merchant-rail span { width:100% }
+.merchant-tier:is([data-state=claimed],[data-state=ready],[data-state=reached]) .merchant-rail::after,.merchant-tier[data-state=next] .merchant-rail span::after { border-color:var(--merchant-sea); background:var(--merchant-sea) }
+.merchant-tier[data-state=next] .merchant-rail span { z-index:1 }
+.merchant-tier-target { display:flex; align-items:baseline; gap:5px; margin:0; font-size:12px; color:var(--muted-foreground) }
+.merchant-tier-target strong { color:var(--foreground); font-size:18px; font-weight:600 }
+.merchant-reward { display:flex; align-items:center; gap:5px; margin-top:4px; font-size:13px }
+.merchant-reward .ico { background:transparent; border-radius:3px }
+.merchant-reward b { color:var(--muted-foreground); font-weight:500; white-space:nowrap }
+.merchant-voyage,.merchant-trade-group { display:grid; gap:8px; padding-block-start:12px; border-block-start:1px solid var(--border) }
+#merchant-intel-dialog { width:min(760px,calc(100vw - 24px)); max-width:none }
+#merchant-intel-dialog[open] { grid-template-rows:auto minmax(0,1fr) auto; overflow:hidden }
+#merchant-intel-dialog p { margin:0 }
+#merchant-intel-list,#merchant-intel-form { min-height:0; overflow:auto }
+#merchant-intel-form:not([hidden]) { display:grid; gap:12px }
+#merchant-intel-form label { display:grid; gap:4px }
+#merchant-intel-form select { width:100% }
+.merchant-intel-actions { display:flex; flex-wrap:wrap; align-items:center; justify-content:flex-end; gap:8px }
+#merchant-intel-reset { margin-inline-end:auto }
+#merchant-intel-notice:empty { display:none }
+.merchant-intel-manual { color:var(--muted-foreground); font-size:12px }
+.merchant-port-position { color:var(--merchant-sea); font-size:12px; white-space:nowrap }
+.merchant-trade-heading { align-items:baseline; gap:2px 12px }
+.merchant-trade-heading h3,.merchant-trade-group h3 { margin:0; font-size:14px; font-weight:600 }
+.merchant-trade-heading span { font-size:13px; color:var(--muted-foreground) }
+.merchant-facts { display:grid; grid-template-columns:repeat(auto-fit,minmax(min(100%,120px),1fr)); gap:9px 16px; margin:0 }
+.merchant-facts dd { margin:2px 0 0; font-size:14px; font-weight:500; overflow-wrap:anywhere }
+.merchant-trade-group p { margin:0; font-size:12px; color:var(--muted-foreground) }
+@media (max-width:768px), (hover:none) and (pointer:coarse) {
+  .merchant-tier-controls { display:none }
+  .merchant-tiers { grid-auto-columns:min(82%,12rem) }
+}
+@container main (max-width:540px) {
+  .merchant-scoreboard { gap:10px 16px }
+  .merchant-gap { padding-inline-start:16px }
+  .merchant-tier { padding:10px }
+  .merchant-facts { grid-template-columns:repeat(2,minmax(0,1fr)) }
+}
 .activity-task { display:grid; grid-template-columns:minmax(0,1fr) auto; column-gap:24px; align-items:center; padding:16px 0; border-top:1px solid var(--border) }
 .activity-task:first-child { border-top:0; padding-top:0 }
 .activity-task>strong,.activity-task>.dim { grid-column:1 }
@@ -838,6 +899,7 @@ button.factory-empty:disabled { cursor:wait; opacity:.6 }
   body:has(#tab-chat:not(.hidden)) { display:flex; flex-direction:column; height:100dvh }
   body:has(#tab-chat:not(.hidden)) > header { flex:none }
   .deck:has(#tab-chat:not(.hidden)) { flex:1; min-height:0; grid-template-rows:minmax(0,1fr); align-items:stretch; padding-top:6px }
+  main:has(>#tab-chat:not(.hidden)) { display:grid; grid-template-rows:auto minmax(0,1fr) }
   #tab-chat:not(.hidden),#chat-root { height:100%; min-height:0 }
   .bar { gap:6px; margin-block:8px }
   .bar .k,.dim,.id,.heading-status,.account-card-data dd,#stage-view { font-size:var(--text-sm) }

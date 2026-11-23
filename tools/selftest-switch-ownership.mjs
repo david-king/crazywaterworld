@@ -20,7 +20,10 @@ const { activityAutomationFields } = await import('../src/activity-automation.mj
 const script = fs.readFileSync(new URL('../src/settings-ui.js', import.meta.url), 'utf8');
 const definitions = script.slice(0, script.indexOf('function configGet('));
 const { staticGroups, merchantFields, guildShipFields } = newStateFunction(definitions + '\nreturn { staticGroups: configGroups, merchantFields: merchantActivityFields, guildShipFields: guildShipActivityFields };')();
-const activityKeys = new Set([...merchantFields.map(field => field.key), ...guildShipFields.map(field => field.key), ...activityAutomationFields.map(field => field.key),
+// These activities no longer have catalog rows. Their gates are edited under 任务与领奖.
+const rewardPageGates = new Set(['activityAutomation.vip', 'activityAutomation.fish', 'activityAutomation.pirates']);
+const catalogGates = activityAutomationFields.filter(field => !rewardPageGates.has(field.key));
+const activityKeys = new Set([...merchantFields.map(field => field.key), ...guildShipFields.map(field => field.key), ...catalogGates.map(field => field.key),
   'schedule.weekOrderSubmit', 'weekOrder.allowDiamonds', 'schedule.weekOrderFinal',
   'heroRaid.enabled', 'heroRaid.challenge', 'heroRaid.retryTimes', 'heroRaid.orders', 'heroRaid.lottery', 'heroRaid.rewards']);
 const renderStart = script.indexOf('function configRender()');
@@ -188,13 +191,18 @@ try {
     }
   });
 
-  await check('每个活动自动挂机总开关仅由活动配置管理，挂机面板不生成入口', () => {
+  await check('活动目录和任务与领奖各自管理对应开关，挂机面板不生成入口', () => {
     const idleKeys = new Set(idleAutomationControls.flatMap(control => control.fields));
+    const rewards = configGroups.find(group => group.id === 'rewards');
     for (const field of activityAutomationFields) {
       assert.equal(typeof read(defaultSettings(), field.key), 'boolean', field.key + ' 有持久化布尔值');
       assert(!idleKeys.has(field.key), field.key + ' 不在挂机入口');
-      assert(!configKeys.has(field.key), field.key + ' 不在通用配置重复编辑');
-      assert(activityKeys.has(field.key), field.key + ' 由活动配置拥有');
+      if (rewardPageGates.has(field.key)) {
+        assert(rewards.fields.some(item => (item.controlFields ?? [item.key]).includes(field.key)), field.key);
+      } else {
+        assert(!configKeys.has(field.key), field.key + ' 不在通用配置重复编辑');
+        assert(activityKeys.has(field.key), field.key + ' 由活动配置拥有');
+      }
     }
   });
 

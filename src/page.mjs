@@ -12,6 +12,7 @@ const lineupScript = readFileSync(new URL('./lineup-editor.js', import.meta.url)
 const lineupCss = readFileSync(new URL('./lineup-editor.css', import.meta.url), 'utf8');
 const settingsScript = readFileSync(new URL('./settings-ui.js', import.meta.url), 'utf8');
 const runtimeOverviewScript = readFileSync(new URL('./runtime-overview-ui.js', import.meta.url), 'utf8');
+const merchantIntelScript = readFileSync(new URL('./merchant-intel-ui.js', import.meta.url), 'utf8');
 const activitiesScript = readFileSync(new URL('./ui/activities.js', import.meta.url), 'utf8');
 const settingsCss = readFileSync(new URL('./settings.css', import.meta.url), 'utf8');
 const giftCodeScript=readFileSync(new URL('./gift-codes-ui.js',import.meta.url),'utf8');
@@ -50,9 +51,12 @@ export const PAGE = `<!doctype html>
 ${chrome()}
 <div class="deck"><main>
   <nav id="resource-tabs" class="resource-tabs" aria-label="杂项分类" hidden>
-    <button type="button" data-resource-tab="guild">联盟</button><button type="button" data-resource-tab="inventory">仓库</button><button type="button" data-resource-tab="heroes">英雄与装备</button><button type="button" data-resource-tab="giftcodes">礼包兑换</button>
+    <button type="button" data-resource-tab="guild">联盟</button><button type="button" data-resource-tab="inventory">仓库</button><button type="button" data-resource-tab="heroes">英雄与装备</button>
+    <button type="button" data-resource-tab="items">装备与徽章</button>
+    <button type="button" data-resource-tab="giftcodes">礼包兑换</button>
     <button type="button" data-resource-tab="dailies">日常任务</button>
     <button type="button" data-resource-tab="shops">商店</button>
+    <button type="button" data-resource-tab="chat">聊天</button>
   </nav>
   <section id="tab-overview">
     ${overviewPage()}
@@ -90,6 +94,7 @@ ${chrome()}
   <section id="tab-dailies" class="hidden" aria-label="日常任务"><div id="daily-tasks-root"></div></section>
   <section id="tab-shops" class="hidden" aria-label="商店"><div id="shops-root"></div></section>
   <section id="tab-chat" class="hidden" aria-label="聊天"><div id="chat-root"></div></section>
+  <section id="tab-items" class="hidden" aria-label="装备与徽章"><div id="items-root"></div></section>
 
   <section id="tab-giftcodes" class="hidden">
     ${giftCodesPage()}
@@ -1244,6 +1249,7 @@ async function pirateAdvanceCommand(action) {
 $('pirate-manual-once').onclick=()=>pirateAdvanceCommand('once');
 $('pirate-advance-start').onclick=()=>pirateAdvanceCommand('start');
 $('pirate-advance-stop').onclick=()=>pirateAdvanceCommand('stop');
+${merchantIntelScript}
 ${runtimeOverviewScript}
 function renderLoop(data) {
   renderAutomationOverview(data);
@@ -2691,15 +2697,17 @@ new ResizeObserver(() => {
 
 async function boot() {
   // 显式链接优先，否则恢复当前历史记录的页面；配置分组由 configApplyHash 恢复。
-  const savedView = history.state?.consoleView;
+  const previousView = history.state?.consoleView;
+  const savedView = ['chat', 'items'].includes(previousView?.tab)
+    ? { tab: 'resources', resource: previousView.tab } : previousView;
   const initialTab = location.hash.startsWith('#config-group-') ? 'settings'
     : location.hash === '#pirate-first-kill' ? 'stages' : location.hash === '#journal' ? 'overview'
     : savedView?.tab === 'login-settings' ? 'account'
     : savedView?.tab === 'resources' && savedView.resource === 'activities' ? 'activities' : savedView?.tab;
   try {
     // 恢复账号页时先显示保存的角色资料，由该页按连接状态决定是否读取资源。
-    await loadAccounts(true, initialTab !== 'account' && initialTab !== 'chat'
-      && !(initialTab === 'resources' && savedView?.resource === 'shops'));
+    await loadAccounts(true, initialTab !== 'account'
+      && !(initialTab === 'resources' && ['shops', 'chat', 'items'].includes(savedView?.resource)));
   } catch (error) {
     $('hint').textContent = '';
     reportError(error);

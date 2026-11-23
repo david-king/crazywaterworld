@@ -123,6 +123,24 @@ try {
     await run(f, s, ledger);
     assert.deepEqual(f.client.writes.map(write => write.body.gridId), [4000]);
   });
+  await test('主城空闲但开启原生委任的舰队先占中等空位，归队后抢占战力最低的合规矿位', async () => {
+    const f = siliconFixture(), s = siliconSettings(), ledger = usage(f);
+    Object.assign(s.silicon.fleets[0], { tiers: ['PURPLE'], emptyOnly: false, opponentOrder: 'powerAsc',
+      maxPowerRatio: 100, failureLimit: 99, dailyAttackLimit: 999, autoRepair: true });
+    f.state.fleets[0].autoFight = { isOn: true, todayTimes: 0 };
+    f.enemy(0, '强敌', 1001, 8, 4000);
+    f.enemy(1, '较弱守军', 800, 8, 4000);
+    s.cityWar.enabled = true; s.cityWar.reserveDuringWar = true; s.cityWar.fleetIds = ['1远征船'];
+    reserveDispatch(f.client, 'cityWar', ['1远征船']);
+    await run(f, s, ledger); assert.deepEqual(f.client.writes, []);
+    reserveDispatch(f.client, 'cityWar', []);
+    await run(f, s, ledger);
+    assert.deepEqual(f.client.writes.map(w => w.body), [{ fleetId: '1远征船', gridId: 4000, index: 2 }]);
+    f.returnFleet('1远征船'); f.enemy(2, '同战力守军', 1000, 8, 4000);
+    await run(f, s, ledger);
+    assert.deepEqual(f.client.writes.map(w => w.body.index), [2, 1]);
+    assert.equal(ledger.confirmedCounters().siliconAttacks1, 1);
+  });
   await test('服务器全局30次与每舰日抢占限制同时生效', async () => {
     const f = siliconFixture(), s = siliconSettings(), ledger = usage(f); s.silicon.fleets[0].emptyOnly = false; for (let i = 0; i < 3; i++) f.enemy(i, '敌人' + i);
     f.state.fightTimes = 30; assert.equal((await plan(f, s, ledger)).actions.length, 0);

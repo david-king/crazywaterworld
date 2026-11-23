@@ -69,6 +69,142 @@ try {
     await page.goto(base);
     await tab('overview');
     {
+      const edits = {};
+      await page.route('**/api/merchant/intel?*', async route => {
+        const { changes, scope } = route.request().postDataJSON();
+        for (const change of changes) {
+          if (change.reset) delete edits[change.cityId];
+          else edits[change.cityId] = { ...change, version: 'saved' };
+        }
+        await route.fulfill({ json: { edits, scope } });
+      });
+      const paint = (period, intel, purchaseDetails) => page.evaluate(({ period, intel, purchaseDetails }) => renderMerchantOverview({
+        startTime: 1, endTime: 3601, serverNow: 1, goal: { target: 50000000, profit: 60, claimed: 0,
+          tiers: Array.from({ length: 8 }, (_, i) => ({ id: i + 1, target: (i + 1) * 100, rewards: [] })) }, trade: {
+          period, intel: { ...intel, scope: '测试联盟-' + period }, voyage: { facts: [['预期收益', '约 2,575 商会币']],
+            status: purchaseDetails ? '买入淡水 ×1' : '航行中', purchaseDetails }, notes: [],
+        },
+      }), { period, intel: { ...intel, edits }, purchaseDetails });
+      const intel = { catalog: [{ id: 1, name: '维生素补剂' }, { id: 2, name: '鱼皮' }, { id: 3, name: '布匹' }], ports: [
+        { cityId: 1, revision: '旧', city: '太阳岛', position: '目的港', shortageId: 1, specialtyId: 2, shortage: '维生素补剂', specialty: '鱼皮', reporter: '海鸥' },
+        { cityId: 2, revision: '缺', city: '要塞D6', position: '出发港', specialtyId: 3, shortageId: 0, specialty: '布匹', shortage: null, reporter: null },
+      ] };
+      await page.evaluate(account => localStorage.setItem('cw.merchant-intel.' + account, JSON.stringify({
+        scope: '测试联盟-1', ports: { 1: { revision: '旧', specialty: '布匹', shortage: '维生素补剂', reporter: '海鸥' } },
+      })), account);
+      const imported = page.waitForResponse(response => new URL(response.url()).pathname === '/api/merchant/intel');
+      await paint(1, intel);
+      await imported;
+      assert.equal(edits[1].specialtyId, 3);
+      const purchaseDetails = [['本批预计净收益', '2 商会币'], ['本批占舱', '1 格']];
+      await paint(1, intel, purchaseDetails);
+      const summary = page.getByText('采购明细', { exact: true });
+      const batch = page.getByText('本批预计净收益', { exact: true });
+      assert.equal(await batch.isVisible(), false);
+      await summary.focus();
+      await summary.press('Enter');
+      assert.equal(await batch.isVisible(), true);
+      await paint(1, intel, purchaseDetails);
+      assert.equal(await batch.isVisible(), true);
+      await paint(1, intel);
+      assert.equal(await summary.count(), 0);
+      assert.equal(await page.evaluate(account => localStorage.getItem('cw.merchant-intel.' + account), account), null);
+      const panel = page.getByRole('dialog', { name: '港口情报', includeHidden: true });
+      const toggle = page.locator('.merchant-score-actions').getByRole('button', { name: '港口情报' });
+      assert.equal(await toggle.isVisible(), true);
+      assert.equal(await page.locator('#merchant-intel-toggle + .merchant-tier-controls').count(), 1);
+      await toggle.focus();
+      await toggle.press('Enter');
+      await panel.getByText('待共享', { exact: true }).waitFor();
+      const first = panel.locator('tbody tr').first();
+      assert.match(await first.innerText(), /太阳岛.*目的港/);
+      assert.match(await first.innerText(), /维生素补剂/);
+      assert.match(await first.innerText(), /海鸥/);
+      assert(await panel.evaluate(node => node.scrollWidth <= node.clientWidth + 1));
+      const edit = panel.getByRole('button', { name: '编辑要塞D6情报' });
+      await edit.click();
+      await panel.getByLabel('紧缺商品').selectOption('2');
+      await paint(1, { message: '港口情报读取失败，请刷新总览重试。' });
+      assert.equal(await panel.getByLabel('紧缺商品').inputValue(), '2');
+      await paint(1, intel);
+      assert.equal(await panel.getByLabel('紧缺商品').inputValue(), '2');
+      await panel.getByRole('button', { name: '保存情报' }).click();
+      await panel.locator('tbody tr').nth(1).getByText('手动', { exact: true }).waitFor();
+      await panel.getByRole('button', { name: '关闭港口情报' }).click();
+      await paint(1, intel);
+      await toggle.click();
+      const second = panel.locator('tbody tr').nth(1);
+      assert.match(await second.innerText(), /鱼皮/);
+      await edit.click();
+      await panel.getByRole('button', { name: '恢复游戏情报' }).click();
+      await second.getByText('待共享', { exact: true }).waitFor();
+      assert.match(await second.innerText(), /待共享/);
+      await edit.click();
+      await panel.getByLabel('紧缺商品').selectOption('2');
+      await panel.getByRole('button', { name: '保存情报' }).click();
+      await edit.click();
+      await panel.getByLabel('共享人').fill('尚未保存');
+      const updated = structuredClone(intel);
+      delete edits[2];
+      Object.assign(updated.ports[1], { revision: '新', shortage: '维生素补剂', reporter: '新共享人' });
+      await paint(1, updated);
+      assert.equal(await panel.locator('form').isVisible(), false);
+      assert.match(await second.innerText(), /新共享人/);
+      assert.doesNotMatch(await second.innerText(), /手动|鱼皮/);
+      await paint(1, intel);
+      assert.match(await second.innerText(), /待共享/);
+      await paint(1, { ports: [], message: '联盟暂无港口情报。' });
+      await panel.getByText('联盟暂无港口情报。').waitFor();
+      assert.equal(await panel.locator('table').count(), 0);
+      await paint(2, intel);
+      assert.equal(await panel.locator('table').isVisible(), false);
+      const refreshToggle = page.locator('#merchant-auto-refresh'), interval = page.getByLabel('海商王刷新间隔（秒）');
+      assert.equal(await refreshToggle.getAttribute('aria-pressed'), 'true');
+      assert.equal(await interval.inputValue(), '30');
+      assert(await interval.evaluate(node => node.getBoundingClientRect().right <= document.documentElement.clientWidth));
+      await refreshToggle.click();
+      await interval.fill('4');
+      await interval.press('Tab');
+      assert.equal(await interval.evaluate(node => node.validity.valid), false);
+      await interval.fill('5');
+      await interval.press('Tab');
+      assert.deepEqual(await page.evaluate(() => JSON.parse(localStorage.getItem('cw.merchant.refresh'))), { enabled: false, seconds: 5 });
+      const reads = await page.evaluate(async () => {
+        const originalCall = call, originalStatus = snapshot, wasDisconnected = disconnected.has(current);
+        const reads = [];
+        try {
+          snapshot = { ...snapshot, connected: true, paused: false, loginBlocked: false };
+          disconnected.delete(current);
+          call = async path => {
+            reads.push(path);
+            return { startTime: 1, endTime: 3601, serverNow: 1, lines: ['已刷新本船'] };
+          };
+          merchantLastRefresh = 0;
+          await maybeRefreshMerchant();
+          if (reads.length) throw Error('关闭后仍自动读取');
+          $('merchant-auto-refresh').click();
+          await maybeRefreshMerchant();
+          if (reads.length !== 1 || !$('merchant-overview-progress').textContent.includes('已刷新本船')) throw Error('开启后未立即更新本船');
+          await maybeRefreshMerchant();
+          if (reads.length !== 1) throw Error('间隔未到就再次刷新');
+          merchantLastRefresh = Date.now() - 5000;
+          await Promise.all([maybeRefreshMerchant(), maybeRefreshMerchant()]);
+          $('merchant-auto-refresh').click();
+          return reads;
+        } finally {
+          call = originalCall;
+          snapshot = originalStatus;
+          if (wasDisconnected) disconnected.add(current);
+        }
+      });
+      assert.deepEqual(reads, Array(2).fill('/api/merchant/overview?account=' + account));
+      await page.reload();
+      await tab('overview');
+      assert.equal(await refreshToggle.getAttribute('aria-pressed'), 'false');
+      assert.equal(await interval.inputValue(), '5');
+      await page.evaluate(() => renderMerchantOverview(null));
+    }
+    {
       const runtime = await (await page.request.get(base + '/api/loop?account='+account)).json();
       Object.assign(runtime, {running:true, connected:true, completed:8, fleetMaintenance:null, controls:[
         {key:'factory.gain', group:'基地', label:'领取工厂产品', enabled:true, observation:{state:'ok',text:'已领取 3 份工厂产品',checkedAt:1700000000}},
@@ -218,7 +354,8 @@ try {
     await tab('overview');
     assert.equal(await page.locator('#tabs [data-tab="activities"]').getAttribute('aria-label'), '活动');
     assert.equal(await page.locator('#tabs [data-tab="resources"]').getAttribute('aria-label'), '杂项');
-    assert.deepEqual(await page.locator('[data-resource-tab]').allTextContents(), ['联盟', '仓库', '英雄与装备', '礼包兑换', '日常任务']);
+    assert.deepEqual(await page.locator('[data-resource-tab]').allTextContents(), ['联盟', '仓库', '英雄与装备', '装备与徽章', '礼包兑换', '日常任务', '商店', '聊天']);
+    assert.equal(await page.locator('#tabs [data-tab="items"]').count(), 0);
     await main('settings');
     await config('base', 'building');
     await page.reload();
@@ -345,6 +482,13 @@ try {
     await tab('resources', 'heroes');
     await page.reload();
     await tab('resources', 'heroes');
+    await page.getByRole('button', { name: '装备与徽章', exact: true }).click();
+    await tab('resources', 'items');
+    await page.reload();
+    await tab('resources', 'items');
+    await page.locator('#items-root').getByText('账号已暂停，恢复托管后可查看装备。').waitFor();
+    await reloadFrom({ consoleView: { tab: 'items', resource: 'guild' } });
+    await tab('resources', 'items');
     await page.locator('[data-resource-tab="dailies"]').click();
     await page.reload();
     await tab('resources', 'dailies');

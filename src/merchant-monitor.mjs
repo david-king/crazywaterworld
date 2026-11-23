@@ -1,5 +1,5 @@
 // 海商王推送仅使快照失效并唤醒现有串行调度，不在监听器中发送任何协议。
-import { merchantPointerSeconds, merchantTiming } from './merchant-planner.mjs';
+import { merchantFinalCargoStart, merchantPointerSeconds, merchantTiming } from './merchant-planner.mjs';
 import { exactAutomationId } from './automation-policy.mjs';
 
 const watchers = new WeakMap();
@@ -100,23 +100,32 @@ export function watchMerchant(client) {
       const deadlines = [time + merchantMonitorSeconds(input.settings)];
       priorityAt = 0;
       const settings = input.settings?.merchant ?? input.settings;
-      if (settings?.autoSpeedUp && (settings.guardLastPointer || ['race', 'full'].includes(settings.speedUpMode))) {
-        if (positive(destination) && cargo?.moveEndTime > time) {
-          const duration = settings.guardLastPointer && merchantPointerSeconds(input.config);
-          priorityAt = duration && cargo.moveEndTime - duration > time ? cargo.moveEndTime - duration : cargo.moveEndTime;
-        }
-        if (input.expedite) priorityAt = time + 1;
-        if (priorityAt) deadlines.push(priorityAt);
+      if (positive(destination) && cargo?.moveEndTime > time && settings?.autoSpeedUp &&
+        (settings.guardLastPointer || ['race', 'full'].includes(settings.speedUpMode))) {
+        const duration = settings.guardLastPointer && merchantPointerSeconds(input.config);
+        priorityAt = duration && cargo.moveEndTime - duration > time ? cargo.moveEndTime - duration : cargo.moveEndTime;
       }
       if (positive(cargo?.moveEndTime) && cargo.moveEndTime > time) deadlines.push(cargo.moveEndTime);
       if (positive(event?.startTime) && event.startTime > time) deadlines.push(event.startTime);
       if (positive(event?.endTime) && event.endTime > time) deadlines.push(event.endTime);
       if (input.config) {
         const timing = merchantTiming(input.config, event, time);
+        const finalStart = merchantFinalCargoStart(timing, event, settings, input.state?.player?.goods, destination);
+        if (finalStart !== null && cargo?.moveEndTime > Math.max(time, finalStart)) {
+          const checkAt = time < finalStart ? finalStart : cargo.moveEndTime;
+          priorityAt = Math.min(priorityAt || Infinity, checkAt);
+        }
         if (positive(timing.nextRefreshAt) && timing.nextRefreshAt > time) deadlines.push(timing.nextRefreshAt);
         if (positive(timing.tradeStartTime) && timing.tradeStartTime > time) deadlines.push(timing.tradeStartTime);
       }
-      if (positive(input.plan?.nextCheckAt) && input.plan.nextCheckAt > time) deadlines.push(input.plan.nextCheckAt);
+      if (settings?.autoSpeedUp && input.expedite) priorityAt = time + 1;
+      if (priorityAt) deadlines.push(priorityAt);
+      if (positive(input.plan?.nextCheckAt) && input.plan.nextCheckAt > time) {
+        deadlines.push(input.plan.nextCheckAt);
+        if (input.plan.mode === 'WAIT_FINAL_CARGO' ||
+          (settings?.fullCargoRoutes && (['WAIT_REFRESH', 'WAIT_DEPARTURE'].includes(input.plan.mode) || input.plan.kind === 'buy')))
+          priorityAt = Math.min(priorityAt || Infinity, input.plan.nextCheckAt);
+      }
       nextAt = Math.max(time + 1, Math.min(...deadlines)); dirty = false;
       return nextAt;
     },

@@ -57,6 +57,14 @@ function integration({ mainEveryMs = 3600000 } = {}) {
 }
 
 try {
+  await test('满舱卡点与刷新前采购均能在长监控间隔内准时唤醒', () => {
+    const monitor = watchMerchant(new EventEmitter()), time = wall / 1000;
+    for (const plan of [{ kind: 'wait', mode: 'WAIT_DEPARTURE' }, { kind: 'wait', mode: 'WAIT_REFRESH' }, { kind: 'buy' }]) {
+      monitor.observe({ time, settings: { fullCargoRoutes: true, monitorSeconds: 300 }, plan: { ...plan, nextCheckAt: time + 23 } });
+      assert.equal(monitor.nextCheckAt, time + 23);
+      assert.equal(monitor.priorityAt, time + 23);
+    }
+  });
   await test('最后一根在窗口边界唤醒，原先同港的船改线使快照失效', () => {
     const client = new EventEmitter(), monitor = watchMerchant(client), off = monitor.subscribe(() => {});
     const now = wall / 1000;
@@ -178,6 +186,50 @@ try {
     assert.deepEqual(f.state.writes.map(row => row.name), ['TradeSpeedRequest', 'TradeBuyRequest']);
     assert.deepEqual(f.state.writes[0].body, { useNum: 1 });
     assert.equal(f.state.writes[1].body.cityId, 20);
+  });
+  await test('末日20点唤醒在途商船，直接加速后分批按目的港实价卖出', async () => {
+    const f = integration();
+    const start = f.now + 8 * 3600; // 北京时间20点，22点停止贸易、午夜活动结束。
+    f.client.serverClockOffsetMs += (8 * 3600 - 3) * 1000;
+    f.client.tradeWindow.endTime = start + 4 * 3600;
+    Object.assign(f.settings.merchant, { autoSpeedUp: true, speedUpMode: 'deadline',
+      autoUpgrade: true, fullCargoRoutes: true });
+    f.state.stock['海商王加速'] = 4;
+    f.state.diamonds = 300;
+    f.state.trade.player.profit = 10000;
+    f.state.trade.player.goods = [1, 2].map(pid => ({ pid, cityId: 10, goodsId: 1001, num: 1, buyPrice: 64 }));
+    Object.assign(f.state.trade.cargo, { moveStartTime: start - 1800, moveEndTime: start + 5400, moveToCityId: 20 });
+    f.reportHook(() => { if (f.state.writes.length >= 3) f.stop.aborted = true; });
+    await f.run();
+    assert.equal(f.sleeps[0], 3000);
+    assert.deepEqual(f.state.writes.map(row => row.name), ['TradeSpeedRequest', 'TradeSellRequest', 'TradeSellRequest']);
+    assert.equal(f.state.writes[0].body.useNum, 3);
+    assert.equal(f.state.trade.player.goods.length, 0);
+    assert.equal(wall - base, 5000);
+  });
+  await test('末班船仅余两根时先自然航行，到可直达的秒数才扣针并售货', async () => {
+    const f = integration();
+    const start = f.now + 8 * 3600;
+    f.client.serverClockOffsetMs += 8 * 3600 * 1000;
+    f.client.tradeWindow.endTime = start + 4 * 3600;
+    // 库存只有三根，其中一根保留。即使允许补购也能用现有两根完成本程。
+    Object.assign(f.settings.merchant, { autoSpeedUp: true, speedUpMode: 'deadline', monitorSeconds: 300,
+      keepPointers: 1, autoBuyPointers: true, pointerDailyDiamondLimit: 1000 });
+    f.state.stock['海商王加速'] = 3;
+    f.state.diamonds = 1000;
+    f.state.trade.player.goods = [{ pid: 201, cityId: 10, goodsId: 1001, num: 1, buyPrice: 40 }];
+    Object.assign(f.state.trade.cargo, { moveStartTime: start - 1813, moveEndTime: start + 5387, moveToCityId: 20 });
+    f.sleepHook(ms => {
+      if (wall - base < 1787000) assert.deepEqual(f.state.writes, [], '等待期间不使用或购买指针');
+      wall += ms;
+    });
+    f.reportHook(() => { if (f.state.writes.length >= 2) f.stop.aborted = true; });
+    await f.run();
+    assert.deepEqual(f.state.writes.map(row => row.name), ['TradeSpeedRequest', 'TradeSellRequest']);
+    assert.equal(f.state.writes[0].body.useNum, 2);
+    assert.equal(wall - base, 1788000, '到直达边界复查，下一秒按实价售出');
+    assert.equal(f.state.stock['海商王加速'], 1);
+    assert.equal(f.state.diamonds, 1000);
   });
   await test('到港期限短于监控周期时及时回读并出售', async () => {
     const f = integration(), now = f.now;

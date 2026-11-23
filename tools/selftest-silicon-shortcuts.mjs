@@ -83,6 +83,15 @@ try {
     assert.equal(f.ledger.confirmedCounters().siliconAttacks2, 1); assert.equal(f.ledger.confirmedCounters().siliconPetrol, 500);
     assert.equal(f.state.fightTimes, 1);
   });
+  await test('手动抢占可选已开原生委任的空闲舰队，确认前实际出征则取消', async () => {
+    const f = fixture(); f.enemy(0);
+    f.state.fleets[0].autoFight = { isOn: true, todayTimes: 0 };
+    const quote = await preview(f, attack());
+    assert.ok(quote.fleets[0].step);
+    Object.assign(f.state.fleets[0], { state: 2, targetGridIdx: 6000 });
+    await assert.rejects(() => run(f, quote), /行军/);
+    assert.deepEqual(f.client.writes, []);
+  });
   await test('初等矿、空位、同盟和自己的舰队不能抢占', async () => {
     for (const [grid, setup] of [[3000, f => f.enemy(0, '敌方船长', 900, 8, 3000)], [5000, () => {}],
       [5000, f => f.enemy(0, '敌方船长', 900, 7)], [5000, f => f.occupy('2远征船')]]) {

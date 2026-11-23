@@ -12,6 +12,7 @@ export const operationLabels = {
   '/api/world/fleet-speed/preview': '核对舰队加速费用',
   '/api/world/fleet-speed/action': '加速舰队至完成',
   '/api/merchant': '查看海商王实况', '/api/merchant/history': '查看海商王成交记录', '/api/merchant/step': '海商王单步验证',
+  '/api/merchant/intel': '保存走商港口情报', '/api/merchant/overview': '刷新海商王',
   '/api/activities/run': '单次执行活动',
   '/api/activities/settings': '设置活动自动挂机',
   '/api/week-order/submit': '提交不差钱商人订单', '/api/week-order/buy': '购买不差钱商人订单材料',

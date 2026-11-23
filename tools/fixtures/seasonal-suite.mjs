@@ -10,6 +10,7 @@ export function seasonalFixture() {
     config = getConfig(),
     settings = defaultSettings();
   settings.merchant.enabled = true;
+  settings.merchant.fullCargoRoutes = false;
   settings.activityAutomation.beauty = true;
   const now = Math.floor(Date.UTC(2026, 10, 5, 4) / 1000);
   const client = new EventEmitter();

@@ -33,10 +33,12 @@ export function merchantStrategyPlan(plan, config, event, state, policy, time, l
     if (policy.firstDepartureMode === 'time') {
       const [hour, minute] = policy.firstDepartureTime.split(':').map(Number);
       const at = dayOf(time) * 86400 - 28800 + hour * 3600 + minute * 60;
-      if (time < at) return { kind: 'wait', reason: '等待首趟指定出发时间 ' + policy.firstDepartureTime, nextCheckAt: at };
+      if (time < at && (!policy.fullCargoRoutes || plan.kind === 'move' || at >= plan.latestActionAt))
+        return { kind: 'wait', reason: '等待首趟指定出发时间 ' + policy.firstDepartureTime, nextCheckAt: at };
     } else if (plan.exploration || plan.waitForFirstDeparture) {
       const at = Math.max(event.startTime, timing.tradeStartTime) + policy.firstDepartureWaitMinutes * 60;
-      if (time < at) return { kind: 'wait', reason: '首趟等待盈利商品或共享商情，稍后按参考价配货或换港寻价', nextCheckAt: at };
+      if (time < at) return { kind: 'wait', reason: policy.fullCargoRoutes ? '首趟等待折后仍可盈利的满舱双向航线' :
+        '首趟等待盈利商品或共享商情，稍后按参考价配货或换港寻价', nextCheckAt: at };
     }
   }
   if ((plan.kind === 'move' || swap) && policy.speedUpMode === 'arrival' && today.some(record =>

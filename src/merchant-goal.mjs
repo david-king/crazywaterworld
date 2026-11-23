@@ -76,6 +76,7 @@ export function merchantGoal(config, event, state, time, settings = {}) {
   }
   return {
     checkedAt, target, profit, remaining, claimed, totalTiers: tiers.length, reward: goalTier?.rewards ?? [],
+    tiers: tiers.map(tier => ({ id: tier.rewardId, target: tier.target, rewards: tier.rewards ?? [] })),
     nextTier: nextTier && { id: nextTier.rewardId, target: nextTier.target },
     ready: nextTier != null && profit !== null && profit >= nextTier.target,
     remainingTradingSeconds: left,
