@@ -810,7 +810,8 @@ roundTrip(Buffer.from('RequestResponse'.repeat(200)), 'text');
   assert.equal(only.state.settled, 'reject', 'without a watcher the oldest pending entry takes the prompt');
   assert.deepEqual(client.pending, [newer.entry]);
   for (const names of [['GuildCityInfoRequest', 'HeroStarUpRequest'], ['HeroStarUpRequest', 'GuildAidListRequest'],
-    ['HeroStarUpRequest', 'GuildInfoRequest'], ['HeroStarUpRequest', 'GotGuildWelfarePackRequest']]) {
+    ['HeroStarUpRequest', 'GuildInfoRequest'], ['HeroStarUpRequest', 'GotGuildWelfarePackRequest'],
+    ['HeroStarUpRequest', 'SeasonChestInfoRequest'], ['HeroStarUpRequest', 'SeasonChestOpenRequest']]) {
     client.pending.length = 0;
     const entries = names.map((name, index) => fake(name, index));
     client.pending.push(...entries.map(({ entry }) => entry));

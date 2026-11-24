@@ -1353,7 +1353,7 @@ export async function runLoop(client, protocol, {
             const states = entries.map(entry => entry.status === 'pending' ? 'pending' : entry.ok === false && !entry.skipped ? 'error' : entry.skipped ? 'waiting' : 'ok');
             const state = ['pending', 'error', 'waiting', 'ok'].find(value => states.includes(value)) ?? 'waiting';
             rewards?.observe('museum.display', text, state);
-            const base = ['enabled', 'upgrade', 'revenue', 'achievements'].some(key => getSettings()?.museum[key]) ? rewards?.status('museum.runEnabled') : null;
+            const base = ['enabled', 'upgrade', 'revenue', 'achievements', 'unlockCases'].some(key => getSettings()?.museum[key]) ? rewards?.status('museum.runEnabled') : null;
             const combined = ['pending', 'error', 'waiting', 'ok'].find(value => value === state || value === base?.state);
             rewards?.observe('museum.runEnabled', [base?.text, text].filter(Boolean).join('；'), combined);
           }

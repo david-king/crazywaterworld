@@ -8,12 +8,12 @@ import { resourceReserve } from './automation-policy.mjs';
 import { readOrderReservedStock } from './order-reservations.mjs';
 import { factoryProductionSnapshot } from './spend-evidence.mjs';
 import { factoryInsertions, saveFactoryInsertion } from './factory-insert-store.mjs';
-import { factoryProductionKey, factoryRecipeAvailability, factoryRecipeCosts, startManualFactoryProduction } from './world.mjs';
+import { factoryProductionKey, factoryRecipeAvailability, factoryRecipeCosts, runWorld, startManualFactoryProduction } from './world.mjs';
+import { insertionSupplyPlanner } from './factory-insertion-supply.mjs';
 
 const rows = (config, table) => config?.tables?.[table]?.data ?? [];
 const clock = client => Math.floor((Date.now() + (client.serverClockOffsetMs || 0)) / 1000);
 const stamp = queue => JSON.stringify(queue.map(j => [j.idx ?? 0, j.productId, j.finishTime ?? 0]));
-const add = (map, id, num) => map.set(id, (map.get(id) ?? 0) + num);
 const nativeOn = (water, building, now) => building.factory.autoProductId && (water.autoProduceForever || water.autoProduceEndTime > now);
 const stale = () => new Error('工厂队列或所选任务已变化，请重新生成排产计划');
 
@@ -78,43 +78,97 @@ export async function prepareFactoryInsertion(client, protocol, ctx, quote, targ
   if (!trace || !forecast || forecast.unknown || !enabled()) throw stale();
   if (!protocol.StartFactoryProduceRequest) throw new Error('当前游戏协议无法向工厂派单');
   const entries = factoryInsertions(player), previous = entries[buildingId];
-  if (previous?.flight || previous?.remove?.length || previous?.revision !== trace.revision) throw stale();
+  if (previous?.flight || previous?.remove?.length || previous?.stagedSupplies || previous?.revision !== trace.revision) throw stale();
   const position = locateFactoryInsertion(trace, { ...forecast, startAt:quote.forecast.startAt, endAt:quote.forecast.endAt }, target, previous);
   if (position.remove.length && !protocol.CancelFactoryProduceRequest) throw new Error('当前游戏协议无法调整已排队的任务');
   if (submit && position.remove.length) await confirmFactoryProductionBeforeHarvest(client, protocol, buildingId, { player, enabled });
-  const { available, water:raw } = await readOrderReservedStock(client, protocol, config, { player, settings, enabled });
+  const { stock, reserved, water:raw } = await readOrderReservedStock(client, protocol, config, { player, settings, enabled });
   const water = normalize(raw), live = factoryProductionSnapshot(water, buildingId), now = clock(client);
   if (!live || stamp(live.queue) !== stamp(trace.queue) || nativeOn(water, live.building, now) || !enabled()) throw stale();
   const recipes = rows(config, 'BuildingProduceCfg');
-  const held = new Map();
-  for (const e of Object.values(entries)) {
-    for (const job of e.jobs.filter(j => j.pinned)) {
-      for (const [id,n] of recipes.find(r => r.itemId === job.id)?.costItem ?? []) add(held,id,n * (job.quantity ?? 1));
-    }
-  }
+  const supply = insertionSupplyPlanner({ config, water, stock, reserved, entries, settings, now,
+    festivals:client.festivals, canPlant:!!(protocol.FarmPlantRequest && protocol.OkResponse), timing:quote.timing });
   const products = [];
   for (const r of recipes) {
     if (r.buildType !== trace.type || !Number.isSafeInteger(r.unlockLevel) || r.unlockLevel > live.building.level
       || !factoryRecipeAvailability(r,client.festivals,now).allowed) continue;
     const costs = factoryRecipeCosts(r);
     if (!costs) continue;
-    let max = Infinity;
-    for (const { id,num } of costs) {
-      const free = (available.get(id) ?? 0) - (resourceReserve(settings,id) || 0) - (held.get(id) ?? 0);
-      max = Math.min(max, Math.floor(free / num));
-    }
-    products.push({ id:r.itemId, name:displayMaterial(config,r.itemId), max:costs.length ? Math.max(0,max) : null });
+    if (!submit || r.itemId === target.productId) products.push({ id:r.itemId, name:displayMaterial(config,r.itemId), ...supply.option(r) });
   }
   if (!submit) return { products, count:position.count, reordersQueue:position.remove.length > 0 };
   const product = products.find(p => p.id === target.productId), n = target.quantity;
   if (!product || !Number.isSafeInteger(n) || n < 1) throw new Error('请选择已解锁的产物，并输入有效的正整数件数');
-  if (product.max !== null && n > product.max) throw new Error('按当前可用原料最多可插入 ' + product.max + ' 件');
-  const inserted = { id:product.id, quantity:n, pinned:true, ...(target.status === 'gap' ? { at:target.from } : {}) };
+  if (product.max !== null && n > product.max && !product.autoSupply) throw new Error('按当前可用原料最多可插入 ' + product.max + ' 件');
+  const supplies = supply.plan(recipes.find(r => r.itemId === product.id), n, buildingId);
+  const sameFactory = supplies[buildingId] ?? [];
+  delete supplies[buildingId];
+  const inserted = { id:product.id, quantity:n, pinned:true, ...(product.autoSupply ? {waitForMaterials:true} : {}),
+    ...(target.status === 'gap' ? { at:target.from } : {}) };
   const restored = position.remove.toReversed().map(q => ({ id:q.id, pinned:true }));
-  const jobs = [...position.before, inserted, ...restored, ...position.after];
+  const jobs = [...position.before, ...sameFactory, inserted, ...restored, ...position.after];
   const rewrite = position.remove.length ? { remove:position.remove, expected:trace.queue, restored:[], rollback:previous?.jobs ?? [] } : {};
-  saveFactoryInsertion(player, buildingId, previous, { jobs, ...rewrite }, entries);
+  const stage = position.remove.length && Object.keys(supplies).length;
+  saveFactoryInsertion(player, buildingId, previous, { jobs, ...rewrite, ...(stage ? {stagedSupplies:supplies} : {}) },
+    entries, stage ? {} : supplies);
   return { label:'已插入' + product.name + ' ×' + n };
+}
+
+async function advanceInsertionCrop(client, protocol, ctx, buildingId, entry) {
+  const { config, player, settings, enabled } = ctx, job = entry.jobs[0];
+  const save = next => { entry = saveFactoryInsertion(player, buildingId, entry, next); };
+  const water = normalize(await client.request('OnWaterRequest', {}, 'OnWaterResponse'));
+  if (!enabled()) return;
+  const plot = water.building?.find(b => b.buildingId === buildingId);
+  if (!plot) return;
+  if (entry.flight) {
+    if (entry.flight.kind !== 'plant' || plot.farm?.productId !== job.id || !(plot.farm.plantTime > 0)
+      || !(plot.farm.ripeTime >= plot.farm.plantTime)) return;
+    const jobs = entry.jobs.slice();
+    consumeInsertionUnit(jobs, 0);
+    save(jobs.length ? { jobs } : null);
+    return;
+  }
+  if (water.autoFarming || plot.buildStartTime || plot.buildFinishTime || plot.farm?.productId) return;
+  const crop = rows(config,'FarmlandPlantCfg').find(r => r.id === job.id);
+  if (!crop) return;
+  const [id, num] = crop.material;
+  const entries = factoryInsertions(player);
+  const materials = await readOrderReservedStock(client, protocol, config, { ...ctx, itemIds:[id] });
+  if (!enabled() || (materials.stock.get(job.id) ?? 0) >= factoryStockCapacity(config,player) * 5) return;
+  if ((materials.available.get(id) ?? 0) - resourceReserve(settings,id) < num) {
+    try {
+      replenishInsertion(client, protocol, ctx, buildingId, entry, {itemId:crop.id,costItem:[crop.material]}, materials, entries);
+    } catch (error) {
+      if (!(error instanceof RangeError)) throw error;
+      if (entry.note !== error.message) save({...entry,note:error.message});
+    }
+    return;
+  }
+  const step = { kind:'farm', request:'FarmPlantRequest', manualCheck:true, body:{args:[{buildingId,productId:job.id}]},
+    costs:[{id,num}], label:'为插单播种' + displayMaterial(config,job.id),
+    beforePlantSend() { save({ ...entry, flight:{kind:'plant',id:job.id} }); } };
+  const {results:[result]} = await runWorld(client, protocol, {actions:[step]}, { config, player, enabled, allowMutate:true });
+  if (entry.flight && result && !result.ok && result.status !== 'unknown') save({jobs:entry.jobs});
+}
+
+// Another consumer may spend stock between submission and dispatch. Requote
+// the waiting batch without charging its own inputs twice.
+function replenishInsertion(client, protocol, ctx, buildingId, entry, recipe, materials, entries) {
+  const { config, player, settings, enabled } = ctx;
+  const {water:raw, stock, reserved} = materials;
+  if (!enabled()) return;
+  const head = entry.jobs[0];
+  if (entries[buildingId]?.revision !== entry.revision) throw stale();
+  if (Object.values(entries).some(e => e.flight || e.remove?.length || e.stagedSupplies)) return;
+  const others = { ...entries, [buildingId]:{jobs:entry.jobs.slice(1)} };
+  const planner = insertionSupplyPlanner({ config, water:normalize(raw), stock, reserved, entries:others, settings,
+    now:clock(client), festivals:client.festivals, canPlant:!!(protocol.FarmPlantRequest && protocol.OkResponse) });
+  const supplies = planner.plan(recipe, head.quantity ?? 1, head.supplyTarget ?? buildingId, head.supplyFor ?? head.id);
+  if (!Object.keys(supplies).length) return;
+  const jobs = [...(supplies[buildingId] ?? []), ...entry.jobs];
+  delete supplies[buildingId];
+  return saveFactoryInsertion(player, buildingId, entry, { jobs }, entries, supplies);
 }
 
 // Journal each packet at the actual send boundary. A lost acknowledgement may
@@ -136,6 +190,12 @@ export async function advanceFactoryInsertion(client, protocol, ctx, buildingId)
     return '工厂队列已变化，插单已撤回，已移出的任务将按原顺序补回';
   };
   for (let i = 0; e && i < 16 && enabled(); i++) {
+    if (e.stagedSupplies && !e.remove?.length && !e.flight) {
+      const entries = factoryInsertions(player), supplies = e.stagedSupplies;
+      if (Object.keys(supplies).some(id => entries[id]?.flight || entries[id]?.remove?.length || entries[id]?.stagedSupplies)) return;
+      e = saveFactoryInsertion(player, buildingId, e, { jobs:e.jobs }, entries, supplies);
+    }
+    if (e.jobs[0]?.crop) return advanceInsertionCrop(client, protocol, ctx, buildingId, e);
     if (!e.remove?.length && !e.flight && e.jobs[0]?.at > clock(client)) return;
     const water = normalize(await client.request('OnWaterRequest', {}, 'OnWaterResponse'));
     if (!enabled()) return;
@@ -152,7 +212,8 @@ export async function advanceFactoryInsertion(client, protocol, ctx, buildingId)
         }
         const remove = e.remove.slice(1);
         save(remove.length ? { ...e, remove, flight:null, note:null,
-          expected:e.expected.filter(q => (q.idx ?? 0) !== idx), restored:[{ id, pinned:true }, ...e.restored] } : { jobs:e.jobs });
+          expected:e.expected.filter(q => (q.idx ?? 0) !== idx), restored:[{ id, pinned:true }, ...e.restored] }
+          : { jobs:e.jobs, ...(e.stagedSupplies ? {stagedSupplies:e.stagedSupplies} : {}) });
       } else {
         if (sum(id) <= baseline) { note('游戏入队结果待确认'); return; }
         finishUnit(e.flight.jobIndex ?? 0, id);
@@ -181,13 +242,32 @@ export async function advanceFactoryInsertion(client, protocol, ctx, buildingId)
     const incoming = confirmedFactoryIncoming(water), cap = factoryStockCapacity(config, player);
     const isFull = id => (stock.get(id) ?? 0) + (incoming.get(id) ?? 0) >= cap;
     const recipes = rows(config,'BuildingProduceCfg');
-    const alternativeStock = isFull(e.jobs[0].id) ? await readInsertionAlternativeStock(client, protocol, config, e, ctx, isFull) : null;
+    const head = e.jobs[0];
+    const entries = (head.waitForMaterials || head.supplyFor) && !isFull(head.id) ? factoryInsertions(player) : null;
+    const materials = entries ? await readOrderReservedStock(client, protocol, config, ctx) : null;
+    const alternativeStock = isFull(head.id)
+      ? await readInsertionAlternativeStock(client, protocol, config, e, ctx, isFull) : null;
     if (!enabled()) return;
-    const free = item => ((alternativeStock ?? stock).get(item) ?? 0) - resourceReserve(ctx.settings,item);
+    const free = item => ((materials?.available ?? alternativeStock ?? stock).get(item) ?? 0) - resourceReserve(ctx.settings,item);
     const now = clock(client);
     const index = nextInsertionIndex(e.jobs, now, isFull, id =>
       insertionRecipeReady(recipes.find(r => r.itemId === id), live.building.level, client.festivals, now, free));
-    if (index < 0) { note(displayMaterial(config, e.jobs[0].id) + '已满仓，消耗后优先补产'); return; }
+    if (index < 0) {
+      if (materials) {
+        const recipe = recipes.find(r => r.itemId === head.id);
+        if (!factoryRecipeCosts(recipe)) { note('插单配方已变化'); return; }
+        try {
+          const updated = replenishInsertion(client, protocol, ctx, buildingId, e, recipe, materials, entries);
+          if (updated) { e = updated; continue; }
+        } catch (error) {
+          if (!(error instanceof RangeError)) throw error;
+          note(error.message);
+          return;
+        }
+      }
+      note(displayMaterial(config, head.id) + (isFull(head.id) ? '已满仓，消耗后优先补产' : '等待上游原料入库'));
+      return;
+    }
     const id = e.jobs[index].id, recipe = recipes.find(r => r.itemId === id);
     if (!recipe) { note('插单配方已变化'); return; }
     let result;

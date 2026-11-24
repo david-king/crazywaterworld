@@ -40,15 +40,19 @@ try {
     const activate = locator => mobile ? locator.tap() : locator.click();
     page.setDefaultTimeout(5000);
     page.on('pageerror', error => errors.push(error.message));
-    await page.route('**/api/settings/players?*', route => route.fulfill({ json: {
-      guildName: '测试联盟', members: new URL(route.request().url()).searchParams.get('scope') === 'world' ? [
-        { id: '9007199254740995', name: '同名船长', source: '世界舰队', guildIdx: 7 },
-        { id: '9007199254740994', name: '同名船长', source: '世界聊天', guildIdx: 9 },
-      ] : [
+    await page.route('**/api/settings/players?*', route => {
+      const params = new URL(route.request().url()).searchParams;
+      if (params.get('scope') === 'world') {
+        const rankPage = Number(params.get('rankPage') ?? 1), members = [
+          { id: '9007199254740994', name: '同名船长', source: '私聊联系人', guildIdx: 9 }];
+        if (rankPage === 2) members.push({ id: '9007199254740995', name: '同名船长', source: '战力榜', guildIdx: 7 });
+        return route.fulfill({ json: { members, rankPage, rankPages: 2 } });
+      }
+      return route.fulfill({ json: { guildName: '测试联盟', members: [
         { id: '9007199254740993', name: '测试盟友甲', online: true },
         { id: '9007199254740994', name: '测试盟友乙', online: false },
-      ],
-    } }));
+      ] } });
+    });
     await page.goto(base + '/#config-group-treasure');
     await page.locator('#config-field-treasure-follow').waitFor();
     if (await page.locator('#config-field-treasure-follow').getAttribute('aria-checked') !== 'true') await activate(page.locator('#config-field-treasure-follow'));
@@ -107,6 +111,17 @@ try {
       await picker.getByRole('searchbox').fill('同名船长');
       const options = picker.locator('.config-option');
       await options.first().waitFor();
+      const more = picker.getByRole('button', { name: '加载下一页战力榜' });
+      if (await more.isVisible()) {
+        const search = picker.getByRole('searchbox');
+        await search.fill('9007199254740995');
+        await picker.getByText('已载入的名单中没有匹配玩家，可继续加载战力榜。').waitFor();
+        await activate(more);
+        await options.filter({ hasText: '战力榜' }).waitFor();
+        assert.equal(await search.inputValue(), '9007199254740995');
+        assert.equal(await more.isVisible(), false);
+        await search.fill('同名船长');
+      }
       assert.equal(await options.count(), 2);
       await activate(options.filter({ hasText: '联盟 ' + guild }).locator('.config-player-name'));
       await activate(picker.locator('summary'));
@@ -134,12 +149,19 @@ try {
     assert.equal(await aliases.inputValue(), '');
     await page.locator('#config-state').filter({ hasText: '配置已同步' }).waitFor();
     assert.deepEqual(loadAutomationSettings('player-picker').settings.treasure.chasePlayerIds, [id]);
-    // 旧昵称可由用户明确换绑。仅删除 ID 时已有昵称继续生效。
+    // 绑定后 ID 和手填昵称均应保存。仅删除 ID 时追杀仍能按昵称运行。
     await aliases.fill(old);
     await activate(history.getByRole('button', { name: '移除 ID（' + id + '）', exact: true }));
-    await activate(history.getByRole('button', { name: '将“' + old + '”改用此 ID', exact: true }));
-    assert.equal(await chaseIds.locator('.config-player-tags .config-player-tag').count(), 1); assert.equal(await aliases.inputValue(), '');
-    await activate(history.getByRole('button', { name: /移除 ID并关闭/ }));
+    await activate(history.getByRole('button', { name: '绑定此 ID 并保留“' + old + '”', exact: true }));
+    assert.equal(await chaseIds.locator('.config-player-tags .config-player-tag').count(), 1);
+    assert.equal(await aliases.inputValue(), old);
+    await page.locator('#config-state').filter({ hasText: '配置已同步' }).waitFor();
+    const bound = loadAutomationSettings('player-picker').settings.treasure;
+    assert.deepEqual(bound.chasePlayerIds, [id]);
+    assert.deepEqual(bound.chaseNames, [old]);
+    await activate(history.getByRole('button', { name: '移除 ID（' + id + '）', exact: true }));
+    assert.equal(await chase.getAttribute('aria-checked'), 'true');
+    await activate(history.getByRole('button', { name: /删除旧昵称.*并关闭/ }));
     assert.equal(await chase.getAttribute('aria-checked'), 'false');
     await activate(avoidIds.getByRole('button', { name: /从避战玩家移除/ }));
     await page.locator('#config-state').filter({ hasText: '配置已同步' }).waitFor();
@@ -169,7 +191,7 @@ try {
     await activate(safe.getByRole('button', { name: /从舰队1 · 安全玩家移除/ }));
     await page.locator('#config-state').filter({ hasText: '配置已同步' }).waitFor();
     await page.close();
-    console.log('通过：' + (mobile ? '手机触屏' : '桌面鼠标') + '盟友选择、改名标记、删除旧昵称、按 ID 换绑和移除均可保存');
+    console.log('通过：' + (mobile ? '手机触屏' : '桌面鼠标') + '盟友选择、改名标记、绑定 ID 保留昵称兜底及移除均可保存');
   }
   assert.deepEqual(errors, []);
   assert.equal(connections, 0);

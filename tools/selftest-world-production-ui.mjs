@@ -101,6 +101,7 @@ function fixture() {
     const $ = env.node, el = env.element, clear = env.clear, table = env.table;
     const document = env.document, Date = class extends globalThis.Date { static now() { return env.now; } };
     const chip = (state, label) => el('span', state, label);
+    const smallButton = label => el('button', '', label);
     const component = id => {
       if (id !== 'ui-building-card') return el('button');
       const card = el('div'), header = el('div'), body = el('div');
@@ -118,7 +119,7 @@ function fixture() {
     const snapshot = { paused: false, connected: true }, disconnected = new Set();
     let current = 'account-a';
     let orderClockOffset = 0;
-    ${script.slice(script.indexOf('function orderState('), script.indexOf('const pendingResidentOrders'))}
+    ${script.slice(script.indexOf('function orderState('), start)}
     env.orderState = orderState;
     ${script.slice(durationStart, durationEnd)}
     ${script.slice(start, end)}
@@ -185,26 +186,32 @@ test('海面依次展示工厂、农田、空位，活动工坊并入工厂表�
 
 test('居民订单按账号每日上限显示交付进度，空订单列表也能查看', () => {
   const env = fixture();
-  const box = env.node('world-orders');
-  for (const [orderNum, target, detail] of [
-    [0, 40, '今日还可交 40 单'],
-    [37, 40, '今日还可交 3 单'],
-    [37, 45, '今日还可交 8 单'],
-    [45, 45, '今日已达上限'],
-    [43, 40, '今日已达上限'],
+  const box = env.node('resident-order-progress');
+  for (const [orderNum, target] of [
+    [0, 40],
+    [37, 40],
+    [37, 45],
+    [45, 45],
+    [43, 40],
   ]) {
-    env.render(worldData(env, { orderOfTheDay: { orderNum, dailyLimit: target } }));
-    assert(box.textContent.includes(detail));
-    const ring = box.querySelector('[role="progressbar"]');
-    assert.equal(ring.children[0].textContent, orderNum + '/' + target);
-    assert.equal(ring.children[1].textContent, '每日上限');
-    assert.equal(ring.attributes['aria-valuemax'], String(target));
-    assert.equal(ring.attributes['aria-valuenow'], String(Math.min(orderNum, target)));
-    assert.equal(ring.style['--order-fill'], Math.min(orderNum / target, 1) * 100 + '%');
+    const percent = target ? Math.min(100, orderNum / target * 100) : 0;
+    env.render(worldData(env, { orderProgress: {
+      orderNum, rewardedNum: 0, total: target, cap: target, baseMax: target, bonus: 0,
+      totalKind: 'dailyCap', percent,
+    } }));
+    assert(box.textContent.includes('今日居民订单'));
+    assert(box.textContent.includes(orderNum + '/' + target));
+    assert(box.textContent.includes('今日上限 ' + target));
+    const track = descendants(box).find(node => node.className === 'resident-order-progress-track');
+    assert(track, '进度卡应包含进度条');
+    assert.equal(track.children[0].style.width, percent + '%');
   }
-  env.render(worldData(env, { orderOfTheDay: { orderNum: 3, tier: 6, reqNums: [6, 12] } }));
-  assert.equal(box.textContent, '今日已完成 3 单 · 每日上限未同步');
-  assert.equal(box.querySelector('[role="progressbar"]'), null);
+  env.render(worldData(env, { orderProgress: {
+    orderNum: 3, rewardedNum: 0, total: 6, cap: 40, baseMax: 40, bonus: 0,
+    totalKind: 'rewardTier', percent: 50,
+  } }));
+  assert(box.textContent.includes('3/6'));
+  assert(box.textContent.includes('当前奖励档位'));
   env.refreshUnavailable('account');
   assert.equal(box.textContent, '');
 });
@@ -285,7 +292,7 @@ test('一键展开收起同步单厂开关，农田与空位可独立折叠并�
   assert.equal(groupButton('factory').textContent, '全部展开');
 });
 
-test('六个游戏格只展示已投产队列，工具拟投产物及估时单列', () => {
+test('工厂详情只展示游戏生产格，即使本轮有待投产任务', () => {
   const env = fixture();
   const now = env.now / 1000 + 5;
   env.render(worldData(env, { factories: [factory([
@@ -304,30 +311,12 @@ test('六个游戏格只展示已投产队列，工具拟投产物及估时单�
   assert.equal(slots.length, 6);
   assert.match(slots[0].textContent, /格子 1.*生产中.*面包.*完成时间.*08:01:10/);
   assert.match(slots[1].textContent, /格子 2.*排队 #1.*饼干/);
-  const [game, plan] = descendants(detail).filter(node => node.tagName === 'section');
-  assert.doesNotMatch(game.textContent, /蛋糕|08:02:10/);
-  assert.match(plan.children[0].textContent, /排产计划.*预计完成/);
-  assert.match(plan.textContent, /蛋糕.*08:03:05/);
-  assert.doesNotMatch(plan.textContent, /面包|饼干/);
+  assert.deepEqual(descendants(detail).filter(node => node.tagName === 'h3').map(node => node.textContent), ['游戏生产格']);
+  assert.doesNotMatch(detail.textContent, /排产计划|蛋糕|08:02:10/);
   assert(slots.slice(2).every(slot => slot.textContent.includes('空闲')));
   button.onclick();
   assert.equal(detail.hidden, true);
   assert.equal(button.attributes['aria-expanded'], 'false');
-});
-
-test('相邻同产物只显示整批最晚完成时间，跨日和部分时间未知时仍正确', () => {
-  const env = fixture();
-  const midnight = 1767283200;
-  const plannedJobs = [
-    ['面包', midnight - 5], ['面包', midnight + 5], ['面包', midnight], ['面条', null], ['面包', midnight + 10], ['面包', null],
-  ].map(([productId, estimatedFinishTime]) => ({ productId, estimatedFinishTime }));
-  env.render(worldData(env, { factories: [factory([], { plannedJobs })] }));
-  const button = productionButton(env);
-  button.onclick();
-  const groups = descendants(detailRow(button)).filter(node => node.className === 'factory-planned-group');
-  assert.deepEqual(groups.map(group => group.children[0].textContent), ['面包 ×3', '面条 ×1', '面包 ×2']);
-  assert.deepEqual(groups.map(group => group.children.slice(1).map(node => node.textContent)),
-    [['01/02 00:00:05'], ['时间待定'], ['时间待定']]);
 });
 
 test('多个在产位均展示剩余时间，排队摘要显示首项和总数', () => {
@@ -354,7 +343,8 @@ test('多座工厂可独立展开，刷新或工厂消失后按建筑保留状�
   const first = productionButton(env), second = productionButton(env, '2食品厂');
   first.onclick();
   second.onclick();
-  assert.match(detailRow(first).textContent, /饼干.*本轮没有待投产任务/);
+  assert.match(detailRow(first).textContent, /饼干/);
+  assert.doesNotMatch(detailRow(first).textContent, /排产计划|本轮没有待投产任务/);
   assert.equal((detailRow(second).textContent.match(/空闲/g) || []).length, 6);
   data.factories[0].jobs = [{ productId: '蛋糕' }];
   data.factories.reverse();
@@ -403,58 +393,31 @@ test('当前产物区分等待开工、已完成和空闲，缺少队列显示�
   }
 });
 
-test('自动生产关闭时只显示开关，缺少状态时显示未同步', () => {
-  for (const [autoEnabled, expected] of [[true, '已开启'], [false, ''], [undefined, '未同步']]) {
+test('自动生产按钮显示状态并打开物料选择弹窗', () => {
+  for (const [autoEnabled, expected] of [[true, '已开启'], [false, '未开启'], [undefined, '未同步']]) {
     const env = fixture();
-    env.render(worldData(env, { factories: [factory([], { autoEnabled })] }));
+    env.render(worldData(env, { factories: [factory([], { autoEnabled, autoProductId: '面包', auto: '面包', autoProducts: [] })] }));
     const cell = env.tables[0].rows[0][4];
-    assert.equal(cell.children[1].textContent, expected);
-    assert.equal(cell.children[1].hidden, !expected);
-    assert.equal(cell.children[0].attributes['aria-checked'], String(autoEnabled === true));
-    assert(cell.children[0].disabled);
+    assert.equal(cell.tagName, 'button');
+    assert.equal(cell.children[0].textContent, expected);
+    assert(cell.title.includes('自动生产'));
   }
 });
 
 {
-  const env = fixture(), building = factory([], {autoControl:{on:false,key:'off',productId:'面包',name:'面包'}});
-  const data = worldData(env,{factories:[building]});
-  const cell = () => env.tables.at(-1).rows[0][4];
-  const writes = [];
-  let resolveWrite;
-  env.call = (url,options) => {
-    if (url === '/api/world') return Promise.resolve(data);
-    assert.equal(url,'/api/world/production-auto');
-    writes.push(JSON.parse(options.body));
-    return new Promise(resolve=>{resolveWrite=resolve;});
-  };
-  await env.refresh(true);
-  const button = cell().children[0];
-  assert(!button.disabled);
-  assert.match(button.title,/开启.*面包/);
-  const operation = button.onclick();
-  assert.equal(cell().children[1].textContent, '切换中…');
-  assert(!cell().children[1].hidden);
-  await button.onclick();
-  assert(button.disabled);
-  assert.equal(button.attributes['aria-checked'],'false');
-  assert.equal(writes.length,1);
-  assert.deepEqual(writes[0],{buildingId:'1食品厂',on:true,productId:'面包',key:'off',confirm:true});
-  const active = {...building.autoControl, on:true,key:'on'};
-  resolveWrite({confirmed:true,control:active});
-  await operation;
-  assert.equal(cell().children[0].attributes['aria-checked'],'true');
-  const closing = cell().children[0].onclick();
-  assert.equal(writes[1].on,false);
-  resolveWrite({confirmed:false,control:active,label:'切换已提交，游戏状态待同步'});
-  await closing;
-  assert.equal(cell().children[0].attributes['aria-checked'],'true');
-  assert.match(cell().children[1].textContent,/待同步/);
-  assert(!cell().children[0].disabled);
-  building.autoControl.reason = '权益已到期';
+  const env = fixture();
+  const product = { productId: '面包', name: '面包', seconds: 60, inputs: [], reason: '' };
+  const building = factory([], { autoEnabled: false, autoProductId: null, auto: '', autoProducts: [product] });
+  const data = worldData(env, { factories: [building],
+    autoProduce: { active: false, costRuby: 500, durationSeconds: 28800, ruby: 1200 } });
   env.render(data);
-  assert(cell().children[0].disabled);
+  const button = env.tables.at(-1).rows[0][4];
+  button.onclick();
+  assert(env.dialog);
+  assert(env.dialog.title.includes('自动生产'));
+  assert.equal(env.dialog.label, '消耗 500 钻石并开启');
   passed++;
-  console.log('通过：在自动生产列直接切换，等待回读、防重复点击，权益过期禁用');
+  console.log('通过：自动生产按钮显示状态、物料并打开开启弹窗');
 }
 
 test('生产格容量变化或缺失时仍完整显示全部已排产项目', () => {

@@ -88,6 +88,8 @@ export function museumMaterialDetails(player, step, snapshot) {
   if (stages.some(row => row.expedition?.endTime > 0 && row.expedition.heroIds.some(id => args.heroIds.includes(id)))) {
     throw new Error('探宝英雄已被其他队伍占用，等待重新安排');
   }
+  if (step.verify?.conditionId != null && stage.expedition?.conditionId !== step.verify.conditionId ||
+      step.verify?.progress != null && stage.progress !== step.verify.progress) throw new Error('探宝推荐条件或地图进度已变化，等待重新安排');
   const costs = stage.expedition?.cost?.asset;
   if (!Array.isArray(costs) || !costs.length) throw new Error('无法确认探宝地图的当前材料消耗');
   const expected = new Map(), planned = new Map();

@@ -168,7 +168,14 @@ export async function openSeasonChests(client, config, ctx) {
 
   for (let opened = 0; opened < CHEST_ROUND_LIMIT; opened++) {
     if (!ctx.enabled()) return;
-    const flow = await view();
+    let flow;
+    try {
+      flow = await view();
+    } catch (error) {
+      if (error.request !== 'SeasonChestInfoRequest' || client.promptNames?.[error.prompt?.prompt] !== 'NO_GUILD') throw error;
+      defer(RECHECK_SECONDS);
+      return waiting(ctx, '当前账号未加入联盟，已跳过赛季宝箱');
+    }
     if (!positive(flow?.stage) || !Array.isArray(flow.costItemId) || !flow.costItemId.length) {
       defer(RECHECK_SECONDS);
       return waiting(ctx, '赛季宝箱进度未同步');

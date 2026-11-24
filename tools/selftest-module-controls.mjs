@@ -95,11 +95,14 @@ try {
     await assert.rejects(guard.before(plan.actions[0]), /设置已关闭/);
     assert.deepEqual(await runBaseAutomation(client, { MuseumClaimAchievementRequest: {} }, config, plan, { getSettings: () => settings }), []);
     const f = pirateAdvanceFixture(); f.settings.loop.world = f.settings.museum.runEnabled = f.settings.museum.enabled = true;
+    const trip = { stageId: 1, progress: 20, expedition: { startTime: 5, endTime: 15 } };
     f.client.request = async name => {
-      assert.equal(name, 'MuseumCompleteExploreRequest'); f.settings.museum.runEnabled = false; f.client.writes.push(name); return { grade: 1 };
+      if (name === 'MuseumInfoRequest') return { exploreStages: [trip] };
+      assert.equal(name, 'MuseumCompleteExploreRequest'); f.settings.museum.runEnabled = false; f.client.writes.push(name); return { grade: 1, progressGain: 3 };
     };
     await runBaseAutomation(f.client, loadProtocol(), config, { actions: [{ kind: 'museumComplete', scope: 'base', setting: 'museum.enabled',
-      request: 'MuseumCompleteExploreRequest', response: 'MuseumCompleteExploreResponse', body: { stageId: 1 } }] }, { getSettings: () => f.settings });
+      request: 'MuseumCompleteExploreRequest', response: 'MuseumCompleteExploreResponse', body: { stageId: 1 }, verify: { progress: 20, startTime: 5, endTime: 15 } }] },
+      { getSettings: () => f.settings, player: f.player, ledger: createUsageLedger('museum-pause', { file: path.join(directory,'museum.json') }) });
     assert.deepEqual(f.client.writes, ['MuseumCompleteExploreRequest']);
   });
   await check('情报总开关关闭不读取，读取中关闭在派遣前拦截且不占预算', async () => {

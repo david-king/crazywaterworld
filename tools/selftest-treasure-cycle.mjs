@@ -241,10 +241,23 @@ try {
       b.state.members.titleList = [{ guildTitle: 2, members: [{ playerId: '9007199254741099', nickname: '乙账号盟友', guildTitle: 2 }] }]; b.state.members.total = 1;
       for (const [id, f] of [['cycle-a', a], ['cycle-b', b]]) Object.assign(app.sessions.get(id), { client: f.client, player: f.player, paused: false });
       assert.equal((await api('cycle-a', '/api/settings/players')).body.members.length, 3); assert.equal((await api('cycle-b', '/api/settings/players')).body.members[0].name, '乙账号盟友');
-      const readWorld = account => fetch(base + '/api/settings/players?scope=world&account=' + account);
+      const readWorld = (account, page) => fetch(base + '/api/settings/players?scope=world&account=' + account + (page ? '&rankPage=' + page : ''));
       const first = '9007199254741103', second = '9007199254741105';
+      const ranked = '9007199254741107', contact = '9007199254741109', nextId = '9007199254741111';
+      const worldRequests = [];
+      let failNextPage = true;
       const originalRequest = a.client.request;
-      a.client.request = async request => {
+      a.client.request = async (request, args) => {
+        worldRequests.push(request);
+        if (request === 'RankRequest') {
+          assert.equal(args.rankType, a.protocol.RankType.PLAYER_POWER);
+          if (args.page === 2 && failNextPage) throw Error('模拟榜单暂未同步');
+          const rows = args.page === 1 ? [{ playerId: ranked, nickname: '榜上船长' }] : [
+            { playerId: ranked, nickname: '榜上船长' }, { playerId: nextId, nickname: '第二页船长' }];
+          return a.protocol.RankResponse.decode(a.protocol.RankResponse.encode({ rankData: rows, maxPage: 2 }).finish());
+        }
+        if (request === 'PrivateChatListRequest') return { chats: [{ peer: { playerId: contact, nickname: '私聊船长' } },
+          { peer: { playerId: ranked, nickname: '榜上船长' } }] };
         if (request === 'WorldInfoRequest') return { fleets: [{ owner: { playerId: first, nickname: '同名对手', guildIdx: 7 } },
           { owner: { playerId: a.player.playerId, nickname: '我' } }] };
         if (request === 'ChatRecordRequest') return { message: [
@@ -255,15 +268,31 @@ try {
       };
       const candidates = await (await readWorld('cycle-a')).json();
       assert.match(candidates.reason, /黑名单/);
-      assert.deepEqual(candidates.members, [{ id: first, name: '同名对手', guildIdx: 7, source: '世界舰队' },
+      assert.deepEqual(candidates.members.filter(row => row.name === '同名对手'), [{ id: first, name: '同名对手', guildIdx: 7, source: '世界舰队' },
         { id: second, name: '同名对手', guildIdx: 8, source: '世界聊天' }]);
+      assert.equal(candidates.members.length, 4);
+      assert.equal(candidates.members.find(row => row.id === contact).source, '私聊联系人');
+      assert.equal(candidates.members.find(row => row.id === ranked).source, '战力榜');
+      assert.deepEqual([candidates.rankPage, candidates.rankPages], [1, 2]);
+      worldRequests.length = 0;
+      assert.equal((await readWorld('cycle-b', 2)).status, 400);
+      assert.equal((await readWorld('cycle-a', 3)).status, 400);
+      assert.equal((await readWorld('cycle-a', 2)).status, 400);
+      failNextPage = false;
+      const more = await (await readWorld('cycle-a', 2)).json();
+      assert.equal(more.members.length, 5);
+      assert.equal(more.rankPage, 2);
+      assert.equal(more.members.find(row => row.id === nextId).name, '第二页船长');
+      assert.deepEqual(await (await readWorld('cycle-a', 2)).json(), more);
+      assert.deepEqual(worldRequests, ['RankRequest', 'RankRequest']);
       a.client.request = originalRequest;
       const s = initial.settings; Object.assign(s.treasure, { enabled: true, autoRepair: true, follow: true, followPlayerIds: ['9007199254740995'], avoidPlayerIds: ['9007199254740997'], fleetIds: ['1远征船'], participationMode: 'always' });
-      s.treasure.chasePlayerIds = [first];
+      s.treasure.chasePlayerIds = [first, nextId];
       const saved = await api('cycle-a', '/api/settings', { settings: s, revision: initial.revision, baseRevision: initial.baseRevision }); assert.equal(saved.status, 200);
       assert.equal((await api('cycle-b', '/api/settings')).body.settings.treasure.participationMode, 'untilFull');
       assert.deepEqual(importAutomationSettings(exportAutomationSettings(saved.body.settings)).treasure, s.treasure);
       assert.deepEqual(saved.body.playerNames[first], { name: '同名对手', previous: [] });
+      assert.deepEqual(saved.body.playerNames[nextId], { name: '第二页船长', previous: [] });
       assert.equal(saved.body.playerNames[second], undefined);
       assert.equal((await api('cycle-b', '/api/settings')).body.playerNames[first], undefined);
       const id = s.treasure.followPlayerIds[0], refresh = account => fetch(base + '/api/settings/player-names?account=' + account + '&ids=' + id);

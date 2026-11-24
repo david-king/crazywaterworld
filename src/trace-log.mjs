@@ -38,8 +38,7 @@ export function emitDiagnostic(client, event, data) {
   try { client.emit?.('diagnostic', { ...data, event }); } catch { /* 日志观察者不能中断玩法。 */ }
 }
 
-// Two files alternate so a long-running console never has to rename an open
-// stream on Windows. Each file is capped independently.
+// 轮流使用两个固定文件。通过已打开的句柄原地清零，避免轮转触发卷上的删除回收策略。
 export function createTraceLog(file, { maxBytes = 5 * 1024 * 1024 } = {}) {
   const limit = Number.isSafeInteger(maxBytes) && maxBytes > 0 ? maxBytes : 5 * 1024 * 1024;
   const files = [file, file + '.1'];
@@ -48,12 +47,23 @@ export function createTraceLog(file, { maxBytes = 5 * 1024 * 1024 } = {}) {
   function trim(target) {
     try { if (fs.statSync(target).size > limit) fs.truncateSync(target, 0); } catch { /* 文件不存在 */ }
   }
-  function open(truncate = false) {
-    const target = files[index];
+  function open(nextIndex, truncate = false) {
+    const target = files[nextIndex];
     fs.mkdirSync(path.dirname(target), { recursive: true });
-    if (truncate) { try { fs.truncateSync(target, 0); } catch { /* 文件不存在 */ } }
-    fd = fs.openSync(target, 'a');
-    bytes = (() => { try { return fs.statSync(target).size; } catch { return 0; } })();
+    const next = fs.openSync(target, 'a');
+    let size;
+    try {
+      // Windows 的追加句柄不能 ftruncate；truncateSync 另开可写句柄，就地清零。
+      if (truncate) fs.truncateSync(target, 0);
+      size = fs.fstatSync(next).size;
+    } catch (error) {
+      fs.closeSync(next);
+      throw error;
+    }
+    if (fd !== null) { try { fs.closeSync(fd); } catch { /* 忽略关闭错误 */ } }
+    fd = next;
+    index = nextIndex;
+    bytes = size;
   }
   function initialize() {
     if (initialized) return;
@@ -61,12 +71,6 @@ export function createTraceLog(file, { maxBytes = 5 * 1024 * 1024 } = {}) {
     for (const target of files) trim(target);
     const modified = files.map(target => { try { return fs.statSync(target).mtimeMs; } catch { return -1; } });
     if (modified[1] > modified[0]) index = 1;
-  }
-  function rotate() {
-    if (fd !== null) { try { fs.closeSync(fd); } catch { /* 忽略关闭错误 */ } fd = null; }
-    index = 1 - index;
-    try { fs.rmSync(files[index], { force: true }); } catch { /* 下一次打开会截断 */ }
-    try { open(true); } catch { fd = null; bytes = 0; }
   }
 
   return {
@@ -82,12 +86,11 @@ export function createTraceLog(file, { maxBytes = 5 * 1024 * 1024 } = {}) {
         data = marker.length <= limit ? Buffer.concat([data.subarray(0, end), marker]) : Buffer.alloc(0);
       }
       const size = data.length;
-      if (fd === null) {
-        try { open(); } catch { return; }
-      }
-      if (bytes > 0 && bytes + size > limit) rotate();
-      if (fd === null) return;
-      try { fs.writeSync(fd, data); bytes += size; } catch {
+      try {
+        if (fd === null) open(index);
+        if (bytes > 0 && bytes + size > limit) open(1 - index, true);
+      } catch { return; }
+      try { bytes += fs.writeSync(fd, data); } catch {
         try { fs.closeSync(fd); } catch { /* 下一次日志写入重试打开 */ }
         fd = null;
       }

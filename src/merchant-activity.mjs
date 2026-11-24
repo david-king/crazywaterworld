@@ -3,7 +3,8 @@ import { claimOnce } from './extra-free-rewards.mjs';
 import { checkedAction, clock, dayOf, digest, hasReward, moduleOpen, natural, positive, read, table, waiting, windowOpen } from './activity-actions.mjs';
 import { claimPass } from './seasonal-activities.mjs';
 import { merchantActionSeconds, merchantFinalCargoStart, merchantSettings, merchantTiming, planMerchant } from './merchant-planner.mjs';
-import { merchantSpeedMatches, runMerchantSpeed } from './merchant-speed.mjs';
+import { runMerchantSpeed } from './merchant-speed.mjs';
+import { merchantActionMatches, merchantActionState, merchantFingerprint as fingerprint, quantity } from './merchant-action-state.mjs';
 import { rewardData } from './missing-rewards.mjs';
 import { recordMerchantSnapshot, recordMerchantTrade, merchantJournalSummary, readMerchantJournal, knownMerchantMarkets } from './merchant-journal.mjs';
 import { evaluateMerchantUpgrade, runMerchantUpgrade } from './merchant-upgrade.mjs';
@@ -19,10 +20,6 @@ const param = (config, key) => table(config, 'ActivityTradeCfg').find(row => row
 function tradingHours(config, time) {
   return merchantTiming(config, null, time).tradingOpen;
 }
-const quantity = (state, id, city, price) => state.goods
-  .filter(g => g.goodsId === id && g.cityId === city && (price == null || g.buyPrice === price))
-  .reduce((sum, g) => sum + g.num, 0);
-const fingerprint = state => ({ coins: state.player.coins, profit: state.player.profit, goods: state.player.goods, cargo: state.cargo });
 const cargoSignature = state => digest([state.player.coins, state.player.goods?.map(g =>
   [g?.pid, g?.goodsId, g?.cityId, g?.buyPrice, g?.num]).sort((a, b) => a[0] - b[0])]);
 function marketEpoch(config, time) {
@@ -235,7 +232,7 @@ async function readMerchantVoyage(config, event, state, player, time, ask, ledge
   const stock = merchantCargoText(state.player.goods, goodsName);
   const facts = [['当前船货', stock]];
   const scope = 'merchant:' + event.startTime + ':' + event.period;
-  const records = Object.values(ledger?.keyRecords() ?? {}).filter(r => r.details?.scope === scope);
+  const records = Object.values(ledger?.keyRecords() ?? {}).filter(r => !r.expired && r.details?.scope === scope);
   const departures = records.filter(r => r.details.expected?.request === 'TradeMoveRequest');
   if (cargo.moveEndTime > time || (cargo.moveToCityId && cargo.moveToCityId !== cargo.cityId)) {
     const leg = departures.find(r => {
@@ -261,7 +258,11 @@ async function readMerchantVoyage(config, event, state, player, time, ask, ledge
   if (!exactGuild(player.guildId)) return wait('需加入联盟后参与贸易');
   if (!positive(cargo.cityId)) return wait('等待商船位置同步');
   const pending = records.find(r => !r.confirmed);
-  if (pending) return wait('前次操作结果待确认');
+  if (pending) {
+    const result = merchantActionState(pending.details, fingerprint(state), time);
+    return wait(result === 'superseded' ? '商船状态已变化，等待自动走商复核后重新规划' :
+      result === 'confirmed' ? '已读到前次操作结果，等待自动走商核对' : '前次操作结果待确认，等待游戏同步船货或航程');
+  }
   const plan = await readMerchantPlan(config, event, state, time, ask,
     voyageHistory(ledger, scope, marketEpoch(config, time), state, time), {
       settings: settings?.merchant ?? settings, ledger, player, intel, markets: knownMerchantMarkets(ledger, event), actionSeconds: merchantActionSeconds(settings)
@@ -275,27 +276,6 @@ async function readMerchantVoyage(config, event, state, player, time, ask, ledge
 }
 const samePlan = (a, b) => a.kind === b.kind &&
   ['city', 'destination', 'goodsId', 'pid', 'count', 'price', 'gain', 'mode', 'exploration'].every(k => a[k] === b[k]);
-function validFingerprint(s) {
-  return s?.cargo && natural(s.coins) && natural(s.profit) && Array.isArray(s.goods) &&
-    s.goods.every(g => g && natural(g.pid) && positive(g.goodsId) && positive(g.cityId) && positive(g.buyPrice) && positive(g.num)) &&
-    new Set(s.goods.map(g => g.pid)).size === s.goods.length;
-}
-function actionMatched(e, s, time) {
-  if (!validFingerprint(s)) return false;
-  if (e.request === 'TradeSpeedRequest') return merchantSpeedMatches(e, s, time);
-  if (e.request === 'TradeBuyRequest')
-    return s.coins === e.coins && quantity(s, e.goodsId, e.city, e.price) >= e.owned;
-  if (e.request === 'TradeSellRequest') {
-    if (s.goods.some(g => g.pid === e.pid)) return false;
-    // 兼容历史账本；新记录还核对整批回款，亏损卖出不增加累计利润。
-    if (e.gain == null) return s.coins > e.coins && s.profit > e.profit;
-    return s.coins >= e.coins + e.proceeds && s.profit >= e.profit + Math.max(0, e.gain);
-  }
-  if (e.request !== 'TradeMoveRequest') return false;
-  return s.cargo.cityId === e.destination ||
-    (s.cargo.moveToCityId === e.destination && s.cargo.moveEndTime >= e.start);
-}
-
 export async function merchantActivity(client, config, ctx) {
   const event = client.tradeWindow && { ...client.tradeWindow };
   if (ctx.key === 'merchantTrade') {
@@ -331,8 +311,8 @@ export async function merchantActivity(client, config, ctx) {
     } catch (error) { waiting(ctx, '已确认成交的统计暂未补录：' + error.message); }
   }
   // 先核对上次写入，再检查航行/盈亏，避免已售批次消失后永久停在未知状态。
-  const pending = Object.entries(ctx.ledger?.keyRecords() ?? {}).find(([, r]) => !r.confirmed && r.details?.scope === scope);
-  if (pending) return reconcileMerchantAction(client, ctx, pending, fingerprint(info), actionMatched);
+  const pending = Object.entries(ctx.ledger?.keyRecords() ?? {}).find(([, r]) => !r.confirmed && !r.expired && r.details?.scope === scope);
+  if (pending) return reconcileMerchantAction(client, ctx, pending, info, allowed);
   if (!tradingHours(config, clock(client))) return waiting(ctx, '等待游戏规定的贸易时段 ' + param(config, '海商王贸易时间'));
   const profitLimit = ctx.settings?.()?.merchant?.profitLimit ?? 0;
   const profitReached = profitLimit > 0 && info.player.profit >= profitLimit;
@@ -406,7 +386,7 @@ export async function merchantActivity(client, config, ctx) {
         watchMerchant(client).observe({ event, state: current, time: clock(client), config, settings: ctx.settings?.(), expedite: true });
       return fingerprint(current);
     },
-    matches: (e, s) => actionMatched(e, s, clock(client))
+    matches: (e, s, before) => merchantActionMatches(e, s, clock(client), before)
   };
   if (plan.kind === 'buy') {
     const expected = {
@@ -416,16 +396,24 @@ export async function merchantActivity(client, config, ctx) {
     };
     return checkedAction(ctx, { ...common, expected,
       send: () => send(expected.request, { cityId: plan.city, goodsId: plan.goodsId, buyNum: plan.count }, 'TradeBuyResponse'),
-      accept: r => r.player && actionMatched(expected, fingerprint({ player: r.player, cargo: state.cargo }))
+      accept: r => r.player && merchantActionMatches(expected, fingerprint({ player: r.player, cargo: state.cargo }), clock(client), state)
     });
   }
   if (plan.kind === 'sell') {
     const batch = state.goods.find(g => g.pid === plan.pid);
     const expected = { request: 'TradeSellRequest', pid: plan.pid, coins: state.coins, profit: state.profit,
       gain: plan.gain, proceeds: batch.buyPrice * plan.count + plan.gain };
+    let receipt;
     return checkedAction(ctx, { ...common, expected,
       send: () => send(expected.request, { cityId: plan.city, pid: plan.pid, sellNum: plan.count }, 'TradeSellResponse'),
-      accept: r => r.player && actionMatched(expected, fingerprint({ player: r.player, cargo: state.cargo }))
+      // 实际售价可能高于规划报价。有卖出回包时，以这笔回款核对随后的余额和剩余批次。
+      accept: r => {
+        const proceeds = r.player?.coins - state.coins;
+        if (!natural(proceeds) || proceeds < expected.proceeds) return false;
+        receipt = { ...expected, proceeds, gain: proceeds - batch.buyPrice * plan.count };
+        return merchantActionMatches(receipt, fingerprint({ player: r.player, cargo: state.cargo }), clock(client), state);
+      },
+      matches: (e, s, before) => merchantActionMatches(receipt ?? e, s, clock(client), before)
     });
   }
   const expected = { request: 'TradeMoveRequest', city: plan.city, destination: plan.destination, goodsId: plan.goodsId,

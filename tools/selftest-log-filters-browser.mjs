@@ -26,31 +26,31 @@ let browser;
 const errors = [];
 const streams = new Set();
 app.server.on('request', (request, response) => { if (request.url.startsWith('/api/events')) streams.add(response); });
-async function checkTagStrip(page, id, expectOverflow = false) {
+async function checkTagRows(page, id, expectOverflow = false) {
   const layout = await page.locator('#' + id).evaluate(node => {
-    const bounds = node.getBoundingClientRect(), first = node.firstElementChild.getBoundingClientRect();
-    return { height: bounds.height, singleRow: [...node.children].every(tag => Math.abs(tag.getBoundingClientRect().top - first.top) <= 1), scrolls: node.scrollWidth > node.clientWidth, verticalOverflow: node.scrollHeight > node.clientHeight };
+    const rowHeight = node.firstElementChild.offsetHeight;
+    return { height: node.clientHeight, rowHeight, horizontalOverflow: node.scrollWidth > node.clientWidth, verticalOverflow: node.scrollHeight > node.clientHeight };
   });
-  assert(layout.singleRow && layout.height <= 52 && !layout.verticalOverflow, id + ': ' + JSON.stringify(layout));
-  if (expectOverflow) assert(layout.scrolls, id + '应允许横向滚动');
+  assert(layout.height <= 2 * layout.rowHeight + 9 && !layout.horizontalOverflow, id + ': ' + JSON.stringify(layout));
+  if (expectOverflow) assert(layout.verticalOverflow, id + '应允许纵向滚动');
   return layout;
 }
 async function checkSelectedTagVisible(page, id) {
   const layout = await page.locator('#' + id).evaluate(node => {
     const bounds = node.getBoundingClientRect(), selected = node.querySelector('[aria-selected=true], [aria-pressed=true]').getBoundingClientRect();
-    return { visible: selected.left >= bounds.left && selected.right <= bounds.right, left: bounds.left, right: bounds.right, selectedLeft: selected.left, selectedRight: selected.right, scrollLeft: node.scrollLeft, scrollWidth: node.scrollWidth };
+    return { visible: selected.left >= bounds.left && selected.right <= bounds.right && selected.top >= bounds.top && selected.bottom <= bounds.bottom, top: bounds.top, bottom: bounds.bottom, selectedTop: selected.top, selectedBottom: selected.bottom };
   });
   assert(layout.visible, id + '选中的Tag应完整滚入可见区域：' + JSON.stringify(layout));
 }
-async function swipeTagStrip(page, id) {
+async function swipeTagRows(page, id) {
   const bounds = await page.locator('#' + id).boundingBox();
   const session = await page.context().newCDPSession(page);
-  const y = bounds.y + 16, start = bounds.x + bounds.width - 18, distance = bounds.width - 36;
+  const x = bounds.x + 30, start = bounds.y + bounds.height - 6, distance = bounds.height - 12;
   try {
-    await session.send('Input.dispatchTouchEvent', { type: 'touchStart', touchPoints: [{ x: start, y, id: 0 }] });
-    for (let step = 1; step <= 8; step++) await session.send('Input.dispatchTouchEvent', { type: 'touchMove', touchPoints: [{ x: start - distance * step / 8, y, id: 0 }] });
+    await session.send('Input.dispatchTouchEvent', { type: 'touchStart', touchPoints: [{ x, y: start, id: 0 }] });
+    for (let step = 1; step <= 8; step++) await session.send('Input.dispatchTouchEvent', { type: 'touchMove', touchPoints: [{ x, y: start - distance * step / 8, id: 0 }] });
     await session.send('Input.dispatchTouchEvent', { type: 'touchEnd', touchPoints: [] });
-    await page.waitForFunction(id => document.getElementById(id).scrollLeft > 0, id);
+    await page.waitForFunction(id => document.getElementById(id).scrollTop > 0, id);
   } finally { await session.detach(); }
 }
 try {
@@ -300,8 +300,8 @@ try {
     assert.equal(await page.locator('#log').evaluate(node => node.scrollWidth > node.clientWidth), false, '长账号名称和日志不能横向溢出');
     const compact = await page.locator('#log .log-account-name').evaluateAll(nodes => nodes.every(node => getComputedStyle(node).whiteSpace === 'nowrap' && getComputedStyle(node).textOverflow === 'ellipsis'));
     assert(compact, '长账号名应单行省略，完整名称可从提示读取');
-    await checkTagStrip(page, 'log-tabs', width <= 390);
-    await checkTagStrip(page, 'log-account-tabs', width === 320);
+    await checkTagRows(page, 'log-tabs', width === 320);
+    await checkTagRows(page, 'log-account-tabs');
     const accountTag = await page.locator('#log-account-tabs [data-log-account="logs-a"] [data-log-account-name]').evaluate(node => ({ clipped: node.scrollWidth > node.clientWidth, ellipsis: getComputedStyle(node).textOverflow }));
     assert(accountTag.clipped && accountTag.ellipsis === 'ellipsis', '筛选Tag的长账号名单行省略');
   }
@@ -318,15 +318,18 @@ try {
     const clear = $('log-clear').getBoundingClientRect(), issues = $('log-issues').getBoundingClientRect();
     return { logBottom: log.bottom, logHeight: log.height, right: actions.right, width: innerWidth, height: innerHeight, sameRow: Math.abs((clear.top + clear.bottom - issues.top - issues.bottom) / 2) <= 1 };
   });
-  await checkTagStrip(touch, 'log-tabs', true);
-  const accountStrip = await checkTagStrip(touch, 'log-account-tabs', true);
+  await checkTagRows(touch, 'log-tabs', true);
+  await checkTagRows(touch, 'log-account-tabs');
   assert(touchLayout.right <= touchLayout.width, JSON.stringify(touchLayout));
   assert(touchLayout.logHeight >= 400 && touchLayout.logBottom <= touchLayout.height, JSON.stringify(touchLayout));
   assert(touchLayout.sameRow, '触屏清空按钮不独占一行');
-  await swipeTagStrip(touch, 'log-tabs');
-  await swipeTagStrip(touch, 'log-account-tabs');
+  await swipeTagRows(touch, 'log-tabs');
   assert.equal(await touch.locator('#log-tabs [aria-selected=true]').getAttribute('data-log-feature'), 'all', '滑动分类不会误触筛选');
-  assert.equal(await touch.locator('#log-account-tabs [aria-pressed=true]').getAttribute('data-log-account'), 'all', '滑动账号不会误触筛选');
+  await touch.locator('#log-tabs [role=tab]').first().focus();
+  await touch.keyboard.press('End');
+  await checkSelectedTagVisible(touch, 'log-tabs');
+  await touch.keyboard.press('Home');
+  await checkSelectedTagVisible(touch, 'log-tabs');
   await touch.locator('#log-group').selectOption('日常与活动');
   assert.equal(await touch.locator('#log .row:visible').count(), 2);
   await checkSelectedTagVisible(touch, 'log-tabs');
@@ -345,8 +348,9 @@ try {
     const account = $('log-account-tabs'), log = $('log').getBoundingClientRect();
     return { accountHeight: account.getBoundingClientRect().height, logHeight: log.height, logBottom: log.bottom, height: innerHeight };
   });
-  await checkTagStrip(touch, 'log-account-tabs', true);
-  assert.equal(manyLayout.accountHeight, accountStrip.height, '增加账号不增加筛选区高度');
+  await checkTagRows(touch, 'log-account-tabs', true);
+  await swipeTagRows(touch, 'log-account-tabs');
+  assert.equal(await touch.locator('#log-account-tabs [aria-pressed=true]').getAttribute('data-log-account'), 'all', '滑动账号不会误触筛选');
   assert(manyLayout.logHeight >= 400 && manyLayout.logBottom <= manyLayout.height, JSON.stringify(manyLayout));
   await touch.locator('#log-account-tabs [data-log-account="all"]').focus();
   await touch.keyboard.press('End');
@@ -355,14 +359,14 @@ try {
   assert(await touch.locator('#log-empty').isHidden());
   assert.equal(await touch.locator('#log-count').textContent(), '0');
   assert.equal(await touch.locator('#log-clear').isDisabled(), false);
-  await touch.evaluate(() => { $('log-account-tabs').scrollLeft = 0; });
+  await touch.evaluate(() => { $('log-account-tabs').scrollTop = 0; });
   await touch.locator('#logs-close').click(); await touch.locator('#logs-open').click();
   await checkSelectedTagVisible(touch, 'log-account-tabs');
   await touch.locator('#log-account-tabs [data-log-account="all"]').click();
-  const scrollLeft = await touch.evaluate(() => { const tags = $('log-account-tabs'); tags.scrollLeft = tags.scrollWidth; return tags.scrollLeft; });
+  const scrollTop = await touch.evaluate(() => { const tags = $('log-account-tabs'); tags.scrollTop = tags.scrollHeight; return tags.scrollTop; });
   app.emit(b, 'info', '滑动浏览期间的新日志', { category: 'alliance' });
   await touch.locator('#log .row').filter({ hasText: '滑动浏览期间的新日志' }).waitFor();
-  assert.equal(await touch.locator('#log-account-tabs').evaluate(node => node.scrollLeft), scrollLeft, '实时更新不重置正在浏览的标签位置');
+  assert.equal(await touch.locator('#log-account-tabs').evaluate(node => node.scrollTop), scrollTop, '实时更新不重置正在浏览的标签位置');
   await touch.locator('#log .row').filter({ hasText: '滑动浏览期间的新日志' }).locator('.log-account').click();
   await checkSelectedTagVisible(touch, 'log-account-tabs');
   assert.equal(await touch.locator('#log-account-tabs [aria-pressed=true]').getAttribute('data-log-account'), 'logs-b');
@@ -374,7 +378,7 @@ try {
   await touch.close();
   assert.deepEqual(errors, []);
   assert.equal(connections, 0);
-  console.log('通过：320–1440px单行标签、原生触屏滑动、多账号单行、选中可见和深色截图检查，全程无页面异常与游戏连接');
+  console.log('通过：320–1440px 标签换行、双行高度上限、原生纵向触屏滑动、多账号选中可见和深色截图检查，全程无页面异常与游戏连接');
 } finally {
   await browser?.close(); await app.close(); fs.rmSync(directory, { recursive: true, force: true });
 }

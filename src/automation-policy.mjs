@@ -29,7 +29,7 @@ export function automationWireId(value) {
 }
 
 const gatherTasks = new Set(['autoFish', 'autoDive', 'autoSalvage', 'floaters', 'antiqueFloaters', 'fishEnhance', 'diveEnhance', 'salvageEnhance', 'diveKey']);
-const museumActions = new Set(['museumCollect', 'museumExplore', 'museumRevenue', 'museumAchievement', 'museumComplete', 'museumStart', 'museumGuide', 'museumExhibition', 'museumKeyword']);
+const museumActions = new Set(['museumCollect', 'museumExplore', 'museumRevenue', 'museumAchievement', 'museumComplete', 'museumStart', 'museumGuide', 'museumExhibition', 'museumKeyword', 'museumCaseUnlock', 'museumCaseFinish']);
 
 export function worldPreferenceEnabled(settings, kind) {
   if (!settings) return true;

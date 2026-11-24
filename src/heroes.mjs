@@ -76,7 +76,6 @@ export function planHeroes({ config, heroes, itemNum, playerLevel, allowUniversa
   const maxStar = maxHeroStar(config);
   const steps = [];
   const notes = [];
-  let expLeft = Math.max(0, itemNum(HERO_EXP_ITEM) - (pref?.keepExp ?? 0));
   if (pref && !pref.enabled) return { steps, notes: ['英雄养成总开关已关闭'], maxLevel, maxStar };
   if (pref && !heroIds?.length) return { steps, notes: [(pref.needsSelection
     ? '旧配置曾允许培养全部英雄，请先重新选择要培养的英雄。' : '未选择培养英雄，已暂停培养操作。')
@@ -86,31 +85,30 @@ export function planHeroes({ config, heroes, itemNum, playerLevel, allowUniversa
   // 升星优先给战力最高的英雄，万能碎片有限时这个顺序更划算。
   const byPower = [...picked].sort((a, b) => (b.power ?? 0) - (a.power ?? 0));
 
-  for (const hero of pref && !pref.level ? [] : picked) {
-    const cfg = heroById.get(hero.heroId);
-    if (!cfg) {
-      notes.push(`${hero.heroId}: HeroCfg 里没有这个英雄，跳过`);
-      continue;
+  if (!pref || pref.level) {
+    let expLeft = Math.max(0, itemNum(HERO_EXP_ITEM) - (pref?.keepExp ?? 0));
+    const ownedLevels = new Map(picked.map(hero => [hero.heroId, hero.level ?? 1]));
+    const levels = new Map();
+    for (const heroId of heroIds ?? ownedLevels.keys()) {
+      const level = ownedLevels.get(heroId);
+      if (level == null) continue;
+      if (!heroById.has(heroId)) notes.push(`${heroId}: HeroCfg 里没有这个英雄，跳过`);
+      else if (level >= maxLevel) notes.push(`${heroId}: 已到升级上限 lv${maxLevel}`);
+      else levels.set(heroId, level);
     }
-    const level = hero.level ?? 1;
-    if (level >= maxLevel) {
-      notes.push(`${hero.heroId}: 已到玩家等级允许的上限 lv${maxLevel}`);
-      continue;
-    }
-    let cost = 0;
-    let count = 0;
-    for (let target = level + 1; target <= maxLevel; target += 1) {
-      const row = byLevel.get(target);
-      if (!row) break;
-      if (row.reqPlayerLv > playerLevel) break;
-      if (cost + row.exp > expLeft) break;
-      cost += row.exp;
-      count += 1;
-    }
-    if (count > 0) {
-      steps.push({ kind: 'level', heroId: hero.heroId, from: level, to: level + count, count, exp: cost,
-        levelCosts: Array.from({ length: count }, (_, index) => byLevel.get(level + index + 1).exp), costs: [{ id: HERO_EXP_ITEM, num: cost }] });
-      expLeft -= cost;
+
+    // 等级决定轮到哪一批，Map 的勾选顺序决定同级英雄谁先升。
+    levelRounds: for (let from = Math.min(...levels.values()); from < maxLevel; from++) {
+      const to = from + 1, row = byLevel.get(to);
+      if (!row || row.reqPlayerLv > playerLevel || !Number.isSafeInteger(row.exp) || row.exp < 0) continue;
+      for (const [heroId, level] of levels) {
+        if (level !== from) continue;
+        if (expLeft < row.exp) break levelRounds;
+        steps.push({ kind: 'level', heroId, from, to, count: 1, exp: row.exp,
+          levelCosts: [row.exp], costs: [{ id: HERO_EXP_ITEM, num: row.exp }] });
+        expLeft -= row.exp;
+        levels.set(heroId, to);
+      }
     }
   }
 

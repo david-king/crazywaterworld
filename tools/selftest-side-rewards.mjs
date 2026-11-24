@@ -379,6 +379,25 @@ function chestServer({ stage = 1, cost = ['赛季宝箱钥匙1', '赛季宝箱�
 }
 const chestCtx = (f) => ({ ...f.options, key: 'seasonChest', label: '赛季宝箱' });
 
+await test('赛季宝箱查询收到未入盟提示时跳过本轮并延后复查', async () => {
+  const f = fixture(name => {
+    throw Object.assign(prompt(name), { prompt: { prompt: protocol.Prompt.NO_GUILD } });
+  });
+  f.client.promptNames = protocol.Prompt;
+  await openSeasonChests(f.client, chestConfig, chestCtx(f));
+  assert.deepEqual(f.output, [{ label: '赛季宝箱', skipped: true, reason: '当前账号未加入联盟，已跳过赛季宝箱' }]);
+  assert.deepEqual(f.client.sent, ['SeasonChestInfoRequest']);
+  assert(f.options.scheduler.nextCheck('seasonChest') > now());
+  assert.equal(Object.keys(f.ledger.keyRecords()).length, 0);
+});
+
+await test('赛季宝箱查询真正超时时保留原错误', async () => {
+  const timeout = new Error('timeout waiting for SeasonChestInfoResponse (sent SeasonChestInfoRequest)');
+  const f = fixture(() => { throw timeout; });
+  await assert.rejects(openSeasonChests(f.client, chestConfig, chestCtx(f)), error => error === timeout);
+  assert.deepEqual(f.client.sent, ['SeasonChestInfoRequest']);
+});
+
 await test('赛季宝箱开放条件来自配置：第一赛季关闭，开服时间缺失不开', () => {
   const time = now();
   assert.equal(seasonChestAccess(chestConfig, { ...player, worldId: 1001001 }, time).reason, '当前赛季未开放赛季宝箱');

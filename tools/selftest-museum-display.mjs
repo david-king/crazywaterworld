@@ -7,7 +7,7 @@ import { EventEmitter } from 'node:events';
 import { loadProtocol } from '../src/proto.mjs';
 import { loadConfig } from '../src/config.mjs';
 import { createUsageLedger } from '../src/usage-ledger.mjs';
-import { planMuseumDisplay, runMuseumDisplay } from '../src/museum-display.mjs';
+import { museumBoothAdvice, planMuseumDisplay, runMuseumDisplay } from '../src/museum-display.mjs';
 import { defaultSettings, hasBaseWork, hasExtraWork } from '../src/automation-settings.mjs';
 import { runLoop } from '../src/loop.mjs';
 import { rewardSchedule } from '../src/reward-schedule.mjs';
@@ -89,6 +89,20 @@ try {
       assert.match(source, /MusuemAntiqueSelectPop[\s\S]{0,3500}getPopularityValue/);
     }
   });
+  await test('升级建议核对前置展柜和库存，换展品只计算当前可执行的一次增益', () => {
+    const f = fixture();
+    const exhibition = f.state.museum.exhibitions[0];
+    exhibition.cases = [booth(101, 'orange'), booth(102, 'red')];
+    const table = f.config.tables.MuseumDisplayCaseCfg.data;
+    table.find(row=>row.displayCaseId===101).popularityBonus=2000;
+    table.push({ areaId:1, displayCaseId:101, level:2, areaLevelReq:2, prevCaseId:[102,2],
+      popularityBonus:3000, costArr:[['木板',4]] });
+    const advice=museumBoothAdvice(f.state.museum,f.state.antiques,f.config,new Map([['木板',1]]));
+    assert.match(advice.upgrades[0].reason,/展区 2 级.*展柜 102 需要 2 级.*木板 ×3/);
+    assert.equal(advice.placement.gain,19);
+    assert.deepEqual(exhibition.cases.map(x=>x.antiqueId),['orange','red']);
+  });
+
   await test('仅上架已激活博物馆藏品，人气高者优先且每件只放一柜', async () => {
     const f = fixture();
     const entries = await f.run();

@@ -22,7 +22,7 @@ export const settingsFile = () => path.join(dataDirectory(), 'automation-setting
 export const SETTINGS_FORMAT = 'crazywaterworld-automation';
 // 文件 version / 账号 settingsVersion 是格式编号，只随结构迁移调整；
 // revision 是每次保存递增的修订号，仅用于并发冲突检查，不能用作格式版本。
-export const SETTINGS_SCHEMA_VERSION = 56;
+export const SETTINGS_SCHEMA_VERSION = 58;
 const LEGACY_SETTINGS_FORMAT = 'crazywaterword-automation';
 const treasureQualityLabels = { ORANGE: '万吨货轮', PURPLE: '中型货轮', BLUE: '小型货轮' };
 const treasureChaseDefaults = {
@@ -73,7 +73,7 @@ export const DEFAULT_SETTINGS = {
   cargo: { enabled: false, dailyLoadLimit: 0 },
   events: { enabled: false, otherOption: 1 },
   pet: { release: false, releaseQualities: [], enabled: false, claim: false, breed: false, species: [], quality: 'BLUE', universal: false, feed: false, advance: false },
-  museum: { runEnabled: false, enabled: false, revenue: false, achievements: false, display: false, maxDispatches: 1, upgrade: false, factorMode: 'materials', fullRecommendedFactor: 3, partialRecommendedFactor: 2, noRecommendedFallback: false, noRecommendedFactor: 1, factor: 1, materialFactor: false, factorMaterials: [], stockThreshold: 0, matchedFactor: 1, maps: [], useGuide: false, dailyGuideLimit: 0 },
+  museum: { runEnabled: false, enabled: false, revenue: false, achievements: false, display: false, unlockCases: false, maxDispatches: 1, upgrade: false, factorMode: 'materials', fullRecommendedFactor: 3, partialRecommendedFactor: 2, noRecommendedFallback: false, noRecommendedFactor: 1, factor: 1, materialFactor: false, factorMaterials: [], stockThreshold: 0, matchedFactor: 1, maps: [], targetFragments: [], useGuide: false, dailyGuideLimit: 0 },
   resources: { keepAccelerators: 0, allowDiamonds: false, diamondThreshold: 0, diamondDailyLimit: 2000 },
   // noPrivilege 仅保留旧配置/导出的兼容字段；无权益账号统一走等待领取。
   ads: { noPrivilege: true, waitSeconds: 15 },
@@ -164,7 +164,7 @@ const constraints = {
   'museum.factorMode': { kind: 'choice', values: ['materials', 'recommended'] },
   'museum.fullRecommendedFactor': int(3, 1), 'museum.partialRecommendedFactor': int(3, 1), 'museum.noRecommendedFactor': int(3, 1),
   'museum.maxDispatches': int(100), 'museum.factor': int(3, 1), 'museum.factorMaterials': strings(), 'museum.stockThreshold': int(), 'museum.matchedFactor': int(3, 1),
-  'museum.maps': strings(), 'museum.dailyGuideLimit': int(), 'resources.keepAccelerators': int(), 'resources.diamondThreshold': int(),
+  'museum.maps': strings(), 'museum.targetFragments': strings(), 'museum.dailyGuideLimit': int(), 'resources.keepAccelerators': int(), 'resources.diamondThreshold': int(),
   'resources.diamondDailyLimit': int(), 'gold.times': int(1000), 'heroes.heroIds': strings(), 'heroes.keepExp': int(),
   'discountShop.rules': { kind: 'discountRules' },
   'heroes.targetLevel': int(10000), 'heroes.targetStar': int(1000),
@@ -320,11 +320,11 @@ export function hasExtraWork(settings) {
   if (settings?.radar?.runEnabled && (settings.radar.enabled || settings.radar.repairIdle)) return true;
   if (settings?.weeklyActivity?.enabled && ['farm', 'pet', 'antique', 'order', 'forge', 'hero'].some(kind => settings.weeklyActivity[kind + 'Enabled'])) return true;
   if (fleetSpeedEnabled(settings) || settings?.appointments?.enabled || settings?.alliance?.enabled || settings?.guildShip?.enabled || settings?.heroRaid?.enabled || settings?.silicon?.enabled || settings?.resourceFields?.enabled) return true;
-  return !!settings && ((settings.loop.world && (settings.museum.runEnabled !== false && ['enabled', 'upgrade', 'revenue', 'achievements', 'display'].some(key => settings.museum[key]) || settings.events.enabled || settings.pet.enabled || (settings.gather.enabled !== false && settings.gather.diving && settings.gather.keyOpen))) || (settings.loop.heroes && settings.heroes.enabled)
+  return !!settings && ((settings.loop.world && (settings.museum.runEnabled !== false && ['enabled', 'upgrade', 'revenue', 'achievements', 'display', 'unlockCases'].some(key => settings.museum[key]) || settings.events.enabled || settings.pet.enabled || (settings.gather.enabled !== false && settings.gather.diving && settings.gather.keyOpen))) || (settings.loop.heroes && settings.heroes.enabled)
     || (settings.progression?.enabled && (settings.progression.mainline || settings.progression.trials)) || (settings.pirate?.enabled && (settings.schedule.pirate || settings.pirateHunt.enabled)));
 }
 export function hasBaseWork(settings) {
-  return !!settings && ((settings.loop.world && (settings.museum.runEnabled !== false && ['enabled', 'upgrade', 'revenue', 'achievements', 'display'].some(key => settings.museum[key]) || settings.events.enabled ||
+  return !!settings && ((settings.loop.world && (settings.museum.runEnabled !== false && ['enabled', 'upgrade', 'revenue', 'achievements', 'display', 'unlockCases'].some(key => settings.museum[key]) || settings.events.enabled ||
     settings.pet.enabled || (settings.gather.enabled !== false && settings.gather.diving && settings.gather.keyOpen))) ||
     (settings.loop.dailies && settings.gold.enabled));
 }
@@ -372,6 +372,7 @@ function validateCurrentSettings(input, { partial = false, catalog = null } = {}
   input = migrateVersion53Settings(input);
   input = migrateVersion54Settings(input);
   input = migrateVersion55Settings(input);
+  input = migrateVersion57Settings(migrateVersion56Settings(input));
   if (plain(input?.resourceFields) && !Object.hasOwn(input.resourceFields, 'refillAfterLoss')) {
     input = { ...input, resourceFields: { ...input.resourceFields, refillAfterLoss: false } };
   }
@@ -524,7 +525,7 @@ function validateCurrentSettings(input, { partial = false, catalog = null } = {}
     for (const [name, collection] of Object.entries({
       'building.disabledTypes': 'buildings', 'factory.disabledTypes': 'factories', 'factory.speedUpItems': 'materials',
       'factory.blockedCollectionTypes': 'collectionBuildings', 'factory.simulatedTargets': 'factoryProducts',
-      'resident.blockedMaterials': 'materials', 'museum.factorMaterials': 'materials', 'museum.maps': 'maps',
+      'resident.blockedMaterials': 'materials', 'museum.factorMaterials': 'materials', 'museum.maps': 'maps', 'museum.targetFragments': 'museumFragments',
       'heroes.heroIds': 'heroes', 'pet.species': 'petSpecies',
       'treasure.fleetIds': 'expeditionFleets', 'treasure.rewardItems': 'materials',
       'treasure.fallbackMediumRewardPriority': 'materials', 'treasure.fallbackSmallRewardPriority': 'materials',
@@ -568,6 +569,8 @@ export function settingsCatalog(config) {
   // These two rewards appeared in DiscountShopResponse without a shop link in ItemJumpCfg.
   const shopIds = new Set(['原料自选包', '玉米']);
   for (const row of rows('ItemJumpCfg')) if (row.accessList?.includes('折扣商店')) shopIds.add(row.id);
+  const museumLoot = new Set(rows('MuseumExpeditionRewardCfg').flatMap(row => (row.randomRewards ?? [])
+    .filter(([, count], index) => count > 0 && row.randomRewardWeights?.[index] > 0).map(([id]) => id)));
   const materialLabels = new Map(materials.map(item => [item.value, item.label]));
   return {
     buildings, factories: buildings.filter(r => factoryTypes.has(r.value)),
@@ -582,6 +585,7 @@ export function settingsCatalog(config) {
     treasureQualities: Object.entries(treasureQualityLabels).map(([value, label]) => option(value, label)),
     siliconTiers: Object.entries(siliconTierLabels).map(([value, label]) => option(value, label)),
     crops: rows('FarmlandPlantCfg').map(r => option(r.id)),
+    museumFragments: rows('ItemCfg').filter(row => row.type === '藏品碎片' && museumLoot.has(row.id)).map(row => option(row.id, row.show_name || row.id)),
     maps: rows('MuseumExpeditionStageCfg').map(r => option(r.stageId, r.name)),
     heroes: rows('HeroCfg').filter(r => r.universalItemId || r.quality).map(r => ({
       ...option(r.id, r.showName || r.name || r.id), ...(r.type && r.type !== '英雄' ? { hidden: true } : {}),
@@ -733,7 +737,7 @@ export function importAutomationSettings(document, options) {
   return validateSettings(migrateSettingsVersion(document.settings, document.version), { ...options, partial: false });
 }
 
-const settingsMigrations = new Map([[1, migrateVersion1Settings], [2, migrateVersion2Settings], [3, migrateVersion3Settings], [4, migrateVersion4Settings], [5, migrateVersion5Settings], [6, migrateVersion6Settings], [7, migrateVersion7Settings], [8, migrateVersion8Settings], [9, migrateVersion9Settings], [10, migrateVersion10Settings], [11, migrateVersion11Settings], [12, migrateVersion12Settings], [13, migrateVersion13Settings], [14, migrateVersion14Settings], [15, migrateVersion15Settings], [16, migrateVersion16Settings], [17, migrateVersion17Settings], [18, migrateVersion18Settings], [19, migrateVersion19Settings], [20, migrateVersion20Settings], [21, migrateVersion21Settings], [22, migrateVersion22Settings], [23, migrateVersion23Settings], [24, migrateVersion24Settings], [25, migrateVersion25Settings], [26, migrateVersion26Settings], [27, migrateVersion27Settings], [28, migrateVersion28Settings], [29, migrateVersion29Settings], [30, migrateVersion30Settings], [31, migrateVersion31Settings], [32, migrateVersion32Settings], [33, migrateVersion33Settings], [34, migrateVersion34Settings], [35, migrateVersion35Settings], [36, migrateVersion36Settings], [37, migrateVersion37Settings], [38, migrateVersion38Settings], [39, migrateVersion39Settings], [40, migrateVersion40Settings], [41, migrateVersion41Settings], [42, migrateVersion42Settings], [43, migrateVersion43Settings], [44, migrateVersion44Settings], [45, migrateVersion45Settings], [46, migrateVersion46Settings], [47, migrateVersion47Settings], [48, migrateVersion48Settings], [49, migrateVersion49Settings], [50, migrateVersion50Settings], [51, migrateVersion51Settings], [52, migrateVersion52Settings], [53, migrateVersion53Settings], [54, migrateVersion54Settings], [55, migrateVersion55Settings]]);
+const settingsMigrations = new Map([[1, migrateVersion1Settings], [2, migrateVersion2Settings], [3, migrateVersion3Settings], [4, migrateVersion4Settings], [5, migrateVersion5Settings], [6, migrateVersion6Settings], [7, migrateVersion7Settings], [8, migrateVersion8Settings], [9, migrateVersion9Settings], [10, migrateVersion10Settings], [11, migrateVersion11Settings], [12, migrateVersion12Settings], [13, migrateVersion13Settings], [14, migrateVersion14Settings], [15, migrateVersion15Settings], [16, migrateVersion16Settings], [17, migrateVersion17Settings], [18, migrateVersion18Settings], [19, migrateVersion19Settings], [20, migrateVersion20Settings], [21, migrateVersion21Settings], [22, migrateVersion22Settings], [23, migrateVersion23Settings], [24, migrateVersion24Settings], [25, migrateVersion25Settings], [26, migrateVersion26Settings], [27, migrateVersion27Settings], [28, migrateVersion28Settings], [29, migrateVersion29Settings], [30, migrateVersion30Settings], [31, migrateVersion31Settings], [32, migrateVersion32Settings], [33, migrateVersion33Settings], [34, migrateVersion34Settings], [35, migrateVersion35Settings], [36, migrateVersion36Settings], [37, migrateVersion37Settings], [38, migrateVersion38Settings], [39, migrateVersion39Settings], [40, migrateVersion40Settings], [41, migrateVersion41Settings], [42, migrateVersion42Settings], [43, migrateVersion43Settings], [44, migrateVersion44Settings], [45, migrateVersion45Settings], [46, migrateVersion46Settings], [47, migrateVersion47Settings], [48, migrateVersion48Settings], [49, migrateVersion49Settings], [50, migrateVersion50Settings], [51, migrateVersion51Settings], [52, migrateVersion52Settings], [53, migrateVersion53Settings], [54, migrateVersion54Settings], [55, migrateVersion55Settings], [56, migrateVersion56Settings], [57, migrateVersion57Settings]]);
 const supportedSettingsVersion = version => Number.isSafeInteger(version) && version >= 1;
 const entrySettingsVersion = entry => Object.hasOwn(entry, 'settingsVersion') ? entry.settingsVersion : 1;
 function newestSettingsVersion(store) {
@@ -1151,6 +1155,16 @@ function migrateVersion22Settings(settings) {
 function migrateVersion55Settings(settings) {
   if (!plain(settings?.factory) || Object.hasOwn(settings.factory, 'strategy') && Object.hasOwn(settings.factory, 'simulatedTargets')) return settings;
   return { ...settings, factory: { strategy: 'smart', simulatedTargets: [], ...settings.factory } };
+}
+
+function migrateVersion57Settings(settings) {
+  if (!plain(settings?.museum) || Object.hasOwn(settings.museum, 'unlockCases')) return settings;
+  return { ...settings, museum: { ...settings.museum, unlockCases: false } };
+}
+
+function migrateVersion56Settings(settings) {
+  if (!plain(settings?.museum) || Object.hasOwn(settings.museum, 'targetFragments')) return settings;
+  return { ...settings, museum: { ...settings.museum, targetFragments: [] } };
 }
 
 function migrateVersion54Settings(settings) {

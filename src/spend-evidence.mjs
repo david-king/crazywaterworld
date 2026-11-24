@@ -1,3 +1,4 @@
+import { caseWorkObserved } from './museum-cases.mjs';
 import { normalize } from './worlds.mjs';
 import { uidText } from './hero-equipment.mjs';
 import { emitDiagnostic } from './trace-log.mjs';
@@ -149,6 +150,14 @@ export async function captureSpendOperation(client, step, { waterSnapshot } = {}
       if (!pet || !integer(pet.grade ?? 0) || !Array.isArray(pet.profFeed)) return false;
       const fed = petAdvanceFeedCount(pet);
       return fed !== null && (fed > verify.fed || (pet.grade ?? 0) > verify.grade);
+    });
+  }
+  if (request === 'MuseumUpgradeCaseRequest') {
+    return probe(async next => {
+      const { exhibitions } = await read(next, 'MuseumInfo');
+      if (!unique(exhibitions, row => row.exhibitionId)) return false;
+      const cases = exhibitions.find(row => row.exhibitionId === body.exhibitionId)?.cases;
+      return unique(cases, row => row.caseIndex) && caseWorkObserved(cases.find(c => c.caseIndex === body.caseIndex), 'museumCaseUnlock');
     });
   }
   if (['MuseumSpeedUpExploreRequest', 'MuseumUpgradeExhibitionRequest', 'MuseumUpgradeKeywordRequest'].includes(request)) {

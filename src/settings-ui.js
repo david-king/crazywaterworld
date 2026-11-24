@@ -212,7 +212,7 @@ const configGroups = [
         configField(key+'pursuit',label+'追击已击败对手','switch',{parent:key+'enabled',when,help:'仅在三日奖励重置窗口追击已击败且在游戏黑名单中的对手。开启指定玩家追杀后，优先使用追杀名单。'}),
         configField(key+'huntEnabled',label+'追杀指定玩家','switch',{parent:key+'enabled',when,help:'优先攻击名单中的合规玩家。没有合规目标时可占空位。安全玩家、同盟、战力和次数限制继续生效。'}),
         configField(key+'huntPlayerIds',label+'追杀玩家','players',{worldPlayers:true,nameList:key+'huntPlayers',parent:key+'huntEnabled',when:d=>when(d)&&d.silicon.fleets[i].huntEnabled,help:'按昵称搜索并勾选对手。控制台保存角色 ID，按当前区服、昵称和联盟核对矿位。遇到同名歧义时跳过。'}),
-        configField(key+'huntPlayers',label+'补充追杀昵称','names',{parent:key+'huntEnabled',when:d=>when(d)&&d.silicon.fleets[i].huntEnabled,help:'每行一个完整昵称，忽略大小写。昵称独立生效，换用角色 ID 后请移除对应旧昵称，以免匹配到接用旧名的玩家。'}),
+        configField(key+'huntPlayers',label+'补充追杀昵称','names',{parent:key+'huntEnabled',when:d=>when(d)&&d.silicon.fleets[i].huntEnabled,help:'每行一个完整昵称，忽略大小写。没有可追击的 ID 目标时，按这里的昵称查找对手。'}),
         configField(key+'huntRetreat',label+'追杀撤退策略','choice',{parent:key+'huntEnabled',options:[['never','持续采集'],['afterReward','采一次矿就撤回'],['onTarget','发现名单目标先撤再打']],when:d=>when(d)&&d.silicon.fleets[i].huntEnabled,help:'采一次后撤回：每次占矿首次产奖后撤回，下轮重新寻找名单目标或空位。发现目标后撤回：仅有符合限制的名单目标时撤回，回港确认后重新核对再攻打。游戏要求首轮15分钟产矿完成后才能撤回；返航期间不强行出征。'}),
         configField(key+'safePlayerIds',label+'安全玩家','players',{worldPlayers:true,nameList:key+'safePlayers',parent:key+'enabled',when,help:'按昵称勾选需要避让的玩家。自动与手动抢占均按角色当前资料核对；资料未同步时，该队仍可采空位。'}),
         configField(key+'safePlayers',label+'补充安全玩家昵称','names',{parent:key+'enabled',when,help:'完整昵称，每行一个，忽略大小写；不主动攻击这些玩家。'}),configField(key+'safeGuilds',label+'安全联盟编号','names',{parent:key+'enabled',when,help:'游戏显示的联盟数字编号，每行一个；矿位协议不包含联盟名称。'}),
@@ -355,6 +355,7 @@ const configGroups = [
   ] },
   { id: 'museum', title: '博物馆探宝', category: 'base', fields: [
     configField('museum.runEnabled', '博物馆探宝总开关', 'switch', { help: '统一暂停博物馆升级、领奖、藏品上架和探宝，保留细项选择。未选择任何执行动作时不会操作。' }),
+    configField('museum.unlockCases', '自动解锁展位', 'switch', { help: '展区和前置展位达标后，用现有金币、人气币和建筑蓝图解锁新展位，保留已设置的蓝图数量。到期自动完工，无需开启广告加速。' }),
     configField('museum.upgrade', '自动升级技能与展区'),
     configField('museum.revenue', '自动领取人气币', 'switch', { help: '领取博物馆已积累的营收。' }),
     configField('museum.achievements', '自动领取人气奖励', 'switch', { help: '领取已达成人气档位的成就奖励。' }),
@@ -371,6 +372,7 @@ const configGroups = [
     configField('museum.factorMaterials', '命中材料名单', 'multi', { parent: 'museum.materialFactor', catalog: 'materials', empty: '未选择，仅检查库存阈值', when: d => d.museum.materialFactor }),
     configField('museum.stockThreshold', '库存阈值', 'number', { parent: 'museum.materialFactor', when: d => d.museum.materialFactor, help: '任一所需材料库存不高于此值时使用命中倍数；0 关闭库存条件。' }),
     configField('museum.matchedFactor', '命中时倍数', 'choice', { parent: 'museum.materialFactor', numeric: true, options: museumFactorOptions, when: d => d.museum.materialFactor }),
+    configField('museum.targetFragments', '目标文物碎片', 'multi', { parent: 'museum.enabled', catalog: 'museumFragments', empty: '不限掉落', help: '只派往当前星级能产出任一目标碎片的地图。同时选择地图时取交集。只读预览可查看掉落星级和所差进度。' }),
     configField('museum.maps', '探宝地图', 'multi', { parent: 'museum.enabled', catalog: 'maps', empty: '未选择，不限制地图', help: '控制新派遣与指南使用；已经完成的探宝仍可领取。' }),
     configField('museum.useGuide', '使用探险指南', 'switch', { parent: 'museum.enabled' }),
     configField('museum.dailyGuideLimit', '每日指南上限', 'number', { parent: 'museum.useGuide', unit: '本', help: '每本缩短 30 分钟，填 0 表示不使用；保存配置或重启不会清零当日记录。' }),
@@ -399,7 +401,7 @@ const configGroups = [
     configField('treasure.followNames', '补充跟随昵称（可选）', 'names', { parent: 'treasure.follow', when: d => d.treasure.follow, help: '保留原有手填名单。每行一个完整昵称，角色 ID 名单优先；同名无法确认身份时跳过。', placeholder: '每行输入一位其他玩家的完整昵称' }),
     configField('treasure.chase', '是否开启追杀', 'switch', { help: '名单对手正在前往、驻守或交战的货轮优先出征。追杀跳过货轮类型、奖励、进度、避战、外盟、反复攻占、每日出征上限和最低耐久比例。只用所选可用舰队，服从其他挂机项目的占用和预留。' }),
     configField('treasure.chasePlayerIds', '追杀玩家', 'players', { worldPlayers:true, nameList:'treasure.chaseNames', parent: 'treasure.chase', when: d => d.treasure.chase, help: '按昵称搜索并勾选对手。按选择顺序优先追击，改名后继续识别同一角色。' }),
-    configField('treasure.chaseNames', '补充追杀昵称', 'names', { parent: 'treasure.chase', when: d => d.treasure.chase, placeholder: '每行一位对手的完整昵称', help: '角色 ID 名单优先。这里的昵称也独立生效，换用角色 ID 后请移除对应旧昵称。' }),
+    configField('treasure.chaseNames', '补充追杀昵称', 'names', { parent: 'treasure.chase', when: d => d.treasure.chase, placeholder: '每行一位对手的完整昵称', help: '先查找角色 ID 名单中的对手，没有合适目标时按这里的完整昵称匹配。' }),
     configField('treasure.chaseWindows', '追杀时间范围', 'names', { parent: 'treasure.chase', when: d => d.treasure.chase, placeholder: '08:00-12:00\n22:00-02:00', help: '在巨轮参与时间内进一步限定追杀。每行一个北京时间 HH:mm-HH:mm 时段，可跨午夜。留空或起止相同表示沿用全部参与时间。' }),
     configField('treasure.chaseSpeedUp', '追杀去程钻石加速', 'switch', { parent: 'treasure.chase', when: d => d.treasure.chase, help: '仅加速已确认的追杀去程。对手离开后停止花钻。回城可单独使用下方的回城加速。' }),
     configField('treasure.chaseTargetSeconds', '追杀去程剩余目标', 'number', { parent: 'treasure.chaseSpeedUp', when: d => d.treasure.chase && d.treasure.chaseSpeedUp, unit: '秒', help: '剩余时间超过此值时才加速。' }),
@@ -505,7 +507,7 @@ const configGroups = [
   { id: 'heroes', title: '英雄养成', category: 'heroes', fields: [
     configField('heroes.enabled', '养成总开关'), configField('loop.heroes', '加入自动挂机'),
     configField('heroes.heroIds', '指定英雄', 'multi', { catalog: 'heroes', empty: '留空则暂停培养，不影响技能展示领奖', help: '可搜索并选择多个英雄。升级、升星等培养操作只处理名单中已拥有的英雄；技能展示领奖覆盖所有已拥有的英雄。' }),
-    configField('heroes.level', '自动升级'), configField('heroes.star', '自动升星'),
+    configField('heroes.level', '自动升级', 'switch', { help: '优先补齐等级最低的所选英雄，同级按勾选顺序各升一级。重启后按实际等级接续。' }), configField('heroes.star', '自动升星'),
     configField('heroes.skill', '技能升级'), configField('heroes.skillAdvance', '技能进阶'),
     configField('heroes.exclusiveLevel', '专武升级'), configField('heroes.exclusiveStar', '专武升星'),
     configField('heroes.showSkillReward', '领取技能展示奖励', 'switch', { help: '领取所有已拥有英雄的技能展示奖励，不受指定英雄名单限制；已领取的英雄自动跳过。' }),
@@ -1757,7 +1759,7 @@ function configCheckForm({ focus = true } = {}) {
   return true;
 }
 
-async function configRefreshPlayers(world = false) {
+async function configRefreshPlayers(world = false, rankPage) {
   const state = world ? configEditor.worldPlayers : configEditor;
   const account = configEditor.owner, serial = configEditor.serial;
   if (!account || !configEditor.draft) return;
@@ -1767,7 +1769,8 @@ async function configRefreshPlayers(world = false) {
   for (const paint of configEditor.playerWidgets) paint();
   job.promise = (async () => {
     try {
-      const data = await call(world ? '/api/settings/players?scope=world' : '/api/settings/players');
+      const path = world ? '/api/settings/players?scope=world' + (rankPage ? '&rankPage=' + rankPage : '') : '/api/settings/players';
+      const data = await call(path);
       if (account !== current || account !== configEditor.owner || serial !== configEditor.serial) return;
       state.playerData = data;
     } catch (error) {
@@ -1838,9 +1841,7 @@ function configListNameHistory(widget, box) {
         }
         for (const value of names.filter(name => record && [record.name, ...aliases].some(alias => fold(alias) === fold(name)))) {
           if (!ids.includes(id)) {
-            const bind = configButton('将“' + value + '”改用此 ID', () => {
-              change(idKey, [...new Set([...configGet(idKey), id])]); change(namesKey, configGet(namesKey).filter(item => item !== value));
-            });
+            const bind = configButton('绑定此 ID 并保留“' + value + '”', () => change(idKey, [...new Set([...configGet(idKey), id])]));
             bind.disabled = ids.length >= (idKey === 'treasure.avoidPlayerIds' || idKey === 'alliance.memberIds' ? 100 : 30);
             tag.append(bind);
           }
@@ -1899,10 +1900,11 @@ function configPlayerPicker(spec, id) {
   // 点击姓名标签时，焦点须留在下拉框内，避免落到外层分组触发失焦关闭。
   const details = el('details', 'config-multi'); details.tabIndex = -1;
   const summary = el('summary', '', '选择' + noun); summary.setAttribute('aria-label', '选择' + spec.label); details.append(summary);
-  const panel = el('div', 'config-multi-panel'); const search = el('input', 'config-input'); search.type = 'search'; search.placeholder = '搜索玩家昵称'; search.setAttribute('aria-label', '搜索' + spec.label);
+  const panel = el('div', 'config-multi-panel'); const search = el('input', 'config-input'); search.type = 'search'; search.placeholder = '搜索已载入的昵称或 ID'; search.setAttribute('aria-label', '搜索' + spec.label);
   const status = el('p', 'config-help'); status.setAttribute('role', 'status');
   const list = el('div', 'config-option-list');
   const refresh = configButton('刷新' + noun + '名单', () => { void configRefreshPlayers(world); }); refresh.setAttribute('aria-label', '刷新' + spec.label + noun + '名单');
+  const more = world ? configButton('加载下一页战力榜', () => { void configRefreshPlayers(true, state.playerData.rankPage + 1); }) : null;
   const manual = el('div', 'config-add'); const input = el('input', 'config-input'); input.type = 'text'; input.inputMode = 'numeric'; input.maxLength = 19; input.placeholder = '已知角色 ID 时可选填'; input.setAttribute('aria-label', '补充' + spec.label + '角色ID');
   const manualError = el('p', 'config-field-error'); manualError.hidden = true;
   const limit = spec.key === 'treasure.avoidPlayerIds' || spec.key === 'alliance.memberIds' ? 100 : 30;
@@ -1929,7 +1931,12 @@ function configPlayerPicker(spec, id) {
       option.append(check, label); list.append(option);
       if (member.id === focusId) check.focus({ preventScroll: true });
     }
-    if (state.playerData && !matches.length) list.append(el('p', 'config-help', query || world ? '未找到玩家，可在补充昵称中填写游戏内的名字。' : '当前没有可选择的盟友，已排除自己及联盟黑名单。'));
+    if (state.playerData && !matches.length) {
+      let message = '未找到玩家，可在补充昵称中填写游戏内的名字。';
+      if (!query && !world) message = '当前没有可选择的盟友，已排除自己及联盟黑名单。';
+      if (world && state.playerData.rankPage < state.playerData.rankPages) message = '已载入的名单中没有匹配玩家，可继续加载战力榜。';
+      list.append(el('p', 'config-help', message));
+    }
     list.scrollTop = scrollTop;
   }
   function paint() {
@@ -1949,7 +1956,17 @@ function configPlayerPicker(spec, id) {
     summary.textContent = values.length ? '选择' + noun + ' · 已选 ' + values.length + ' 位' : '选择' + noun;
     refresh.disabled = !!state.playerRequest; refresh.textContent = state.playerRequest ? '正在读取…' : '刷新' + noun + '名单';
     const data = state.playerData;
-    status.textContent = state.playerError || (state.playerRequest ? '' : data?.reason || (data ? (world ? '世界舰队、世界聊天和黑名单' : data.guildName || '当前联盟') + ' · 可选 ' + members.length + ' 位' : '尚未读取' + noun + '名单'));
+    if (more) {
+      more.hidden = !(data?.rankPage < data?.rankPages);
+      more.disabled = !!state.playerRequest;
+    }
+    const info = [];
+    if (world && data?.rankPages) info.push('战力榜 ' + data.rankPage + '/' + data.rankPages + ' 页');
+    if (!world && data) info.push(data.guildName || '当前联盟');
+    if (data) info.push((world ? '已载入 ' : '可选 ') + members.length + ' 位');
+    if (state.playerError || data?.reason) info.push(state.playerError || data.reason);
+    if (!info.length && !state.playerRequest) info.push('尚未读取' + noun + '名单');
+    status.textContent = info.join(' · ');
     status.hidden = !status.textContent;
     if (details.open) paintList();
   }
@@ -1959,7 +1976,9 @@ function configPlayerPicker(spec, id) {
     else details.classList.remove('open-up');
   };
   details.onkeydown = event => { if (event.key === 'Escape') { details.open = false; summary.focus(); event.stopPropagation(); } };
-  panel.append(search, status, list, refresh, manual, manualError); details.append(panel); root.append(selected, details);
+  panel.append(search, status, list);
+  if (more) panel.append(more);
+  panel.append(refresh, manual, manualError); details.append(panel); root.append(selected, details);
   root.refreshPlayerNames = paint;
   configEditor.playerWidgets.push(paint); paint(); return root;
 }
@@ -2519,6 +2538,30 @@ async function configExport() {
   finally { if (account === current) { configBusy(false); configUpdateState(); } }
 }
 
+function renderMuseumPreview(result, museum) {
+  const costs = items => items.map(i => i.name + ' ×' + i.num).join('、') || '—';
+  const group = (title, body, expanded) => {
+    const details = el('details', 'preview-inspection');
+    details.open = expanded;
+    details.append(el('summary', '', title), body);
+    result.append(details);
+  };
+  if (museum.drops.length) group('目标碎片来源', table(['文物碎片','探宝地图','首次掉落','当前条件'],
+    museum.drops.map(r => [r.item,r.map,r.first+' 星',r.status])), true);
+  group('探宝队伍与地图', museum.maps.length ? table(['地图 / 星级','派遣状态','队伍 / 倍数','评级概率','派遣用料','预计返航（北京时间）'],
+    museum.maps.map(r => [r.name + (r.star == null ? '' : ' · '+r.star+' 星'),r.status,
+      [r.heroes.join('、'),r.recommended == null ? '' : r.recommended+' 人符合推荐',r.factor ? r.factor+' 倍' : ''].filter(Boolean).join(' · ') || '—',
+      r.odds || '—',costs(r.costs),r.until ? new Date(r.until*1000).toLocaleString('zh-CN',{timeZone:'Asia/Shanghai',month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit'}) : '—'])) : el('p','dim','尚无探宝地图配置'), true);
+  const display = museum.display, change = display.placement;
+  const booths = el('div');
+  booths.append(el('p','config-help',change ? change.name+' · '+change.from+' → '+change.to+'，预计增加 '+change.gain+' 人气（仅计展柜加成）'
+    : display.notes.length ? display.notes.join('；') : '当前摆放暂无可提高人气的单次调整。'));
+  if (display.upgrades.length) booths.append(table(['展柜','目标等级','用料','升级条件','预计人气变化'],
+    display.upgrades.map(r=>[r.name,r.level+' 级',costs(r.costs),r.reason,
+      (r.gain == null ? '未确认' : '+'+r.gain)+' · 展柜加成 +'+r.bonusChange+' 个百分点'])));
+  group('展柜升级与摆放建议', booths, false);
+}
+
 async function configPreview() {
   if (configPageStale()) { configMessage(''); return; }
   if (!configEditor.draft || configEditor.busy || !configCheckForm()) return;
@@ -2532,7 +2575,7 @@ async function configPreview() {
   clear($('config-preview-result'));
   configRenderUsage();
   try {
-    const dedicated={'discount-shop':'discountShop',arena:'arena',league:'league',alliance:'alliance',guildShip:'guildShip',guildFort:'guildFort',silicon:'silicon',resourceFields:'resourceFields','hero-raid':'heroRaid',treasure:'world',radar:'radar','fleet-dispatch':'fleetDispatch','pirate-hunt':'pirateHunt',worldBoss:'worldBoss',cityWar:'cityWar',forge:'forge',antique:'antique',heroes:'heroes'};
+    const dedicated={museum:'museum','discount-shop':'discountShop',arena:'arena',league:'league',alliance:'alliance',guildShip:'guildShip',guildFort:'guildFort',silicon:'silicon',resourceFields:'resourceFields','hero-raid':'heroRaid',treasure:'world',radar:'radar','fleet-dispatch':'fleetDispatch','pirate-hunt':'pirateHunt',worldBoss:'worldBoss',cityWar:'cityWar',forge:'forge',antique:'antique',heroes:'heroes'};
     const source=dedicated[selected.id];
     let data;
     if(selected.id==='pirate-hunt'){
@@ -2574,6 +2617,7 @@ async function configPreview() {
     if (!stillOnPage() || JSON.stringify(configEditor.draft) !== original) return;
     configEditor.data={...configEditor.data,usage:data.usage,...(data.pendingUsage?{pendingUsage:data.pendingUsage}:{})};configEditor.previewSummary={...data,group:selected.id};configRenderUsage();
     const result = clear($('config-preview-result'));
+    if (data.museum) renderMuseumPreview(result, data.museum);
     const actions = data.moduleActions ?? data.actions;
     if (actions.length) {
       const list = el('ol', 'config-preview-list'), rest = el('ol', 'config-preview-list');

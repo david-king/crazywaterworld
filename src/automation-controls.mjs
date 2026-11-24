@@ -14,7 +14,7 @@ for (const [key,label] of [
  ['building.enabled','建筑总开关'],['building.collect','收取建筑产出'],['building.build','自动建造'],['building.upgrade','自动升级建筑'],['building.finish','自动完工'],['building.supply','缺料时为建筑备料'],['building.speedUp','建筑自动加速'],
  ['factory.enabled','工厂总开关'],['factory.gain','领取工厂产品'],['factory.produce','工厂自动生产'],['factory.cooperateNative','按需调整原生自动生产'],['factory.speedUp','工厂自动加速'],
  ['farm.enabled','农田总开关'],['resident.enabled','自动交居民订单'],['resident.reroll','刷新不符合条件的订单'],['resident.rewards','领取居民订单进度奖励'],['cargo.enabled','贸易港自动交货与收货'],['events.enabled','处理已支持的随机事件'],
- ['pet.enabled','海兽培育总开关'],['museum.runEnabled','博物馆探宝总开关'],['museum.upgrade','升级博物馆技能与展区'],['museum.revenue','自动领取人气币'],['museum.achievements','自动领取人气奖励'],['museum.display','自动上架藏品'],['museum.enabled','自动探宝'],['gold.enabled','每日钻石点金'],
+ ['pet.enabled','海兽培育总开关'],['museum.runEnabled','博物馆探宝总开关'],['museum.unlockCases','自动解锁展位'],['museum.upgrade','升级博物馆技能与展区'],['museum.revenue','自动领取人气币'],['museum.achievements','自动领取人气奖励'],['museum.display','自动上架藏品'],['museum.enabled','自动探宝'],['gold.enabled','每日钻石点金'],
 ]) {
  const base = key.split('.')[0], gates = key === 'gold.enabled' ? ['loop.dailies'] : ['loop.world'];
  if (['building','factory'].includes(base) && !key.endsWith('.enabled')) gates.push(base+'.enabled');
@@ -97,7 +97,7 @@ const idleModules = {
 for(const control of controls){const module=idleModules[control.key];if(module)Object.assign(control,{idleGroup:module[0],configTarget:module[1],idleLabel:module[2]});}
 Object.assign(controls.find(c=>c.key==='schedule.shop'),{configLabel:'折扣商店总开关',
   help:'开启后，商品符合购买规则且实际钻石余额足够就会购买。普通购买和兜底购买均不受全局钻石开关、每日预算和钻石保留量限制，也不占用全局预算。挂机只使用免费刷新。'});
-Object.assign(controls.find(c=>c.key==='museum.runEnabled'),{help:'统一暂停或恢复博物馆升级、领奖、藏品上架和探宝，保留细项选择。自动探宝同时领取探险奖励和派遣探险。',configuredFields:['museum.upgrade','museum.revenue','museum.achievements','museum.display','museum.enabled']});
+Object.assign(controls.find(c=>c.key==='museum.runEnabled'),{help:'统一暂停或恢复展位解锁、博物馆升级、领奖、藏品上架和探宝，保留细项选择。自动探宝同时领取探险奖励和派遣探险。',configuredFields:['museum.unlockCases','museum.upgrade','museum.revenue','museum.achievements','museum.display','museum.enabled']});
 Object.assign(controls.find(c=>c.key==='museum.enabled'),{help:'自动领取已完成探险的奖励，并按配置继续派遣探险。'});
 Object.assign(controls.find(c=>c.key==='radar.runEnabled'),{configuredFields:['radar.enabled','radar.repairIdle']});
 export const idleAutomationControls=controls.filter(c=>c.idleGroup);

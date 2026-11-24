@@ -8,6 +8,9 @@ import { buyMerchantPointers, reconcileMerchantAction } from './merchant-strateg
 import { estimateMerchantRace, merchantCompetitorArrivals } from './merchant-race.mjs';
 import { watchMerchant } from './merchant-monitor.mjs';
 import { MERCHANT_PROFIT_GOAL } from './merchant-goal.mjs';
+import { merchantFingerprint as fingerprint, merchantSpeedMatches, merchantSpeedVoyageEnded } from './merchant-action-state.mjs';
+
+export { merchantSpeedMatches };
 
 const pointer = '海商王加速';
 const arrivalReasons = new Set(['race', 'full', 'guard', 'finalCargo']);
@@ -23,8 +26,6 @@ const stampSettings = ctx => {
     settings.firstDepartureMode, settings.firstDepartureTime, ctx.merchantCadenceSeconds
   ]);
 };
-const fingerprint = state => ({ coins: state.player?.coins, profit: state.player?.profit,
-  goods: state.player?.goods, cargo: state.cargo });
 
 function tradeDeadline(config, event, time) {
   const window = merchantTiming(config, event, time);
@@ -242,19 +243,6 @@ export function planMerchantSpeed(config, event, state, radar, stock, settings, 
       + best.estimatedProfit + '（非目的港实时报价）' };
 }
 
-// 自然到港不能作为未知加速请求的成功证据，必须确认同一航程被提前。
-export function merchantSpeedMatches(expected, snapshot, time) {
-  const cargo = snapshot?.cargo;
-  if (expected?.request !== 'TradeSpeedRequest' || !cargo || !positive(expected.beforeEndTime)
-    || !natural(expected.afterEndTime) || expected.afterEndTime >= expected.beforeEndTime
-    || !positive(expected.moveStartTime) || cargo.moveStartTime !== expected.moveStartTime) return false;
-  if (cargo.cityId === expected.destination && time < expected.beforeEndTime
-    && (!cargo.moveToCityId || cargo.moveToCityId === expected.destination)) return true;
-  return cargo.cityId === expected.city && cargo.moveToCityId === expected.destination
-    && positive(cargo.moveEndTime) && cargo.moveEndTime < expected.beforeEndTime
-    && cargo.moveEndTime <= expected.afterEndTime;
-}
-
 async function readStock(client) {
   const response = await read(client, 'AllItem'), stock = new Map();
   if (!Array.isArray(response?.items)) throw Error('商会指针完整库存未同步');
@@ -281,10 +269,10 @@ export async function runMerchantSpeed(client, config, ctx, event, state) {
     && windowOpen(event, clock(client)) && tradeDeadline(config, event, clock(client)) !== null;
   if (!allowed()) return false;
   const records = Object.entries(ctx.ledger?.keyRecords() ?? {});
-  const pending = records.find(([, record]) => !record.confirmed && record.details?.scope === 'merchant:' + event.startTime + ':' + event.period &&
+  const pending = records.find(([, record]) => !record.confirmed && !record.expired && record.details?.scope === 'merchant:' + event.startTime + ':' + event.period &&
     record.details.expected?.request === 'TradeSpeedRequest');
   if (pending) {
-    await reconcileMerchantAction(client, ctx, pending, fingerprint(state), merchantSpeedMatches);
+    await reconcileMerchantAction(client, ctx, pending, state, allowed);
     return true;
   }
   const exploratoryLeg = records.some(([, record]) => {
@@ -407,8 +395,11 @@ export async function runMerchantSpeed(client, config, ctx, event, state) {
             [{ id: pointer, have: verified.have, need: verified.useNum }], '海商王指针加速', {
               operation: { verify: async next => {
                 const current = await read(next, 'TradeInfo');
-                return next.tradeWindow?.startTime === event.startTime && current.period === event.period
-                  && merchantSpeedMatches(expected, current, clock(next));
+                const window = next.tradeWindow, now = clock(next);
+                if (current.period !== window?.period || !windowOpen(window, now)) return false;
+                // 旧航程结束后可用随后回读的完整库存重新定基；成交与用针统计独立核对。
+                return window.startTime > event.startTime || window.startTime === event.startTime && current.period === event.period
+                  && (merchantSpeedMatches(expected, current, now) || merchantSpeedVoyageEnded(expected, fingerprint(current), now));
               } }
             });
           if (!allowed() || clock(client) > verified.deadline - verified.saleSeconds

@@ -155,6 +155,7 @@ const progression = [
   'tools/selftest-museum-exploration.mjs',
   'tools/selftest-museum-controls.mjs',
   'tools/selftest-museum-display.mjs',
+  'tools/selftest-museum-case-unlock.mjs',
   'tools/selftest-museum-materials.mjs',
   'tools/selftest-pet-breeding.mjs',
   'tools/selftest-antique.mjs',

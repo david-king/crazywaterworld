@@ -96,6 +96,60 @@ function fixture() {
   return { settings, plan, run, bag, writes, reads, client, claimed };
 }
 
+async function testLevelRotation() {
+  const config = { tables: {
+    HeroCfg: { data: ['甲', '乙', '丙', '丁', '戊'].map(id => ({ id })) },
+    HeroUpgradeCfg: { data: [0, 2, 4, 8, 16].map((exp, i) => ({ level: i + 1, exp, reqPlayerLv: 1 })) },
+  } };
+  const settings = defaultSettings();
+  Object.assign(settings.heroes, { enabled: true, level: true, heroIds: ['丙', '丁', '乙', '甲', '未拥有'],
+    targetLevel: 4, keepExp: 10 });
+  const role = { ...player, playerId: 17701235 };
+  const heroes = [{ heroId: '甲', level: 2 }, { heroId: '乙', level: 1 }, { heroId: '丙', level: 3 },
+    { heroId: '丁', level: 4 }, { heroId: '戊', level: 1 }];
+  const sent = [];
+  let exp = 44;
+  const client = {
+    async request(name) {
+      if (name === 'AllHeroRequest') return { heroes: structuredClone(heroes) };
+      assert.equal(name, 'AllItemRequest');
+      return { items: [{ itemId: '英雄经验', num: exp }] };
+    },
+    async sendWatch(name, { heroId }) {
+      assert.equal(name, 'HeroLevelUpRequest');
+      const hero = heroes.find(h => h.heroId === heroId);
+      exp -= config.tables.HeroUpgradeCfg.data[hero.level].exp;
+      sent.push([heroId, ++hero.level]);
+    },
+  };
+  const preview = async (readPlan = readHeroGrowthPlan) => (await readPlan(client, config, role, settings)).plan;
+  const targets = plan => plan.steps.map(step => [step.heroId, step.to]);
+  const run = (plan, options = {}) => runHeroPlan(client, protocol, plan, { allowMutate: true, player: role,
+    getSettings: () => settings, ...options });
+  const expected = [['乙', 2], ['乙', 3], ['甲', 3], ['丙', 4], ['乙', 4], ['甲', 4]];
+  const plan = await preview();
+  assert.deepEqual(targets(plan), expected);
+  assert.deepEqual(targets(await preview()), expected, '预览不推进轮换');
+  assert.deepEqual(plan.steps.map(step => step.costs[0].num), [2, 4, 4, 8, 8, 8]);
+  exp = 16;
+  assert((await run(await preview())).every(entry => entry.ok));
+  assert.deepEqual(sent, expected.slice(0, 2), '先补最低等级，同级时按勾选顺序');
+  assert.equal(exp, 10);
+  assert.deepEqual(targets(await preview()), []);
+
+  exp += 28;
+  const fresh = await import('../src/heroes.mjs?restart');
+  const resumed = await preview(fresh.readHeroGrowthPlan);
+  assert.deepEqual(targets(resumed), expected.slice(2), '重启后从实际仍落后的甲开始，补齐后按顺序轮流');
+  assert.deepEqual(targets(await preview()), targets(resumed), '同一英雄列表在重启前后生成相同计划');
+  await run(resumed, { enabled: () => false });
+  assert.deepEqual(targets(await preview()), targets(resumed), '未执行的计划不推进轮换');
+  assert((await run(resumed)).every(entry => entry.ok));
+  assert.deepEqual(sent, expected);
+  assert.equal(exp, 10);
+  assert.deepEqual(targets(await preview()), []);
+}
+
 async function testExclusiveMaterialRecovery() {
   const f = fixture();
   f.bag.红武材料 = 6;
@@ -153,6 +207,7 @@ async function testExclusiveMaterialRecovery() {
 }
 
 try {
+  await testLevelRotation();
   assert(newActions.every(key => defaultSettings().heroes[key] === false));
   const unselected = fixture();
   unselected.settings.heroes.heroIds = [];

@@ -97,8 +97,9 @@ import { readHeroGrowthPlan, heroStepLabel, runHeroPlan, formatHeroPlan } from '
 import { appointments } from './appointments.mjs';
 import { surveyDailies, runDailies, formatSurvey, canClaimDailyReward } from './dailies.mjs';
 import { dailySingleState, addDailyOptions, runDailySingle } from './daily-single.mjs';
-import { surveyTasks, runTasks, formatTaskPlan, selectTaskSettings } from './tasks.mjs';
-import { makeTypeResolver, displayBuilding, weekFactoryInfo, surveyWorld, inventoryStockRows, factoryIncomingStock, manualFactoryProducts, startManualFactoryProduction, nativeFactoryControl, toggleNativeFactory, planWorld, runWorldRound, speedUpProduction, SPEED_UP_ITEM, manualResidentOrderDecision, submitResidentOrder, rerollResidentOrder, watchResidentRefreshes, formatWorldPlan, formatFieldReport, loadMapAsset } from './world.mjs';
+import { surveyTasks, runTasks, formatTaskPlan, selectTaskSettings, nextOrderTier } from './tasks.mjs';
+import { makeTypeResolver, displayBuilding, weekFactoryInfo, surveyWorld, inventoryStockRows, factoryIncomingStock, manualFactoryProducts, autoFactoryProducts, startManualFactoryProduction, nativeFactoryControl, toggleNativeFactory, planWorld, runWorldRound, speedUpProduction, SPEED_UP_ITEM, manualResidentOrderDecision, submitResidentOrder, rerollResidentOrder, watchResidentRefreshes, formatWorldPlan, formatFieldReport, loadMapAsset } from './world.mjs';
+import { autoProduceView, runFactoryAutoProduce } from './factory-auto.mjs';
 import { runLoop, formatLoopRound, formatLoopStep } from './loop.mjs';
 import { foldBusinessEntry, createOperationJournal } from './business-journal.mjs';
 import { upgradeChanges } from './building-upgrade-log.mjs';
@@ -121,6 +122,7 @@ import { readEquipmentForge, releaseStaleEquipmentForge, forgeEnabled } from './
 import { previewEquipmentForge } from './equipment-forge-preview.mjs';
 import { reconcileManualForge } from './manual-forge-sync.mjs';
 import { readAntiqueUpgrade, planAntiqueUpgrade, antiqueEnabled } from './antique-upgrade.mjs';
+import { readMuseumPreview } from './museum-preview.mjs';
 import { watchBasePushes, surveyBaseAutomation, planBaseAutomation, baseDemands, previewNativeAutomation } from './base-automation.mjs';
 import { reconcileManualProduction } from './manual-production-sync.mjs';
 import { configuredMaterialRecipes, readProductionSnapshot } from './production-snapshot.mjs';
@@ -675,6 +677,10 @@ export function createConsole({ host = '127.0.0.1', port = 17321, onLog, recover
     session.waitingJobs++;
     const run = async () => {
       session.waitingJobs--;
+      if (session.priorityWork?.length) {
+        const priority = session.priorityWork.shift();
+        await priority();
+      }
       if (closing || session.connectionDrain || session.paused || generation !== session.generation) throw new Error('账号已暂停，已取消排队操作');
       if (recoverFormation && !session.lineupJob && session.client?.connected && session.player
         && readLineupRuntime(session.id).pending) {
@@ -688,6 +694,24 @@ export function createConsole({ host = '127.0.0.1', port = 17321, onLog, recover
     const clear = () => { if (session.queueTail === job) session.queueTail = null; };
     job.then(clear, clear);
     return job;
+  }
+
+  // 用户手动操作优先于自动挂机队列：在当前和下一个队列边界执行，
+  // 不再排到所有已排队的自动任务后面。
+  function enqueuePriority(session, work) {
+    const generation = session.generation;
+    return new Promise((resolve, reject) => {
+      session.priorityWork ??= [];
+      session.priorityWork.push(async () => {
+        try {
+          resolve(await work({ generation }));
+        } catch (error) {
+          reject(error);
+        }
+      });
+      // 始终放一个队列边界任务；若前面已有任务，会先执行优先操作。
+      enqueue(session, async () => {}, undefined, { recoverFormation: false }).catch(() => {});
+    });
   }
 
   function newSession(id) {
@@ -1948,6 +1972,32 @@ export function createConsole({ host = '127.0.0.1', port = 17321, onLog, recover
     return { ...survey, text: formatTaskPlan(survey) };
   }
 
+  function orderProgressView(config, survey, player) {
+    const order = survey.orderOfTheDay ?? {};
+    const tier = nextOrderTier(config, { ...order, player, now: survey.serverNow });
+    const baseMax = Number(config?.tables?.OrderParamCfg?.data
+      ?.find(row => row.paramName === '订单每日上限')?.paramValue ?? 0);
+    const cap = Number.isSafeInteger(survey.residentOrderLimit) && survey.residentOrderLimit > 0
+      ? survey.residentOrderLimit
+      : (Number.isSafeInteger(baseMax) && baseMax > 0 ? baseMax : 0);
+    const bonus = Math.max(0, cap - baseMax);
+    const total = tier.tier ?? cap;
+    const orderNum = Number(order.orderNum ?? 0);
+    return {
+      orderNum,
+      rewardedNum: Number(order.rewardedNum ?? 0),
+      tier: tier.tier,
+      reqNums: tier.reqNums,
+      claimable: tier.claimable,
+      baseMax,
+      bonus,
+      cap,
+      total,
+      totalKind: tier.tier == null ? 'dailyCap' : 'rewardTier',
+      percent: total > 0 ? Math.min(100, Math.round(orderNum / total * 1000) / 10) : 0,
+    };
+  }
+
   async function world(session, account, allowAccelerators = false) {
     const instance = await ensureConnected(session, account);
     const config = loadConfigSafe();
@@ -2036,9 +2086,13 @@ export function createConsole({ host = '127.0.0.1', port = 17321, onLog, recover
           buildingId: b.buildingId, displayName: displayBuilding(config, b), type: b.type, typeName: typeNames.get(b.type), level: b.level,
           queue: jobs.length, queueKnown, jobs, plannedJobs,
           manualProducts: manualFactoryProducts(b, survey, config, incoming).map(product => ({ ...product, icon: materialIcon(product.productId) })),
+          autoProducts: autoFactoryProducts(b, survey, config).map(product => ({ ...product, icon: materialIcon(product.productId) })),
           capacity: Number.isSafeInteger(survey.factorySlots) && survey.factorySlots > 0 ? survey.factorySlots : null,
           auto: b.factory.autoProductId ? displayMaterial(config, b.factory.autoProductId) : null,
+          autoProductId: b.factory.autoProductId || null,
+          autoIcon: b.factory.autoProductId ? materialIcon(b.factory.autoProductId) : null,
           autoEnabled: autoControl.on, autoControl,
+          autoPending: !!b.factory.autoProductId && !autoControl.on,
           icon: buildingIcon(b.type),
         };
       }),
@@ -2046,6 +2100,8 @@ export function createConsole({ host = '127.0.0.1', port = 17321, onLog, recover
         orderNum: survey.orderOfTheDay.orderNum ?? 0,
         dailyLimit: survey.residentOrderLimit,
       },
+      orderProgress: orderProgressView(config, survey, session.player),
+      autoProduce: autoProduceView(config, survey),
       orders: survey.orders.map((order) => ({
         ...order,
         workerIcon: workerIcon(order.workerId),
@@ -2502,15 +2558,26 @@ export function createConsole({ host = '127.0.0.1', port = 17321, onLog, recover
             throw new Error('角色连接已变化，请重新读取名单');
         };
         const world = parsed.searchParams.get('scope') === 'world';
-        const result = await readJob(session, () => {
+        const next = parsed.searchParams.get('rankPage');
+        const result = await readJob(session, async () => {
           check();
-          return world ? readWorldListPlayers(client, player, check) : readGuildMembers(client, loadConfigSafe(), player);
+          const cached = playerPickerLists.get(client);
+          const lists = cached?.player === player && cached.generation === generation ? cached : { player, generation };
+          if (next !== null) {
+            const page = Number(next), last = lists.world;
+            if (!world || !last || !Number.isSafeInteger(page) || page < 2 || String(page) !== next || page > last.rankPages || page > last.rankPage + 1)
+              throw Error('战力榜页码已变化，请刷新玩家名单');
+            if (page <= last.rankPage) return last;
+          }
+          const data = world
+            ? await readWorldListPlayers(client, player, check, protocolFor(client).RankType?.PLAYER_POWER, next !== null ? lists.world : undefined)
+            : await readGuildMembers(client, loadConfigSafe(), player);
+          check();
+          lists[world ? 'world' : 'guild'] = data;
+          playerPickerLists.set(client, lists);
+          return data;
         }, { recoverFormation: false });
         check();
-        const cached = playerPickerLists.get(client);
-        const lists = cached?.player === player ? cached : { player };
-        lists[world ? 'world' : 'guild'] = result.members;
-        playerPickerLists.set(client, lists);
         try { recordListNames(session, effectiveSettings(session), result.members, true); }
         catch (error) { emit(session, 'warn', '名单昵称记录失败：' + error.message); }
         json(result);
@@ -2581,7 +2648,8 @@ export function createConsole({ host = '127.0.0.1', port = 17321, onLog, recover
         adoptPreferences(session, entry);
         try {
           const lists = playerPickerLists.get(session.client);
-          if (lists && lists.player === session.player) recordListNames(session, entry.settings, [...(lists.guild ?? []), ...(lists.world ?? [])], true);
+          if (lists && lists.player === session.player && lists.generation === session.generation)
+            recordListNames(session, entry.settings, [...(lists.guild?.members ?? []), ...(lists.world?.members ?? [])], true);
           prunePlayerNames(session.id, entry.settings);
         }
         catch (error) { emit(session, 'warn', '配置已保存，名单昵称记录清理失败：' + error.message); }
@@ -2597,7 +2665,7 @@ export function createConsole({ host = '127.0.0.1', port = 17321, onLog, recover
         if (!config) throw new Error('缺少游戏配置表，暂时不能预览');
         const settings = validateSettings(payload.settings ?? settingsView(session).settings, { catalog: settingsCatalog(config) });
         const category = payload.category ?? 'base';
-        if (!['base', 'world', 'heroes', 'daily', 'arena', 'league', 'discountShop', 'runtime', 'cityWar', 'forge', 'antique', 'equipmentGrowth', 'activity', 'radar', 'pirateHunt', 'fleetDispatch','fleetSpeed','worldBoss','pirateSweep','alliance','guildShip','guildFort','silicon','heroRaid','resourceFields'].includes(category)) throw new Error('不支持的预览分类');
+        if (!['base', 'world', 'heroes', 'daily', 'arena', 'league', 'discountShop', 'runtime', 'cityWar', 'forge', 'antique', 'equipmentGrowth', 'activity', 'museum', 'radar', 'pirateHunt', 'fleetDispatch','fleetSpeed','worldBoss','pirateSweep','alliance','guildShip','guildFort','silicon','heroRaid','resourceFields'].includes(category)) throw new Error('不支持的预览分类');
 
         if (category === 'runtime') {
           json({ checkedAt: new Date().toISOString(), usage: usageFor(session).snapshot(), actions: [], counts: {}, viewOnly: true, scopeLabel: '运行安排（仅查看，不执行）',
@@ -2606,6 +2674,20 @@ export function createConsole({ host = '127.0.0.1', port = 17321, onLog, recover
               '在对应配置页点击「只读预览」可查看该功能的检查结果。'] }); return;
         }
         if (!session.client?.connected || session.paused) throw new Error('请先连接当前账号，再读取真实游戏状态');
+        if (category === 'museum') {
+          const client = session.client, player = session.player;
+          const usage = usageFor(session).snapshot();
+          const generation = session.generation;
+          const check = () => {
+            if (generation !== session.generation || client !== session.client || player !== session.player || !client.connected || session.paused)
+              throw new Error('账号或连接已变化，请重新预览博物馆');
+          };
+          const { actions, notes, ...museum } = await readJob(session, () => readMuseumPreview(client, config, player, settings, usage, check), { recoverFormation: false });
+          check();
+          json({ checkedAt: new Date().toISOString(), usage, scopeLabel: '博物馆探宝', counts: { maps: museum.maps.length }, museum, notes,
+            actions: actions.map(step => ({ kind: step.kind, label: step.label, costs: (step.costs ?? []).map(c => ({ name: displayMaterial(config, c.id), num: c.num })) })) });
+          return;
+        }
         const result = await enqueue(session, async () => {
           const client = session.client;
           const usage = usageFor(session).snapshot();
@@ -4428,7 +4510,7 @@ export function createConsole({ host = '127.0.0.1', port = 17321, onLog, recover
             if (!enabled() || loadConfigSafe() !== config) throw new Error('账号或排产配置已变化，请重新计算');
             if (!result.forecast.unavailable) {
               result.forecast.insertKey = randomUUID();
-              session.factoryInsertPlan = { anchors, forecast:result.forecast, config, enabled };
+              session.factoryInsertPlan = { anchors, forecast:result.forecast, config, timing:snapshot.timing, enabled };
             }
             return result;
           }).finally(() => { if (session.productionPlanRead === job) session.productionPlanRead = null; });
@@ -4503,6 +4585,26 @@ export function createConsole({ host = '127.0.0.1', port = 17321, onLog, recover
           emit(session, result.confirmed ? 'info' : 'warn', result.label, { worldUpdated: true });
           return result;
         }, label);
+        json(result);
+        return;
+      }
+      if (route === 'POST /api/world/factory-auto-produce') {
+        const payload = jsonBody();
+        needConfirm(payload);
+        const { session } = scoped_(parsed);
+        const { client, player, generation } = session;
+        const enabled = () => client?.connected && session.client === client && session.player === player
+          && session.generation === generation && !session.paused && !session.productionSyncRequired;
+        const work = async () => {
+          if (!enabled()) throw new Error('请先连接并同步当前账号，再操作自动生产');
+          return runFactoryAutoProduce(client, protocolFor(client), payload, {
+            player, enabled, config: loadConfigSafe(),
+          });
+        };
+        const result = payload.fast === true
+          ? await (session.fastAutoAction = (session.fastAutoAction ?? Promise.resolve()).then(work, work))
+          : await enqueuePriority(session, work).finally(() => { session.worldRead = null; });
+        if (payload.fast === true) session.worldRead = null;
         json(result);
         return;
       }

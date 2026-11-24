@@ -9,7 +9,7 @@ const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'cw-unified-config-'));
 process.env.CW_DATA_DIR = directory;
 process.env.CW_CONFIG_PACK = path.join(directory, 'config.json');
 process.env.CW_RESOURCE_AUTO_UPDATE = '0';
-const items = [...['耐火砖','高温合金','木板'].map(id => ({ id })),
+const items = [{ id: '望远镜碎片', show_name: '古董望远镜碎片', type: '藏品碎片' }, ...['耐火砖','高温合金','木板'].map(id => ({ id })),
   { id: '礼包A', show_name: '材料礼包' }, { id: '礼包B', show_name: '材料礼包' }];
 fs.writeFileSync(process.env.CW_CONFIG_PACK, JSON.stringify([[1, 'HeroCfg', { data: [
   { id: '瑞文', name: '骑士瑞文', quality: 'PURPLE', type: '英雄' },
@@ -20,6 +20,9 @@ fs.writeFileSync(process.env.CW_CONFIG_PACK, JSON.stringify([[1, 'HeroCfg', { da
   ...[1, 2].map(id => ({ buildingType: '精铁厂', buildingId: id + '精铁厂' })),
 ] }],
   [3, 'ItemCfg', { data: items }],
+  [10, 'MuseumExpeditionStageCfg', { data: [{ stageId: 1, name: '旧灯塔瞭望台', exploreTime: 14400 }] }],
+  [11, 'MuseumStageStarCfg', { data: [{ star: 1, exploreValue: 250 }] }],
+  [12, 'MuseumExpeditionRewardCfg', { data: [{ stageId: 1, star: 1, randomRewards: [['望远镜碎片',1]], randomRewardWeights: [1] }] }],
   [4, 'BuildingCfg', { data: [{ buildingType: '精铁厂', name: '冶炼厂' }] }],
   [5, 'BuildingUpgradeCfg', { data: [{ buildingType: '精铁厂', product: [['精铁', 1]] }] }],
   [6, 'ItemJumpCfg', { data: [{ id: '耐火砖', accessList: ['折扣商店'] }] }],
@@ -813,7 +816,31 @@ try {
   await autoExplore.click(); await saved();
   await museum.getByRole('button', { name: '自动探宝，展开下级设置', exact: true }).click();
   assert.equal(await museum.locator('#config-field-museum-factor').inputValue(), '2');
+  {
+    const picker = museum.locator('#config-field-museum-targetFragments');
+    await picker.locator('summary').click();
+    await picker.getByRole('searchbox').fill('望远镜');
+    await picker.getByRole('checkbox', { name: '古董望远镜碎片' }).check();
+    await picker.locator('summary').click(); await saved();
+    const previous = { player: bossSession.player, client: bossSession.client, paused: bossSession.paused };
+    const reads = [];
+    const mock = { MuseumInfo: { exploreStages: [{ stageId: 1, progress: 180 }], exhibitions: [] }, AllHero: { heroes: [] },
+      AllAntique: { antiques: [] }, AllItem: { items: [] }, AllResource: { list: [] } };
+    Object.assign(bossSession, { paused: false, player: { worldId: 1001001, playerId: 123, level: 40 },
+      client: { connected: true, stop() {}, async request(name) {
+        reads.push(name); const value = mock[name.replace(/Request$/, '')]; assert(value, name); return value;
+      } } });
+    try {
+      await page.locator('#config-preview').click();
+      const result = page.locator('#config-preview-result');
+      await result.getByText('距 1 星还差 70 进度', { exact: true }).waitFor();
+      await result.getByText('展柜升级与摆放建议', { exact: true }).click();
+      await result.getByText(/当前摆放暂无/).waitFor();
+      assert.deepEqual(reads, ['MuseumInfoRequest','AllHeroRequest','AllItemRequest','AllResourceRequest','AllAntiqueRequest']);
+    } finally { Object.assign(bossSession, previous); }
+  }
   const savedMuseum = loadAutomationSettings('config-a').settings.museum;
+  assert.deepEqual(savedMuseum.targetFragments, ['望远镜碎片']);
   assert.equal(savedMuseum.enabled, true);
   assert(!Object.hasOwn(savedMuseum, 'claim') && !Object.hasOwn(savedMuseum, 'explore'), '保存后没有拆分动作字段');
   await museum.locator('#config-field-museum-factorMode').selectOption('recommended'); await saved();

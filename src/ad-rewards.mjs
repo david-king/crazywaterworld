@@ -1,4 +1,5 @@
 // 挂机收益与工厂/建筑/博物馆加速的广告入口，广告次数读 OnWaterResponse.adv。
+import { museumFinishKey } from './museum-cases.mjs';
 import { normalize } from './worlds.mjs';
 import { displayMaterial } from './config.mjs';
 import { makeTypeResolver } from './world.mjs';
@@ -158,10 +159,10 @@ async function readMuseumCases(client) {
 
 const findCase = (cases, target) => cases.find(row => row.exhibitionId === target.exhibitionId && row.caseIndex === target.caseIndex);
 
-// 客户端在展柜到期后补发完工请求；工具没有其他入口处理展柜升级，这里一并收尾。
+// 客户端在展柜到期后补发完工请求；广告加速与展位自动解锁共用同一完工记录。
 async function finishMuseumCases(client, ctx, cases, now) {
   for (const item of cases.filter(row => row.finishTime <= now)) {
-    const key = 'museum-case-finish:' + item.exhibitionId + ':' + item.caseIndex + ':' + item.finishTime;
+    const key = museumFinishKey(item.exhibitionId, item.caseIndex, item.finishTime);
     if (!ctx.enabled('adSpeedUpMuseum') || ctx.ledger.hasKey(key)) continue;
     const label = '博物馆展柜升级完工';
     const ticket = ctx.ledger.reserve({}, {}, {}, { uniqueKey: key, details: { kind: 'museumCaseFinish' } });

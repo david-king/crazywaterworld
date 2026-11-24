@@ -209,7 +209,7 @@ export function buildProductionSnapshot(raw, config, settings = {}) {
   if (settings.museum && settings.pet && settings.factory) {
     const world = { buildings, factories: buildings.filter(b => b.factory), stockCap, have: id => stockMap.get(id) ?? 0 };
     const pets = list(raw.pets?.pets).map(pet => ({ ...pet, uid: exactAutomationId(pet.uid) }));
-    const extra = baseDemands({ now: serverNow, player: raw.player, world, pets, museum: raw.museum, radar: raw.radar,
+    const extra = baseDemands({ now: serverNow, player: raw.player, world, pets, heroes: raw.heroes?.heroes, museum: raw.museum, radar: raw.radar,
       guildRecruitDemand: [], guildShipDemand: [], heroRaidDemand: [] }, config, settings);
     for (const [index, demand] of extra.entries()) {
       if (!priority.has(demand.source) || ['guildRecruit', 'guildShip', 'heroRaid', 'refugee'].includes(demand.source)) continue;

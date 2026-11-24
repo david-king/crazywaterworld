@@ -372,7 +372,7 @@ test('海兽、博物馆和情报只展示统一配置，探宝单开关直接�
   assert.match(f.widget('museum.enabled').spec.help, /领取.*奖励.*派遣/);
   const museumFields = f.editor.groups.get('museum').fields;
   assert.deepEqual(museumFields.filter(field => !field.parent).map(field => field.key),
-    ['museum.runEnabled', 'museum.upgrade', 'museum.revenue', 'museum.achievements', 'museum.display', 'museum.enabled']);
+    ['museum.runEnabled', 'museum.unlockCases', 'museum.upgrade', 'museum.revenue', 'museum.achievements', 'museum.display', 'museum.enabled']);
   for (const [child, parent] of [['museum.factorMode', 'museum.enabled'], ['museum.factor', 'museum.enabled'], ['museum.fullRecommendedFactor', 'museum.enabled'], ['museum.partialRecommendedFactor', 'museum.enabled'], ['museum.maxDispatches', 'museum.enabled'], ['museum.materialFactor', 'museum.enabled'],
     ['museum.noRecommendedFallback', 'museum.enabled'], ['museum.noRecommendedFactor', 'museum.noRecommendedFallback'],
     ['museum.maps', 'museum.enabled'], ['museum.useGuide', 'museum.enabled'],

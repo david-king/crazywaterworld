@@ -12,6 +12,7 @@ const collections = {
     'museum.factorMaterials', 'treasure.rewardItems', 'treasure.fallbackMediumRewardPriority', 'treasure.fallbackSmallRewardPriority',
     'alliance.allowedMaterials', 'alliance.blockedMaterials', 'alliance.requestMaterials', 'guildShip.rewardItems',
     'guildShip.disabledMaterials', 'guildFort.materials', 'guildFort.blockedMaterials'] },
+  museumFragments: { tables: ['ItemCfg', 'MuseumExpeditionRewardCfg'], fields: ['museum.targetFragments'] },
   maps: { tables: ['MuseumExpeditionStageCfg'], fields: ['museum.maps'] },
   heroes: { tables: ['HeroCfg'], fields: ['heroes.heroIds'] },
   petSpecies: { tables: ['PetBreedCfg'], fields: ['pet.species'] },

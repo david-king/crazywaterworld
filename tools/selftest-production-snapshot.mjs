@@ -220,6 +220,22 @@ await test('博物馆消费备料遵守世界循环、运行、探宝、升级�
   }
 });
 
+await test('博物馆按推荐英雄备料时使用快照中的真实英雄名单', () => {
+  const { raw, settings } = fixture();
+  settings.factory.demandPriority = ['museum'];
+  Object.assign(settings.museum, { runEnabled: true, enabled: true, factorMode: 'recommended' });
+  const cfg = { tables: { ...config.tables, MuseumExpeditionStageCfg: table([{ stageId: 1 }]),
+    MuseumExploreTimeFactorCfg: table([{ playerLevel: 1, factor: 1 }]),
+    MuseumExpeditionConditionCfg: table([{ conditionId: 1, heroCount: 1, heroStar: 0, heroQualityIndex: 1, careerLimit: '', factionLimit: '' }]),
+    HeroCfg: table([{ id: '甲', quality: 'BLUE' }]) } };
+  raw.museum = { exploreStages: [{ stageId: 1, expedition: { conditionId: 1, cost: { asset: [{ id: '面包', num: 2 }] } } }] };
+  raw.heroes = { heroes: [{ heroId: '甲', star: 1 }] };
+  const demand = () => buildProductionSnapshot(raw, cfg, settings).orders.filter(o => o.source === 'museum');
+  assert.deepEqual(demand().flatMap(row => row.requirements), [{ id: '面包', num: 2 }]);
+  raw.heroes = null;
+  assert.deepEqual(demand(), []);
+});
+
 function buildingFixture() {
   const { raw, settings } = fixture();
   settings.factory.demandPriority = ['building', 'resident'];

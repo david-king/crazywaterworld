@@ -103,16 +103,43 @@ assert(createProtocolDiagnostics(blockedSnapshotPath).save(diagnosticEvent).erro
 const log = createTraceLog(file, { maxBytes: 1024 });
 log.write('a'.repeat(700) + '\n');
 log.write('b'.repeat(700) + '\n');
-log.write('c'.repeat(700) + '\n');
-await log.close();
 const files = [file, file + '.1'];
+// 已打开的读句柄也应读到新内容，这能区分原地复用与删除后重建同名文件。
+const readers = files.map(target => fs.openSync(target, 'r'));
+try {
+  log.write('c'.repeat(700) + '\n');
+  log.write('d'.repeat(700) + '\n');
+  assert.equal(fs.readFileSync(readers[0], 'utf8'), 'c'.repeat(700) + '\n');
+  assert.equal(fs.readFileSync(readers[1], 'utf8'), 'd'.repeat(700) + '\n');
+} finally {
+  for (const reader of readers) fs.closeSync(reader);
+}
+await log.close();
 assert.deepEqual(log.files, files);
 for (const target of files) {
   const stat = fs.statSync(target);
   assert(stat.size > 0 && stat.size <= 1024, target + ' must stay within the size limit');
 }
 assert.match(fs.readFileSync(file, 'utf8'), /^c+$/m);
-assert.match(fs.readFileSync(file + '.1', 'utf8'), /^b+$/m);
+assert.match(fs.readFileSync(file + '.1', 'utf8'), /^d+$/m);
+
+const retryFile = path.join(dir, 'retry.log');
+const retry = createTraceLog(retryFile, { maxBytes: 4 });
+retry.write('aaaa');
+retry.write('bbbb');
+const truncate = fs.truncateSync;
+try {
+  fs.truncateSync = () => { throw new Error('测试目标暂时无法截断'); };
+  retry.write('cccc');
+  assert.equal(retry.current, retryFile + '.1');
+  assert.equal(fs.readFileSync(retryFile, 'utf8'), 'aaaa');
+  assert.equal(fs.readFileSync(retry.current, 'utf8'), 'bbbb');
+} finally {
+  fs.truncateSync = truncate;
+}
+retry.write('ok');
+await retry.close();
+assert.equal(fs.readFileSync(retryFile, 'utf8'), 'ok');
 
 const oversized = path.join(dir, 'oversized.log');
 fs.writeFileSync(oversized, 'o'.repeat(4096));

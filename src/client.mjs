@@ -10,6 +10,7 @@ export const MAX_SEQ = 2147483647;
 const HALF_SEQ = (MAX_SEQ - 1) / 2;
 const MEMBER_REQUESTS = new Set([
   'RadarInfoRequest', 'RadarGetAllRewardsRequest',
+  'SeasonChestInfoRequest', 'SeasonChestOpenRequest',
   'GuildInfoRequest', 'GotGuildWelfarePackRequest', 'GuildAidListRequest', 'GuildCityInfoRequest',
   'GuildTechInfoRequest', 'UpgradeGuildTechRequest', 'GuildOrderRequest', 'TradeGuildRadarRequest', 'TradeCityReportRequest',
   'GuildAidHelpRequest', 'GuildAidAskRequest', 'MyGuildAidRequest', 'GotMyGuildAidRequest', 'GotGuildTitleRewardRequest',

@@ -83,8 +83,8 @@ export async function checkedAction(
   if (!ctx.ledger) return waiting(ctx, '账号执行记录不可用');
   const records = Object.entries(ctx.ledger.keyRecords());
   for (const [key, record] of records) {
-    if (record.confirmed || record.details?.scope !== scope) continue;
-    if (!matches(record.details.expected, before))
+    if (record.confirmed || record.expired || record.details?.scope !== scope) continue;
+    if (!matches(record.details.expected, before, record.details.before))
       return waiting(ctx, '前次操作结果待确认，等待游戏状态更新');
     ctx.ledger.resolveKey(key, true, retainEvidence ? { ...record.details, after: before, confirmedAt: now() } : undefined);
     await outcome({ actionKey: key, expected: record.details.expected, before: record.details.before, after: before,
@@ -111,7 +111,7 @@ export async function checkedAction(
   try {
     const reply = await send();
     const after = await inspect();
-    if (!accept(reply) || !matches(expected, after)) throw Error('服务端结果待确认');
+    if (!accept(reply) || !matches(expected, after, before)) throw Error('服务端结果待确认');
     if (retainEvidence) ctx.ledger.resolveKey(key, true, { scope, expected, before, after, attemptedAt, confirmedAt: now() });
     else ctx.ledger.confirm(ticket);
     await outcome({ actionKey: key, expected, before, after, attemptedAt, status: 'confirmed' });

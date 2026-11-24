@@ -60,7 +60,7 @@ export function summarizeTrialChecks(schedule, taskKey, raids) {
 // 博物馆统一由基地计划报告升级、领奖、上架和探宝状态。
 export function museumRuntimeStatus(settings, { status, nextCheck }) {
   if (settings.museum?.runEnabled === false || !settings.loop?.world) return { observation: null, nextCheck: null };
-  if (['enabled', 'upgrade', 'revenue', 'achievements', 'display'].some(key => settings.museum?.[key])) {
+  if (['enabled', 'upgrade', 'revenue', 'achievements', 'display', 'unlockCases'].some(key => settings.museum?.[key])) {
     return { observation: status('museum.runEnabled') ?? null, nextCheck: nextCheck('museum.runEnabled') ?? null };
   }
   return { observation: null, nextCheck: null };

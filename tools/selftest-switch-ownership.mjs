@@ -129,7 +129,7 @@ try {
   await check('模块下方保留执行细项、资源权限、策略与预算', () => {
     const details = ['building.collect', 'building.upgrade', 'factory.produce', 'factory.demandFirst',
       'farm.harvest', 'farm.autoPlant', 'farm.customPlant', 'gather.fishing', 'gather.keyOpen',
-      'museum.enabled', 'museum.upgrade', 'museum.revenue', 'museum.achievements', 'museum.display', 'radar.enabled', 'radar.repairIdle',
+      'museum.enabled', 'museum.unlockCases', 'museum.upgrade', 'museum.revenue', 'museum.achievements', 'museum.display', 'radar.enabled', 'radar.repairIdle',
       'heroes.level', 'heroes.star', 'heroes.skill', 'heroes.universal', 'resources.allowDiamonds',
       'alliance.autoHelp', 'silicon.fleets.0.enabled', 'silicon.fleets.1.huntEnabled'];
     const idleFields = new Set(idleAutomationControls.flatMap(control => control.fields));
@@ -143,7 +143,7 @@ try {
     }
   });
 
-  await check('博物馆五项功能同组管理，自动探宝不拆分领取派遣开关', () => {
+  await check('博物馆六项功能同组管理，自动探宝不拆分领取派遣开关', () => {
     const settings = defaultSettings(); settings.museum.runEnabled = true;
     const note = () => automationControlView(settings).find(control => control.key === 'museum.runEnabled').configurationNote;
     assert.match(note(), /尚未选择执行动作/);
@@ -151,7 +151,7 @@ try {
     assert.equal(note(), '');
     settings.museum.enabled = false; settings.museum.useGuide = true;
     assert.match(note(), /尚未选择执行动作/, '指南不能独立于自动探宝执行');
-    for (const key of ['upgrade', 'revenue', 'achievements', 'display']) {
+    for (const key of ['upgrade', 'revenue', 'achievements', 'display', 'unlockCases']) {
       settings.museum[key] = true;
       assert.equal(note(), '', key + ' 可独立于自动探宝执行');
       const control = automationControlView(settings).find(row => row.key === 'museum.' + key);

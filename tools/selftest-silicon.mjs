@@ -368,6 +368,19 @@ try {
     await run(f, s, ledger); assert.deepEqual(f.client.writes.map(row => [row.name, row.body.index]), [['ChipMineSendFleetRequest', 1]]);
     assert.equal(ledger.snapshot().counters.siliconAttacks1, 1); assert.equal(ledger.snapshot().counters.siliconPetrol, 500);
   });
+  await test('有合规 ID 目标时优先按 ID 追杀，ID 目标受保护时回退到手填昵称', async () => {
+    const f = siliconFixture(), s = siliconSettings(), ledger = usage(f), id = '9007199254740995';
+    const policy = hunt(s, ['补充目标']);
+    Object.assign(policy, { huntPlayerIds: [id], opponentOrder: 'powerAsc' });
+    f.state.profiles[id] = { worldId: f.player.worldId, nickname: '已绑定目标', guildIdx: 8 };
+    f.enemy(0, '补充目标', 100);
+    f.enemy(1, '已绑定目标', 800);
+    assert.equal((await plan(f, s, ledger)).actions[0].opponent.matchedPlayerId, id);
+    policy.safePlayers = ['已绑定目标'];
+    assert.equal((await plan(f, s, ledger)).actions[0].opponent.nickname, '补充目标');
+    policy.safePlayers.push('补充目标');
+    assert.equal((await plan(f, s, ledger)).actions[0].opponent, null);
+  });
   await test('追杀不会攻击名字仅部分相同或名单外玩家，无目标时可占空位', async () => {
     const f = siliconFixture(), s = siliconSettings(), ledger = usage(f); hunt(s, ['名单目标']);
     f.enemy(0, '名单目标甲', 100); f.enemy(1, '甲名单目标', 100); f.enemy(2, '其他船长', 100);

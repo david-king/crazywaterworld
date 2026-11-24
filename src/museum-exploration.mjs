@@ -32,7 +32,7 @@ export function matchesMuseumRecommendation(hero, heroConfig, condition) {
 // their existing power order, and fills the remaining slots with other heroes.
 // Callers include both active expeditions and unconfirmed/planned dispatches
 // in busyHeroIds so a hero cannot be allocated twice in the same round.
-export function selectMuseumHeroes(stage, heroes, config, busyHeroIds = new Set()) {
+function museumCandidates(stage, heroes, config, busyHeroIds) {
   const conditions = rows(config, 'MuseumExpeditionConditionCfg')
     .filter(row => row.conditionId === stage.expedition?.conditionId);
   const condition = conditions.length === 1 ? conditions[0] : null;
@@ -54,7 +54,13 @@ export function selectMuseumHeroes(stage, heroes, config, busyHeroIds = new Set(
       power: Number.isFinite(hero.power) && hero.power >= 0 ? hero.power : 0 });
   }
   candidates.sort((a, b) => Number(b.recommended) - Number(a.recommended) || b.power - a.power || a.heroId.localeCompare(b.heroId));
-  const selected = candidates.slice(0, requiredCount);
+  return { ...result, candidates };
+}
+
+function selectedTeam(pool, selected) {
+  const { candidates, ...result } = pool;
+  if (!candidates) return result;
+  const { requiredCount } = result;
   result.heroIds = selected.map(hero => hero.heroId);
   result.recommendedCount = selected.filter(hero => hero.recommended).length;
   result.ready = selected.length === requiredCount;
@@ -65,6 +71,79 @@ export function selectMuseumHeroes(stage, heroes, config, busyHeroIds = new Set(
     && (result.allRecommended || candidates.every(hero => hero.recommendationKnown));
   if (!result.ready) result.reason = '没有足够的空闲英雄';
   return result;
+}
+
+export function selectMuseumHeroes(stage, heroes, config, busyHeroIds = new Set()) {
+  const pool = museumCandidates(stage, heroes, config, busyHeroIds);
+  return selectedTeam(pool, pool.candidates?.slice(0, pool.requiredCount) ?? []);
+}
+
+// Match one recommended hero per map before filling the other slots. An
+// augmenting path can move a flexible hero to free a specialist for another map.
+export function allocateMuseumTeams(stages, snapshot, config, settings, busy, limit, available) {
+  if (limit < 2 || stages.length < 2 || settings.museum.factorMode !== 'recommended') return new Map();
+  const pools = stages.map(stage => museumCandidates(stage, snapshot.heroes, config, busy));
+  const eligible = pools.map((pool, index) => ({ pool, index })).filter(({pool}) =>
+    pool.requiredCount && pool.candidates?.length >= pool.requiredCount);
+  let best = { teams: new Map(), full: 0, recommended: 0 };
+  function evaluate(group) {
+    const slots = group.map(({pool, index}) => Array.from({ length: pool.requiredCount }, () => ({ pool, index })));
+    const assigned = new Map(), used = new Map();
+    function match(slot, seen) {
+      for (const hero of slot.pool.candidates) {
+        if (!hero.recommended || seen.has(hero.heroId)) continue;
+        seen.add(hero.heroId);
+        const old = used.get(hero.heroId);
+        if (old && !match(old, seen)) continue;
+        assigned.set(slot, hero); used.set(hero.heroId, slot);
+        return true;
+      }
+      return false;
+    }
+    for (const team of slots) match(team[0], new Set());
+    for (const team of slots) for (const slot of team.slice(1)) match(slot, new Set());
+    const teams = new Map(), totals = new Map();
+    let full = 0, recommended = 0;
+    for (const team of slots) {
+      const { index, pool } = team[0], stage = stages[index];
+      const selected = [];
+      for (const slot of team) {
+        const hero = assigned.get(slot) ?? pool.candidates.find(h => !used.has(h.heroId));
+        if (!hero) return;
+        selected.push(hero); used.set(hero.heroId, slot);
+      }
+      const result = selectedTeam(pool, selected), { factor, costs } = museumExploreFactor(stage, snapshot, config, settings, result);
+      if (!factor || !costs.length) return;
+      for (const cost of costs) {
+        if (typeof cost.id !== 'string' || !integer(cost.num, 1)) return;
+        const total = (totals.get(cost.id) ?? 0) + factor * cost.num;
+        if (total > available(cost.id)) return;
+        totals.set(cost.id, total);
+      }
+      teams.set(stage.stageId, result);
+      full += Number(result.allRecommended); recommended += result.recommendedCount;
+    }
+    if (teams.size > best.teams.size || teams.size === best.teams.size &&
+      (full > best.full || full === best.full && recommended > best.recommended)) best = { teams, full, recommended };
+  }
+  function visit(group, from) {
+    if (group.length >= 2) evaluate(group);
+    if (group.length >= limit) return;
+    for (let i = from; i < eligible.length; i++) visit([...group, eligible[i]], i + 1);
+  }
+  visit([], 0);
+  return best.teams;
+}
+
+export function museumStar(config, progress) {
+  const thresholds = rows(config, 'MuseumStageStarCfg');
+  if (!integer(progress) || !thresholds.length) return null;
+  return Math.max(0, ...thresholds.filter(row => row.exploreValue <= progress).map(row => row.star));
+}
+
+export function museumTargetDrops(config, stageId, star, targets) {
+  return rows(config, 'MuseumExpeditionRewardCfg').filter(row => row.stageId === stageId && (star == null || row.star === star)
+    && row.randomRewards?.some(([id, count], index) => count > 0 && row.randomRewardWeights?.[index] > 0 && targets.includes(id)));
 }
 
 // The client unlocks the listed factors at their configured player levels.

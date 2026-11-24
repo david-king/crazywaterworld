@@ -389,31 +389,36 @@ function openJournal() {
   document.body.classList.add('has-log-dialog'); $('journal-dialog').showModal();
   const selectedAccount = $('log-account-tabs').querySelector('[aria-pressed=true]');
   selectedAccount.focus({ preventScroll: true });
-  revealHorizontalTab(selectedAccount); revealHorizontalTab($('log-tabs').querySelector('[aria-selected=true]'));
+  revealLogTag(selectedAccount); revealLogTag($('log-tabs').querySelector('[aria-selected=true]'));
 }
 $('logs-open').onclick = openJournal;
 $('logs-close').onclick = () => $('journal-dialog').close();
 $('journal-dialog').addEventListener('close', () => { document.body.classList.remove('has-log-dialog'); (logReturnFocus?.isConnected ? logReturnFocus : $('logs-open')).focus(); });
 const featureBar = $('log-tabs');
 function revealHorizontalTab(button) {
-  // 使用布局坐标，避免弹窗开场缩放影响横向定位。
   const container = button.parentElement, left = button.offsetLeft - 3, right = button.offsetLeft + button.offsetWidth + 3;
   if (left < container.scrollLeft) container.scrollLeft = left;
   else if (right > container.scrollLeft + container.clientWidth) container.scrollLeft = right - container.clientWidth;
 }
+function revealLogTag(button) {
+  const container = button.parentElement;
+  const top = button.offsetTop - 3, bottom = button.offsetTop + button.offsetHeight + 3;
+  if (top < container.scrollTop) container.scrollTop = top;
+  else if (bottom > container.scrollTop + container.clientHeight) container.scrollTop = bottom - container.clientHeight;
+}
 function selectLogFeature(key) {
   stateActions.setView({ logFeature: key });
   const selected = featureBar.querySelector('[aria-selected=true]');
-  if (selected) revealHorizontalTab(selected);
+  if (selected) revealLogTag(selected);
 }
 $('log-group').onchange = event => {
   stateActions.setView({ logGroup: event.target.value, logFeature: 'all' });
-  featureBar.scrollLeft = 0;
+  featureBar.scrollTop = 0;
 };
 function selectLogAccount(id) {
   stateActions.setView({ logAccount: id });
   updateLogSummary();
-  revealHorizontalTab($('log-account-tabs').querySelector('[aria-pressed=true]'));
+  revealLogTag($('log-account-tabs').querySelector('[aria-pressed=true]'));
 }
 $('log-account-tabs').onkeydown = event => {
   const buttons = [...$('log-account-tabs').querySelectorAll('[data-log-account]')];
@@ -1589,12 +1594,14 @@ const factoryFinishClock = new Intl.DateTimeFormat('zh-CN', {
   hour: '2-digit', minute: '2-digit', second: '2-digit', hourCycle: 'h23',
 });
 
-function factoryProduct(job, recipes, num = 1) {
+function factoryProduct(job, recipes) {
   if (!job.productId) return el('span', 'dim', job.name || '产物未同步');
-  return planMaterialList([{ id: job.productId, name: job.name, icon: job.icon, num }], recipes);
+  return planMaterialList([{ id: job.productId, name: job.name, icon: job.icon, num: 1 }], recipes);
 }
 
 const pendingFactoryStarts = new Set();
+const pendingFactoryAuto = new Set();
+let lastWorldData = null;
 
 function showFactoryStartState(key, message) {
   for (const button of document.querySelectorAll('[data-factory-start]')) {
@@ -1743,39 +1750,6 @@ function factoryProductionQueue(factory, recipes, accelerators) {
   return section;
 }
 
-function factoryPlannedProduction(factory, recipes) {
-  const section = el('section', 'factory-planned-section');
-  const heading = el('h3', null, '排产计划');
-  section.appendChild(heading);
-  const jobs = factory.plannedJobs;
-  if (!jobs?.length) {
-    section.appendChild(el('p', 'dim', Array.isArray(jobs) ? '本轮没有待投产任务' : '本轮计划未同步'));
-    return section;
-  }
-  const list = el('ol', 'factory-planned-list');
-  const groups = [];
-  for (const job of jobs) {
-    const last = groups.at(-1);
-    if (last && (job.productId || job.name) === (last[0].productId || last[0].name)) last.push(job);
-    else groups.push([job]);
-  }
-  heading.appendChild(el('span', 'factory-planned-caption dim', '整批预计完成（北京时间）'));
-  for (const group of groups) {
-    const row = el('li', 'factory-planned-group');
-    const first = group[0];
-    row.appendChild(factoryProduct(first, recipes, group.length));
-    if (group.every(job => Number.isFinite(job.estimatedFinishTime) && job.estimatedFinishTime > 0)) {
-      const time = Math.max(...group.map(job => job.estimatedFinishTime));
-      const stamp = el('time', 'factory-planned-time', factoryFinishClock.format(time * 1000));
-      stamp.dateTime = new Date(time * 1000).toISOString();
-      row.appendChild(stamp);
-    } else row.appendChild(el('span', 'dim', '时间待定'));
-    list.appendChild(row);
-  }
-  section.appendChild(list);
-  return section;
-}
-
 function factoryCurrentProduction(factory, recipes) {
   if (!Array.isArray(factory.jobs) || factory.queueKnown === false) {
     return el('span', 'dim', '生产队列未同步');
@@ -1798,62 +1772,227 @@ function factoryCurrentProduction(factory, recipes) {
   return current;
 }
 
-const pendingNativeFactorySwitches = new Set();
-
-function factoryAutoSwitch(factory) {
-  const account = current, key = JSON.stringify([account, factory.buildingId]);
-  const name = factory.displayName || factory.buildingId;
-  const cell = el('span', 'factory-auto-control');
-  cell.dataset.factoryAuto = key;
-  const button = component('config-switch-template');
-  const status = el('small', 'dim');
-  status.setAttribute('role', 'status');
-  cell.append(button, status);
-  const connected = () => current === account && !!account && snapshot.connected && !snapshot.paused && !disconnected.has(account);
-  cell.updateAutoSwitch = (message = '') => {
-    const control = factory.autoControl, on = factory.autoEnabled;
-    const busy = pendingNativeFactorySwitches.has(key);
-    button.setAttribute('aria-checked', String(on === true));
-    button.dataset.state = on ? 'checked' : 'unchecked';
-    button.setAttribute('aria-label', name + '原生自动生产');
-    button.title = control?.reason || (!control ? '请刷新工厂状态' : (on ? '关闭' : '开启') + name + '原生自动生产 · ' + control.name);
-    cell.title = button.title;
-    button.disabled = busy || !connected() || !control?.key || !!control.reason || on == null;
-    status.textContent = message || (busy ? '切换中…' : on == null ? '未同步' : on ? '已开启' : '');
-    status.hidden = !status.textContent;
+function applyFactoryAutoResult(result, account) {
+  if (!result?.confirmed || !lastWorldData || current !== account) return false;
+  const data = lastWorldData;
+  const factory = (data.factories || []).find(item => item.buildingId === result.buildingId);
+  if (!factory) return false;
+  const product = (factory.autoProducts || []).find(item => item.productId === result.autoProductId);
+  factory.autoProductId = result.autoProductId || null;
+  factory.auto = result.autoProductName || product?.name || null;
+  factory.autoIcon = product?.icon || null;
+  factory.autoEnabled = !!factory.autoProductId && result.active === true;
+  factory.autoPending = !!factory.autoProductId && result.active !== true;
+  data.autoProduce = {
+    ...(data.autoProduce || {}),
+    active: result.active === true,
+    forever: result.forever === true,
+    endTime: result.endTime ?? 0,
+    remainingSeconds: result.remainingSeconds ?? null,
+    costRuby: result.costRuby,
+    durationSeconds: result.durationSeconds,
+    ruby: Number.isFinite(result.ruby) ? result.ruby : (data.autoProduce?.ruby ?? null),
   };
-  cell.updateAutoSwitch();
-  button.onclick = async () => {
-    if (button.disabled || !connected() || pendingNativeFactorySwitches.has(key)) return;
-    pendingNativeFactorySwitches.add(key);
-    cell.updateAutoSwitch();
-    let message = '';
-    try {
-      const control = factory.autoControl;
-      const result = await call('/api/world/production-auto', { method:'POST', body:JSON.stringify({
-        buildingId:factory.buildingId, on:!factory.autoEnabled, productId:control.productId, key:control.key, confirm:true,
-      }) });
-      if (result.control) {
-        factory.autoControl = result.control;
-        factory.autoEnabled = result.control.on;
+  renderWorld(data);
+  return true;
+}
+
+function showFactoryAutoState(key, message) {
+  let buildingId = key;
+  try {
+    const parts = JSON.parse(key);
+    if (Array.isArray(parts) && typeof parts[1] === 'string') buildingId = parts[1];
+  } catch { /* 保持原值，兼容直接传入工厂标识。 */ }
+  for (const button of document.querySelectorAll('[data-factory-auto]')) {
+    if (button.dataset.factoryAuto === buildingId) {
+      button.disabled = pendingFactoryAuto.has(key);
+      button.toggleAttribute('aria-busy', pendingFactoryAuto.has(key));
+      if (message) button.title = message;
+    }
+  }
+}
+
+function autoTimeText(seconds) {
+  if (!Number.isFinite(seconds) || seconds <= 0) return '0 分钟';
+  const hours = Math.floor(seconds / 3600);
+  const minutes = Math.floor((seconds % 3600) / 60);
+  return hours ? hours + ' 小时 ' + minutes + ' 分钟' : minutes + ' 分钟';
+}
+
+function factoryAutoButton(factory, autoProduce) {
+  const active = factory.autoEnabled === true;
+  const pending = factory.autoPending === true;
+  const button = el('button', 'factory-auto-button');
+  button.type = 'button';
+  button.dataset.factoryAuto = factory.buildingId;
+  const badge = chip(factory.autoEnabled == null ? 'unknown' : active ? 'ready' : pending ? 'waiting' : 'unknown',
+    factory.autoEnabled == null ? '未同步' : active ? '已开启' : '未开启');
+  badge.classList.add('factory-auto-badge');
+  button.appendChild(badge);
+  if (factory.auto) {
+    const material = el('span', 'factory-auto-material');
+    material.append(iconEl(factory.autoIcon, 16, factory.auto), el('span', null, factory.auto));
+    button.appendChild(material);
+  }
+  const cost = Number(autoProduce?.costRuby) || 500;
+  const hours = Math.max(1, Math.round((Number(autoProduce?.durationSeconds) || 28800) / 3600 * 10) / 10);
+  const globallyActive = autoProduce?.active === true;
+  button.title = active
+    ? (factory.autoProductId ? '已设置自动生产，点击更换物料或关闭该工厂自动生产' : '点击选择该工厂的自动物料')
+    : globallyActive
+      ? '点击选择该工厂的自动物料'
+      : pending
+        ? '自动物料已设置，但自动生产时长未开通；点击开通'
+        : '点击开通自动生产（' + cost + ' 钻石 / ' + hours + ' 小时）';
+  button.disabled = !current || snapshot.paused || disconnected.has(current) || pendingFactoryAuto.has(JSON.stringify([current, factory.buildingId]));
+  button.onclick = () => openFactoryAutoDialog(factory, current, autoProduce);
+  return button;
+}
+
+function openFactoryAutoDialog(factory, account, autoProduce) {
+  const key = JSON.stringify([account, factory.buildingId]);
+  const available = () => current === account && account && !snapshot.paused && !disconnected.has(account) && !pendingFactoryAuto.has(key);
+  if (!available()) return;
+  const active = autoProduce?.active === true;
+  const forever = autoProduce?.forever === true;
+  const cost = Number(autoProduce?.costRuby) || 500;
+  const hours = Math.max(1, Math.round((Number(autoProduce?.durationSeconds) || 28800) / 3600 * 10) / 10);
+  const ruby = Number.isFinite(autoProduce?.ruby) ? autoProduce.ruby : null;
+  const products = Array.isArray(factory.autoProducts) ? factory.autoProducts
+    : Array.isArray(factory.manualProducts) ? factory.manualProducts : [];
+  const currentProduct = products.find(product => product.productId === factory.autoProductId)
+    || products.find(product => factory.auto && product.name === factory.auto);
+  let selected = currentProduct || products.find(product => !product.reason) || products[0] || null;
+  const body = [];
+  const intro = el('div', 'factory-auto-summary');
+  if (!active) {
+    intro.appendChild(el('strong', 'factory-auto-cost', '消耗 ' + cost + ' 钻石，获得 ' + hours + ' 小时自动生产'));
+    intro.appendChild(el('span', 'dim', '开通后本工厂按所选物料自动生产；已购时长不退。'));
+    if (ruby != null) intro.appendChild(el('strong', ruby < cost ? 'bad' : 'dim', '当前持有 ' + ruby + ' 钻石'));
+  } else {
+    intro.appendChild(el('strong', null, forever ? '自动生产：永久已开通' : '自动生产：已开通，剩余 ' + autoTimeText(Number(autoProduce?.remainingSeconds) || 0)));
+    if (factory.auto) intro.appendChild(el('span', 'dim', '当前自动物料：' + factory.auto));
+  }
+  body.push(intro);
+  let applySelection = null;
+  if (!products.length) {
+    body.push(el('p', 'bad', '这个工厂当前没有可自动生产的物料，请先确认工厂产物列表。'));
+  } else {
+    const choices = el('div', 'factory-product-choices');
+    choices.setAttribute('role', 'radiogroup');
+    choices.setAttribute('aria-label', '选择自动生产物料');
+    const detail = el('div', 'factory-recipe-detail');
+    detail.setAttribute('aria-live', 'polite');
+    let initialInput;
+    const select = product => {
+      selected = product;
+      clear(detail);
+      if (!product) {
+        detail.appendChild(el('span', 'dim', '没有可选物料'));
+        $('m-ok').disabled = true;
+        return;
       }
-      if (!result.confirmed) message = result.label;
+      detail.appendChild(el('strong', null, product.name + ' ×1'));
+      detail.appendChild(el('span', 'dim', '基础耗时 ' + productionPlanDuration(product.seconds)));
+      if (product.inputs?.length) {
+        const list = el('ul', 'factory-recipe-costs');
+        for (const input of product.inputs) {
+          const row = el('li');
+          row.append(el('span', null, input.name + ' ×' + input.num),
+            el('span', 'dim', input.owned == null ? '库存未同步' : '持有 ' + input.owned));
+          list.appendChild(row);
+        }
+        detail.appendChild(list);
+      } else detail.appendChild(el('span', 'dim', '无需原料'));
+      if (product.reason) detail.appendChild(el('span', 'dim', product.reason + '（仍可设置自动生产）'));
+      $('m-ok').disabled = !active && ruby != null && ruby < cost;
+    };
+    for (const product of products) {
+      const label = el('label', 'factory-product-choice');
+      const input = el('input');
+      input.type = 'radio';
+      input.name = 'factory-auto-product';
+      input.value = product.productId;
+      input.checked = product === selected;
+      if (input.checked) initialInput = input;
+      input.onchange = () => { if (input.checked) select(product); };
+      label.append(input, iconEl(product.icon, 24, product.name), el('span', null, product.name));
+      choices.appendChild(label);
+    }
+    body.push(choices, detail);
+    applySelection = () => { select(selected); initialInput?.focus(); };
+  }
+  const hasTarget = !!factory.autoProductId;
+  if (active && hasTarget) {
+    const close = smallButton('关闭该工厂自动生产', true);
+    close.type = 'button';
+    close.classList.add('factory-auto-close');
+    close.onclick = async () => {
+      if (!available()) return;
+      close.disabled = true;
+      pendingFactoryAuto.add(key);
+      showFactoryAutoState(key, '正在关闭自动生产…');
+      try {
+        const result = await call('/api/world/factory-auto-produce', { method: 'POST', body: JSON.stringify({
+          action: 'cancel', buildingId: factory.buildingId, confirm: true, fast: true,
+          active,
+          forever,
+          endTime: Number(autoProduce?.endTime) || 0,
+          ruby,
+          currentProductId: factory.autoProductId || null,
+        }) });
+        closeModal();
+        if (applyFactoryAutoResult(result, account)) return;
+        if (current === account) await refreshManualWorld(true);
+      } catch (error) {
+        close.disabled = false;
+        if (!error.logged) reportError(error);
+      } finally {
+        pendingFactoryAuto.delete(key);
+        if (current === account) showFactoryAutoState(key, '');
+      }
+    };
+    body.push(close);
+  }
+  openConfirm((factory.displayName || factory.buildingId) + ' · 自动生产', body, async () => {
+    if (!available() || !selected) throw Error('账号或工厂状态已变化，请重新选择自动物料');
+    pendingFactoryAuto.add(key);
+    showFactoryAutoState(key, '正在提交自动生产…');
+    let message;
+    let applied = false;
+    try {
+      const result = await call('/api/world/factory-auto-produce', { method: 'POST', body: JSON.stringify({
+        action: active ? 'set' : 'enable',
+        buildingId: factory.buildingId,
+        productId: selected.productId,
+        productName: selected.name || null,
+        confirm: true,
+        fast: true,
+        active,
+        forever,
+        endTime: Number(autoProduce?.endTime) || 0,
+        ruby,
+        currentProductId: factory.autoProductId || null,
+      }) });
+      message = result.label;
+      applied = applyFactoryAutoResult(result, account);
     } catch (error) {
       message = error.message;
+      throw error;
     } finally {
-      try { if (connected()) await refreshManualWorld(true); }
+      try { if (current === account && !applied) await refreshManualWorld(true); }
       finally {
-        pendingNativeFactorySwitches.delete(key);
-        if (current === account) for (const visible of document.querySelectorAll('[data-factory-auto]')) {
-          if (visible.dataset.factoryAuto === key) visible.updateAutoSwitch(message);
+        pendingFactoryAuto.delete(key);
+        if (current === account) {
+          showFactoryAutoState(key, message || '');
         }
       }
     }
-  };
-  return cell;
+  }, !active ? '消耗 ' + cost + ' 钻石并开启' : hasTarget ? '保存自动物料' : '开启自动生产');
+  applySelection?.();
 }
 
-function factoryProductionSection(factories, expanded, recipes, accelerators) {
+function factoryProductionSection(factories, expanded, recipes, accelerators, autoProduce) {
   const headers = ['建筑', '类型', '等级', '当前产物', '自动生产', '游戏排队'];
   const result = table(headers, factories.map(b => {
     const button = component('ui-factory-toggle');
@@ -1867,7 +2006,7 @@ function factoryProductionSection(factories, expanded, recipes, accelerators) {
     if (first) preview.appendChild(factoryProduct(first, recipes));
     if (queued?.length > 1) preview.appendChild(el('small', 'dim', '共 ' + queued.length + ' 件'));
     return [button, b.typeName || b.type, 'lv' + b.level, factoryCurrentProduction(b, recipes),
-      factoryAutoSwitch(b), preview];
+      factoryAutoButton(b, autoProduce), preview];
   }), 'sea-records');
   const toggleAll = component('ui-button');
   toggleAll.type = 'button';
@@ -1886,11 +2025,7 @@ function factoryProductionSection(factories, expanded, recipes, accelerators) {
       button.setAttribute('aria-label', (open ? '收起' : '展开') + (factory.displayName || factory.buildingId) + '的生产格');
       detail.hidden = !open;
       clear(cell);
-      if (open) {
-        const sections = el('div', 'factory-detail-sections');
-        sections.append(factoryProductionQueue(factory, recipes, accelerators), factoryPlannedProduction(factory, recipes));
-        cell.appendChild(sections);
-      }
+      if (open) cell.appendChild(factoryProductionQueue(factory, recipes, accelerators));
     };
     setExpanded(expanded.has(factory.buildingId));
     button.onclick = () => {
@@ -1946,36 +2081,28 @@ function buildingListSection(title, className, content, collapsed) {
   return buildingSection(title, className, content, button);
 }
 
-function residentOrderProgress(daily) {
-  if (!Number.isSafeInteger(daily?.orderNum) || daily.orderNum < 0) {
-    return el('p', 'dim', '今日交付进度未同步');
-  }
-  const count = daily.orderNum;
-  const target = daily.dailyLimit;
-  if (!Number.isSafeInteger(target) || target <= 0) return el('p', '', '今日已完成 ' + fmt(count) + ' 单 · 每日上限未同步');
-
-  const box = el('div', 'resident-order-progress');
-  const ring = el('div', 'resident-order-ring');
-  const filled = Math.min(count, target);
-  ring.style.setProperty('--order-fill', (filled / target * 100) + '%');
-  ring.setAttribute('role', 'progressbar');
-  ring.setAttribute('aria-label', '今日居民订单交付进度');
-  ring.setAttribute('aria-valuemin', '0');
-  ring.setAttribute('aria-valuemax', String(target));
-  ring.setAttribute('aria-valuenow', String(filled));
-  ring.title = '今日已交付 ' + fmt(count) + ' 单，每日上限 ' + fmt(target) + ' 单';
-  ring.setAttribute('aria-valuetext', ring.title);
-  const fraction = el('strong', '', fmt(count));
-  fraction.appendChild(el('small', '', '/' + fmt(target)));
-  ring.append(fraction, el('span', '', '每日上限'));
-
-  const status = count >= target ? '今日已达上限' : '今日还可交 ' + fmt(target - count) + ' 单';
-  box.append(ring, el('span', 'resident-order-remaining', status));
-  return box;
+function renderOrderProgress(progress) {
+  const box = $('resident-order-progress');
+  clear(box);
+  box.hidden = !(progress && Number.isFinite(progress.total) && progress.total > 0);
+  if (box.hidden) return;
+  const head = el('div', 'resident-order-progress-head');
+  head.append(el('span', 'dim', '今日居民订单'), el('strong', '', progress.orderNum + '/' + progress.total));
+  const track = el('div', 'resident-order-progress-track');
+  const fill = el('i');
+  fill.style.width = Math.max(0, Math.min(100, Number(progress.percent) || 0)) + '%';
+  track.append(fill);
+  const note = el('div', 'dim resident-order-progress-note');
+  const capNote = '今日上限 ' + progress.cap + (progress.bonus ? '（基础 ' + progress.baseMax + ' + 加成 ' + progress.bonus + '）' : '');
+  note.textContent = progress.totalKind === 'rewardTier'
+    ? '当前奖励档位；已领档位 ' + progress.rewardedNum + (progress.claimable ? '，可领取' : '') + '；' + capNote
+    : capNote;
+  box.append(head, track, note);
 }
 
 function renderWorld(data) {
   stateActions.setGameData(current, 'world', data);
+  lastWorldData = data;
   orderClockOffset=Number.isFinite(data.serverNow)?data.serverNow*1000-Date.now():0;
   $('world-view').textContent = '';
   const recipes = new Map((data.recipes || []).map(recipe => [recipe.productId, recipe]));
@@ -1987,7 +2114,7 @@ function renderWorld(data) {
   clear(fbox);
   if (data.factories?.length) {
     const factories = [...data.factories].sort((a, b) => a.buildingId.localeCompare(b.buildingId, 'zh-CN', { numeric: true }));
-    fbox.appendChild(factoryProductionSection(factories, expanded, recipes, data.accelerators));
+    fbox.appendChild(factoryProductionSection(factories, expanded, recipes, data.accelerators, data.autoProduce));
   }
   if (data.farms?.length) {
     const plots = [...data.farms].sort((a, b) => a.plot.localeCompare(b.plot, 'zh-CN', { numeric: true }));
@@ -2031,8 +2158,8 @@ function renderWorld(data) {
     (button || $('tab-manual')).focus({ preventScroll: true });
   }
   const obox = clear($('world-orders'));
-  if (data.orderOfTheDay || data.orders.length) obox.appendChild(residentOrderProgress(data.orderOfTheDay));
-  if (data.orders.length) {
+  renderOrderProgress(data.orderProgress);
+  if (data.orders?.length) {
     const ordersTable = table(['订单', '居民', '需求', '挂机交付', '手动操作'], data.orders.map((o) => [
       '#' + o.index,
       { cell: o.workerIcon, text: (o.workerName || '未知居民') + (o.isSpecial ? '（特殊）' : '') },
@@ -2041,6 +2168,9 @@ function renderWorld(data) {
       residentOrderActions(o),
     ]), 'sea-records');
     obox.appendChild(ordersTable);
+  } else {
+    obox.appendChild(el('p', 'resident-order-empty', Array.isArray(data.orders)
+      ? '当前没有待处理的居民订单。' : '居民订单列表尚未同步。'));
   }
   renderInventory(data.stock);
 }
@@ -2058,7 +2188,7 @@ function refreshManualWorld(force = false) {
     resetInventory();
     worldVersion++;
     worldRead = null;
-    for (const id of ['world-factories', 'world-orders', 'world-stock']) clear($(id));
+    for (const id of ['world-factories', 'world-orders', 'world-stock', 'resident-order-progress']) clear($(id));
     if (!available) $('world-view').textContent = account ? '账号已断开连接' : '请先选择账号';
   }
   if (!available || worldRead?.account === account) return;

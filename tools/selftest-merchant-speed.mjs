@@ -544,6 +544,27 @@ try {
     f.state.cargo.moveEndTime -= 10;
     assert.equal(merchantSpeedMatches(expected, f.state, now), false);
   });
+  await test('未知加速后已开始新航程，保留当日用针额度，完整库存回读后新航程可继续用针', async () => {
+    const f = fixture(now - 6 * 3600);
+    Object.assign(f.settings.merchant, { speedUpMode: 'full', keepPointers: 0, dailyPointerLimit: 8 });
+    f.mode('unknown');
+    await f.run();
+    assert.equal(f.sent().length, 1);
+    const used = f.sent()[0].body.useNum;
+    const [key] = Object.entries(f.ledger.keyRecords()).find(([, r]) => r.details?.expected?.request === 'TradeSpeedRequest');
+    f.mode('');
+    f.client.serverClockOffsetMs += 7200000;
+    Object.assign(f.state.cargo, { cityId: 20, moveToCityId: 10, moveStartTime: f.now + 7200, moveEndTime: f.now + 10800 });
+    await f.run();
+    assert.equal(f.ledger.keyRecords()[key].expired, true);
+    assert.equal(f.ledger.keyRecords()[key].confirmed, false);
+    assert.equal(f.ledger.confirmedCounters().merchantPointers ?? 0, 0);
+    assert.equal(f.ledger.snapshot().counters.merchantPointers, used);
+    assert.equal(f.sent().length, 1);
+    await f.run();
+    assert.equal(f.sent().length, 2);
+    assert.equal(f.ledger.confirmedCounters().merchantPointers, f.sent()[1].body.useNum);
+  });
   await test('满舱航线前期自然到港时保留指针，进入配置的收尾窗口才按已开启模式加速', () => {
     const f = fixture(now - 8 * 3600);
     Object.assign(f.settings.merchant, { fullCargoRoutes: true, speedUpMode: 'full', liquidationMinutes: 120 });

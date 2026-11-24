@@ -27,6 +27,7 @@ import { atomicJson, readJson, withFileLock } from './json-store.mjs';
  * @property {(uniqueKey: string) => number | null} reservationTime
  * @property {() => Counters} pendingCounters
  * @property {(uniqueKey: string, confirmed: boolean, details?: Record<string, unknown>) => void} resolveKey
+ * @property {(uniqueKey: string, expected: KeyRecord) => boolean} retireUnknownKey
  * @property {(uniqueKey: string, expected: KeyRecord, dailyLimit?: boolean) => boolean} failGuildAidGift
  * @property {(counters: Counters, limits?: Counters, minimums?: Counters, options?: {uniqueKey?: string | null, details?: Record<string, unknown> | null, paidGold?: PaidGoldBaseline}) => LedgerTicket} reserve
  * @property {(ticket: LedgerTicket) => boolean} markPaidGoldReward
@@ -206,6 +207,20 @@ export function createUsageLedger(accountId, { file = usageFile(), now = Date.no
           record.confirmed = true;
         } else record.expired = true;
         atomicJson(file, store);
+      });
+    },
+    retireUnknownKey(uniqueKey, expected) {
+      return withFileLock(file, () => {
+        const { store, entry } = forUpdate();
+        const record = entry.keys[uniqueKey];
+        if (!record || record.confirmed || record.expired || !isDeepStrictEqual(record, expected)) return false;
+        const reservation = entry.pending[record.id];
+        if (reservation && reservation.uniqueKey !== uniqueKey) throw new Error('待确认操作与额度预留不一致');
+        // 旧状态已失效。保留防重键及当日已占额度，已核实消费不增加。
+        record.expired = true;
+        delete entry.pending[record.id];
+        atomicJson(file, store);
+        return true;
       });
     },
     failGuildAidGift(uniqueKey, expected, dailyLimit = false) {

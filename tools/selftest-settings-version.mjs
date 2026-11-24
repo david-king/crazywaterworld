@@ -723,6 +723,18 @@ try {
       }
     }
   });
+  test('旧版博物馆继续使用已选地图，显式碎片目标可保留或报告格式错误', () => {
+    const old = defaultSettings();
+    old.museum.maps = ['2'];
+    delete old.museum.targetFragments;
+    const upgrade = () => importAutomationSettings({ format: SETTINGS_FORMAT, version: 56, settings: old }).museum;
+    assert.deepEqual(upgrade().maps, ['2']);
+    assert.deepEqual(upgrade().targetFragments, []);
+    old.museum.targetFragments = ['藏品橙20碎片'];
+    assert.deepEqual(upgrade().targetFragments, old.museum.targetFragments);
+    old.museum.targetFragments = '藏品橙20碎片';
+    assert.throws(upgrade);
+  });
   test('旧账号默认新版排产，模拟原生策略及主产物可完整导入导出', () => {
     const old = defaultSettings();
     delete old.factory.strategy;
@@ -744,6 +756,8 @@ try {
       delete expected.merchant.speedUpMinProfit;
       expected.merchant.speedUpMode = 'deadline';
       expected.merchant.fullCargoRoutes = value ?? defaultSettings().merchant.fullCargoRoutes;
+      expected.museum.targetFragments = [];
+      expected.museum.unlockCases = false;
       expected.treasure.chasePlayerIds = [];
       expected.alliance.memberIds = [];
       Object.assign(expected.factory,{strategy:'smart',simulatedTargets:[]});
@@ -840,7 +854,7 @@ try {
     assert.throws(() => validateSettings(settings), error => !!error.fields['alliance.memberIds']);
   });
   test('版本1升级后重复迁移保持一致，保留有效的用户值', () => {
-    assert.equal(SETTINGS_SCHEMA_VERSION, 56);
+    assert.equal(SETTINGS_SCHEMA_VERSION, 58);
     const settings = legacySettings();
     settings.factory.checkEverySeconds = 270;
     settings.resources.diamondDailyLimit = 1234;

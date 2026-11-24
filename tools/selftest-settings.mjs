@@ -914,15 +914,24 @@ try {
 
   await check('博物馆完成探索后继续领奖，领奖回执不完整时不报告成功', async () => {
     const settings = quiet(); settings.museum.enabled = true;
-    const snapshot = extra(survey(), { museum: { topPopularity: 0, claimedAchievements: [], exhibitions: [], exploreStages: [{ stageId: 1, expedition: { endTime: 9000, heroIds: [] } }] } });
+    const snapshot = extra(survey(), { museum: { topPopularity: 0, claimedAchievements: [], exhibitions: [], exploreStages: [{ stageId: 1, progress: 100, expedition: { startTime: 8000, endTime: 9000, heroIds: ['甲'] } }] } });
     const plan = planBaseAutomation(snapshot, config, settings);
-    const protocol = { MuseumCompleteExploreRequest: {}, MuseumCompleteExploreResponse: {}, MuseumRewardRequest: {}, MuseumRewardResponse: {} };
-    const calls = [];
-    const client = { connected: true, async request(name) { calls.push(name); if (name === 'MuseumCompleteExploreRequest') return { grade: 2, progressGain: 5 }; if (name === 'MuseumRewardRequest') return { reward: { asset: [] }, exploreStage: { stageId: 1, expedition: { endTime: 0 } } }; throw new Error(name); } };
-    const result = await runBaseAutomation(client, protocol, config, plan, { getSettings: () => settings });
-    assert.deepEqual(calls, ['MuseumCompleteExploreRequest', 'MuseumRewardRequest']); assert.equal(result[0].ok, true);
-    client.request = async name => name === 'MuseumCompleteExploreRequest' ? { grade: 2, progressGain: 5 } : {};
-    assert.equal((await runBaseAutomation(client, protocol, config, plan, { getSettings: () => settings }))[0].ok, false);
+    const protocol = Object.fromEntries(['MuseumInfo','MuseumCompleteExplore','MuseumReward'].flatMap(n => [[n+'Request', {}],[n+'Response', {}]]));
+    const good = { reward: { asset: [{ id: '人气币', num: 5 }] }, exploreStage: { stageId: 1, progress: 105 } };
+    for (const [i, reply] of [good, { ...good, reward: { asset: [] } }, { ...good, exploreStage: { stageId: 1, progress: 100 } }].entries()) {
+      const calls = [];
+      const client = { connected: true, async request(name) {
+        if (name === 'MuseumInfoRequest') return snapshot.museum;
+        calls.push(name);
+        return name === 'MuseumCompleteExploreRequest' ? { grade: 2, progressGain: 5 } : reply;
+      } };
+      const ledger = createUsageLedger('museum-'+i, { file: path.join(directory, 'claim.json') });
+      const options = { player: { playerId: 10, worldId: 20 }, ledger, getSettings: () => settings };
+      const result = await runBaseAutomation(client, protocol, config, plan, options);
+      assert.deepEqual(calls, ['MuseumCompleteExploreRequest', 'MuseumRewardRequest']); assert.equal(result[0].ok, i === 0);
+      await runBaseAutomation(client, protocol, config, plan, options);
+      assert.equal(calls.length, 2);
+    }
   });
 
   await check('消耗回执未确认时保留指南、钻石与点金次数，避免重试超额', async () => {

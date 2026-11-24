@@ -2,10 +2,21 @@ import { clock, dayOf, natural, positive, read, table, waiting, windowOpen } fro
 import { refreshOrderMaterialSpends } from './order-reservations.mjs';
 import { merchantTiming } from './merchant-planner.mjs';
 import { watchMerchant } from './merchant-monitor.mjs';
+import { merchantActionState, merchantFingerprint } from './merchant-action-state.mjs';
 
-export async function reconcileMerchantAction(client, ctx, [key, record], after, matches) {
+export async function reconcileMerchantAction(client, ctx, [key, record], state, allowed) {
   const { expected } = record.details;
-  if (!matches(expected, after, clock(client))) return waiting(ctx, '前次操作结果待确认，等待游戏状态更新');
+  const after = merchantFingerprint(state);
+  const result = merchantActionState(record.details, after, clock(client));
+  if (result === 'pending') return waiting(ctx, '前次操作结果待确认，等待游戏状态更新');
+  if (result === 'superseded') {
+    const fresh = await read(client, 'TradeInfo');
+    if (!allowed() || fresh?.period !== state.period || merchantActionState(record.details, merchantFingerprint(fresh), clock(client)) !== 'superseded')
+      return waiting(ctx, '商船状态仍在同步，稍后重新核对前次操作');
+    if (ctx.ledger.retireUnknownKey(key, record))
+      waiting(ctx, '商船状态已变化，前次操作保留为未知，下一轮按当前船货和港口重新规划');
+    return;
+  }
   if (expected.request === 'TradeSpeedRequest') await refreshOrderMaterialSpends(client, ctx.player);
   const details = { ...record.details, after, confirmedAt: clock(client) };
   ctx.ledger.resolveKey(key, true, details);

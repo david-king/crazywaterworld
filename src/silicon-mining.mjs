@@ -242,7 +242,7 @@ function miningCandidates(snapshot, policy, settings, state, fleet, used, planne
   for (const mine of snapshot.mines.filter(mine => policy.tiers.includes(mine.tier) && !mine.reason)) {
     if (!pursuit && !attacksOnly) {
       const count = mine.tier === 'BLUE' ? 3 : mine.positionNum;
-      for (let index = 0; index < count; index++) if (!mine.positions.some(position => position.index === index && position.player) && !targetHeld(mine.gridId, index)) candidates.push({ mine, index, opponent: null });
+      for (let index = 0; index < count; index++) if (!mine.positions.some(position => position.index === index && position.player) && !targetHeld(mine.gridId, index)) candidates.push({ mine, index, opponent: null, priority: policy.huntEnabled ? 2 : 0 });
     }
     if (policy.emptyOnly || mine.tier === 'BLUE' || (policy.dailyAttackLimit > 0 && (used['siliconAttacks' + fleetNumber(policy.id)] ?? 0) >= policy.dailyAttackLimit) || snapshot.fightTimes + plannedAttacks >= snapshot.maxFightTimes) continue;
     for (const position of mine.positions) {
@@ -252,17 +252,20 @@ function miningCandidates(snapshot, policy, settings, state, fleet, used, planne
       const failures = state.failures[policy.id + ':' + opponentHistoryKey(target)] ?? 0;
       const legacyFailures = target.matchedPlayerId ? state.failures[policy.id + ':' + opponentKey(target)] ?? 0 : 0;
       if (policy.failureLimit > 0 && failures + legacyFailures >= policy.failureLimit) continue;
-      if (policy.huntEnabled && !policy.huntPlayerIds?.includes(target.matchedPlayerId) && !(policy.huntPlayers ?? []).some(name => nameKey(name) === nameKey(target.nickname))) continue;
+      const listedId = policy.huntEnabled && policy.huntPlayerIds?.includes(target.matchedPlayerId);
+      if (policy.huntEnabled && !listedId && !(policy.huntPlayers ?? []).some(name => nameKey(name) === nameKey(target.nickname))) continue;
       if (pursuit) {
         const members = snapshot.blacklist.filter(member => member.name === nameKey(target.nickname));
         if (members.length !== 1 || target.matchedPlayerId && members[0].id !== target.matchedPlayerId) continue;
         if (!state.defeated[opponentKey(target)] && state.defeated['id:' + members[0].id]?.guildIdx !== target.guildIdx) continue;
       }
       if (targetHeld(mine.gridId, position.index)) continue;
-      candidates.push({ mine, index: position.index, opponent: target });
+      candidates.push({ mine, index: position.index, opponent: target, priority: listedId ? 0 : 1 });
     }
   }
-  candidates.sort((a, b) => (policy.huntEnabled ? -1 : 1) * (Number(Boolean(a.opponent)) - Number(Boolean(b.opponent))) || (a.opponent && b.opponent ? (policy.opponentOrder === 'powerAsc' ? 1 : -1) * (a.opponent.power - b.opponent.power) : 0) || a.mine.gridId - b.mine.gridId || a.index - b.index);
+  candidates.sort((a, b) => a.priority - b.priority ||
+    (a.opponent && b.opponent ? (policy.opponentOrder === 'powerAsc' ? 1 : -1) * (a.opponent.power - b.opponent.power) : 0) ||
+    a.mine.gridId - b.mine.gridId || a.index - b.index);
   return candidates;
 }
 export function planSiliconMining(snapshot, settings, ledger, client, heldForEvent = () => false) {

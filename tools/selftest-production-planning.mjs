@@ -667,11 +667,13 @@ test('缺少库存时保留原始读取错误', () => {
 {
   const { snapshot, settings } = fixture(), id = '1食品厂', start = snapshot.serverNow;
   settings.loop.world = false;
-  const entry = { revision:'v1', jobs:[{id:'面包',at:start+90,pinned:true},{id:'面包',pinned:true}] };
+  const entry = { revision:'v1', jobs:[{id:'面包',at:start+90,pinned:true},{id:'面包',pinned:true},
+    {id:'面包',at:start+86401}] };
   const anchors = new Map();
   const day = await forecastProductionDay(snapshot,config,settings,[],{anchors,insertions:{[id]:entry}});
   const trace = anchors.get(id), f = { ...day.factories[0], startAt:start,endAt:day.endAt };
   assert.deepEqual(f.runs.map(r => [r.id,r.from,r.to,r.quantity]), [['面包',start+90,start+210,2]]);
+  assert.deepEqual(f.pendingInsertions, [{id:'面包',name:'面包',quantity:1},{id:'面包',name:'面包',quantity:1}]);
   const [run] = f.runs;
   const position = locateFactoryInsertion(trace,f,{...run,offset:1},entry);
   assert.deepEqual(position.before,entry.jobs.slice(0,1));

@@ -14,7 +14,7 @@ export function factoryInsertions(player) {
   return readJson(fileFor(player), {});
 }
 
-export function saveFactoryInsertion(player, buildingId, previous, next, quotedEntries) {
+export function saveFactoryInsertion(player, buildingId, previous, next, quotedEntries, supplies = {}) {
   const file = fileFor(player);
   return withFileLock(file, () => {
     const entries = readJson(file, {});
@@ -25,6 +25,13 @@ export function saveFactoryInsertion(player, buildingId, previous, next, quotedE
     }
     if (next) entries[buildingId] = { ...next, revision: randomUUID() };
     else delete entries[buildingId];
+    for (const [id, jobs] of Object.entries(supplies)) {
+      const entry = entries[id];
+      if (id === buildingId || entry?.flight || entry?.remove?.length || entry?.stagedSupplies) {
+        throw new Error('上游队列正在调整，等待核对后补料');
+      }
+      entries[id] = {jobs:[...jobs, ...(entry?.jobs ?? [])], revision:randomUUID()};
+    }
     atomicJson(file, entries);
     return entries[buildingId];
   });

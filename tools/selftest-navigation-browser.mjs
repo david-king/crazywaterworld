@@ -577,10 +577,8 @@ try {
     await page.evaluate(() => refreshAccountStatuses());
     const quantity = card.locator('.production-batch-quantity');
     await quantity.filter({ hasText:'×1' }).waitFor();
-    const preview = page.locator('#production-day-preview');
-    await preview.getByText('游戏内排队中 · 铜锭 ×1').waitFor();
-    assert(await preview.evaluate(n => n.getBoundingClientRect().top >= 0 && n.getBoundingClientRect().bottom <= innerHeight));
-    await page.locator('#production-day-jump').click();
+    assert.equal(await page.locator('#production-day-preview').count(), 0);
+    await page.getByRole('button', { name:'查看排产清单' }).click();
     assert.equal(await page.locator('#production-day-title').evaluate(node => node === document.activeElement),true);
     await main('settings');
     await main('manual');
@@ -593,7 +591,6 @@ try {
     await page.reload();
     await tab('manual');
     await quantity.filter({ hasText:'×3' }).waitFor();
-    await preview.getByText('游戏内排队中 · 铜锭 ×3').waitFor();
     assert.equal(planReads,3);
     await context.close();
     console.log('通过：' + name + ' 页头搜索位置、快捷键、配置项滚动定位、总览与仓库分类跳转，导航刷新恢复、深链与无效状态回退');

@@ -147,7 +147,7 @@ export async function forecastProductionDay(
       trace,
       manual: entry?.jobs.map((job, sourceIndex) => ({ ...job, sourceIndex })) ?? [],
       insertNote: entry?.note,
-      editing: !!(entry?.remove?.length || entry?.flight),
+      editing: !!(entry?.remove?.length || entry?.flight || entry?.stagedSupplies),
       unknown,
       capacity: f.capacity,
       collect:
@@ -166,6 +166,8 @@ export async function forecastProductionDay(
     product: [],
     farm: f.productId ? { productId: f.productId, ripeTime: f.ripeTime } : null,
     yield: f.num ?? crops.get(f.productId)?.produceNum ?? 0,
+    manual: insertions[f.id]?.jobs.map(job => ({...job})) ?? [],
+    confirmingPlant: !!insertions[f.id]?.flight,
   }));
   const recipes = new Map(rows(config, 'BuildingProduceCfg').map(r => [r.itemId, r]));
   const remainder = orders.filter(o => !o.skipped);
@@ -277,6 +279,7 @@ export async function forecastProductionDay(
     const extraDemand = remainder.filter(o => !['merchant', 'cargo'].includes(o.source)).concat(stockNeeds);
     survey.factoryInsertions = Object.fromEntries(factories.filter(f => f.manual.length || f.editing)
       .map(f => [f.building.buildingId, { jobs:f.manual, flight:f.editing }]));
+    for (const plot of farms) if (plot.manual.length) survey.factoryInsertions[plot.buildingId] = {jobs:plot.manual};
     const plan = planWorld(survey, {
       config,
       settings: dispatchSettings,
@@ -294,6 +297,12 @@ export async function forecastProductionDay(
     const free = id => have(id) - (resourceReserve(settings,id) || 0);
     const ready = (factory, id) => insertionRecipeReady(recipes.get(id), factory.building.level, survey.festivals, now, free);
     function* productionSteps() {
+      for (const plot of farms) {
+        const job = plot.manual[0], crop = crops.get(job?.id);
+        if (!crop || plot.farm || plot.confirmingPlant || snapshot.autoFarming || (stock.get(job.id) ?? 0) >= snapshot.stockCap * 5) continue;
+        const [id,num] = crop.material;
+        yield {request:'FarmPlantRequest', body:{args:[{buildingId:plot.buildingId,productId:job.id}]}, costs:[{id,num}], job};
+      }
       for (const [buildingId, f] of manualFacilities) {
         while (f.jobs.length < f.capacity && f.manual.length) {
           const index = nextInsertionIndex(f.manual, now, isFull, id => ready(f,id)), job = f.manual[index];
@@ -318,6 +327,7 @@ export async function forecastProductionDay(
         if (!plot || plot.farm || !(seconds > 0) || snapshot.autoFarming) continue;
         plot.farm = { productId, ripeTime: now + seconds };
         plot.yield = crop.produceNum;
+        if (step.job) consumeInsertionUnit(plot.manual, 0);
       } else {
         const { buildingId, productId } = step.body,
           f = (step.job ? manualFacilities : active).get(buildingId);
@@ -359,6 +369,16 @@ export async function forecastProductionDay(
     if ([...waitHistory.values()].some(t => now - t < 3 * revisit)) events.push(now + revisit);
     now = Math.min(endAt, ...events.filter(t => t > now));
   }
+  const upstream = new Map();
+  for (const [id, entry] of Object.entries(insertions)) {
+    for (const job of entry.jobs) {
+      if (!job.supplyTarget || job.supplyTarget === id) continue;
+      const batches = upstream.get(job.supplyTarget) ?? [];
+      batches.push({factory:displayBuilding(config, byId.get(id) ?? {buildingId:id}), name:name(job.id),
+        quantity:job.quantity ?? 1, crop:!!job.crop});
+      upstream.set(job.supplyTarget,batches);
+    }
+  }
   result.factories = factories.map(f => ({
     id: f.building.buildingId,
     name: displayBuilding(config, f.building),
@@ -366,6 +386,11 @@ export async function forecastProductionDay(
     disabled: f.disabled,
     editing: f.editing,
     insertNote: f.insertNote || (f.editing ? '正在核对游戏队列，完成后可继续插单' : undefined),
+    upstream: upstream.get(f.building.buildingId) ?? [],
+    pendingInsertions: (insertions[f.building.buildingId]?.jobs ?? [])
+      .filter(job => job.pinned)
+      .map(job => ({ id: job.id, name: name(job.id), quantity: job.quantity ?? 1,
+        ...(job.supplyFor ? {supplyFor:name(job.supplyFor)} : {}) })),
     hours: f.chart.summarize(),
     runs: f.chart.runs.sort((a, b) => a.from - b.from || a.lane - b.lane),
   }));

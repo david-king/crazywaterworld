@@ -336,7 +336,7 @@ try {
   });
 
   await test('独立营收、人气奖励和上架也展示博物馆统一状态', () => {
-    for (const action of ['revenue', 'achievements', 'display']) {
+    for (const action of ['revenue', 'achievements', 'display', 'unlockCases']) {
       const settings = defaultSettings(); settings.loop.world = true;
       settings.museum.runEnabled = true; settings.museum[action] = true;
       const summary = { text: action + ' 已核对', state: 'ok', checkedAt: 1000 };
