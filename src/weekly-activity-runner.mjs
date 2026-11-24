@@ -1,7 +1,7 @@
 import { createWeeklyActivityContext } from './weekly-activity.mjs';
-import { createActionGuard, AutomationSkip } from './automation-policy.mjs';
+import { createActionGuard, AutomationSkip, worldPreferenceEnabled } from './automation-policy.mjs';
 import { surveyWorld, planWorld, runWorldRound } from './world.mjs';
-import { surveyBaseAutomation, planBaseAutomation, runBaseAutomation } from './base-automation.mjs';
+import { baseDemands, surveyBaseAutomation, planBaseAutomation, runBaseAutomation } from './base-automation.mjs';
 import { serviceGuildOrders } from './guild-orders.mjs';
 import { serviceCargo } from './cargo.mjs';
 import { runEquipmentForge } from './equipment-forge.mjs';
@@ -73,7 +73,7 @@ export function weeklyActivityActionSettings(context, config) {
   settings.pet.release = false;
   settings.forge.decompose = false;
   if (context.kind === 'pet') {
-    settings.pet.feed = false; settings.pet.advance = false;
+    settings.pet.feed = false; settings.pet.advance = false; settings.pet.levelUp = false;
     settings.museum.enabled = false; settings.museum.upgrade = false; settings.museum.runEnabled = false;
     settings.gold.enabled = false; settings.events.enabled = false; settings.gather.enabled = false;
   }
@@ -111,7 +111,14 @@ export async function runWeeklyActivity(client, protocol, config, player, {
       const allowed = kind => active() && (context.kind === 'farm' ? kind === 'farm' : ['finishOrder', 'speedUpProduce'].includes(kind));
       const survey = await surveyWorld(connection, protocol, { config, player, includeWeekOrder: true,
         includeCargo: settings.cargo.enabled, includeProductionTiming: false });
+      // The order activity can load ships while ordinary production is waiting for a native slot.
+      // Include those factory claims in the plan, but execute only the activity's allowed actions.
+      const production = getSettings();
+      const protectFactory = context.kind === 'order' && survey.cargoOrder.size > 0 && settings.cargo.enabled
+        && worldPreferenceEnabled(production, 'startProduce') && production.factory.demandFirst && production.factory.strategy !== 'nativeSimulation';
+      const extra = protectFactory && await surveyBaseAutomation(connection, protocol, config, player, production, survey, { ledger, enabled: active });
       const plan = planWorld(survey, { config, settings, usage: ledger.snapshot(), enabled: allowed,
+        reserveFactoryInputs: protectFactory, extraDemand: extra ? baseDemands(extra, config, production) : [],
         allowSpeedUp: context.kind === 'farm' ? settings.weeklyActivity.farmSpeedUp : settings.factory.speedUp || settings.factory.speedUpSources.length > 0 });
       await runWorldRound(connection, protocol, plan, { config, player, settings, getSettings: current,
         getUsage: () => ledger.snapshot(), allowMutate: true, enabled: allowed,
@@ -125,7 +132,7 @@ export async function runWeeklyActivity(client, protocol, config, player, {
           enabled: active, dailyLimit: settings.weeklyActivity.farmRecruitTimes, report: emit });
       }
       if (context.kind === 'order' && settings.cargo.enabled && active()) {
-        await serviceCargo(connection, config, { enabled: active, getSettings: current, ledger,
+        await serviceCargo(connection, config, { enabled: active, getSettings: current, ledger, cargoLoadLimits: plan.cargoLoadLimits,
           beforeAction: guard.before, afterAction: guard.after, cancelAction: guard.cancel,
           log: (title, details = {}) => emit({ title, ok: !details.skipped, ...details }) });
       }

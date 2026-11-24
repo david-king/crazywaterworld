@@ -1,11 +1,10 @@
 import fs from 'node:fs';
 import { normalize } from './worlds.mjs';
 import { exactAutomationId } from './automation-policy.mjs';
-import { restorePirateFlight, reconcilePirateFlights } from './pirates.mjs';
+import { PIRATE_CONFIRMATION_MS, restorePirateFlight, reconcilePirateFlights } from './pirates.mjs';
 import { savePirateOutcome } from './pirate-advance.mjs';
 
 const SECOND = 1000;
-const WINDOW = 15 * 60 * SECOND;
 
 // 历史协议日志的正文最多400字符。只采用截断前已完整记录的 JSON 字段。
 function readPrefix(text) {
@@ -170,7 +169,7 @@ export function recoverPirateHunts(client, player, ledger, accountId, tracePath)
     if (!Number.isFinite(sentAt)) continue;
     if (traceFiles.length) {
       const from = sentAt - offset;
-      const lines = [...new Set(traceFiles.flatMap(file => traceWindow(file, from - 2 * SECOND, from + WINDOW)))];
+      const lines = [...new Set(traceFiles.flatMap(file => traceWindow(file, from - 2 * SECOND, from + PIRATE_CONFIRMATION_MS)))];
       lines.sort((a, b) => Date.parse(a.slice(0, 24)) - Date.parse(b.slice(0, 24)));
       const proof = replayPirateReceipt(lines, {
         accountId,
@@ -187,7 +186,7 @@ export function recoverPirateHunts(client, player, ledger, accountId, tracePath)
     }
     // 重连时仍在途的新版派遣继续监听本人舰队和个人记录，不发起新挑战。
     const age = Date.now() + offset - sentAt;
-    if (d.active !== false && age >= 0 && age <= WINDOW && Number.isSafeInteger(d.grid) && d.grid >= 0)
+    if (d.active !== false && age >= 0 && age < PIRATE_CONFIRMATION_MS && Number.isSafeInteger(d.grid) && d.grid >= 0)
       restorePirateFlight(client, d, (event) => savePirateOutcome(ledger, key, event, record.id), record.id);
   }
   reconcilePirateFlights(client, ledger.keyRecords(), world);

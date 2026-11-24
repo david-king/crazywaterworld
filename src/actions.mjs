@@ -44,7 +44,7 @@ export const ACTIONS = {
     request: 'UpgradeAfkLevelRequest',
     response: 'UpgradeAfkLevelResponse',
     mutate: true,
-    desc: '提升挂机等级',
+    desc: '提升挂机等级，level 填本次提升的级数（1、5 或 10）',
     params: ['level'],
     body: ({ level }) => ({ level: Number(level) }),
   },

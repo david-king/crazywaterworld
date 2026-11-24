@@ -8,15 +8,19 @@ import { atomicJson, readJson, withFileLock } from './json-store.mjs';
 /** @typedef {{id: string, day: string}} LedgerTicket */
 /** @typedef {{paidBefore: number, resetTime?: number, account: string | null}} PaidGoldBaseline */
 /** @typedef {{expectedPaidTimes: number, account: string | null, resetTime?: number, rewardReceived: boolean}} PaidGoldReservation */
-/** @typedef {{at: number, day?: string, counters: Counters, uniqueKey?: string, paidGold?: PaidGoldReservation}} Reservation */
+/** @typedef {{state: Record<string, unknown>, active: (Record<string, unknown> & {id?: string}) | null, fuelCeiling: number | null}} PirateProgress */
+/** @typedef {PirateProgress & {revision: number}} PirateRun */
+/** @typedef {{world: string, day: string, revision: number, progress: PirateProgress}} PirateRunUpdate */
+/** @typedef {{at: number, day?: string, counters: Counters, uniqueKey?: string, paidGold?: PaidGoldReservation, pirateRollback?: {world: string, previous?: PirateRun}}} Reservation */
 /** @typedef {{id: string, confirmed: boolean, expired?: boolean, details?: Record<string, unknown>}} KeyRecord */
 /** @typedef {{revision: number, owned: Record<string,string>, lost: Record<string,string>, settled?: Record<string,string>}} FieldHistory */
 /** @typedef {Record<string, {revision:string, specialtyId:number, shortageId:number, reporter:string|null}>} MerchantEdits */
-/** @typedef {{day: string, counters: Counters, pending: Record<string, Reservation>, confirmed: Counters, keys: Record<string, KeyRecord>, fieldHistory?: Record<string,FieldHistory>, merchantIntel?: Record<string,{expiresAt:number, ports:MerchantEdits}>}} LedgerEntry */
+/** @typedef {{day: string, counters: Counters, pending: Record<string, Reservation>, confirmed: Counters, keys: Record<string, KeyRecord>, pirateRuns?: Record<string,PirateRun>, fieldHistory?: Record<string,FieldHistory>, merchantIntel?: Record<string,{expiresAt:number, ports:MerchantEdits}>}} LedgerEntry */
 /** @typedef {{version: number, accounts: Record<string, LedgerEntry>}} LedgerStore */
 /**
  * @typedef {object} UsageLedger
- * @property {() => {day: string, counters: Counters, uncertain: number, pendingPaidGold?: true}} snapshot
+ * @property {(pirateWorld?: string) => {day: string, counters: Counters, uncertain: number, pendingPaidGold?: true, pirateRun?: PirateRun}} snapshot
+ * @property {(update: PirateRunUpdate) => number} savePirateRun
  * @property {() => Counters} confirmedCounters
  * @property {(uniqueKey: string) => boolean} hasKey
  * @property {() => Record<string, KeyRecord>} keyRecords
@@ -28,12 +32,13 @@ import { atomicJson, readJson, withFileLock } from './json-store.mjs';
  * @property {() => Counters} pendingCounters
  * @property {(uniqueKey: string, confirmed: boolean, details?: Record<string, unknown>) => void} resolveKey
  * @property {(uniqueKey: string, expected: KeyRecord) => boolean} retireUnknownKey
+ * @property {(uniqueKey: string, expected: KeyRecord, details: Record<string, unknown>) => boolean} expirePirateDispatch
  * @property {(uniqueKey: string, expected: KeyRecord, dailyLimit?: boolean) => boolean} failGuildAidGift
- * @property {(counters: Counters, limits?: Counters, minimums?: Counters, options?: {uniqueKey?: string | null, details?: Record<string, unknown> | null, paidGold?: PaidGoldBaseline}) => LedgerTicket} reserve
+ * @property {(counters: Counters, limits?: Counters, minimums?: Counters, options?: {uniqueKey?: string | null, details?: Record<string, unknown> | null, paidGold?: PaidGoldBaseline, pirateRun?: PirateRunUpdate}) => LedgerTicket} reserve
  * @property {(ticket: LedgerTicket) => boolean} markPaidGoldReward
  * @property {(info: {paidTimes?: number, resetTime?: number} | null | undefined, account?: string | null) => boolean} reconcilePaidGold
  * @property {(uniqueKey: string, details: Record<string, unknown>, expected?: KeyRecord) => boolean} updateKeyDetails
- * @property {(uniqueKey: string) => void} releaseCompletedKey
+ * @property {(uniqueKey: string, expected?: KeyRecord) => void} releaseCompletedKey
  * @property {(records: Record<string, KeyRecord>) => {released: number, archived: string[]}} archiveManualForge
  * @property {(ticket: LedgerTicket | null | undefined) => void} confirm
  * @property {(ticket: {id: string, day?: string} | null | undefined) => void} cancel
@@ -81,6 +86,12 @@ export function accountKey(accountId) {
 }
 
 export function beijingDay(now = Date.now()) { return new Date(now + 8 * 3600_000).toISOString().slice(0, 10); }
+
+/** @param {LedgerEntry} entry @param {PirateRunUpdate} update */
+function checkPirateRevision(entry, {world, day, revision}) {
+  if (!/^[1-9]\d*$/.test(world) || entry.day !== day || (entry.pirateRuns?.[world]?.revision ?? 0) !== revision)
+    throw new Error('海盗首杀进度已变化，等待下轮重新核对');
+}
 
 /** @param {Record<string, unknown>} state */
 export function guildAidGiftLimitKey(state) {
@@ -142,10 +153,22 @@ export function createUsageLedger(accountId, { file = usageFile(), now = Date.no
     return { store, entry };
   };
   return {
-    snapshot() {
+    snapshot(pirateWorld) {
       const entry = read();
       return { day: entry.day, counters: { ...entry.counters }, uncertain: Object.keys(entry.pending).length,
+        ...(pirateWorld && entry.pirateRuns?.[pirateWorld] ? { pirateRun: copy(entry.pirateRuns[pirateWorld]) } : {}),
         ...(hasPendingPaidGold(entry) ? { pendingPaidGold: /** @type {const} */ (true) } : {}) };
+    },
+    savePirateRun(update) {
+      return withFileLock(file, () => {
+        const {store, entry} = forUpdate();
+        checkPirateRevision(entry, update);
+        const runs = entry.pirateRuns ??= {};
+        const revision = update.revision + 1;
+        runs[update.world] = {...update.progress, revision};
+        atomicJson(file, store);
+        return revision;
+      });
     },
     confirmedCounters() { return { ...read().confirmed }; },
     hasKey(uniqueKey) { return Object.hasOwn(read().keys, uniqueKey); },
@@ -209,6 +232,20 @@ export function createUsageLedger(accountId, { file = usageFile(), now = Date.no
         atomicJson(file, store);
       });
     },
+    expirePirateDispatch(uniqueKey, expected, details) {
+      return withFileLock(file, () => {
+        const { store, entry } = forUpdate();
+        const record = entry.keys[uniqueKey];
+        if (!record || record.expired || !isDeepStrictEqual(record, expected) ||
+            details.kind !== 'pirateFirst' || details.outcome !== 'timedOut' || details.active !== false) return false;
+        record.details = details;
+        record.expired = true;
+        // 保留预留时记下的用量及已确认消费，归队后的新库存无需再扣这笔未决汽油。
+        delete entry.pending[record.id];
+        atomicJson(file, store);
+        return true;
+      });
+    },
     retireUnknownKey(uniqueKey, expected) {
       return withFileLock(file, () => {
         const { store, entry } = forUpdate();
@@ -249,7 +286,7 @@ export function createUsageLedger(accountId, { file = usageFile(), now = Date.no
         return true;
       });
     },
-    reserve(counters, limits = {}, minimums = {}, { uniqueKey = null, details = null, paidGold } = {}) {
+    reserve(counters, limits = {}, minimums = {}, { uniqueKey = null, details = null, paidGold, pirateRun } = {}) {
       return withFileLock(file, () => {
         const { store, entry } = forUpdate();
         if (uniqueKey !== null) {
@@ -277,10 +314,20 @@ export function createUsageLedger(accountId, { file = usageFile(), now = Date.no
           if (limits[name] != null && used + amount > limits[name]) throw new Error(`达到今日上限：${({ diamonds: '钻石', residentOrders: '居民订单', cargoLoads: '贸易港装货', museumGuides: '探险指南', goldPaidTimes: '付费点金次数', treasureDispatches: '巨轮出征次数' })[name] ?? name}`);
         }
         const id = crypto.randomUUID();
+        if (pirateRun) {
+          checkPirateRevision(entry, pirateRun);
+          if (!uniqueKey || !pirateRun.progress.active || pirateRun.progress.active.key !== uniqueKey)
+            throw new Error('海盗首杀进度缺少对应派遣');
+        }
         for (const [name, amount] of Object.entries(counters)) entry.counters[name] = Math.max(Number(entry.counters[name] ?? 0), Number(minimums[name] ?? 0)) + amount;
         entry.pending[id] = { at: now(), day: entry.day, counters: copy(counters), ...(uniqueKey ? { uniqueKey } : {}),
           ...(goldReservation ? { paidGold: goldReservation } : {}) };
         if (uniqueKey) entry.keys[uniqueKey] = { id, confirmed: false, ...(details ? { details: copy(details) } : {}) };
+        if (pirateRun) {
+          const runs = entry.pirateRuns ??= {};
+          entry.pending[id].pirateRollback = {world: pirateRun.world, previous: runs[pirateRun.world]};
+          runs[pirateRun.world] = {...pirateRun.progress, active: {...pirateRun.progress.active, id}, revision: pirateRun.revision + 1};
+        }
         atomicJson(file, store);
         return { id, day: entry.day };
       });
@@ -325,12 +372,23 @@ export function createUsageLedger(accountId, { file = usageFile(), now = Date.no
         return true;
       });
     },
-    releaseCompletedKey(uniqueKey) {
+    releaseCompletedKey(uniqueKey, expected) {
       return withFileLock(file, () => {
         const { store, entry } = forUpdate();
         const record = Object.hasOwn(entry.keys, uniqueKey) ? entry.keys[uniqueKey] : null;
         if (!record) return;
-        if (!record.confirmed || Object.hasOwn(entry.pending, record.id)) throw new Error('待确认任务不可释放');
+        if (expected && !isDeepStrictEqual(record, expected)) throw new Error('派遣记录已变化，请重新检查');
+        const timedOut = record.expired && record.details?.kind === 'pirateFirst' && record.details.outcome === 'timedOut';
+        if ((!record.confirmed && !timedOut) || Object.hasOwn(entry.pending, record.id)) throw new Error('待确认任务不可释放');
+        // 手动挑战也能重用战败目标；保留尚未由自动推进计入的那次战果。
+        if (record.details?.kind === 'pirateFirst' && record.details.outcome === 'lost') {
+          const run = entry.pirateRuns?.[String(record.details.world)];
+          if (run?.active?.id === record.id && run.active.result !== 'lost') {
+            run.active.result = 'lost';
+            run.active.failureLimit = record.details.failureLimit;
+            run.revision++;
+          }
+        }
         delete entry.keys[uniqueKey];
         atomicJson(file, store);
       });
@@ -413,7 +471,12 @@ export function createUsageLedger(accountId, { file = usageFile(), now = Date.no
           return;
         }
         if ((entry.pending[ticket.id].day ?? ticket.day) === entry.day) for (const [name, amount] of Object.entries(entry.pending[ticket.id].counters)) entry.counters[name] = Math.max(0, Number(entry.counters[name] ?? 0) - amount);
-        const uniqueKey = entry.pending[ticket.id].uniqueKey;
+        const {uniqueKey, pirateRollback} = entry.pending[ticket.id];
+        if (pirateRollback && entry.pirateRuns?.[pirateRollback.world]?.active?.id === ticket.id) {
+          if (pirateRollback.previous) {
+            entry.pirateRuns[pirateRollback.world] = {...pirateRollback.previous, revision: entry.pirateRuns[pirateRollback.world].revision + 1};
+          } else delete entry.pirateRuns[pirateRollback.world];
+        }
         if (uniqueKey && entry.keys[uniqueKey]?.id === ticket.id) delete entry.keys[uniqueKey];
         delete entry.pending[ticket.id];
         atomicJson(file, store);

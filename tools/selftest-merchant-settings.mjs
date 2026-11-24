@@ -16,7 +16,7 @@ const defaults = {
   quoteMaxAgeSeconds: 300, estimateDiscountPercent: 0, refreshWaitSeconds: 120, liquidationMinutes: 120,
   maxLossPercent: 0, minExpectedProfit: 1, autoSpeedUp: false, keepPointers: 0,
   speedUpMode: 'deadline', guardLastPointer: false, speedUpMaxPerLeg: 4, monitorSeconds: 60,
-  refreshWindowMinutes: 8, dailyPointerLimit: 28, autoBuyPointers: false, pointerDailyDiamondLimit: 0,
+  refreshWindowMinutes: 8, dailyPointerLimit: 28, periodPointerLimit: -1, autoBuyPointers: false, pointerDailyDiamondLimit: 0,
   profitLimit: 0, firstDepartureMode: 'smart', firstDepartureTime: '10:00', firstDepartureWaitMinutes: 29,
   autoUpgrade: false
 };
@@ -155,7 +155,7 @@ test('海商王活动配置完整接线，并说明估算、默认不亏卖和�
   assert.match(byKey.get('merchant.autoShareIntel').help, /已有共享直接跳过/);
   assert.match(byKey.get('merchant.autoShareIntel').help, /失败不阻塞买卖/);
   assert.equal(byKey.has('merchant.speedUpMinProfit'), false);
-  assert.deepEqual(byKey.get('merchant.speedUpMode').options.map(([mode]) => mode), ['deadline', 'refresh', 'arrival', 'race', 'full']);
+  assert.deepEqual(byKey.get('merchant.speedUpMode').options.map(([mode]) => mode), ['deadline', 'refresh', 'arrival', 'race', 'full', 'goal', 'eventFree']);
   const when = byKey.get('merchant.keepPointers').when;
   assert.equal(when(defaultSettings()), false);
   const enabled = defaultSettings();

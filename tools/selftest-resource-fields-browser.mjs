@@ -240,6 +240,7 @@ try {
     await closeDialog();
     await openManager(page, '公会科技点');
     assert.deepEqual(await candidateRows.evaluateAll(rows => rows.map(row => row.dataset.candidateField)), ['204']);
+    assert.equal(await replaceTarget(204).count(), 0, '没有同类旧田时只能直接占领');
     const factoryPlot = candidateRows.first().locator('td').first();
     assert.equal(await factoryPlot.innerText(), '堡垒F2\nLv.5 工厂');
     for (const line of await factoryPlot.locator('strong, small').all()) {
@@ -260,8 +261,16 @@ try {
     const beforeSelection = requests.length;
     await replaceTarget(203).click();
     assert.equal(await targets.isVisible(), false);
-    assert.equal(await selectOld(101).isVisible(), true, '跨资源旧田可选');
-    assert.equal(await selectOld(102).isVisible(), true);
+    assert.deepEqual(await ownedGrids(), [102], '换入种子只列出已占种子田');
+    assert.match(await dialog.locator('#resource-fields-owned-hint').innerText(), /换入绿洲（种子）/);
+    const fitsActionCell = await selectOld(102).evaluate(button => {
+      const cell = button.closest('td'), style = getComputedStyle(cell);
+      const bounds = cell.getBoundingClientRect(), rect = button.getBoundingClientRect();
+      return style.textOverflow === 'clip' && rect.left >= bounds.left + parseFloat(style.paddingLeft) - 1
+        && rect.right <= bounds.right - parseFloat(style.paddingRight) + 1;
+    });
+    assert(fitsActionCell, name + ' 选为旧田按钮完整落在操作列内，右侧不显示省略号');
+    await page.evaluate(() => openResourceFieldAction(203, 101));
     await dialog.screenshot({ path: path.join(output, 'choose-old-' + name + '.png') });
     await page.locator('#resource-fields-action-back').click();
     assert.equal(await targets.isVisible(), true);
@@ -274,8 +283,8 @@ try {
     await dialog.evaluate(node => node.scrollTop = 0); await dialog.screenshot({ path: path.join(output, 'replacement-' + name + '.png') });
     await page.locator('#resource-fields-action-back').click(); assert.equal(await selectOld(102).isVisible(), true);
     await closeDialog();
-    await openManager(page); await replace(201, 102);
-    assert.match(await dialog.textContent(), /跨资源替换/); assert.doesNotMatch(await dialog.textContent(), /预计 汽油 \+/);
+    await openManager(page); await replace(201, 101);
+    assert.match(await dialog.textContent(), /预计 汽油 \+0\/小时/);
     actionResult = { ...confirmedDispatch, released: true, partial: false, reason: '旧田已放弃，新田派遣已确认，最终占领以资源田列表为准' };
     await page.locator('#resource-fields-action-confirm').click(); await waitIdle(page);
     assert.equal(await page.locator('#resource-fields-feedback').isVisible(), false, '替换派遣成功后不显示提示');
@@ -302,13 +311,13 @@ try {
       await page.locator('#resource-fields-action-back').click();
       assert.equal(await ownedTable.locator('[data-owned-field]').count(), 7);
       await page.keyboard.press('Escape');
-      await openManager(page);
-      await replaceTarget(201).click();
+      await openManager(page, '种子');
+      await replaceTarget(203).click();
       assert.equal(await selectOld(115).isVisible(), true);
-      assert.deepEqual(await ownedGrids(), [110, 111, 113, 101, 102, 114, 115, 112], '所有已占类型的旧田统一按等级降序展示');
+      assert.deepEqual(await ownedGrids(), [110, 111, 113, 102, 114, 115, 112], '同类旧田按等级降序展示');
       assert.doesNotMatch(await ownedTable.innerText(), /海上油井|海上农庄|格\s*\d+/);
       await selectOld(115).click(); await waitReady(page);
-      assert.deepEqual(requests.filter(row => row.url.includes('/preview')).at(-1).body, { gridIdx: 201, replaceGridIdx: 115 });
+      assert.deepEqual(requests.filter(row => row.url.includes('/preview')).at(-1).body, { gridIdx: 203, replaceGridIdx: 115 });
       await page.keyboard.press('Escape');
       payload = fixture; await page.locator('#resource-fields-refresh').click(); await waitIdle(page);
       await openManager(page); await page.locator('[data-resource-field="201"]').click(); await waitReady(page);
@@ -341,6 +350,10 @@ try {
       payload = { ...fixture, maxNum: 2, remaining: 0, pending: [] };
       await page.locator('#resource-fields-refresh').click(); await waitIdle(page);
       assert.deepEqual(await types.locator('[data-resource-manage]').allTextContents(), ['换田', '换田', '换田']);
+      await openManager(page, '公会科技点');
+      assert.equal(await candidateRows.count(), 0);
+      assert.match(await targets.innerText(), /暂无可替换的同类旧田（科技点）/);
+      await closeDialog();
       await openManager(page);
       assert.equal(await page.locator('[data-resource-field]').count(), 0, '满额时可换田但不可新增');
       assert.equal(await dialog.locator('[data-resource-replace]').count(), 8);
@@ -394,6 +407,9 @@ try {
       await page.locator('#resource-fields-refresh').click(); await waitIdle(page); assert.match(await page.locator('#resource-fields-capacity').textContent(), /类型待同步 1/); payload = fixture;
       payload = { ...fixture, owned: fixture.owned.map(row => row.grid === 101 ? { ...row, replacementReason: '已有替换任务待确认' } : row) };
       await page.locator('#resource-fields-refresh').click(); await waitIdle(page); await openManager(page);
+      assert.equal(await replaceTarget(201).count(), 0, '唯一同类旧田已锁定时隐藏替换入口');
+      await closeDialog(); payload = { ...payload, owned: [...payload.owned, { ...fixture.owned[0], grid: 106 }], count: 3, maxNum: 5 };
+      await page.locator('#resource-fields-refresh').click(); await waitIdle(page); await openManager(page);
       await replaceTarget(201).click();
       assert.equal(await selectOld(101).isDisabled(), true, '已有任务的地块不能选为替换旧田');
       await closeDialog(); payload = fixture;
@@ -432,6 +448,6 @@ try {
     }
     await page.close(); console.log('通过：' + name + ' 资源田卡片、分类明细全量展示、单行放弃、逐行换田、全量候选与确认');
   }
-  assert.deepEqual(errors, []); console.log('通过：仅显示可占领候选、按资源过滤及等级降序、汽油和待确认消耗、满额替换恢复/取消、收益比较、跨资源替换、逐行绑定、无舰队放弃、自动占领提醒、未知产量、部分失败、未知放弃、重复确认、过期、账号隔离与停刷；未连接游戏');
+  assert.deepEqual(errors, []); console.log('通过：仅显示可占领候选、按资源过滤及等级降序、汽油和待确认消耗、满额替换恢复/取消、收益比较、同类换田、操作列完整展示、逐行绑定、无舰队放弃、自动占领提醒、未知产量、部分失败、未知放弃、重复确认、过期、账号隔离与停刷；未连接游戏');
   console.log('截图：' + output);
 } finally { await browser?.close(); server.closeAllConnections(); await new Promise(resolve => server.close(resolve)); }

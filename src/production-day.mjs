@@ -4,6 +4,8 @@ import { insertionRecipeReady } from './production-eligibility.mjs';
 import { createProductionTiming, nextFactoryLane, commitFactoryLane } from './production-timing.mjs';
 import { resourceReserve } from './automation-policy.mjs';
 import { consumeInsertionUnit, insertionYieldsToProduction, nextInsertionIndex } from './factory-insertion-queue.mjs';
+import { factoryProductionSnapshot } from './spend-evidence.mjs';
+import { observedSchedule, scheduleMaterials, unscheduledBatches } from './production-sequence.mjs';
 
 const hour = 3600;
 const day = 24 * hour;
@@ -16,20 +18,34 @@ function factoryScheduleRecorder(startAt, name) {
   const hours = Array.from({ length: 24 }, () => ({ intervals: [], products: new Map() }));
   const runs = [];
   const lastByLane = new Map();
-  function record(id, start, end, status, index) {
+  const visibleJobs = new Map();
+  function record(id, start, end, status, index, job) {
     const lo = Math.max(start, startAt),
       hi = Math.min(end, startAt + day);
     if (!(hi > lo)) return;
     const existing = status !== 'planned';
-    const last = lastByLane.get(index);
-    if (last && last.id === id && last.status === status && last.to === lo) {
-      last.to = hi;
-      last.quantity++;
-      last.continues = end > startAt + day;
+    const previous = lastByLane.get(index);
+    let run = previous?.run;
+    const supplyFor = job?.supplyFor && name(job.supplyFor);
+    if (run && run.id === id && run.status === status && run.to === lo && !!run.inserted === !!job?.pinned
+      && run.supplyFor === supplyFor && (previous.sourceIndex === job?.sourceIndex || previous.sourceIndex + 1 === job?.sourceIndex)) {
+      run.to = hi;
+      run.quantity++;
+      run.continues = end > startAt + day;
     } else {
-      const run = { id, name: name(id), from: lo, to: hi, quantity: 1, lane: index + 1, status, existing, continues: end > startAt + day };
+      run = { id, name: name(id), from: lo, to: hi, quantity: 1, lane: index + 1, status, existing, continues: end > startAt + day };
+      if (job?.pinned) run.inserted = true;
+      if (supplyFor) run.supplyFor = supplyFor;
       runs.push(run);
-      lastByLane.set(index, run);
+    }
+    lastByLane.set(index, {run, sourceIndex:job?.sourceIndex});
+    if (job) {
+      const visible = visibleJobs.get(job.sourceIndex) ?? { quantity:0, last:run, start:lo, finish:end };
+      visible.quantity++;
+      visible.start = Math.min(visible.start, lo);
+      visible.finish = Math.max(visible.finish, end);
+      if (run.from > visible.last.from || (run.from === visible.last.from && run.lane >= visible.last.lane)) visible.last = run;
+      visibleJobs.set(job.sourceIndex, visible);
     }
     for (let i = Math.floor((lo - startAt) / hour); i < Math.ceil((hi - startAt) / hour); i++) {
       const bucket = hours[i],
@@ -65,7 +81,35 @@ function factoryScheduleRecorder(startAt, name) {
       return { busySeconds, products: [...products.values()].sort((a, b) => a.from - b.from) };
     });
   }
-  return { record, summarize, runs };
+  return { record, summarize, runs, visibleJobs };
+}
+
+// The journal owns quantities and order. Simulation only supplies timing estimates.
+function savedSchedule(jobs, runs, visibleJobs, startAt, name) {
+  const pendingInsertions = [], unscheduled = unscheduledBatches(jobs, visibleJobs, name);
+  const remainder = new Map(unscheduled.map(batch => [batch.planIndex, batch]));
+  const afterRun = new Map(runs.map((run, index) => [run, index + 1]));
+  let beforeRun = runs.findLastIndex(run => run.existing) + 1;
+  for (const [index, job] of jobs.entries()) {
+    const visible = visibleJobs.get(index);
+    while (beforeRun < runs.length && runs[beforeRun].from < job.at) beforeRun++;
+    if (job.pinned) {
+      const batch = { id:job.id, name:name(job.id), quantity:job.quantity ?? 1, planIndex:index, beforeRun };
+      if (job.supplyFor) batch.supplyFor = name(job.supplyFor);
+      if (job.supplyTarget) batch.supplyTarget = job.supplyTarget;
+      if (job.at > startAt) batch.at = job.at;
+      if (visible) {
+        batch.estimatedStart = visible.start;
+        if (visible.quantity === batch.quantity) batch.estimatedFinish = visible.finish;
+      }
+      pendingInsertions.push(batch);
+    }
+    // Pinned jobs are displayed together at their journal positions even when
+    // the dispatcher temporarily lets ordinary work pass while awaiting stock.
+    if (visible && !job.pinned) beforeRun = Math.max(beforeRun, afterRun.get(visible.last));
+    if (!job.pinned && remainder.has(index)) remainder.get(index).beforeRun = beforeRun;
+  }
+  return {pendingInsertions, unscheduled};
 }
 
 /** Read-only event simulation using the same per-account dispatcher as the loop. */
@@ -74,7 +118,7 @@ export async function forecastProductionDay(
   config,
   settings,
   orders,
-  { pendingMaterials = [], checkCurrent = () => {}, insertions = {}, anchors } = {},
+  { pendingMaterials = [], checkCurrent = () => {}, insertions: savedInsertions = {}, anchors } = {},
 ) {
   const startAt = snapshot.serverNow,
     endAt = startAt + day;
@@ -87,25 +131,47 @@ export async function forecastProductionDay(
     factories: [],
     completions: [],
   };
-  if (!(startAt > 0) || !(snapshot.stockCap > 0) || !(snapshot.inventoryKnown ?? snapshot.complete)) {
-    return { ...result, unavailable: '需要服务器时间、当前库存和仓容才能推演。' };
-  }
-  if (
-    snapshot.missingReads.some(r =>
-      ['OnWaterRequest', 'productionRecipes', 'BuildingProduceParamCfg'].includes(r.request),
-    )
-  ) {
-    return { ...result, unavailable: '建筑、配方或生产位数据尚未读全，请刷新后再推演。' };
-  }
-  const name = id => config?.materialName?.(id) ?? id;
+  const name = id => {
+    const label = config?.materialName?.(id);
+    return label && label !== '未知材料' ? label : id;
+  };
   const stock = new Map(snapshot.inventory.map(r => [r.id, r.num]));
   const held = new Map(),
     pending = new Set(pendingMaterials.flatMap(r => [...(r.scope ?? [])]));
-  const have = id => (pending.has(id) ? 0 : Math.max(0, (stock.get(id) ?? 0) - (held.get(id) ?? 0)));
+  const nativeFactoryStock = id => pending.has(id) ? 0 : stock.get(id) ?? 0;
+  const have = id => Math.max(0, nativeFactoryStock(id) - (held.get(id) ?? 0));
+  const byId = new Map(snapshot.buildings.map(b => [b.id, b]));
+  // The latest game snapshot can confirm a send before the dispatch journal's next check.
+  // Remove that unit from this read-only projection so it only appears in the game queue.
+  const insertions = { ...savedInsertions };
+  for (const [id, entry] of Object.entries(insertions)) {
+    const flight = entry.flight;
+    if (!flight) continue;
+    const building = byId.get(id), farm = building?.farm;
+    if (!building) continue;
+    const observed = flight.kind === 'plant' && farm?.productId === flight.id && farm.plantTime > 0 && farm.ripeTime >= farm.plantTime
+      || flight.kind === 'start' && factoryProductionSnapshot({building:[building]}, id)?.totals.get(flight.id) > flight.baseline;
+    const index = flight.jobIndex ?? 0;
+    if (!observed || entry.jobs[index]?.id !== flight.id) continue;
+    const jobs = entry.jobs.slice();
+    consumeInsertionUnit(jobs, index);
+    insertions[id] = { ...entry, jobs };
+  }
+  result.materials = scheduleMaterials(snapshot, config, settings, insertions, pending);
+  if (!(startAt > 0) || !(snapshot.stockCap > 0) || !(snapshot.inventoryKnown ?? snapshot.complete)) {
+    result.unavailable = '需要服务器时间、当前库存和仓容才能推演。';
+  } else if (snapshot.missingReads.some(r => ['OnWaterRequest','productionRecipes','BuildingProduceParamCfg'].includes(r.request))) {
+    result.unavailable = '建筑、配方或生产位数据尚未读全，请刷新后再推演。';
+  }
+  if (result.unavailable) {
+    const known = observedSchedule(snapshot,config,insertions,name);
+    result.factories = known.filter(f => !f.crop);
+    result.farms = known.filter(f => f.crop);
+    return result;
+  }
   const timingAt = now => createProductionTiming({ config, ...snapshot.timing, serverNow: now });
   const timing = timingAt(startAt);
   const collectionBlocked = new Set(settings.factory.blockedCollectionTypes);
-  const byId = new Map(snapshot.buildings.map(b => [b.id, b]));
   const factories = snapshot.factories.map(f => {
     const original = byId.get(f.id) ?? {};
     const building = {
@@ -134,6 +200,14 @@ export async function forecastProductionDay(
         chart.record(j.job.productId, j.start, j.finish, status, j.index);
         return { id: j.job.productId, idx: j.job.idx, start: j.start, end: j.finish };
       });
+    const timedIndices = new Set(jobs.filter(j => j.start < endAt).map(j => j.idx));
+    const untimedQueue = [];
+    for (const job of f.queue) {
+      if (timedIndices.has(job.index)) continue;
+      const last = untimedQueue.at(-1);
+      if (last?.id === job.productId) last.quantity++;
+      else untimedQueue.push({ id:job.productId, name:name(job.productId), quantity:1 });
+    }
     const unknown = queue.missing.length
       ? '队列时间待确认'
       : f.nativeAutoActive
@@ -145,6 +219,7 @@ export async function forecastProductionDay(
       finishes: queue.finishes,
       chart,
       trace,
+      untimedQueue,
       manual: entry?.jobs.map((job, sourceIndex) => ({ ...job, sourceIndex })) ?? [],
       insertNote: entry?.note,
       editing: !!(entry?.remove?.length || entry?.flight || entry?.stagedSupplies),
@@ -158,17 +233,22 @@ export async function forecastProductionDay(
   });
   const cropRows = rows(config, 'FarmlandPlantCfg'),
     crops = new Map(cropRows.map(c => [c.id, c]));
-  const farms = snapshot.farms.map(f => ({
-    ...byId.get(f.id),
-    buildingId: f.id,
-    type: '农田',
-    level: f.level,
-    product: [],
-    farm: f.productId ? { productId: f.productId, ripeTime: f.ripeTime } : null,
-    yield: f.num ?? crops.get(f.productId)?.produceNum ?? 0,
-    manual: insertions[f.id]?.jobs.map(job => ({...job})) ?? [],
-    confirmingPlant: !!insertions[f.id]?.flight,
-  }));
+  const farms = snapshot.farms.map(f => {
+    const chart = factoryScheduleRecorder(startAt, name);
+    if (f.productId && f.ripeTime > startAt) chart.record(f.productId, startAt, f.ripeTime, 'running', 0);
+    return {
+      ...byId.get(f.id),
+      buildingId: f.id,
+      type: '农田',
+      level: f.level,
+      product: [],
+      farm: f.productId ? { productId: f.productId, ripeTime: f.ripeTime } : null,
+      yield: f.num ?? crops.get(f.productId)?.produceNum ?? 0,
+      chart,
+      manual: insertions[f.id]?.jobs.map((job, sourceIndex) => ({...job,sourceIndex})) ?? [],
+      confirmingPlant: !!insertions[f.id]?.flight,
+    };
+  });
   const recipes = new Map(rows(config, 'BuildingProduceCfg').map(r => [r.itemId, r]));
   const remainder = orders.filter(o => !o.skipped);
   const active = new Map(factories.filter(f => !f.unknown && !f.disabled).map(f => [f.building.buildingId, f]));
@@ -202,6 +282,7 @@ export async function forecastProductionDay(
     productionTiming: snapshot.timing,
     stock,
     have,
+    nativeFactoryStock,
     warehouseCount: id => stock.get(id) ?? 0,
     stockCap: snapshot.stockCap,
     factorySlots: slots,
@@ -318,13 +399,15 @@ export async function forecastProductionDay(
     let manualAdvanced = false;
     for (const step of productionSteps()) {
       if (step.request !== 'StartFactoryProduceRequest' && step.request !== 'FarmPlantRequest') continue;
-      if (step.costs.some(r => have(r.id) - (resourceReserve(settings, r.id) || 0) < r.num)) continue;
+      const inputs = step.factoryStrategy === 'nativeSimulation' ? nativeFactoryStock : have;
+      if (step.costs.some(r => inputs(r.id) - (resourceReserve(settings, r.id) || 0) < r.num)) continue;
       if (step.request === 'FarmPlantRequest') {
         const { buildingId, productId } = step.body.args[0],
           plot = farms.find(b => b.buildingId === buildingId),
           crop = crops.get(productId);
         const seconds = liveTiming.farm(crop).seconds;
         if (!plot || plot.farm || !(seconds > 0) || snapshot.autoFarming) continue;
+        plot.chart.record(productId, now, now + seconds, 'planned', 0, step.job);
         plot.farm = { productId, ripeTime: now + seconds };
         plot.yield = crop.produceNum;
         if (step.job) consumeInsertionUnit(plot.manual, 0);
@@ -344,7 +427,7 @@ export async function forecastProductionDay(
         commitFactoryLane(finishes, lane);
         f.finishes = finishes;
         f.jobs.push({ id: productId, idx: ++f.serial, start: lane.start, end: lane.finish });
-        f.chart.record(productId, lane.start, lane.finish, 'planned', lane.index);
+        f.chart.record(productId, lane.start, lane.finish, 'planned', lane.index, step.job);
         f.trace?.units.push({ id: productId, lane: lane.index + 1, from: lane.start, to: lane.finish,
           at: now, status: 'planned', manual: !!step.job, sourceIndex:step.job?.sourceIndex });
         if (step.job) consumeInsertionUnit(f.manual, step.index);
@@ -369,9 +452,9 @@ export async function forecastProductionDay(
     if ([...waitHistory.values()].some(t => now - t < 3 * revisit)) events.push(now + revisit);
     now = Math.min(endAt, ...events.filter(t => t > now));
   }
-  const upstream = new Map();
-  for (const [id, entry] of Object.entries(insertions)) {
-    for (const job of entry.jobs) {
+  const upstream = new Map(), staged = new Map();
+  function addSupplies(id, jobs) {
+    for (const job of jobs) {
       if (!job.supplyTarget || job.supplyTarget === id) continue;
       const batches = upstream.get(job.supplyTarget) ?? [];
       batches.push({factory:displayBuilding(config, byId.get(id) ?? {buildingId:id}), name:name(job.id),
@@ -379,20 +462,46 @@ export async function forecastProductionDay(
       upstream.set(job.supplyTarget,batches);
     }
   }
-  result.factories = factories.map(f => ({
-    id: f.building.buildingId,
-    name: displayBuilding(config, f.building),
-    unknown: f.unknown,
-    disabled: f.disabled,
-    editing: f.editing,
-    insertNote: f.insertNote || (f.editing ? '正在核对游戏队列，完成后可继续插单' : undefined),
-    upstream: upstream.get(f.building.buildingId) ?? [],
-    pendingInsertions: (insertions[f.building.buildingId]?.jobs ?? [])
-      .filter(job => job.pinned)
-      .map(job => ({ id: job.id, name: name(job.id), quantity: job.quantity ?? 1,
-        ...(job.supplyFor ? {supplyFor:name(job.supplyFor)} : {}) })),
-    hours: f.chart.summarize(),
-    runs: f.chart.runs.sort((a, b) => a.from - b.from || a.lane - b.lane),
-  }));
+  for (const [id, entry] of Object.entries(insertions)) {
+    addSupplies(id, entry.jobs);
+    for (const [facility, jobs] of Object.entries(entry.stagedSupplies ?? {})) {
+      addSupplies(facility, jobs);
+      staged.set(facility, [...(staged.get(facility) ?? []), ...jobs]);
+    }
+  }
+  result.unsynced = observedSchedule(snapshot,config,insertions,name,true);
+  function facilitySchedule(id, chart) {
+    const runs = chart.runs.sort((a,b) => a.from - b.from || a.lane - b.lane);
+    const saved = savedSchedule(insertions[id]?.jobs ?? [], runs, chart.visibleJobs, startAt, name);
+    if (!staged.has(id)) return {runs, ...saved};
+    const front = savedSchedule(staged.get(id), runs, new Map(), startAt, name);
+    return {runs, pendingInsertions:[...front.pendingInsertions.map(job => ({...job, staged:true})), ...saved.pendingInsertions],
+      unscheduled:[...front.unscheduled, ...saved.unscheduled]};
+  }
+  result.farms = farms.map((plot, index) => {
+    const f = snapshot.farms[index];
+    return { id:f.id, name:displayBuilding(config,plot), crop:true, ...facilitySchedule(f.id,plot.chart),
+      ready:f.productId && f.ripeTime > 0 && f.ripeTime <= startAt ? [{id:f.productId,name:name(f.productId),quantity:1}] : [],
+      untimedQueue:f.productId && !f.ripeTime ? [{id:f.productId,name:name(f.productId),quantity:1}] : [],
+      unknown:snapshot.autoFarming ? '游戏原生种植，后续作物待定' : null };
+  });
+  result.factories = factories.map((f,index) => {
+    const id = f.building.buildingId;
+    return {
+      id: f.building.buildingId,
+      name: displayBuilding(config, f.building),
+      unknown: f.unknown,
+      disabled: f.disabled,
+      editing: f.editing || staged.has(id),
+      insertNote: f.insertNote || (f.editing ? '正在核对游戏队列，完成后可继续插单' : undefined),
+      upstream: upstream.get(f.building.buildingId) ?? [],
+      untimedQueue: f.untimedQueue,
+      ready: snapshot.factories[index].finished.filter(j => j.num > 0).map(j => ({id:j.id,name:name(j.id),quantity:j.num})),
+      elapsed: (byId.get(id)?.factory?.factoryQ ?? []).filter(j => j.finishTime > 0 && j.finishTime <= startAt)
+        .map(j => ({id:j.productId,name:name(j.productId),quantity:1})),
+      ...facilitySchedule(id,f.chart),
+      hours: f.chart.summarize(),
+    };
+  });
   return result;
 }

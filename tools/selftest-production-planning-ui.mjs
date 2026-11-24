@@ -207,7 +207,7 @@ await test('插单立即弹窗，读取期间可关闭，旧请求不会覆盖�
   env.respond = () => first.promise;
   const older = insert.onclick();
   assert(dialog.open && ok.disabled);
-  assert.match(body.textContent, /正在核对库存/);
+  assert.match(body.textContent, /正在读取配方/);
   dialog.open = false;
   env.respond = () => second.promise;
   const newer = insert.onclick();
@@ -228,7 +228,7 @@ await test('插单立即弹窗，读取期间可关闭，旧请求不会覆盖�
   first.reject(new Error('已关闭弹窗的请求失败'));
   await older;
   assert(!ok.disabled);
-  assert.doesNotMatch(body.textContent, /失败|正在核对库存/);
+  assert.doesNotMatch(body.textContent, /失败|正在读取配方/);
   env.respond = async () => { throw new Error('库存未同步'); };
   await insert.onclick();
   assert.match(body.textContent, /库存未同步/);
@@ -259,9 +259,10 @@ await test('满仓插单后刷新可见剩余 340 件，撤回后清除记录', 
     await env.node('m-ok').onclick();
     const day = env.node('production-day-result');
     if (warning) {
-      assert.doesNotMatch(day.textContent, /待入队插单|淡水/);
+      assert.doesNotMatch(day.textContent, /已加入计划|淡水/);
     } else {
-      assert.match(day.textContent, /待入队插单.*淡水 ×340.*淡水已满仓/);
+      assert.match(day.querySelector('.production-batches').children[0].textContent, /淡水×340开工时间待定已加入计划/);
+      assert.match(day.textContent, /淡水已满仓/);
       assert.match(day.querySelector('.plan-day-totals').textContent, /运行 0秒.*空闲 24小时/);
     }
     assert.equal(env.node('hint').textContent, '');
@@ -320,13 +321,116 @@ await test('独立卡片只显示一家工厂，切换与刷新保留选中项�
   assert.equal(box.textContent, '');
 });
 
-await test('高级配方显示上游工厂补料件数及农田播种茬数', () => {
-  const env = fixture(), startAt = 1767225600;
-  const factory = {id:'food', name:'食品厂', runs:[], upstream:[
-    {factory:'海水提取厂-1', name:'淡水', quantity:7}, {factory:'农田-1', name:'小麦', quantity:2, crop:true},
+await test('成品和逐级补料都在排产表内，保留厂内位置和整批数量', () => {
+  const env = fixture(), startAt = 1000;
+  const job = (id, quantity, extra = {}) => ({id,name:id,quantity,...extra});
+  const kit = job('急救包',1,{inserted:true,planIndex:0,beforeRun:0});
+  const cloth = job('布匹',5,{inserted:true,supplyFor:'急救包',planIndex:1,beforeRun:1});
+  const wheat = job('小麦',2,{inserted:true,supplyFor:'急救包',planIndex:0,beforeRun:0});
+  const mill = {id:'mill', name:'材料厂', runs:[
+    job('木板',1,{from:1000,to:1100,status:'running',existing:true}),
+    job('布匹',2,{from:1100,to:1200,status:'planned',inserted:true,supplyFor:'急救包'}),
+    job('粗纸',1,{from:1200,to:1300,status:'planned'}),
+  ], pendingInsertions:[cloth], unscheduled:[
+    job('待派木料',1,{planIndex:0,beforeRun:1}), {...cloth,quantity:3}, job('待派细绳',1,{planIndex:2,beforeRun:1}),
   ]};
-  env.render({forecast:{startAt,endAt:startAt+86400,completions:[],factories:[factory]}});
-  assert.match(env.node('production-day-result').textContent, /上游补料插单.*海水提取厂-1 · 淡水 ×7.*农田-1 · 小麦 ×2 茬/);
+  const day = {startAt,endAt:startAt+86400,completions:[],materials:{
+    急救包:{inputs:[{id:'布匹'},{id:'酒精'}]}, 酒精:{inputs:[{id:'小麦'}]},
+  }, factories:[{id:'drug',name:'成品厂',runs:[],pendingInsertions:[kit],unscheduled:[kit]}, mill],
+    farms:[{id:'plot',name:'农田',crop:true,runs:[],pendingInsertions:[wheat],unscheduled:[wheat]}]};
+  env.render({forecast:day});
+  const picker = env.node('production-day-factory'), panel = env.node('production-day-result');
+  const grid = () => panel.querySelector('.production-schedule-table');
+  const rows = () => panel.querySelector('.production-batches').children;
+  const names = rs => rs.map(r => r.querySelector('.production-batch-name').textContent);
+  assert.deepEqual(picker.children.map(n => n.textContent),['成品厂','材料厂','农田','全部设施']);
+  assert.equal(picker.value,'drug');
+  assert.deepEqual(names(rows()),['急救包×1','空闲']);
+  picker.selectedIndex = 1; picker.onchange();
+  env.render({forecast:day});
+  assert.equal(picker.value,'mill');
+  picker.selectedIndex = 2; picker.onchange();
+  assert.deepEqual(names(rows()),['小麦×2 茬']);
+  picker.selectedIndex = 3; picker.onchange();
+  env.render({forecast:day});
+  assert.equal(picker.value,'');
+  assert.equal(grid().tagName,'table');
+  assert.equal(grid().children[0].tagName,'thead');
+  assert(rows().every(r => r.tagName === 'tr'));
+  assert(!descendants(panel).some(n => ['ol','details'].includes(n.tagName)));
+  assert.deepEqual(names(rows().filter(r => r.textContent.includes('材料厂'))),
+    ['木板×1','待派木料×1','布匹×5','待派细绳×1','粗纸×1']);
+  assert.equal(rows().filter(r => r.textContent.includes('布匹')).length,1);
+  assert.match(rows().find(r => r.textContent.includes('布匹')).textContent,/开工时间待定.*为急救包补料/);
+  assert(rows().some(r => r.textContent.includes('小麦×2 茬')));
+  assert.equal(names(rows()).at(-1),'急救包×1');
+  rows().find(r => r.textContent.includes('材料厂')).querySelector('.production-sequence-facility').onclick();
+  assert.equal(picker.value,'mill');
+  assert.deepEqual(names(rows()).slice(0,5),['木板×1','待派木料×1','布匹×5','待派细绳×1','粗纸×1']);
+  picker.selectedIndex = 0; picker.onchange();
+  assert.deepEqual(names(rows()),['急救包×1','空闲']);
+  env.render({forecast:{...day,factories:[]}});
+  assert.equal(picker.value,'plot');
+  assert.deepEqual(names(rows()),['小麦×2 茬']);
+});
+
+await test('快照不全时按原始队列混排普通批次和插单，跨厂原料先于成品', () => {
+  const env = fixture();
+  const job = (id,extra = {}) => ({id,name:id,quantity:1,...extra});
+  const kit = job('急救包',{inserted:true}), cloth = job('布匹',{inserted:true,supplyFor:'急救包'});
+  env.render({forecast:{unavailable:'库存未同步',startAt:0,materials:{},completions:[],factories:[
+    {id:'drug',name:'成品厂',runs:[],pendingInsertions:[kit],unscheduled:[kit]},
+    {id:'mill',name:'材料厂',runs:[],untimedQueue:[job('木板')],pendingInsertions:[cloth],unscheduled:[job('甲'),cloth,job('乙')]},
+  ]}});
+  const panel = env.node('production-day-result');
+  assert.match(panel.textContent,/库存未同步/);
+  const picker = env.node('production-day-factory');
+  assert.equal(picker.value,'drug');
+  assert.deepEqual(panel.querySelector('.production-batches').children.map(r => r.querySelector('.production-batch-name').textContent),['急救包×1']);
+  picker.selectedIndex = 2; picker.onchange();
+  assert.deepEqual(panel.querySelector('.production-batches').children.map(r => r.querySelector('.production-batch-name').textContent),
+    ['木板×1','甲×1','布匹×1','急救包×1','乙×1']);
+});
+
+await test('多级补料都待料时，按依赖排在成品之前，同时保留成品之后的原任务', () => {
+  const env = fixture();
+  const pending = (id, extra) => ({id,name:id,quantity:1,planIndex:0,beforeRun:0,...extra});
+  const supply = {supplyFor:'成品',supplyTarget:'a'};
+  const later = {id:'其它订单',name:'其它订单',quantity:1,from:1100,to:1200,status:'planned'};
+  env.render({forecast:{startAt:1000,endAt:87400,completions:[],materials:{
+    成品:{inputs:[{id:'半成品'}]}, 半成品:{inputs:[{id:'基础材料'}]},
+  }, factories:[
+    {id:'a',name:'甲厂',runs:[later],pendingInsertions:[pending('成品')]},
+    {id:'b',name:'乙厂',runs:[],pendingInsertions:[pending('半成品',supply)]},
+    {id:'c',name:'丙厂',runs:[],pendingInsertions:[pending('基础材料',supply)]},
+  ]}});
+  const picker = env.node('production-day-factory');
+  picker.selectedIndex = 3; picker.onchange();
+  const rows = env.node('production-day-result').querySelector('.production-batches').children;
+  assert.deepEqual(rows.map(r => r.querySelector('.production-batch-name').textContent),['基础材料×1','半成品×1','成品×1','其它订单×1']);
+  assert(rows.slice(0,3).every(r => r.querySelector('.production-batch-time').textContent === '开工时间待定'));
+});
+
+await test('缺料成品和上游均整批入计划，只有部分可估时也只列一行', () => {
+  const env = fixture(), startAt = 1000;
+  const food = {id:'food',name:'成品厂',runs:[],pendingInsertions:[{id:'急救包',name:'急救包',quantity:1,planIndex:0}]};
+  const mill = {id:'mill',name:'材料厂-1',runs:[
+    {name:'木板',from:1000,to:1100,status:'running',quantity:1},
+    {name:'布匹',from:1100,to:1300,status:'planned',quantity:2,inserted:true,supplyFor:'急救包'},
+    {name:'布匹',from:1300,to:1400,status:'planned',quantity:1},
+  ],pendingInsertions:[{id:'布匹',name:'布匹',quantity:5,estimatedStart:1100,beforeRun:1,planIndex:0,supplyFor:'急救包'}]};
+  env.render({forecast:{startAt,endAt:startAt+86400,completions:[],insertKey:'plan',factories:[food,mill]}});
+  const list = () => env.node('production-day-result').querySelector('.production-batches').children;
+  assert.match(list()[0].textContent, /急救包×1开工时间待定已加入计划/);
+  assert(list()[0].querySelector('.production-batch-insert'));
+  const picker = env.node('production-day-factory');
+  picker.selectedIndex = 1;
+  picker.onchange();
+  const [running, planned, ordinary] = list();
+  assert.match(running.textContent, /木板×1.*生产中/);
+  assert.match(planned.textContent, /布匹×5.*开始.*为急救包补料 · 已加入计划/);
+  assert.doesNotMatch(ordinary.textContent, /补料/);
+  assert.equal(list().filter(row => row.textContent.includes('为急救包补料')).length,1);
 });
 
 await test('并行的一秒产物完整列出，长任务只列一次，翻页覆盖全部批次', () => {

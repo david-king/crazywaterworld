@@ -85,11 +85,12 @@ export function createProductionEligibility(config, { buildings, settings, stock
     return '所需工厂等级未达到或已禁用';
   };
 
-  return (requirements, { reserve = false } = {}) => {
+  return (requirements, { reserve = false, acceptBatches } = {}) => {
     const requested = amounts(requirements);
     if (!stateKnown || !requested) return [];
     const remaining = new Map(available);
     const blockers = new Map();
+    const factoryBatches = acceptBatches && new Map();
     let complete = true;
     const consume = (id, num, visiting) => {
       const held = remaining.get(id) ?? 0;
@@ -119,13 +120,14 @@ export function createProductionEligibility(config, { buildings, settings, stock
       const batches = Math.ceil(missing / output);
       const produced = batches * output;
       if (!quantity(produced) || costs.some(cost => !quantity(cost.num * batches))) { complete = false; return; }
+      if (factory && factoryBatches) factoryBatches.set(factory, (factoryBatches.get(factory) ?? 0) + batches);
       const next = new Set(visiting).add(id);
       for (const cost of costs) consume(cost.id, cost.num * batches, next);
       remaining.set(id, (remaining.get(id) ?? 0) + produced - missing);
     };
     for (const item of requested) consume(item.id, item.num, new Set());
     if (!complete) return [];
-    if (!blockers.size && reserve) available = remaining;
+    if (!blockers.size && reserve && (!acceptBatches || acceptBatches(factoryBatches))) available = remaining;
     return [...blockers.values()];
   };
 }

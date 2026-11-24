@@ -15,6 +15,7 @@
 //   WeeklyActivityRewardCfg 120/240/360/480/600。
 
 import { displayMaterial } from './config.mjs';
+import { afkClaimTime } from './afk-rewards.mjs';
 import { linkOperationResult } from './operation-log.mjs';
 import { normalize } from './worlds.mjs';
 import { FREE_DAILY_PACK_ID } from './actions.mjs';
@@ -222,12 +223,14 @@ export const DAILY_DRIVERS = {
     id: 1004,
     title: '领取挂机收益',
     probes: [['AfkInfoRequest', {}]],
-    evaluate({ task, probe, now }) {
+    evaluate({ task, probe, now, afkClaimHours }) {
       if (task.progress >= task.targetProgress) return { status: 'done' };
       const afk = probe('AfkInfoRequest')?.afkInfo;
       if (!afk) return { status: 'blocked', reason: '没有挂机信息' };
-      if (!(afk.afkFinishTime > 0 && afk.afkFinishTime <= now)) {
-        return { status: 'waiting', reason: `本段挂机还有 ${Math.ceil(afk.afkFinishTime - now)} 秒` };
+      const claimTime = afkClaimTime(afk, afkClaimHours);
+      if (claimTime == null) return { status: 'waiting', reason: '等待挂机计时' };
+      if (claimTime > now) {
+        return { status: 'waiting', reason: `距本段挂机领取还有 ${Math.ceil(claimTime - now)} 秒` };
       }
       return { status: 'ready', actions: [{ request: 'DrawAfkRewardRequest', body: {}, response: 'DrawAfkRewardResponse', cost: '无', note: '领取挂机本段收益' }] };
     },
@@ -354,7 +357,7 @@ function lowPower(power) {
 }
 
 // 只读调研：跑一遍前置请求，给出每个日常任务能不能做、要发什么。
-export async function surveyDailies(client, protocol, { config = null, player = null, timeout = 8000, includeTask = () => true, probeGift = true, idle = false, allowRecruitTickets = true, settings = null, ledger = null } = {}) {
+export async function surveyDailies(client, protocol, { config = null, player = null, timeout = 8000, includeTask = () => true, probeGift = true, idle = false, allowRecruitTickets = true, settings = null, afkClaimHours = settings?.afk?.claimIntervalHours, ledger = null } = {}) {
   const daily = await client.request('DailyTaskInfoRequest', {}, 'DailyTaskInfoResponse', timeout);
   const tasks = (daily.dailyTask ?? []).filter(task => includeTask(task.id)).map((task) => describeDailyTask(task, config));
   const needsAction = task => task.id === 1005 && idle && settings?.arena
@@ -418,7 +421,7 @@ export async function surveyDailies(client, protocol, { config = null, player = 
     }
     let verdict;
     try {
-      verdict = normalize(driver.evaluate({ task, probe, items, ruby, now, config, player, settings, client, ledger, allowRecruitTickets, dailyResetTime: daily.dailyResetTime }));
+      verdict = normalize(driver.evaluate({ task, probe, items, ruby, now, config, player, settings, afkClaimHours, client, ledger, allowRecruitTickets, dailyResetTime: daily.dailyResetTime }));
     } catch (error) {
       verdict = { status: 'error', reason: error.message };
     }

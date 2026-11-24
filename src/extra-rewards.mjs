@@ -2,11 +2,11 @@ import { displayMaterial } from './config.mjs';
 import { toNumber } from './client.mjs';
 import { normalize } from './worlds.mjs';
 
-export const extraRewardKeys = ['worldOnline', 'tradeTasks', 'guildTitleReward', 'guildAidCollect', 'heroRecruitRewards',
+export const extraRewardKeys = ['tradeTasks', 'guildTitleReward', 'guildAidCollect', 'heroRecruitRewards',
   'seasonTasks', 'crossRankDaily', 'worldBossDamage', 'passStageRewards'];
 
 const labels = {
-  worldOnline: '世界在线奖励', tradeTasks: '海商王联盟任务', guildTitleReward: '联盟职级奖励', guildAidCollect: '联盟互助收取',
+  tradeTasks: '海商王联盟任务', guildTitleReward: '联盟职级奖励', guildAidCollect: '联盟互助收取',
   heroRecruitRewards: '英雄累计招募奖励', seasonTasks: '赛季任务奖励', crossRankDaily: '跨服排行每日奖励',
   worldBossDamage: '世界 Boss 伤害奖励', passStageRewards: '闯关基金奖励',
 };
@@ -21,7 +21,6 @@ const MAX_PASS_CLAIMS = 10;
 const rows = (config, table) => config?.tables?.[table]?.data ?? [];
 const clock = client => Math.floor((Date.now() + (client.serverClockOffsetMs || 0)) / 1000);
 const startOfDay = time => Math.floor((time + BEIJING) / DAY) * DAY - BEIJING;
-const configAssets = (config, list = []) => list.map(([id, num]) => displayMaterial(config, id) + ' ×' + num).join('、');
 const replyAssets = (config, reward) => (normalize(reward)?.asset ?? []).map(item => displayMaterial(config, item.id) + ' ×' + item.num).join('、');
 const withReward = (label, text) => (text ? label + ' · 获得 ' + text : label);
 const moduleLevel = (config, id) => rows(config, 'ModuleOpenCfg').find(row => row.moduleId === id)?.playerLevel;
@@ -52,57 +51,12 @@ export function worldOpenDays(player, now) {
   return Math.floor((now - startOfDay(opened)) / DAY) + 1;
 }
 
-// 规则与客户端 WarPop、WarOnlineReward 相同：当天 20:00 开放，已在 21:00 后领过则今天结束，
-// 每档按上次领取时间计时。
-export function worldOnlineState(config, player, counter, now) {
-  const tiers = [...rows(config, 'WorldOnlineRwdCfg')].sort((a, b) => a.stage - b.stage);
-  const stage = counter ? toNumber(counter.num) : 0;
-  const last = counter ? toNumber(counter.updateTime) : 0;
+export function worldOnlineWindow(config, player, now) {
   const today = startOfDay(now);
-  const tomorrow = today + DAY + WAR_START_HOUR * 3600 + 1;
-  const next = tiers.find(tier => tier.stage === stage + 1);
-  if (!tiers.length) return { status: 'waiting', at: now + 3600, reason: '缺少世界在线奖励配置' };
-  if (!next) return { status: 'waiting', at: tomorrow, reason: '今日 ' + stage + ' 档已全部领完' };
-  const warDay = gameplayOpenDay(config, player, '国战');
   const days = worldOpenDays(player, now);
-  let opensAt = today + WAR_START_HOUR * 3600;
-  if (days !== null && days < warDay) opensAt = today + (warDay - days) * DAY + WAR_START_HOUR * 3600;
-  if (now <= opensAt) return { status: 'waiting', at: opensAt + 1, reason: '每天 20:00 开放（北京时间）' };
-  if (last >= today + WAR_END_HOUR * 3600) return { status: 'waiting', at: tomorrow, reason: '今天的开放时段已结束' };
-  if (now < last + next.seconds) return { status: 'waiting', at: last + next.seconds, reason: '第 ' + next.stage + ' 档计时中' };
-  return { status: 'ready', next, stage };
-}
-
-async function readOnlineCounter(client) {
-  const reply = await client.request('CounterInfoRequest', {}, 'CounterInfoResponse');
-  return reply?.counters?.find(row => row.type === 'DAILY_WORLD_ONLINE_RWD') ?? null;
-}
-
-async function claimWorldOnline(ctx) {
-  const { client, config, player, scheduler, report } = ctx;
-  const required = moduleLevel(config, '世界');
-  if (!(player?.level >= required)) {
-    scheduler?.defer('worldOnline', scheduler.now() + 3600);
-    return report(skip('worldOnline', '世界玩法 ' + required + ' 级开放'));
-  }
-  const before = worldOnlineState(config, player, await readOnlineCounter(client), clock(client));
-  if (before.status !== 'ready') {
-    scheduler?.defer('worldOnline', before.at);
-    return report(skip('worldOnline', before.reason));
-  }
-  let reply = null;
-  try {
-    reply = await client.request('GotWorldOnlineRwdRequest', {}, REWARD_REPLIES);
-  } catch (error) {
-    // 回包类型未在协议中声明，超时不代表失败，以重新读取的计数为准。
-    if (error.prompt || !client.connected) throw error;
-  }
-  const counter = await readOnlineCounter(client);
-  if (!(counter && toNumber(counter.num) > before.stage)) throw new Error('服务端未确认第 ' + before.next.stage + ' 档已领取');
-  const after = worldOnlineState(config, player, counter, clock(client));
-  scheduler?.defer('worldOnline', after.at);
-  report({ key: 'worldOnline', label: withReward('世界在线奖励 · 第 ' + before.next.stage + ' 档',
-    replyAssets(config, reply?.reward) || configAssets(config, before.next.reward)), ok: true });
+  const waitDays = days === null ? 0 : Math.max(0, gameplayOpenDay(config, player, '国战') - days);
+  const openDay = today + waitDays * DAY;
+  return { startTime: openDay + WAR_START_HOUR * 3600, endTime: openDay + WAR_END_HOUR * 3600, resetTime: today + DAY };
 }
 
 async function claimTradeTasks({ client, config, player, scheduler, report, allowed }) {
@@ -255,7 +209,6 @@ const skip = (key, reason) => ({ key, label: labels[key], skipped: true, reason 
 export async function claimExtraRewards(client, config, player, allowed, report, scheduler = null, active = allowed) {
   const ctx = { client, config, player, scheduler, report, allowed: active };
   const steps = [
-    ['worldOnline', claimWorldOnline],
     ['tradeTasks', claimTradeTasks],
     ['guildTitleReward', claimGuildTitle],
     ['guildAidCollect', collectGuildAid],
@@ -268,7 +221,7 @@ export async function claimExtraRewards(client, config, player, allowed, report,
   const run = async (key, work) => {
     try { await work(); }
     catch (error) {
-      scheduler?.defer(key, scheduler.now() + (key === 'worldOnline' ? 300 : 1800));
+      scheduler?.defer(key, scheduler.now() + 1800);
       report({ key, label: labels[key], ok: false, error: error.message });
     }
   };

@@ -192,7 +192,9 @@ try {
         [key,{state:'waiting',text,checkedAt:Math.floor(Date.now()/1000)}]));
       const rows = (await api('loop')).data.controls;
       const row = key => rows.find(control=>control.key===key);
-      for(const [key,source] of Object.entries({'schedule.worldOnline':'worldOnlineRewards','schedule.guildWelfare':'guildWelfare',
+      assert.equal(row('schedule.worldOnline'), undefined);
+      assert.equal(rows.filter(control => control.key === 'schedule.worldOnlineRewards').length, 1);
+      for(const [key,source] of Object.entries({'schedule.worldOnlineRewards':'worldOnlineRewards','schedule.guildWelfare':'guildWelfare',
         'schedule.tradeTasks':'merchantRewards','guildFort.enabled':'guildFort','guildShip.enabled':'guildShip','heroRaid.enabled':'heroRaid'}))
         assert(row(key).condition.includes(recorded[source]),key);
       assert(row('schedule.weekCharge').blockedBy.includes('累计充值'));

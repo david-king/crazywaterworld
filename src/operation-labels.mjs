@@ -39,6 +39,7 @@ export const operationLabels = {
   '/api/lineups/apply': '应用推荐阵容',
   '/api/lineup-presets': '读取保存的阵容',
   '/api/lineup-editor': '读取布阵信息',
+  '/api/settings/stationed-pets': '读取值守海兽',
   '/api/lineup-presets/save': '保存阵容预设',
   '/api/lineup-presets/capture': '保存当前游戏阵容',
   '/api/lineup-presets/delete': '删除阵容预设',

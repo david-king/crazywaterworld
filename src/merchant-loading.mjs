@@ -6,16 +6,21 @@ export function fullMerchantLoad(offers, capacity, cash, maxTypes, specialtyId, 
     .sort((a, b) => Number(b.goodsId === specialtyId) - Number(a.goodsId === specialtyId) ||
       a.price / a.basePrice - b.price / b.basePrice || b.unitProfit / b.capacity - a.unitProfit / a.capacity ||
       b.quality - a.quality || a.goodsId - b.goodsId);
-  if (!items.length || (needsSpecialty && items[0].goodsId !== specialtyId) ||
+  if (needsSpecialty && items[0]?.goodsId !== specialtyId) return empty;
+  const purchases = fillRankedMerchantLoad(items, capacity, cash, maxTypes, needsSpecialty)
+    .map(item => ({ ...item, gain: Math.ceil(item.profitBasis * item.count / 10000) }));
+  if (!purchases.length) return empty;
+  return { purchases, profit: purchases.reduce((s, p) => s + p.gain, 0),
+    cost: purchases.reduce((s, p) => s + p.price * p.count, 0), capacity, approximate: false };
+}
+
+// 调用方决定货物的优先顺序。装舱只使用可购数量、舱位、资金和采购轮数。
+export function fillRankedMerchantLoad(items, capacity, cash, maxTypes, needsFirst = false) {
+  if (!capacity || !cash || maxTypes < 1 || !items.length ||
     items.reduce((sum, o) => sum + o.capacity * o.count, 0) < capacity ||
-    items.every(o => o.price * capacity > cash * o.capacity)) return empty;
+    items.every(o => o.price * capacity > cash * o.capacity)) return [];
   const counts = new Array(items.length).fill(0);
-  const result = () => {
-    const purchases = items.flatMap((item, i) => counts[i] ? [{ ...item, count: counts[i],
-      gain: Math.ceil(item.profitBasis * counts[i] / 10000) }] : []);
-    return { purchases, profit: purchases.reduce((s, p) => s + p.gain, 0),
-      cost: purchases.reduce((s, p) => s + p.price * p.count, 0), capacity, approximate: false };
-  };
+  const result = () => items.flatMap((item, i) => counts[i] ? [{ ...item, count: counts[i] }] : []);
   let space = capacity, coins = cash, types = maxTypes;
   for (let i = 0; i < items.length && types && space; i++) {
     const o = items[i], n = Math.min(o.count, Math.floor(space / o.capacity), Math.floor(coins / o.price));
@@ -47,7 +52,7 @@ export function fullMerchantLoad(offers, capacity, cash, maxTypes, specialtyId, 
     if (!space) return true;
     if (!types || i === items.length || costs[i][space] > coins) return false;
     if (types === 1) {
-      const end = i === 0 && needsSpecialty ? 1 : items.length;
+      const end = i === 0 && needsFirst ? 1 : items.length;
       for (let j = i; j < end; j++) {
         const o = items[j], n = space / o.capacity;
         if (Number.isInteger(n) && n <= o.count && n * o.price <= coins) { counts[j] = n; return true; }
@@ -56,7 +61,7 @@ export function fullMerchantLoad(offers, capacity, cash, maxTypes, specialtyId, 
     }
     const key = i + ':' + space + ':' + types;
     if ((failed.get(key) ?? -1) >= coins) return false;
-    const o = items[i], minimum = i === 0 && needsSpecialty ? 1 : 0;
+    const o = items[i], minimum = i === 0 && needsFirst ? 1 : 0;
     const max = Math.min(o.count, Math.floor(space / o.capacity), Math.floor(coins / o.price));
     for (let n = max; n >= minimum; n--) {
       const rest = space - n * o.capacity, balance = coins - n * o.price;
@@ -68,5 +73,5 @@ export function fullMerchantLoad(offers, capacity, cash, maxTypes, specialtyId, 
     failed.set(key, coins);
     return false;
   };
-  return fill(0, capacity, cash, maxTypes) ? result() : empty;
+  return fill(0, capacity, cash, maxTypes) ? result() : [];
 }

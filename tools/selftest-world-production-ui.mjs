@@ -1,7 +1,7 @@
 import { newStateFunction } from './fixtures/console-state.mjs';
 import assert from 'node:assert/strict';
 import { PAGE } from '../src/page.mjs';
-import { inventoryStockRows } from '../src/world.mjs';
+import { inventoryStockRows, manualResidentOrderDecision } from '../src/world.mjs';
 
 const script = [...PAGE.matchAll(/<script\b[^>]*>([\s\S]*?)<\/script>/g)]
   .map(match => match[1]).find(value => value.includes('function renderWorld('));
@@ -121,6 +121,7 @@ function fixture() {
     let orderClockOffset = 0;
     ${script.slice(script.indexOf('function orderState('), start)}
     env.orderState = orderState;
+    env.residentOrderButton = residentOrderButton;
     ${script.slice(durationStart, durationEnd)}
     ${script.slice(start, end)}
     ${script.slice(end, refreshEnd)}
@@ -187,6 +188,7 @@ test('海面依次展示工厂、农田、空位，活动工坊并入工厂表�
 test('居民订单按账号每日上限显示交付进度，空订单列表也能查看', () => {
   const env = fixture();
   const box = env.node('resident-order-progress');
+  const count = () => box.children[0].children[1].textContent.replace(/\s+/g, ' ').trim();
   for (const [orderNum, target] of [
     [0, 40],
     [37, 40],
@@ -197,21 +199,53 @@ test('居民订单按账号每日上限显示交付进度，空订单列表也�
     const percent = target ? Math.min(100, orderNum / target * 100) : 0;
     env.render(worldData(env, { orderProgress: {
       orderNum, rewardedNum: 0, total: target, cap: target, baseMax: target, bonus: 0,
-      totalKind: 'dailyCap', percent,
+      reqNums: [], percent,
     } }));
     assert(box.textContent.includes('今日居民订单'));
-    assert(box.textContent.includes(orderNum + '/' + target));
-    assert(box.textContent.includes('今日上限 ' + target));
+    assert.equal(count(), orderNum + ' / 账号上限 ' + target);
     const track = descendants(box).find(node => node.className === 'resident-order-progress-track');
     assert(track, '进度卡应包含进度条');
     assert.equal(track.children[0].style.width, percent + '%');
   }
-  env.render(worldData(env, { orderProgress: {
-    orderNum: 3, rewardedNum: 0, total: 6, cap: 40, baseMax: 40, bonus: 0,
-    totalKind: 'rewardTier', percent: 50,
-  } }));
-  assert(box.textContent.includes('3/6'));
-  assert(box.textContent.includes('当前奖励档位'));
+  const progress = { orderNum: 39, rewardedNum: 30, tier: 40, reqNums: [6, 12, 18, 24, 30, 40, 45],
+    total: 40, cap: 40, configuredCap: null, baseMax: 40, bonus: 0, percent: 97.5 };
+  const render = changes => env.render(worldData(env, { orderProgress: { ...progress, ...changes } }));
+  const nodes = () => descendants(box).filter(node => node.tagName === 'li');
+  render({});
+  assert.equal(count(), '39 / 账号上限 40');
+  assert.deepEqual(nodes().map(node => node.textContent), ['6', '12', '18', '24', '30', '40', '45']);
+  assert.equal(nodes().at(-1).attributes['aria-label'], '45 单档 · 超出账号上限');
+  assert.match(box.textContent, /下一档 40 单/);
+  assert.deepEqual(nodes().map(node => node.dataset.status), [...Array(5).fill('已领取'), '下一档', '超出账号上限']);
+  const scale = () => descendants(box).find(node => node.className === 'resident-order-scale');
+  const [track, milestones] = scale().children;
+  assert.equal(milestones.tagName, 'ol', '奖励节点与交付进度共用一条刻度');
+  const at = count => (count / 45 * 100) + '%';
+  assert.equal(track.children[0].style.width, at(39));
+  assert.equal(track.style['--goal'], at(40));
+  assert.deepEqual(milestones.children.map(node => node.style.left), progress.reqNums.map(at));
+  render({ total: 90, cap: 90 });
+  assert.equal(nodes().at(-1).style.left, '50%', '上限高于所有奖励档时保留后续交付空间');
+  render({ orderNum: 40, cap: 45, total: 40, configuredCap: 40, percent: 100 });
+  assert.equal(count(), '40 / 设定上限 40');
+  assert(box.textContent.includes('账号上限 45 单'));
+  assert.match(box.textContent, /40 单档可领取/);
+  assert.deepEqual(nodes().slice(-2).map(node => node.dataset.status), ['可领取', '超挂机上限']);
+  render({ orderNum: 45, cap: 45, total: 40, configuredCap: 40, percent: 100 });
+  assert.deepEqual(nodes().slice(-2).map(node => node.dataset.status), ['可领取', '已达标']);
+  render({ configuredCap: 45, cap: 40, total: 40 });
+  assert.equal(count(), '39 / 设定上限 45');
+  assert(box.textContent.includes('账号上限 40 单'));
+  assert.equal(nodes().at(-1).dataset.status, '超出账号上限');
+  render({ tier: 45, orderNum: 40, rewardedNum: 40 });
+  assert.equal(count(), '40 / 账号上限 40');
+  render({ configuredCap: 45, cap: null, total: 45 });
+  assert.equal(count(), '39 / 设定上限 45');
+  assert(box.textContent.includes('账号上限待同步'));
+  render({ total: null, cap: null });
+  assert.match(box.textContent, /已交 39 单/);
+  assert.match(box.textContent, /账号上限待同步/);
+  assert.equal(nodes().at(-1).dataset.status, '未达标');
   env.refreshUnavailable('account');
   assert.equal(box.textContent, '');
 });
@@ -237,6 +271,58 @@ test('居民订单以材料标签和逐项需缺留数量展示缺口，关闭�
   const unknown = { decision: { status: 'unknown', reason: '库存读取失败' } };
   assert.match(env.orderState(unknown, { autoDeliverOrders: true }).textContent, /等待核对.*库存读取失败/);
 });
+
+test('居民订单逐单显示经验和金币，区分零奖励、未知奖励和换单中的旧奖励', () => {
+  const env = fixture();
+  const orders = [
+    { rewardExp: 120, rewardGold: 480 },
+    { isSpecial: true, rewardExp: 0, rewardGold: null },
+    { rewardGold: 0 },
+    { decision: { status: 'refreshing' }, rewardExp: 120, rewardGold: 480 },
+    { refreshPending: true, rewardExp: 120, rewardGold: 480 },
+  ].map((order, index) => ({ index, requirements: [{ id: '烤鱼', num: 1 }], ...order }));
+  env.render(worldData(env, { orders }));
+  const { headers, rows } = env.tables[0];
+  const labels = headers.map(header => header.label ?? header);
+  assert.deepEqual(rows.map(row => ['经验', '金币'].map(label => cellText(row[labels.indexOf(label)]))), [
+    ['120', '480'], ['0', '—'], ['—', '0'], ['—', '—'], ['—', '—'],
+  ]);
+});
+
+{
+  const env = fixture();
+  const order = { index: 2, orderKey: 'slot-two', workerName: '蛙人',
+    requirements: [{ id: '淡水', num: 15 }], missing: [{ id: '淡水', num: 15 }],
+    decision: { status: 'filtered', reason: '金币奖励未达到 3000' } };
+  order.manualDecision = manualResidentOrderDecision({ stockKnown: true, stock: new Map() }, order, { materialName: id => id });
+  assert.match(env.orderState(order, { autoDeliverOrders: true }).textContent, /已过滤.*金币奖励未达到 3000/);
+  const button = env.residentOrderButton(order);
+  env.node('world-orders').appendChild(button);
+  assert.equal(button.textContent, '强制提交');
+  assert.equal(button.disabled, false);
+  assert.match(button.title, /还缺淡水 ×15/);
+  const requests = [];
+  env.call = async (path, options) => {
+    if (path === '/api/world') return worldData(env);
+    assert.equal(path, '/api/world/order/submit');
+    const payload = JSON.parse(options.body);
+    requests.push(payload);
+    return payload.acceptStockWarning ? { ok: true } : { stockWarning: '仓库库存不足，还缺淡水 ×4、酒精 ×2。' };
+  };
+  const checking = button.onclick();
+  button.onclick();
+  await checking;
+  assert.equal(env.dialog.title, '蛙人的订单 #2');
+  assert.match(env.dialog.body[0].textContent, /淡水 ×4、酒精 ×2/);
+  assert.equal(env.dialog.label, '继续提交');
+  const expected = { confirm: true, index: 2, orderKey: 'slot-two', acceptStockWarning: false };
+  assert.deepEqual(requests, [expected]);
+  assert.equal(button.disabled, false, '关闭提示后可重新核对同一张订单');
+  await env.dialog.confirm();
+  assert.deepEqual(requests, [expected, { ...expected, acceptStockWarning: true }]);
+  passed++;
+  console.log('通过：挂机过滤的订单仍可点击，玩家确认库存缺口后才强制提交');
+}
 
 function detailRow(button) {
   const row = button.parent;

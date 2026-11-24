@@ -43,7 +43,7 @@ function updateResourceFieldsControls() {
   if (showOwned) {
     const count = resourceFieldsData.count == null ? '数量未同步' : '共 ' + hint.dataset.count + ' 块';
     const target = resourceFieldsAction.target;
-    hint.textContent = target ? '换入 ' + (target.cityName || '城市未同步') + ' · 格 ' + target.grid + ' · Lv.' + (target.level ?? '?')
+    hint.textContent = target ? '换入' + resourceFieldBuildings.get(target.resourceId) + '（' + resourceFieldName(target.resourceId) + '） · ' + (target.cityName || '城市未同步') + ' · 格 ' + target.grid + ' · Lv.' + (target.level ?? '?')
       : readOnlyDetails ? count + ' · 上次同步结果，请关闭并刷新后操作' : count;
   }
 }
@@ -122,12 +122,12 @@ function resourceFieldTableEmpty(root, message, columns) {
 function resourceFieldReplacementReason(field) {
   return field.replacementReason || (!field.resourceId || fieldEffectiveYield(field) === null ? '旧田产出或归属未同步' : '');
 }
-function resourceFieldCapacityReason(replacing) {
+function resourceFieldCapacityReason(replacementResource = null) {
   const data = resourceFieldsData, valid = value => Number.isSafeInteger(value) && value >= 0;
-  if (replacing) {
+  if (replacementResource !== null) {
     if (!valid(data.maxNum) || !valid(data.count) || !Array.isArray(data.pending)) return '资源田名额未同步';
     if (data.maxNum - data.count - data.pending.length + 1 <= 0) return '名额已被在途任务预留';
-    if (!(data.owned || []).some(field => !resourceFieldReplacementReason(field))) return '暂无可替换的旧田';
+    if (!(data.owned || []).some(field => field.resourceId === replacementResource && !resourceFieldReplacementReason(field))) return '暂无可替换的同类旧田（' + resourceFieldName(replacementResource) + '）';
   } else if (!valid(data.remaining)) return '资源田名额未同步';
   else if (data.remaining === 0) return '名额已满';
   return '';
@@ -168,10 +168,10 @@ function resourceFieldOwnedRow(field) {
 function paintOwnedResourceFieldTable() {
   const action = resourceFieldsAction, data = resourceFieldsData;
   const root = clear($('resource-fields-owned-table')), all = data.owned || [];
-  const owned = all.filter(field => !action.detailResource || field.resourceId === action.resource).sort(compareResourceFieldsByLevel);
+  const owned = all.filter(field => field.resourceId === action.resource).sort(compareResourceFieldsByLevel);
   $('resource-fields-owned-hint').dataset.count = String(owned.length);
   for (const field of owned) root.append(resourceFieldOwnedRow(field));
-  if (!owned.length) resourceFieldTableEmpty(root, data.count == null ? '已占资源田未同步' : '暂无已占' + (action.detailResource ? resourceFieldBuildings.get(action.resource) : '资源田'), 4);
+  if (!owned.length) resourceFieldTableEmpty(root, data.count == null ? '已占资源田未同步' : '暂无已占' + resourceFieldBuildings.get(action.resource), 4);
 }
 function resourceFieldCandidateRow(field, canOccupy, canReplace) {
   const row = el('tr'), plot = el('td'), actions = el('td'), controls = el('div', 'resource-fields-row-actions');
@@ -201,7 +201,7 @@ function resourceFieldCandidateRow(field, canOccupy, canReplace) {
 function paintResourceFieldCandidates() {
   const action = resourceFieldsAction, data = resourceFieldsData;
   const root = clear($('resource-fields-candidates')), common = resourceFieldDispatchReason();
-  const occupyReason = resourceFieldCapacityReason(false), replaceReason = resourceFieldCapacityReason(true);
+  const occupyReason = resourceFieldCapacityReason(), replaceReason = resourceFieldCapacityReason(action.resource);
   const reason = common || (occupyReason && replaceReason);
   const rows = reason ? [] : (data.candidates || []).filter(field => field.resourceId === action.resource && !field.reason)
     .sort(compareResourceFieldsByLevel);
@@ -234,16 +234,16 @@ function appendResourceFieldComparison(root, quote, action) {
       const difference = after - before;
       root.append(el('p', difference < 0 ? 'warn' : 'resource-fields-yield', '占领成功后预计 ' + resourceFieldName(target.resourceId) + (difference >= 0 ? ' +' : ' −') + fmt(Math.abs(difference)) + '/小时（基础产量）'));
     } else root.append(el('p', 'dim', '收益变化待同步，当前无法计算准确差额'));
-  } else if (old) root.append(el('p', 'dim', '跨资源替换会减少旧田对应产出并增加新田对应产出，两种资源不合并计算。'));
+  }
 }
 async function openResourceFieldAction(gridIdx, replaceGridIdx = null) {
   const action = resourceFieldsAction;
   if (!action || action.phase !== 'selecting' || action.detailResource || !resourceFieldsConnected() || action.account !== current || resourceFieldDispatchReason()) return;
   const replace = replaceGridIdx !== null;
-  if (resourceFieldCapacityReason(replace) || (replace && (action.target?.grid !== gridIdx || gridIdx === replaceGridIdx))) return;
+  if (resourceFieldCapacityReason(replace ? action.resource : null) || (replace && (action.target?.grid !== gridIdx || gridIdx === replaceGridIdx))) return;
   if (replace) {
     const old = (resourceFieldsData.owned || []).find(field => field.grid === replaceGridIdx);
-    if (!old || resourceFieldReplacementReason(old)) return;
+    if (!old || old.resourceId !== action.target.resourceId || resourceFieldReplacementReason(old)) return;
   }
   action.replaceGridIdx = replaceGridIdx;
   $('resource-fields-action-back').textContent = replace ? '返回选旧田' : '返回候选';

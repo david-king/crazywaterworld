@@ -3,6 +3,36 @@ import { merchantActionSeconds, merchantSettings, merchantTiming } from './merch
 
 export const MERCHANT_PROFIT_GOAL = 50_000_000;
 
+// 在一个交易窗口内跑 n 趟，分别检查最后一次采购和最后一笔卖货的截止时间。
+// 每程四根针也要留出发船后执行加速的时间。
+export function merchantSprintTrips(window, ready, purchaseCutoff, travel, step, batches, per, legCap, budget, wanted) {
+  const cycle = travel + (2 * batches + 1) * step;
+  const canSave = Math.min(legCap * per, Math.max(0, travel - step));
+  const end = window.tradeEndTime - ready - 1;
+  const buy = purchaseCutoff - ready - batches * step - 1;
+  const required = n => {
+    if (!n) return 0;
+    const toClose = Math.max(0, n * cycle - end);
+    const toBuy = Math.max(0, (n - 1) * cycle - buy);
+    if (toClose > n * canSave || toBuy > (n - 1) * canSave) return Infinity;
+    // 最后一根在接近到港时只能省部分航时。
+    const fullPerLeg = Math.floor(canSave / per), partial = canSave % per;
+    const pinsFor = (seconds, full) => seconds <= full * per ? Math.ceil(seconds / per) :
+      full + Math.ceil((seconds - full * per) / partial);
+    const early = pinsFor(toBuy, fullPerLeg * (n - 1));
+    const fullUsed = Math.min(early, fullPerLeg * (n - 1));
+    const saved = fullUsed * per + (early - fullUsed) * partial;
+    return early + pinsFor(Math.max(0, toClose - saved), fullPerLeg * n - fullUsed);
+  };
+  let low = 0, high = Math.max(0, Math.min(wanted, Math.floor((end + budget * per) / cycle)));
+  while (low < high) {
+    const mid = Math.ceil((low + high) / 2);
+    if (required(mid) <= budget) low = mid;
+    else high = mid - 1;
+  }
+  return { trips: low, pins: required(low) };
+}
+
 // 后续每程至少需要采购、出航、出售各一轮。跨夜分别计数，零头不能拼成航程。
 export function merchantFreeTrips(config, event, readyAt, actionSeconds, policy, batches = 1, lastDeparture = readyAt) {
   const first = merchantTiming(config, event, readyAt);

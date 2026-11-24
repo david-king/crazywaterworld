@@ -230,6 +230,10 @@ export async function runFactoryProductionBatch(client, protocol, steps, {
         || preferences.guildShip?.enabled && preferences.guildShip.produceMissing);
       const stockOnly = step.demandDriven === false || step.demandDriven == null && preferences?.factory?.demandFirst === false && !independent;
       if (stockOnly && preferences && step.factoryStrategy !== 'nativeSimulation' && (stock.get(id) ?? 0) + projected.get(id) > preferences.factory.keepStock) throw new AutomationSkip('最新库存已达到备货水位，等待重新排产');
+      // This start must succeed before the next wire request can use the space.
+      if (step.factoryStrategy === 'nativeSimulation') for (const { id: input, num } of step.costs) {
+        projected.set(input, (projected.get(input) ?? 0) - num);
+      }
     }
     let stopped = '';
     for (const step of selected) {

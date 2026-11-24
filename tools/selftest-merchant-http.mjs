@@ -183,6 +183,9 @@ try {
     const peers = [1003, 1004].map(goodsId => ({ goodsId, price: 60,
       stock: f.config.tables.TradeGoodsCfg.data.find(g => g.goodsId === goodsId).maxCount }));
     market.goods.push(...peers);
+    const unreported = ok(await api('merchant')).plan;
+    assert.equal(unreported.purchases[0].expectedPrice, 50, '紧缺未共享时不借用同档货的溢价');
+    port.rareGoodsId = 1005;
     const before = ok(await api('merchant')).plan;
     assert.deepEqual([before.kind, before.price, before.purchases[0].expectedPrice], ['buy', 40, 60]);
     let reads = 0;
@@ -241,7 +244,13 @@ try {
     f.state.radar.radar[2].rareGoodsId = 0;
     ok(await save(change));
   });
+  const estimate = ['预期收益', '折后可售约 0，按参考价约 10,300 商会币'];
+  const forecast = async () => ok(await api('overview')).merchant.trade.voyage.facts.find(([label]) => label === '预期收益');
   await test('重复点击串行去重，一次采购有实际回读与独立成交记录', async () => {
+    const saved = ok(await api('settings'));
+    saved.settings.merchant.estimateDiscountPercent = 60;
+    ok(await api('settings', { settings: saved.settings, revision: saved.revision, baseRevision: saved.baseRevision }));
+    assert.deepEqual(await forecast(), estimate);
     const results = await Promise.all([api('merchant/step', { confirm: true }), api('merchant/step', { confirm: true })]);
     results.forEach(ok);
     assert.equal(f.state.writes.filter(row => row.name === 'TradeBuyRequest').length, 1);
@@ -257,6 +266,9 @@ try {
     const trade = () => api('merchant/step', { confirm: true });
     ok(await trade());
     assert.equal(f.state.writes.find(row => row.name === 'TradeMoveRequest').body.mvToCityId, 30);
+    assert.deepEqual(await forecast(), estimate);
+    const leg = ok(await api('merchant/history')).entries.find(e => e.expected?.request === 'TradeMoveRequest');
+    assert.deepEqual([leg.expected.discountedProfit, leg.expected.estimatedProfit], [0, 10300]);
     assert.match(ok(await api('overview')).merchant.lines.join(' '), /出发时生鱼片参考涨跌 \+60.00%/);
     Object.assign(f.state.trade.cargo, { cityId: 30, moveToCityId: 0, moveEndTime: 0 });
     const local = ok(await api('merchant')).plan;

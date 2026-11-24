@@ -19,24 +19,24 @@ let serial = 0;
 const results = [];
 const check = async (name, run) => { try { await run(); results.push({ name, passed: true }); console.log('通过：' + name); } catch (error) { results.push({ name, passed: false, error: error.stack }); console.error('失败：' + name + '\n' + error.stack); } };
 function onlineFixture() {
-  const now = Math.floor(Date.now() / 1000), file = path.join(directory, `usage-${serial++}.json`);
+  const now = Date.parse('2026-11-23T20:02:00+08:00') / 1000, file = path.join(directory, `usage-${serial++}.json`);
   const state = { startTime: now - 120, endTime: now + 3600, num: 0, updateTime: now - 10, fail: '', duplicate: false, reads: 0, writes: 0 };
   const player = { level: 37, worldId: '1001001', playerId: '9007199254740993' };
   const config = { tables: { ModuleOpenCfg: { data: [{ moduleId: '世界', playerLevel: 16 }] }, WorldOnlineRwdCfg: { data: [{ stage: 1, seconds: 1 }, { stage: 2, seconds: 60 }, { stage: 3, seconds: 120 }] } } };
-  const client = { connected: true, serverClockOffsetMs: 0, onRead: null,
+  const client = { connected: true, serverClockOffsetMs: now * 1000 - Date.now(), onRead: null,
     async request(name) { state.reads++; await client.onRead?.(name);
       if (state.fail === 'read') throw new Error('模拟断线');
       const value = name === 'WarDeclarationRequest' ? { declarations: [], startTime: state.startTime, endTime: state.endTime } : { counters: [ { type: 'DAILY_WORLD_ONLINE_RWD', num: state.num, updateTime: state.updateTime }, ...(state.duplicate ? [{ type: 'DAILY_WORLD_ONLINE_RWD', num: 0, updateTime: 0 }] : [])] };
       const t = protocol[name.replace(/Request$/, 'Response')]; return t.decode(t.encode(value).finish());
     },
-    async sendWatch(name) { assert.equal(name, 'GotWorldOnlineRwdRequest'); state.writes++;
+    async sendWatch(name, body, { beforeSend }) { assert.equal(name, 'GotWorldOnlineRwdRequest'); beforeSend(); state.writes++;
       if (state.fail === 'unknown') throw new Error('模拟结果未知');
       if (state.fail === 'reject') throw Object.assign(new Error('模拟明确拒绝'), { prompt: {}, request: name });
       if (state.fail !== 'stale') { state.num++; state.updateTime = Math.floor((Date.now() + client.serverClockOffsetMs) / 1000); }
     },
   };
   const ledger = createUsageLedger('online-qa', { file });
-  return { state, player, config, client, ledger, file, run: options => claimWorldOnlineReward(client, config, player, { ledger, ...options }) };
+  return { state, player, config, client, ledger, file, now, run: options => claimWorldOnlineReward(client, config, player, { ledger, ...options }) };
 }
 function trialFixture() {
   const player = { level: 37 }, state = { passed: 0, outcomes: [], calls: [], badReply: false, afterUnknown: false };
@@ -60,12 +60,12 @@ try {
   await check('在线奖励只读不领取，逐档计时并确认服务端计数', async () => {
     const f = onlineFixture(); assert.equal((await readWorldOnlineReward(f.client, f.config, f.player)).ready, true); assert.equal(f.state.writes, 0);
     assert.equal((await f.run()).ok, true); assert.equal(f.state.writes, 1); assert.equal((await f.run()).skipped, true);
-    f.client.serverClockOffsetMs = 61000; assert.equal((await f.run()).ok, true); assert.equal(f.state.writes, 2);
+    f.client.serverClockOffsetMs += 61000; assert.equal((await f.run()).ok, true); assert.equal(f.state.writes, 2);
   });
   await check('时段外、计时未满、档位已满、异常计数均不领取', async () => {
-    for (const kind of ['early','late','waiting','full','bad','duplicate']) { const f = onlineFixture(), now = Math.floor(Date.now()/1000);
+    for (const kind of ['early','late','waiting','full','bad','duplicate']) { const f = onlineFixture(), now = f.now;
       if (kind === 'early') f.state.startTime = now + 60;
-      if (kind === 'late') f.state.endTime = now - 1;
+      if (kind === 'late') { f.state.num = 1; f.state.endTime = f.state.updateTime; }
       if (kind === 'waiting') { f.state.num = 1; f.state.updateTime = now; }
       if (kind === 'full') f.state.num = 3;
       if (kind === 'bad') f.state.num = '-1';
@@ -75,32 +75,150 @@ try {
   });
   await check('在线领取前暂停、时段结束或身份变化都取消', async () => {
     for (const mode of ['paused','ended','identity']) { const f = onlineFixture(); let enabled = true, n = 0;
-      f.client.onRead = name => { if (name === 'CounterInfoRequest' && ++n === 2) { if (mode === 'paused') enabled = false; if (mode === 'ended') f.state.endTime = Math.floor(Date.now()/1000)-1; if (mode === 'identity') f.player.playerId = '9007199254740995'; } };
+      f.client.onRead = name => { if (name === 'CounterInfoRequest' && ++n === 2) { if (mode === 'paused') enabled = false; if (mode === 'ended') f.state.endTime = f.now-1; if (mode === 'identity') f.player.playerId = '9007199254740995'; } };
       await f.run({ enabled: () => enabled }); assert.equal(f.state.writes, 0, mode);
     }
   });
   await check('未知在线领取跨重建不重发，后续计数可确认', async () => {
     const f = onlineFixture(); f.state.fail = 'unknown'; assert.equal((await f.run()).pending, true);
     await f.run({ ledger: createUsageLedger('online-qa', { file: f.file }) }); assert.equal(f.state.writes, 1);
-    f.state.fail = ''; f.state.num = 1; f.state.updateTime = Math.floor(Date.now()/1000); await f.run();
+    f.state.fail = ''; f.state.num = 1; f.state.updateTime = f.now; await f.run();
     assert.equal(Object.values(f.ledger.keyRecords())[0].confirmed, true);
   });
   await check('空结果不报领取成功，明确拒绝才释放领取记录', async () => {
     const f = onlineFixture(); f.state.fail = 'stale'; assert.equal((await f.run()).pending, true); await f.run(); assert.equal(f.state.writes, 1);
     const g = onlineFixture(); g.state.fail = 'reject'; await g.run(); assert.equal(Object.keys(g.ledger.keyRecords()).length, 0); g.state.fail = ''; assert.equal((await g.run()).ok, true);
   });
+  await check('20:56 已领第六档，21:01 可补第七档，宣战切到明日也可确认', async () => {
+    for (const rolled of [false, true]) {
+      const f = onlineFixture(), start = f.state.startTime;
+      f.config.tables.WorldOnlineRwdCfg.data = [1,60,120,180,240,300,300,300].map((seconds, i) => ({ stage: i + 1, seconds }));
+      Object.assign(f.state, { endTime: start + 3600, num: 6, updateTime: start + 56 * 60 });
+      f.client.serverClockOffsetMs += (start + 3600 - f.now) * 1000;
+      if (rolled) { f.state.startTime += 86400; f.state.endTime += 86400; }
+      const waiting = await readWorldOnlineReward(f.client, f.config, f.player);
+      assert.equal(waiting.ready, false);
+      assert.equal(waiting.nextAt, start + 3660);
+      f.client.serverClockOffsetMs += 60000;
+      assert.equal((await f.run()).ok, true);
+      assert.equal(f.state.num, 7);
+      assert.ok(Object.keys(f.ledger.keyRecords())[0].endsWith(`:${start}:7`));
+      f.client.serverClockOffsetMs += 301000;
+      assert.equal((await f.run()).skipped, true, '21:00 后领过一档就停止');
+      assert.equal(f.state.writes, 1);
+    }
+  });
+  await check('跨日后旧场不可补，新区尚未开放也不可提前补领', async () => {
+    const f = onlineFixture(), start = f.state.startTime;
+    f.client.serverClockOffsetMs += 4 * 3600_000;
+    assert.equal((await f.run()).skipped, true);
+    f.client.serverClockOffsetMs -= 3 * 3600_000;
+    f.player.worldOpenTime = start - 3600;
+    f.config.tables.GameplayOpenCfg = { data: [{ gameplay: '国战', openDays: [2] }] };
+    f.state.startTime += 86400; f.state.endTime += 86400;
+    assert.equal((await f.run()).skipped, true);
+    assert.equal(f.state.writes, 0);
+  });
+  await check('请求丢失后跨重启恢复，回读失败不重发，旧格式记录也能恢复', async () => {
+    const originalNow = Date.now;
+    let clock = originalNow();
+    Date.now = () => clock;
+    try {
+      for (const legacy of [false, true]) {
+        const f = onlineFixture();
+        if (legacy) {
+          const details = { kind: 'worldOnlineReward', startTime: f.state.startTime, stage: 1 };
+          f.ledger.reserve({}, {}, {}, { uniqueKey: `worldOnline:${f.player.worldId}:${f.player.playerId}:${f.state.startTime}:1`, details });
+        } else {
+          f.state.fail = 'unknown';
+          assert.equal((await f.run()).pending, true);
+        }
+        const ledger = createUsageLedger('online-qa', { file: f.file });
+        const writes = f.state.writes;
+        assert.equal((await f.run({ ledger })).pending, true);
+        clock += 60000;
+        f.state.fail = 'read';
+        assert.equal((await f.run({ ledger })).skipped, true);
+        assert.equal(f.state.writes, writes);
+        f.state.fail = '';
+        assert.equal((await f.run({ ledger })).ok, true);
+        assert.equal(f.state.writes, writes + 1);
+        assert.equal(Object.values(ledger.keyRecords())[0].confirmed, true);
+        assert.equal((await f.run({ ledger })).skipped, true);
+      }
+    } finally { Date.now = originalNow; }
+  });
+  await check('同一档并发恢复只补发一次，复核时已到账就跳过补发', async () => {
+    for (const advanced of [false, true]) {
+      const f = onlineFixture();
+      f.state.fail = 'stale';
+      await f.run();
+      f.state.fail = '';
+      f.client.serverClockOffsetMs += 20000;
+      if (advanced) {
+        let reads = 0;
+        f.client.onRead = name => {
+          if (name === 'CounterInfoRequest' && ++reads === 2) {
+            f.state.num = 1;
+            f.state.updateTime = f.now + 20;
+          }
+        };
+        await f.run();
+        assert.equal(f.state.writes, 1);
+      } else {
+        const secondLedger = createUsageLedger('online-qa', { file: f.file });
+        await Promise.all([f.run(), claimWorldOnlineReward({ ...f.client }, f.config, f.player, { ledger: secondLedger })]);
+        assert.equal(f.state.writes, 2);
+      }
+      assert.equal(Object.values(f.ledger.keyRecords())[0].confirmed, true);
+    }
+  });
   await check('并发领取只发送一次，关闭开关不读取或领取', async () => {
     const f = onlineFixture(); await f.run({ enabled: () => false }); assert.equal(f.state.reads, 0);
     await Promise.all([f.run(), f.run()]); assert.equal(f.state.writes, 1);
   });
   await check('在线奖励已接入真实协议的整轮挂机入口', async () => {
-    const f=warForgeFixture(), s=defaultSettings(), now=Math.floor(Date.now()/1000); let claimed=0;
+    const f=warForgeFixture(), s=defaultSettings(), now=Date.parse('2026-11-23T20:02:00+08:00')/1000; let claimed=0;
+    f.client.serverClockOffsetMs=now*1000-Date.now(); Object.assign(f.state.war,{startTime:now-120,endTime:now+3480});
     for(const key of Object.keys(s.schedule))s.schedule[key]=key==='worldOnlineRewards';
     Object.assign(s.loop,{world:false,tasks:false,dailies:false,heroes:false});s.dailies.enabled=false;s.resident.rewards=false;
     f.config.tables.WorldOnlineRwdCfg={data:[{stage:1,seconds:1}]};const read=f.client.request;
     f.client.request=async(name,...args)=>name==='CounterInfoRequest'?protocol.CounterInfoResponse.decode(protocol.CounterInfoResponse.encode({counters:[{type:'DAILY_WORLD_ONLINE_RWD',num:claimed,updateTime:now-10}]}).finish()):read(name,...args);
     f.client.sendWatch=async name=>{assert.equal(name,'GotWorldOnlineRwdRequest');claimed++;};
     await runLoop(f.client,protocol,{config:f.config,player:f.player,allowMutate:true,rounds:1,everyMs:0,getSettings:()=>s,isEnabled:key=>key==='worldOnlineRewards',usageLedger:createUsageLedger('loop-qa',{file:path.join(directory,'loop-ledger.json')})});assert.equal(claimed,1);
+  });
+  await check('旧配置迁移后仅靠城战领奖开关，长主循环仍按时领取七档', async () => {
+    const originalNow = Date.now, start = Date.parse('2026-11-23T20:00:00+08:00') / 1000;
+    let clock = (start - 60) * 1000;
+    Date.now = () => clock;
+    try {
+      const f = warForgeFixture(), legacy = defaultSettings(), times = [];
+      legacy.schedule.worldOnline = true;
+      const settings = importAutomationSettings({ format: 'crazywaterword-automation', version: 62, settings: legacy });
+      assert.equal(settings.schedule.worldOnline, undefined);
+      Object.assign(settings.loop, { world: false, tasks: false, dailies: false, heroes: false });
+      settings.dailies.enabled = settings.resident.rewards = false;
+      const tiers = [1, 60, 120, 180, 240, 300, 300];
+      f.config.tables.WorldOnlineRwdCfg = { data: tiers.map((seconds, i) => ({ stage: i + 1, seconds })) };
+      Object.assign(f.state.war, { startTime: start, endTime: start + 3600 });
+      const read = f.client.request;
+      f.client.request = async (name, ...args) => name === 'CounterInfoRequest'
+        ? { counters: [{ type: 'DAILY_WORLD_ONLINE_RWD', num: times.length, updateTime: times.at(-1) ?? 0 }] }
+        : read(name, ...args);
+      f.client.sendWatch = async (name, body, { beforeSend }) => {
+        assert.equal(name, 'GotWorldOnlineRwdRequest');
+        beforeSend();
+        times.push(clock / 1000);
+      };
+      let waits = 0;
+      await runLoop(f.client, protocol, {
+        config: f.config, player: f.player, allowMutate: true, rounds: 2, everyMs: 1800_000,
+        getSettings: () => settings, isEnabled: key => settings.schedule[key] === true,
+        usageLedger: createUsageLedger('online-deadlines', { file: path.join(directory, 'deadlines.json') }),
+        sleep: async ms => { assert.ok(ms > 0 && ++waits < 100); clock += ms; },
+      });
+      assert.deepEqual(times.map(t => t - start), [1, 61, 181, 361, 601, 901, 1201]);
+    } finally { Date.now = originalNow; }
   });
   await check('试炼连续通关，以实际进度前进至全通', async () => {
     const f = trialFixture(); const result = await f.run(); assert.equal(result.wins, 3); assert.deepEqual(f.state.calls,[1001,1002,1003]);

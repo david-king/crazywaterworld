@@ -21,7 +21,17 @@ const stale = () => new Error('工厂队列或所选任务已变化，请重新�
 // Two lanes can share a start time and their finish order need not match dispatch order.
 export function locateFactoryInsertion(trace, forecast, target, previous) {
   const { from, id, lane, status, offset = 0 } = target;
-  if (!Number.isSafeInteger(offset) || offset < 0 || !Number.isSafeInteger(from)) throw stale();
+  if (!Number.isSafeInteger(offset) || offset < 0) throw stale();
+  if (status === 'batch') {
+    const index = target.planIndex;
+    const job = previous?.jobs[index], count = job?.quantity ?? 1;
+    if (!Number.isSafeInteger(index) || !job?.pinned || job.id !== id || offset >= count) throw stale();
+    const before = previous.jobs.slice(0, index);
+    if (offset) before.push({ ...job, quantity:offset });
+    const after = [offset ? { ...job, quantity:count-offset } : job, ...previous.jobs.slice(index+1)];
+    return { before, after, remove:[], count };
+  }
+  if (!Number.isSafeInteger(from)) throw stale();
   let targetUnit, count = 1;
   const units = trace.units;
   if (status === 'gap') {
@@ -81,7 +91,6 @@ export async function prepareFactoryInsertion(client, protocol, ctx, quote, targ
   if (previous?.flight || previous?.remove?.length || previous?.stagedSupplies || previous?.revision !== trace.revision) throw stale();
   const position = locateFactoryInsertion(trace, { ...forecast, startAt:quote.forecast.startAt, endAt:quote.forecast.endAt }, target, previous);
   if (position.remove.length && !protocol.CancelFactoryProduceRequest) throw new Error('当前游戏协议无法调整已排队的任务');
-  if (submit && position.remove.length) await confirmFactoryProductionBeforeHarvest(client, protocol, buildingId, { player, enabled });
   const { stock, reserved, water:raw } = await readOrderReservedStock(client, protocol, config, { player, settings, enabled });
   const water = normalize(raw), live = factoryProductionSnapshot(water, buildingId), now = clock(client);
   if (!live || stamp(live.queue) !== stamp(trace.queue) || nativeOn(water, live.building, now) || !enabled()) throw stale();
@@ -99,11 +108,10 @@ export async function prepareFactoryInsertion(client, protocol, ctx, quote, targ
   if (!submit) return { products, count:position.count, reordersQueue:position.remove.length > 0 };
   const product = products.find(p => p.id === target.productId), n = target.quantity;
   if (!product || !Number.isSafeInteger(n) || n < 1) throw new Error('请选择已解锁的产物，并输入有效的正整数件数');
-  if (product.max !== null && n > product.max && !product.autoSupply) throw new Error('按当前可用原料最多可插入 ' + product.max + ' 件');
-  const supplies = supply.plan(recipes.find(r => r.itemId === product.id), n, buildingId);
+  const supplies = supply.plan(recipes.find(r => r.itemId === product.id), n, buildingId, product.id, { waitForInputs:true });
   const sameFactory = supplies[buildingId] ?? [];
   delete supplies[buildingId];
-  const inserted = { id:product.id, quantity:n, pinned:true, ...(product.autoSupply ? {waitForMaterials:true} : {}),
+  const inserted = { id:product.id, quantity:n, pinned:true, ...(product.requiresMaterials ? {waitForMaterials:true} : {}),
     ...(target.status === 'gap' ? { at:target.from } : {}) };
   const restored = position.remove.toReversed().map(q => ({ id:q.id, pinned:true }));
   const jobs = [...position.before, ...sameFactory, inserted, ...restored, ...position.after];
@@ -111,7 +119,7 @@ export async function prepareFactoryInsertion(client, protocol, ctx, quote, targ
   const stage = position.remove.length && Object.keys(supplies).length;
   saveFactoryInsertion(player, buildingId, previous, { jobs, ...rewrite, ...(stage ? {stagedSupplies:supplies} : {}) },
     entries, stage ? {} : supplies);
-  return { label:'已插入' + product.name + ' ×' + n };
+  return { label:'已加入计划队列：' + product.name + ' ×' + n };
 }
 
 async function advanceInsertionCrop(client, protocol, ctx, buildingId, entry) {
@@ -197,6 +205,7 @@ export async function advanceFactoryInsertion(client, protocol, ctx, buildingId)
     }
     if (e.jobs[0]?.crop) return advanceInsertionCrop(client, protocol, ctx, buildingId, e);
     if (!e.remove?.length && !e.flight && e.jobs[0]?.at > clock(client)) return;
+    if (e.remove?.length && !e.flight) await confirmFactoryProductionBeforeHarvest(client, protocol, buildingId, { player, enabled });
     const water = normalize(await client.request('OnWaterRequest', {}, 'OnWaterResponse'));
     if (!enabled()) return;
     const live = factoryProductionSnapshot(water, buildingId);

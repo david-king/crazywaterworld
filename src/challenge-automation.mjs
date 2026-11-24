@@ -82,7 +82,7 @@ export async function runChallengeRound(client, config, { player, getSettings, s
     if (isPirateBusy()) { report({ key: 'pirateAuto', label: '海盗首杀', skipped: true, reason: '手动首杀推进中，本轮跳过' }); return; }
     try {
       const dailyRun = pirateAutoDay(ledger, player, state.pirate);
-      if (state.pirate.scope !== dailyRun.scope) state.pirate = { scope: dailyRun.scope };
+      state.pirate = dailyRun.checkpoint;
       if (dailyRun.reason) {
         await checkFleetSettlement(client, player, ledger);
         report({ key: 'pirateAuto', label: '海盗首杀', skipped: true, reason: dailyRun.reason });

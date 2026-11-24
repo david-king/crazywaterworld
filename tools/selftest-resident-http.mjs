@@ -24,7 +24,7 @@ export async function testResidentHttp(app) {
     });
     return { status: res.status, data: await res.json() };
   };
-  const submit = row => request('world/order/submit', { confirm: true, index: row.index, orderKey: row.orderKey });
+  const submit = (row, acceptStockWarning = false) => request('world/order/submit', { confirm: true, index: row.index, orderKey: row.orderKey, acceptStockWarning });
   await request('loop');
   const session = app.sessions.get('b');
   assert.equal(session.loop.tasks.finishOrder, false);
@@ -54,6 +54,7 @@ export async function testResidentHttp(app) {
     { buildingId: '8农田', level: 0, buildFinishTime: now - 1 },
   ];
   const writes = [];
+  let displayedStock = 3;
   let weekUnavailable = false;
   let onNextRead;
   game.request = async (name, body, responseType) => {
@@ -64,7 +65,7 @@ export async function testResidentHttp(app) {
         if (block) { block.enter.resolve(); await bounded(block.release.promise, '测试中的阻塞读取未能解除'); }
         return { workerOrder: orders, building: buildings, autoProduceForever, autoProduceEndTime };
       }
-      case 'AllItemRequest': return { items: [{ itemId: '烤鱼', num: 3 }] };
+      case 'AllItemRequest': return { items: [{ itemId: '烤鱼', num: displayedStock }] };
       case 'AllResourceRequest': return { list: [] };
       case 'MyResFieldsRequest': return {};
       case 'MyFleetsRequest': return { fleets: [] };
@@ -140,12 +141,20 @@ export async function testResidentHttp(app) {
   assert.equal(timedView.data.factories[0].jobs[0].estimatedFinishTime, null, '首项开工时间待同步时不推算完成时间');
   buildings = [];
   weekUnavailable = true;
+  displayedStock = 0;
   const manualView = await request('world');
   assert.equal(manualView.status, 200);
   const [first, second] = manualView.data.orders;
   assert.equal(second.decision.status, 'unknown', '挂机交付仍然需要确认商人订单的预留');
   assert(first.orderKey && second.orderKey && first.orderKey !== second.orderKey);
-  assert.equal(second.manualDecision.status, 'ready', '只能交一单时第二个槽也可手动选择');
+  assert.equal(second.missing[0].num, 3);
+  assert.equal(second.manualDecision.status, 'ready', '预览库存为零时仍可手动提交所选订单');
+  displayedStock = 1;
+  const warning = await submit(second);
+  assert.equal(warning.status, 200);
+  assert.equal(warning.data.ok, false);
+  assert.match(warning.data.stockWarning, /还缺烤鱼 ×2/);
+  assert.deepEqual(writes, [], '提示采用提交时的库存，等待玩家确认');
   const startRead = () => {
     const block = { enter: gate(), release: gate() };
     onNextRead = block;
@@ -168,7 +177,7 @@ export async function testResidentHttp(app) {
   const blocked = startRead();
   await bounded(blocked.enter.promise, '测试海面查询未进入账号队列');
   const received = waitForSubmissions(2);
-  const duplicatePair = Promise.all([submit(second), submit(second)]);
+  const duplicatePair = Promise.all([submit(second, true), submit(second, true)]);
   try {
     await bounded(received, '服务端未收到两次手动交单请求');
     assert.deepEqual(writes, [], '手动交单要等本账号在途查询结束');

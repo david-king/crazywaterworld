@@ -163,6 +163,9 @@ try {
   });
   await test('替换的旧田必须仍归本人且新目标不能是已占田', async () => {
     const g = await replacementFixture();
+    const mismatch = await g.preview({ gridIdx: 10, replaceGridIdx: 21 });
+    assert.equal(mismatch.token, null);
+    assert(mismatch.fleets.every(fleet => !fleet.available && /相同资源类型/.test(fleet.reason)));
     for (const intent of [{ gridIdx: 10, replaceGridIdx: 22 }, { gridIdx: 20, replaceGridIdx: 20 }, { gridIdx: 21, replaceGridIdx: 20 }]) {
       const response = await g.send('preview', intent);
       if (response.ok) assert.equal((await response.json()).token, null);

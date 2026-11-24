@@ -1,4 +1,5 @@
 import { normalize } from './worlds.mjs';
+import { displayMaterial } from './config.mjs';
 import { retiredAutomationTasks } from './automation.mjs';
 import { goldAccountKey, reserveGold, rejectGold, cancelUnsentGold, confirmGoldOperation, readGoldSpendState, settleGoldSpendState, refreshGoldSpend } from './gold-reservations.mjs';
 import { beginOrderMaterialSpend, cancelOrderMaterialSpend, confirmOrderMaterialSpends, pendingFarmMaterialSpends, pendingMuseumMaterialSpends,
@@ -138,6 +139,16 @@ export function worldActionAllowed(settings, step, config) {
   return true;
 }
 
+export function residentOrderStockWarning(stock, requirements, config) {
+  if (!stock) return '仓库库存尚未同步，暂时无法核对所需材料。';
+  const missing = [];
+  for (const { id, num } of requirements) {
+    const short = num - (stock.get(id) ?? 0);
+    if (short > 0) missing.push(displayMaterial(config, id) + ' ×' + short);
+  }
+  return missing.length ? '库存不足，还缺' + missing.join('、') + '。' : '';
+}
+
 export function residentFilter(order, survey, settings, usage = {}) {
   if (!settings) return null;
   const r = settings.resident;
@@ -205,7 +216,7 @@ export function actionCounters(step) {
 }
 
 // 同一计划中的成本按发送顺序扣减。读取失败、额度文件损坏或金额不明均不发送消费动作。
-export function createActionGuard(client, getSettings, ledger, { enabled = () => true, player = null } = {}) {
+export function createActionGuard(client, getSettings, ledger, { enabled = () => true, player = null, config = null } = {}) {
   const remaining = new Map();
   const reservations = new Map();
   // Even actions without daily counters need a distinct generation. Identical
@@ -221,6 +232,8 @@ export function createActionGuard(client, getSettings, ledger, { enabled = () =>
       const planting = step.request === 'FarmPlantRequest';
       const exploring = step.request === 'MuseumStartExploreRequest';
       const producing = step.request === 'StartFactoryProduceRequest';
+      const manualOrder = step.manualCheck === true && step.request === 'FinishWorkerOrderRequest';
+      const serverChecksOrderStock = manualOrder && step.acceptStockWarning === true;
       if (planting && !player) throw new AutomationSkip('无法确认播种账号');
       if (exploring && !player) throw new AutomationSkip('无法确认探宝账号');
       if (!settings && !player) return null;
@@ -238,8 +251,8 @@ export function createActionGuard(client, getSettings, ledger, { enabled = () =>
       const account = player && (costs.size || step.factoryBatch || producing) ? goldAccountKey(player) : null;
       let actualGold, materialStock, museumDetails;
       const nextBalances = new Map();
+      const itemIds = [...costs.keys()].filter(id => !['GOLD', 'RUBY', 'EXP', 'ARENA_POINT', 'LEAGUE_POINT'].includes(id));
       if (costs.size) {
-        const itemIds = [...costs.keys()].filter(id => !['GOLD', 'RUBY', 'EXP', 'ARENA_POINT', 'LEAGUE_POINT'].includes(id));
         if (planting && itemIds.length !== costs.size) throw new AutomationSkip('播种成本必须是种子道具');
         const resourceIds = [...costs.keys()].filter(id => !itemIds.includes(id));
         const balances = new Map();
@@ -253,10 +266,16 @@ export function createActionGuard(client, getSettings, ledger, { enabled = () =>
             }
             catch (error) { throw new AutomationSkip(error.message); }
           }
-          const bag = normalize(await client.request('AllItemRequest', {}, 'AllItemResponse'));
+          let bag;
+          try { bag = normalize(await client.request('AllItemRequest', {}, 'AllItemResponse')); }
+          catch (error) { if (!manualOrder) throw error; }
           try { materialStock = farmInventory(bag); }
-          catch (error) { throw new AutomationSkip(error.message); }
-          if (account) {
+          catch (error) { if (!manualOrder) throw new AutomationSkip(error.message); }
+          if (manualOrder && !serverChecksOrderStock) {
+            const warning = residentOrderStockWarning(materialStock, itemIds.map(id => ({ id, num: costs.get(id) })), config);
+            if (warning) throw Object.assign(new AutomationSkip(warning), { stockWarning: warning });
+          }
+          if (account && materialStock) {
             if (goldAccountKey(player) !== account) throw new AutomationSkip('账号已切换，不能使用原账号库存');
             if (!enabled()) throw new AutomationSkip('操作已暂停');
             try {
@@ -269,7 +288,7 @@ export function createActionGuard(client, getSettings, ledger, { enabled = () =>
             }
             catch (error) { throw new AutomationSkip(error.message); }
           }
-          for (const id of itemIds) balances.set(id, materialStock.get(id) ?? 0);
+          if (!serverChecksOrderStock) for (const id of itemIds) balances.set(id, materialStock.get(id) ?? 0);
         }
         if (resourceIds.length) {
           const goldState = account && resourceIds.includes('GOLD') ? await readGoldSpendState(client, player, { enabled }) : null;
@@ -292,15 +311,14 @@ export function createActionGuard(client, getSettings, ledger, { enabled = () =>
           const [group, key] = step.setting.split('.');
           if (!settings[group]?.[key] || (step.scope === 'base' && !settings.loop.world)) throw new AutomationSkip('对应设置已关闭');
         }
-        for (const [id, cost] of costs) {
-          const actual = balances.get(id);
+        for (const [id, actual] of balances) {
+          const cost = costs.get(id);
           const balance = Math.min(actual, remaining.get(id) ?? actual);
           if (!Number.isSafeInteger(balance) || balance < 0 || balance - cost < resourceReserve(settings, id, step)) throw new AutomationSkip(`${({ GOLD: '金币', RUBY: '钻石', EXP: '经验' })[id] ?? id}不足或会低于保留数量`);
           if (id === 'RUBY' && settings && !automaticDiamondsAllowed(settings, step) && !isManualShopSpend(step)) throw new AutomationSkip('对应的钻石消耗总开关已关闭');
-          balances.set(id, balance);
+          nextBalances.set(id, balance - cost);
         }
         if (!enabled()) throw new AutomationSkip('操作已暂停');
-        for (const [id, cost] of costs) nextBalances.set(id, balances.get(id) - cost);
       }
       const counters = actionCounters(step);
       if (step.factoryBatch && materialStock) step.factoryBatch.checkedStock = new Map(materialStock);
@@ -323,14 +341,15 @@ export function createActionGuard(client, getSettings, ledger, { enabled = () =>
             // A production request without its baseline cannot be reconciled
             // later; do not send it and create a permanently unprovable lock.
             if (producing) throw error;
-            return { confirmed: false };
+            return { confirmed: false, request: step.request };
           }) : null;
           if (producing && (typeof operation?.verify !== 'function'
             || operation.factoryBuildingId !== step.body?.buildingId)) throw new AutomationSkip('无法完整确认排产前的队列和待收成品');
           if (!enabled() || goldAccountKey(player) !== account) throw new AutomationSkip('操作已暂停或账号已切换');
           if (operation && ticket) operation.onConfirmed = () => ledger.confirm(ticket);
-          if (materialStock) materials = beginOrderMaterialSpend(player, [...costs].filter(([id]) => !['GOLD', 'RUBY', 'EXP', 'ARENA_POINT', 'LEAGUE_POINT'].includes(id)).map(([id, need]) => ({ id, need, have: materialStock.get(id) ?? 0 })), step.label || step.request,
-            planting ? { farm: { args: farmPlantArgs(step) } } : exploring ? { museum: museumDetails } : { operation });
+          if (itemIds.length) materials = beginOrderMaterialSpend(player,
+            itemIds.map(id => ({ id, need: costs.get(id), have: materialStock?.get(id) ?? 0 })), step.label || step.request,
+            planting ? { farm: { args: farmPlantArgs(step) } } : exploring ? { museum: museumDetails } : { operation, serverChecksOrderStock });
           if (materials && (ticket || [...costs.keys()].some(id => ['GOLD', 'RUBY', 'EXP', 'ARENA_POINT', 'LEAGUE_POINT'].includes(id)))) materials.manualSyncBlocked = true;
           if (costs.has('GOLD')) gold = reserveGold(player, actualGold, costs.get('GOLD'), step.request, { operation });
         } catch (error) {

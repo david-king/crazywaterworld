@@ -76,7 +76,7 @@ export function insertionSupplyPlanner({ config, water, stock, reserved, entries
     makers.set(id, result);
     return result;
   }
-  function plan(recipe, quantity, target, productId = recipe.itemId) {
+  function plan(recipe, quantity, target, productId = recipe.itemId, { waitForInputs = false } = {}) {
     const left = new Map(), jobs = new Map(), visiting = new Set([recipe.itemId]);
     function requireItem(id, n) {
       const needed = checked(n - (left.get(id) ?? load(id)));
@@ -84,7 +84,7 @@ export function insertionSupplyPlanner({ config, water, stock, reserved, entries
       if (needed <= 0) return;
       const facility = maker(id);
       if (!facility) {
-        if (passive.has(id)) return;
+        if (waitForInputs || passive.has(id)) return;
         throw new RangeError((config.materialName?.(id) ?? id) + '还缺 ' + needed + ' 件，当前没有可插单的生产设施');
       }
       if (visiting.has(id)) throw new RangeError('原料配方存在循环依赖');
@@ -104,25 +104,7 @@ export function insertionSupplyPlanner({ config, water, stock, reserved, entries
   }
   function option(recipe) {
     const costs = factoryRecipeCosts(recipe);
-    if (!costs.length) return {max:null};
-    const autoSupply = costs.some(c => maker(c.id) || passive.has(c.id));
-    if (!autoSupply) return {max:Math.max(0, Math.min(...costs.map(c => Math.floor(load(c.id) / c.num))))};
-    const fits = n => {
-      try { plan(recipe, n); return true; }
-      catch (error) { if (error instanceof RangeError) return false; throw error; }
-    };
-    let lo = 0, hi = 1;
-    while (fits(hi)) {
-      lo = hi;
-      if (hi === Number.MAX_SAFE_INTEGER) return {max:null, autoSupply};
-      hi = Math.min(Number.MAX_SAFE_INTEGER, hi * 2);
-    }
-    while (hi - lo > 1) {
-      const mid = lo + Math.floor((hi - lo) / 2);
-      if (fits(mid)) lo = mid;
-      else hi = mid;
-    }
-    return {max:lo, autoSupply};
+    return { max:null, requiresMaterials:costs.length > 0, autoSupply:costs.some(c => maker(c.id)) };
   }
   return { plan, option };
 }

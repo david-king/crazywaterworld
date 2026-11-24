@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { EventEmitter } from 'node:events';
 import { claimRewards } from '../src/claim-rewards.mjs';
+import { surveyDailies } from '../src/dailies.mjs';
 import { nextOrderTier, surveyTasks } from '../src/tasks.mjs';
 import { runLoop } from '../src/loop.mjs';
 import { defaultSettings } from '../src/automation-settings.mjs';
@@ -41,6 +42,71 @@ const client = {
   async sendWatch(name) { calls.push(name); },
 };
 const enabled = key => ['dailyRewards', 'chests', 'gift', 'mail'].includes(key);
+{
+  const realNow = Date.now;
+  let clockMs = 36_000_000;
+  Date.now = () => clockMs;
+  try {
+    // 一小时已积累。运行中把四小时改为两小时，随后跨两个新时段。
+    const prefs = defaultSettings();
+    prefs.schedule.afk = true;
+    prefs.afk.claimIntervalHours = 4;
+    const timedClient = new EventEmitter().setMaxListeners(32);
+    timedClient.serverClockOffsetMs = 2000;
+    const serverTime = () => (clockMs + timedClient.serverClockOffsetMs) / 1000;
+    const period = { afkStartTime: serverTime() - 3600, afkFinishTime: serverTime() + 9 * 3600, level: 105, rewardedLevel: 104 };
+    const timedDraws = [];
+    timedClient.request = async (name, body) => {
+      if (name === 'AfkInfoRequest') return { afkInfo: { ...period } };
+      if (name === 'DrawAfkLevelRewardRequest') {
+        assert.equal(body.level, 105);
+        period.rewardedLevel = body.level;
+        return {};
+      }
+      assert.equal(name, 'DrawAfkRewardRequest');
+      timedDraws.push(clockMs);
+      period.afkStartTime = serverTime();
+      period.afkFinishTime = serverTime() + 10 * 3600;
+      return { ...period };
+    };
+    await runLoop(timedClient, { DrawAfkRewardRequest: true, DrawAfkRewardResponse: true,
+      DrawAfkLevelRewardRequest: true, DrawAfkLevelRewardResponse: true }, {
+      config: { nextAfkRewardLevel: level => level === 104 ? 105 : null },
+      getSettings: () => prefs, isEnabled: key => prefs.schedule[key], allowMutate: true,
+      rounds: 2, everyMs: 4 * 3600_000,
+      onRound: ({ round }) => {
+        if (round !== 1) return;
+        assert.equal(period.rewardedLevel, 105, '等级奖励可先于本段收益领取');
+        assert.deepEqual(timedDraws, []);
+        prefs.afk.claimIntervalHours = 2;
+        timedClient.emit('automationSettingsChanged');
+      },
+      sleep: async ms => { clockMs += ms; },
+    });
+    assert.deepEqual(timedDraws, [11 * 3600_000, 13 * 3600_000]);
+
+    prefs.afk.claimIntervalHours = 24;
+    const dailyClient = { async request(name) {
+      if (name === 'DailyTaskInfoRequest') return { dailyTask: [{ id: 1004, progress: 0, targetProgress: 1 }] };
+      if (name === 'AfkInfoRequest') return { afkInfo: period };
+      assert.equal(name, 'AllResourceRequest');
+      return {};
+    }, serverClockOffsetMs: 2000 };
+    const dailyStatus = async () => (await surveyDailies(dailyClient, {}, { settings: prefs })).tasks[0].status;
+    clockMs = (period.afkFinishTime - 3) * 1000;
+    assert.equal(await dailyStatus(), 'waiting');
+    clockMs += 1000;
+    assert.equal(await dailyStatus(), 'ready', '设置超过实际容量时在封顶时领取');
+    prefs.afk.claimIntervalHours = 1;
+    clockMs = (period.afkStartTime + 3600 - 2) * 1000;
+    assert.equal(await dailyStatus(), 'ready', '日常任务也按设定小时判断');
+    prefs.afk.claimIntervalHours = 0;
+    assert.equal(await dailyStatus(), 'waiting', '旧设置仍等到收益存满');
+    prefs.afk.claimIntervalHours = 1;
+    delete period.afkStartTime;
+    assert.equal(await dailyStatus(), 'waiting', '缺少起点时按服务端封顶时间判断');
+  } finally { Date.now = realNow; }
+}
 const run = schedule => claimRewards(client, protocol, config, undefined, enabled, undefined, schedule);
 await run(scheduler);
 assert.deepEqual(Object.fromEntries(deadlines), { dailyRewards: 2000, chests: 2000, gift: 1800, mail: 1180 });

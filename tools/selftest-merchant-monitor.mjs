@@ -137,6 +137,24 @@ try {
     assert(wall - base < 3600000);
     assert(f.scheduled() >= 2);
   });
+  await test('隔夜满船在开市时清货，即使用针关闭也能紧接着采购首轮现货', async () => {
+    const f = integration(), opening = f.now - 2 * 3600, start = opening - 3 * 3600;
+    f.client.serverClockOffsetMs -= (2 * 3600 + 2) * 1000;
+    f.settings.merchant.monitorSeconds = 300;
+    f.settings.merchant.autoSpeedUp = false;
+    const goods = [1, 2].map(pid => ({ pid, goodsId: 1001, cityId: 10, num: 500, buyPrice: 70 }));
+    f.state.trade.player.goods = structuredClone(goods);
+    Object.assign(f.state.trade.cargo, { cityId: 20, moveStartTime: start });
+    f.state.markets[20].goods = [{ goodsId: 1001, price: 30, stock: 0 }, { goodsId: 1003, price: 10, stock: 0 }];
+    const ticket = f.ledger.reserve({}, {}, {}, { uniqueKey: 'overnight', details: { journalRecorded: true,
+      scope: 'merchant:' + f.window.startTime + ':' + f.window.period, before: { goods },
+      expected: { request: 'TradeMoveRequest', city: 10, destination: 20, start, plannedOpening: opening } } });
+    f.ledger.confirm(ticket);
+    f.reportHook(() => { if (f.state.writes.length >= 3) f.stop.aborted = true; });
+    await f.run();
+    assert.deepEqual(f.state.writes.map(w => w.name), ['TradeSellRequest', 'TradeSellRequest', 'TradeBuyRequest']);
+    assert.deepEqual(f.sleeps, [2000, 1000, 1000]);
+  });
   await test('较快主循环仍遵守海商王due，读取失败按监控间隔重试', async () => {
     const fast = integration({ mainEveryMs: 10000 });
     await fast.run();

@@ -72,7 +72,7 @@ const configZeroHints={
 const merchantActivityFields = [
     configField('merchant.enabled','开启自动挂机'),
     configField('schedule.merchantTrade','按整船收益自动走商','switch',{help:'按实时买价、舱位、资金和库存配货，到港重读实价。没有成员共享时可在总览补录港口情报。本港可盈利的持货仍可出售。'}),
-    configField('merchant.fullCargoRoutes','满舱双向特产航线','switch',{help:'默认关闭，按预计净收益灵活配货和选港。开启后只跑两港特产互为紧缺货的航线，按折扣、每格价差和品质补满再出发。库存不足时等刷新，本金不足以装满时留港。空余航次时间用于对准刷新，指针留到活动收尾或收盘救航。'}),
+    configField('merchant.fullCargoRoutes','满舱双向特产航线','switch',{help:'默认关闭，按预计净收益灵活配货和选港。开启后，日间只跑两港特产互为紧缺货的航线，按折扣、每格价差和品质补满再出发。库存不足时等刷新，本金不足以装满时留港。空余航次时间用于对准刷新，指针留到活动收尾或收盘救航。隔夜航次按现货和本金尽量装满，次日开市先清舱。'}),
     configField('merchant.autoShareIntel','到港自动共享情报','switch',{help:'默认关闭，手动开启后随已开启的走商及所属分组执行。确认到港后共享本港尚未共享的紧缺情报，已有共享直接跳过；每日紧缺更新后重新检查，不按每次价格刷新重复发送。回读确认后才记为已共享，未知结果保留防重记录，失败不阻塞买卖；达到利润上限仍可共享当前港口。'}),
     configField('schedule.tradeTasks','领取海商王联盟任务奖励','switch',{help:'保留原联盟任务领奖开关，按本期联盟任务达成进度自动领取。'}),
     configField('schedule.merchantRewards','领取战令、利润和联盟奖励','switch',{help:'按本期利润、战令分数、联盟任务进度和当日商情贡献领取已达成档。'}),
@@ -82,15 +82,16 @@ const merchantActivityFields = [
     configField('merchant.minExpectedProfit','最低预期整船利润','number',{unit:'商会币',help:'采购与选港需达到的风险调整后预期利润，默认1。资金、容量和可购库存同时限制采购数量。'}),
     configField('merchant.refreshWaitSeconds','刷新前最多等待','number',{unit:'秒',help:'默认120秒，0关闭。仅在等待后的预计收益优于立即出航且能及时成交时等待；刷新后重新读取价格和库存。刷新时刻使用游戏配置。'}),
     configField('merchant.liquidationMinutes','活动结束前清仓窗口','number',{unit:'分钟',help:'默认120分钟，0关闭提前清仓。窗口内优先处理持货；无论此值多少，都不采购无法在交易截止前卖出的货物。'}),
-    configField('merchant.maxLossPercent','清仓最大亏损率','number',{unit:'%',help:'默认 0，不自动亏损卖出。平时可按原价卖出，为收益更高的现货腾出本金和舱位。填正数后，清仓期可按每批买价接受所设比例内的亏损。'}),
+    configField('merchant.maxLossPercent','清仓最大亏损率','number',{unit:'%',help:'普通清仓默认 0，不自动亏损卖出。平时可按原价卖出，为收益更高的现货腾出本金和舱位。填正数后，清仓期可按每批买价接受所设比例内的亏损。隔夜船货在次日开市按实价全部卖出，即使亏损超过此比例。'}),
     configField('merchant.autoSpeedUp','允许使用指南针加速','switch',{help:'按账号保存，跨期生效。关闭时按自然航程走商。开启后按所选策略、用量上限和保留数量用针，达到 5000 万或更低的自设利润上限后停止用针。'}),
-    configField('merchant.speedUpMode','跑船与加速策略','choice',{options:[['deadline','稳定模式：平时省针，最后一船加速卖货'],['refresh','刷新窗口加速'],['arrival','刷新窗口加速：每刷新最多一程'],['race','同港抢先（领先时省针）'],['full','全程加速']],help:'稳定模式在最后一个交易日收盘前的一段航程内（当前为两小时），按每日和每程剩余额度及可用库存核算。能一次到港且收盘前来得及逐批卖完时才用针。余针暂时不够就先自然航行，到点复查。其他交易日若次日仍能卖货会留针。同港抢先比较可见同盟船的预计到港时间。落后或并列时，用刚好能超过最早一艘的根数。全程加速按剩余航时尽快到港，针不足时可部分加速。这两种模式按到港时间决定用针。刷新窗口模式会比较同盟船到港顺序与历史库存。能提前买到更赚钱的组合时才为抢货用针，到港重新核价。每刷新最多一程模式还会限制出航次数。'}),
+    configField('merchant.speedUpMode','跑船与加速策略','choice',{options:[['deadline','稳定模式：平时省针，最后一船加速卖货'],['refresh','刷新窗口加速'],['arrival','刷新窗口加速：每刷新最多一程'],['race','同港抢先（领先时省针）'],['full','全程加速'],['goal','冲刺目标：前期省针，收尾追赶'],['eventFree','仅用本期免费针']],help:'仅用本期免费针模式按实领额度加速，钻石补购始终关闭。冲刺目标模式按本船折后利润估算剩余自然航次。前期能多跑一程或多卖货时才用针。最后两个交易日按利润缺口、库存和各日额度安排加速，有时间买货并在收盘前卖出时可继续出航。同等预计进度优先少用针。稳定模式在最后一个交易日收盘前的一段航程内（当前为两小时），按每日和每程剩余额度及可用库存核算。能一次到港且收盘前来得及逐批卖完时才用针。余针暂时不够就先自然航行，到点复查。其他交易日若次日仍能卖货会留针。同港抢先比较可见同盟船的预计到港时间。落后或并列时，用刚好能超过最早一艘的根数。全程加速按剩余航时尽快到港，针不足时可部分加速。这两种模式按到港时间决定用针。刷新窗口模式会比较同盟船到港顺序与历史库存。能提前买到更赚钱的组合时才为抢货用针，到港重新核价。每刷新最多一程模式还会限制出航次数。'}),
     configField('merchant.guardLastPointer','最后一根防抢','switch',{ parent: 'merchant.autoSpeedUp',when:d=>d.merchant?.autoSpeedUp,help:'默认关闭。开启后，每程进入一根指南针可直接到港的时间（当前 30 分钟），即使领先或未见同港船也尝试用一根。仍遵守保留量和用量上限，补购须单独开启。'}),
     configField('merchant.refreshWindowMinutes','刷新后加速窗口','number',{ parent: 'merchant.speedUpMode',unit:'分钟',when:d=>['refresh','arrival'].includes(d.merchant.speedUpMode),help:'仅在真实配置刷新时刻之后的此窗口内加速，窗口外等待；交易截止前仍可补救。'}),
     configField('merchant.dailyPointerLimit','每日指针使用上限','number',{ parent: 'merchant.autoSpeedUp',unit:'根',when:d=>d.merchant.autoSpeedUp,help:'默认28，0 禁止使用；跨重启保留已用和未确认用量。'}),
+    configField('merchant.periodPointerLimit','本期自动用针总上限','number',{ parent:'merchant.autoSpeedUp',unit:'根',help:'整期累计扣除自动使用的指南针，切换方案或重启后继续计数。0 全程零针，-1 表示仅按每日上限和库存执行。'}),
     configField('merchant.autoBuyPointers','允许用钻石补购指南针','switch',{help:'按账号保存，跨期生效。开启指南针加速后，只补当前加速方案缺少的数量。购买前核对实际钻石余额、补购预算和游戏购买次数。'}),
     configField('merchant.pointerDailyDiamondLimit','每日购买指针钻石上限','number',{ parent: 'merchant.autoBuyPointers',when:d=>d.merchant.autoBuyPointers,help:'只用于补购指南针，填 0 停止补购。'}),
-    configField('merchant.profitLimit','本期累计利润上限','number',{unit:'商会币',help:'0 表示不额外限制。5000 万利润对应 50000000 商会币。达到上限后停止新增买卖、升级与加速，仍可按开关共享当前港口情报，领奖独立。'}),
+    configField('merchant.profitLimit','本期累计利润上限','number',{unit:'商会币',help:'0 表示不额外限制。5000 万利润对应 50000000 商会币。达到上限后停止新航次、采购、升级与加速。已到港的隔夜货会继续清舱。共享情报和领奖按各自开关执行。'}),
     configField('merchant.firstDepartureMode','每日首趟出发','choice',{options:[['smart','自行判定：先找盈利商品'],['time','指定最早时间']]}),
     configField('merchant.firstDepartureTime','首趟最早出发时间','time',{ parent: 'merchant.firstDepartureMode',when:d=>d.merchant.firstDepartureMode==='time',help:'北京时间。到点后仍需满足报价、舱位、交易时段和预计成交条件。'}),
     configField('merchant.firstDepartureWaitMinutes','首趟无盈利商情最多等待','number',{ parent: 'merchant.firstDepartureMode',unit:'分钟',when:d=>d.merchant.firstDepartureMode==='smart',help:'默认29分钟。灵活配货可在等待结束后换港寻价。满舱策略始终等待符合条件的双向航线。'}),
@@ -286,7 +287,7 @@ const configGroups = [
     configField('factory.blockedCollectionTypes', '禁止自动领取', 'multi', { catalog: 'collectionBuildings', empty: '未禁止任何建筑类型', help: '按类型选择要保留产物的建筑。挂机会跳过该类型所有建筑的产出、工厂成品或成熟作物。' }),
     configField('factory.produce', '自动生产', 'switch', { help: '按原料、库存、在产和待收数量填充空余队列格。已建成的工厂升级时仍可生产当前等级的配方。' }),
     configField('factory.strategy', '排产策略', 'choice', { options: [['smart','新版智能排产（推荐）'],['nativeSimulation','模拟游戏原生自动生产']], help: '智能排产使用账号加成、需求和备货水位。模拟原生按空闲生产位逐件选品，最多补到游戏仓容。' }),
-    configField('factory.simulatedTargets', '模拟原生主产物', 'multi', { catalog: 'factoryProducts', empty: '使用工厂已设目标或首个解锁配方', when: d => d.factory.strategy === 'nativeSimulation', help: '每类工厂可选一个主产物。缺料或满仓时优先选实际耗时小于 5 秒的候补，再选库存最少的。' }),
+    configField('factory.simulatedTargets', '模拟原生主产物', 'multi', { catalog: 'factoryProducts', empty: '使用工厂已设目标或首个解锁配方', when: d => d.factory.strategy === 'nativeSimulation', help: '每厂优先生产主产物。缺料或满仓时，先选实际耗时不超过 5 秒的候补，同档选库存最少的。下游开工扣料、成品收取后都会重新判断主产物缺口。' }),
     configField('factory.cooperateNative', '按需求调整游戏自动生产目标', 'switch', { when: d => d.factory.strategy !== 'nativeSimulation', help:'只控制游戏中已开启的原生自动生产目标；关闭后，普通排产仍由“自动生产”和“按需优先生产”控制。开启时补齐种子及上游需求，保留正在生产队列，目标调整后回读确认并间隔至少60秒，不购买材料。' }),
     configField('factory.disabledTypes', '禁用工厂', 'multi', { catalog: 'factories', empty: '未选择，允许全部工厂', help: '控制台不再新增生产或加速，已完成产品仍按领取开关处理。游戏内已有的原生自动生产设置保持原状。' }),
     configField('factory.keepStock', '备货水位', 'number', { when: d => d.factory.strategy !== 'nativeSimulation', unit: '件 / 产品', help: '计入库存、待领取与在产数量，实际不超过游戏仓库上限。0 表示只为需求生产。' }),
@@ -334,11 +335,13 @@ const configGroups = [
   { id: 'pet', title: '海兽培育室', category: 'base', fields: [
     configField('pet.enabled', '总开关'), configField('pet.claim', '自动领取'), configField('pet.breed', '自动培育'),
     configField('pet.species', '培育种类', 'multi', { parent: 'pet.breed', catalog: 'petSpecies', empty: '未选择品种，不自动培育', when: d => d.pet.breed }),
-    configField('pet.release','自动放生','switch',{help:'放生所选品质的海兽，包括已养成的海兽。已编队或值守的海兽会跳过。工具无法读取游戏客户端的本地锁定名单。'}),
+    configField('pet.release','自动放生','switch',{help:'放生所选品质的海兽，包括已养成的海兽。已编队、值守或列入升级名单的海兽会跳过。工具无法读取游戏客户端的本地锁定名单。'}),
     configField('pet.releaseQualities','处理品质','multi',{ parent: 'pet.release',catalog:'petQualities',empty:'未选择，不处理',when:d=>d.pet.release}),
     configField('pet.quality', '培育品质上限', 'choice', { parent: 'pet.breed', options: [['BLUE', '蓝色'], ['PURPLE', '紫色'], ['ORANGE', '橙色'], ['RED', '红色']], when: d => d.pet.breed, help: '在所选品质及以下，从材料足够的低品质开始尝试。' }),
     configField('pet.universal', '允许消耗万能基因', 'switch', { parent: 'pet.breed', help: '仅在普通基因不足时，用对应的已有自选基因补足。', when: d => d.pet.breed }),
     configField('pet.feed', '自动喂养', 'switch', { help: '消耗服务器列出的喂养材料，加快当前培育。' }),
+    configField('pet.levelUp', '自动升级', 'switch', { help: '消耗海兽经验。所选海兽全部达到 30 级后升向 65 级，全部达到 65 级后升向 100 级。' }),
+    configField('pet.levelUids', '升级海兽', 'multi', { parent: 'pet.levelUp', catalog: 'stationedPets', empty: '选择值守海兽', when: d => d.pet.levelUp }),
     configField('pet.advance', '自动进阶', 'switch', { help: '对已入驻的海兽投喂进阶材料；达到喂养和等级要求后进阶。' }),
   ] },
   { id: 'forge', title: '装备自动锻造', category: 'equipment', fields: [
@@ -473,7 +476,7 @@ const configGroups = [
   { id: 'cityWar', title: '联盟城战', category: 'world', fields: [
     configField('schedule.guildWelfare', '领取联盟福利礼包'),
     configField('schedule.guildTitleReward', '联盟每日职级礼包', 'switch', { help:'默认关闭。按服务器提供的可领取职级核对每日礼包，不以当前职位替代；确认奖励回执及当日领取时间后才记为成功。' }),
-    configField('schedule.worldOnlineRewards', '领取城战在线奖励', 'switch', { help: '在服务器城战时段内，按实际计时逐档领取免费在线奖励。独立于下方城战接续开关；默认关闭，保存后随挂机检查，不自动启动挂机。请求结果未知时等待计数确认，不重复领取。' }),
+    configField('schedule.worldOnlineRewards', '领取城战在线奖励', 'switch', { help: '挂机时按每档到期时间领取。上一档在城战结束前领取，当天仍可补领下一档。结果未知时，挂机会重新核对计数再决定是否重试。默认关闭，可独立于城战接续开启。' }),
     configField('cityWar.enabled', '城战接续总开关', 'switch', { help: '防守队从开战起由工具接管，进攻队按原生委任次数接续。可在本页只读预览各队的接续条件。' }),
     configField('cityWar.fleetIds', '城战参与舰队', 'multi', { catalog: 'expeditionFleets', empty: '请选择参与接续的舰队' }),
     configField('cityWar.defenceFleetIds', '舰队职责与策略', 'cityWarRoles', { parent: 'cityWar.fleetIds', wide: true, help: '为已选舰队分别选择进攻或防守；展开后可设置本队策略、维修加速和派遣加速。策略可跟随全局，也可独立设置目标来源、城市和优先策略。加速需开启城战接续和“基础 → 加速与钻石”中的自动钻石消耗总开关，每队每项上限与全局钻石预算同时生效。切换职责保留本队另一套策略；新加入的舰队默认进攻。进攻只选择本盟已宣战且仍属于敌方的城市，防守只选择被宣战且仍属于本盟的城市；没有对应目标时等待，不自动换职责。使用舰队已保存的英雄编队，不自动换阵。城战开始后，工具先关闭防守队的原生委任，确认后按防守目标派遣。进攻队按下方次数接管。' }),
@@ -544,6 +547,9 @@ const configGroups = [
     configField('tasks.main', '领取主线奖励'), configField('tasks.branch', '领取支线奖励'), configField('tasks.achievements', '领取成就奖励'),
     configField('dailies.enabled', '日常总开关', 'switch', { help: '控制本组每日任务与奖励。基地页的付费点金独立设置。' }), configField('dailies.claimTasks', '领取其他每日任务奖励', 'switch', {help:'竞技场和积分赛的每日任务奖励在各自页签设置。'}),
     configField('dailies.claimDailyChest', '领取每日活跃宝箱'), configField('dailies.claimWeeklyChest', '领取每周活跃宝箱'), configField('dailies.claimGift', '领取每日免费赠礼'),
+    configField('schedule.afk', '闯关挂机收益', 'switch', { editChildrenWhenOff: true, help: '自动领取本段挂机收益和已达到的等级奖励。' }),
+    configField('afk.claimIntervalHours', '领取间隔', 'number', { parent: 'schedule.afk', unit: '小时', help: '填 0 表示存满再领。填 6 表示本段挂机累计 6 小时就领取，领取后重新计时。游戏收益先存满时会提前领取。' }),
+    configField('schedule.afkUpgrade', '自动升级挂机等级', 'switch', { parent: 'schedule.afk', help: '连续用定位芯片升级，每次选当前能升的最高档（1、5 或 10 级），直到芯片用完或达到主线允许的等级。升级可独立开启，领取间隔只控制收益领取。' }),
     configField('schedule.fishBook', '钓鱼图鉴奖励', 'switch', { controlFields: ['schedule.fishBook', 'activityAutomation.fish'], help: '挂机时领取已达标的图鉴奖励。' }),
     configField('activityAutomation.vip', 'VIP 每日自动领奖', 'switch', { help: '挂机时领取所有已解锁档位中尚未领取的免费奖励。' }),
     configField('activityAutomation.pirates', '战报自动领奖总开关', 'switch', { help: '开启后，挂机按已勾选的战报奖励项目领取。' }),
@@ -1230,7 +1236,8 @@ function configRenderField(spec) {
   } else if (spec.kind === 'players') {
     control = configPlayerPicker(spec, id); box.append(control);
   } else if (spec.kind === 'multi') {
-    control = configMultiselect(spec, id); box.append(control);
+    control = spec.catalog === 'stationedPets' ? configStationedPetPicker(spec, id) : configMultiselect(spec, id);
+    box.append(control);
   } else if (spec.kind === 'cityWarRoles') {
     control = configCityWarRoles(spec, id); box.append(control);
   } else if (spec.kind === 'sortableOrder') {
@@ -2100,11 +2107,37 @@ function configCityWarRoles(spec, id) {
   root.refresh(); return root;
 }
 
+function configStationedPetPicker(spec, id) {
+  const owner = configEditor.owner;
+  const catalog = { stationedPets: configEditor.stationedPets?.owner === owner ? configEditor.stationedPets.options : [] };
+  let status = '', pending = false;
+  const picker = configMultiselect(spec, id, { catalog, missingLabel: uid => '已选海兽 · ' + uid,
+    listMessage: () => status || (!catalog.stationedPets.length ? '暂无值守海兽，请先在游戏中安排值守。' : '') });
+  picker.addEventListener('toggle', async () => {
+    if (!picker.open || pending || owner !== current) return;
+    pending = true; status = '正在读取值守海兽…'; picker.refresh();
+    try {
+      const data = await call('/api/settings/stationed-pets');
+      if (!picker.isConnected || owner !== current) return;
+      catalog.stationedPets = data.pets;
+      configEditor.stationedPets = { owner, options: data.pets };
+      status = '';
+    } catch (error) {
+      status = error.message + '。重新展开可重试。';
+    } finally {
+      pending = false;
+      if (picker.isConnected && owner === current) picker.refresh();
+    }
+  });
+  return picker;
+}
+
 function configMultiselect(spec, id, options = {}) {
   const read = options.read ?? (() => configGet(spec.key));
   const write = options.write ?? (value => configSet(spec.key, value));
   const catalog = options.catalog ?? configEditor.data.catalog;
   const disabled = options.disabled === true;
+  const missingLabel = options.missingLabel ?? (value => value + '（当前配置中未找到）');
   const root = el('details', 'config-multi'); root.id = id; root.setAttribute('aria-label', spec.label); root.tabIndex = -1;
   const summary = el('summary'); summary.setAttribute('aria-label', spec.label); root.append(summary);
   const panel = el('div', 'config-multi-panel');
@@ -2116,7 +2149,7 @@ function configMultiselect(spec, id, options = {}) {
     const choices = spec.options?.map(([value,label])=>({value,label})) ?? catalog[spec.catalog] ?? [];
     const options = choices.filter(item =>
       spec.key !== 'heroes.heroIds' || !item.hidden || read().includes(item.value));
-    if (spec.catalog!=='expeditionFleets') for (const value of read()) if (!options.some(item => item.value === value)) options.unshift({ value, label: value + '（当前配置中未找到）' });
+    if (spec.catalog!=='expeditionFleets') for (const value of read()) if (!options.some(item => item.value === value)) options.unshift({ value, label: missingLabel(value) });
     return options;
   };
   function paintSummary() {
@@ -2154,7 +2187,8 @@ function configMultiselect(spec, id, options = {}) {
       };
       label.append(input, el('span', '', item.label)); list.append(label);
     }
-    if (!matches.length) list.append(el('p', 'config-help', '没有匹配项，试试其他名称。'));
+    const message = options.listMessage?.() || (!matches.length ? '没有匹配项，试试其他名称。' : '');
+    if (message) list.append(el('p', 'config-help', message));
     paintFooter(available, matches.length, selected);
     more.hidden = matches.length <= limit; list.scrollTop = oldScroll;
   }

@@ -14,6 +14,7 @@ import { fishOnce } from './fishing.mjs';
 import { upgradeFishingOnce } from './fishing-upgrade.mjs';
 import { readOrderReservedStock } from './order-reservations.mjs';
 import { petSpendSnapshot, confirmPetSpend, petAdvanceFeedCount } from './spend-evidence.mjs';
+import { planPetLevels, petLevelStage, readPetLevelRoster, petLevelConfirmed } from './pet-leveling.mjs';
 import { goldAccountKey } from './gold-reservations.mjs';
 import { readAllianceRecruitDemand } from './alliance-automation.mjs';
 import { readGuildShips, guildShipDemands } from './guild-ships.mjs';
@@ -91,7 +92,8 @@ export async function surveyBaseAutomation(client, protocol, config, player, set
   const [museum, heroes, pets, gold, guildOrder, guildShip, radar] = await Promise.all([
     settings.museum.runEnabled !== false && (['enabled', 'upgrade', 'revenue', 'achievements', 'display', 'unlockCases'].some(key => settings.museum[key]) || needs.has('museum')) ? get('MuseumInfoRequest', 'museum') : null,
     settings.museum.runEnabled !== false && settings.museum.enabled ? get('AllHeroRequest', 'museum.enabled') : null,
-    settings.pet.enabled && settings.pet.advance ? get('AllPetRequest', 'pet.advance') : null,
+    settings.pet.enabled && (settings.pet.advance || settings.pet.levelUp && settings.pet.levelUids.length)
+      ? get('AllPetRequest', 'pet') : null,
     settings.gold.enabled ? get('ClickGoldInfoRequest', 'gold.enabled') : null,
     member && needs.has('guildRecruit') && !settings.alliance?.enabled ? get('GuildOrderRequest', 'factory') : null,
     member && needs.has('guildShip') && !settings.guildShip?.enabled ? get('GuildShipRequest', 'factory') : null,
@@ -200,7 +202,7 @@ export function baseDemands(snapshot, config, settings) {
   return demands;
 }
 
-export async function previewNativeAutomation(client, config, player, settings, flags, world, usage) {
+export async function previewNativeAutomation(client, config, player, settings, flags, world, usage, cargoLoadLimits) {
   const actions = [], notes = [], moduleNotes = { gather: [], cargo: [] };
   const enabled = key => flags[key] === true && nativePreferenceEnabled(settings, key);
   const reads = new Set(['FishEncyclopediaRequest','OnWaterRequest', 'AllItemRequest', 'AllResourceRequest', 'GameEffectRequest', 'CargoShipsRequest', 'WeekInfoRequest', 'WeekOrderInfoRequest']);
@@ -230,7 +232,7 @@ export async function previewNativeAutomation(client, config, player, settings, 
   if (enabled('antiqueFloaters')) await group('藏品宝箱',()=>collectAntiqueFloaters(readonly,config,{enabled:()=>enabled('antiqueFloaters'),report:record,dryRun:true}));
   if (enabled('floaters')) await group('漂浮物', () => collectFloaters(readonly, config, world.floaters, enabled, record, { settings, dryRun: true }));
   if (enabled('cargo') && player?.level >= (rows(config, 'CargoUnlockCfg')[0]?.playerLevel ?? 9)) await group('贸易港', () => serviceCargo(readonly, config, {
-    enabled: () => enabled('cargo'), getSettings: () => settings, ledger: { snapshot: () => usage }, dryRun: true,
+    enabled: () => enabled('cargo'), getSettings: () => settings, ledger: { snapshot: () => usage }, dryRun: true, cargoLoadLimits,
     log(label, details) { if (details?.action) actions.push(details.action); else if (details?.skipped) notes.push(label); },
   }), 'cargo');
   if (settings.gather.keyOpen && actions.some(action => action.kind === 'autoDive') && world.have('保险箱钥匙') >= 1) {
@@ -266,6 +268,7 @@ export function planBaseAutomation(snapshot, config, settings, usage = {}, { div
       planPets();
       planPetAdvance();
     }
+    planPetLevels(snapshot, config, settings.pet, add, text => note('pet.levelUp', text));
     if (settings.events.enabled) {
       if (!snapshot.choiceObserved) note('events.enabled', '随机事件：尚未收到本次连接的事件状态');
       for (const event of snapshot.choices) {
@@ -517,7 +520,7 @@ export function observeBaseAutomationPlan(rewards, plan, settings, everyMs) {
   if (!rewards) return;
   const groups = {
     museum: ['runEnabled', 'enabled', 'upgrade', 'revenue', 'achievements', 'display', 'unlockCases', 'useGuide'],
-    pet: ['enabled', 'claim', 'breed', 'feed', 'advance'],
+    pet: ['enabled', 'claim', 'breed', 'feed', 'levelUp', 'advance'],
     events: ['enabled'],
     gold: ['enabled'],
   };
@@ -659,8 +662,8 @@ export async function runBaseAutomation(client, protocol, config, plan, { player
       if (!enabled() || current !== getSettings()) { await guard.cancel(step, ticket, { notSent: true }); if(choiceTicket)ledger.cancel(choiceTicket); break; }
       if (dispatchChanged()) throw new AutomationSkip('探宝派遣设置已变化，等待重新规划');
       const wireBody = step.kind === 'choiceEvent' ? { ...step.body, uid: automationWireId(step.body.uid) } : step.body;
-      sent = writePending = true;
       if (step.response && protocol[step.response]) {
+        sent = writePending = true;
         const reply = await client.request(step.request, wireBody, step.response, 15000);
         writePending = false;
         const body = normalize(reply);
@@ -680,7 +683,23 @@ export async function runBaseAutomation(client, protocol, config, plan, { player
           if (reason) entry = { step, ok: false, status: 'pending', reason, body };
         }
       } else {
-        const watched = await client.sendWatch(step.request, wireBody, { window: 500 });
+        let beforeSend;
+        if (step.kind === 'petLevelUp') {
+          const { petUid, level } = step.verify;
+          const roster = await readPetLevelRoster(client);
+          const target = roster.get(petUid);
+          beforeSend = () => {
+            const settings = getSettings();
+            if (!enabled() || current !== settings || !settings.loop.world || !settings.pet.enabled || !settings.pet.levelUp ||
+                !settings.pet.levelUids.includes(petUid) || !(level <= petLevelStage(roster, settings.pet.levelUids)) ||
+                !target || target.buildingId !== step.body.buildingId || target.pet.level !== level - 1) {
+              throw new AutomationSkip('升级名单、值守海兽或等级已变化，等待重新规划');
+            }
+          };
+          beforeSend();
+        }
+        sent = writePending = true;
+        const watched = await client.sendWatch(step.request, wireBody, { window: 500, beforeSend });
         writePending = false;
         entry = { step, ok: true, sent: watched };
         if (step.kind === 'museumAchievement') {
@@ -697,6 +716,9 @@ export async function runBaseAutomation(client, protocol, config, plan, { player
             : confirmPetSpend(petBefore, petSpendSnapshot(rooms), step.request, step.body, client);
           if (!confirmed) throw new Error('服务器尚未确认海兽操作结果');
           entry = { step, ok: true, body: { confirmed: true } };
+        } else if (step.kind === 'petLevelUp') {
+          if (!await petLevelConfirmed(client, step.verify)) throw new Error('所选海兽的升级结果尚未确认');
+          entry = { step, ok: true, body: { confirmed: true, level: step.verify.level } };
         } else if (step.kind === 'petAdvance' || step.kind === 'petAdvanceFeed') {
           const after = normalizeBaseReply('AllPetRequest', await client.request('AllPetRequest', {}, 'AllPetResponse'));
           const pet = after.pets?.find(p => String(p.uid) === step.verify.petUid);

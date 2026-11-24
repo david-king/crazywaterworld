@@ -69,6 +69,38 @@ try {
     assert.deepEqual(settingsFromNative({}).worldBoss.fleetPresets, []);
   });
 
+  test('城战在线奖励合并两个旧选择，关闭后重载与导出只保留统一开关', () => {
+    assert.deepEqual(automationTasks.filter(task => ['worldOnline', 'worldOnlineRewards'].includes(task.key)).map(task => task.label), ['领取城战在线奖励']);
+    for (const old of [true, false]) for (const current of [true, false]) {
+      const tasks = { worldOnline: old, worldOnlineRewards: current };
+      const settings = defaultSettings();
+      Object.assign(settings.schedule, tasks);
+      const expected = old || current;
+      for (const schedule of [
+        taskSettings(tasks), settingsFromNative(tasks).schedule, validateSettings(settings).schedule, nativeTaskValues(settings, {}),
+        importAutomationSettings({ format: SETTINGS_FORMAT, version: 62, settings }).schedule,
+      ]) {
+        assert.equal(schedule.worldOnlineRewards, expected);
+        assert(!Object.hasOwn(schedule, 'worldOnline'));
+      }
+      fs.writeFileSync(file, JSON.stringify({ version: 62, accounts: { city: { settingsVersion: 62, revision: 1, settings } } }));
+      const loaded = loadAutomationSettings('city', { file });
+      assert.equal(loaded.settings.schedule.worldOnlineRewards, expected);
+      const disabled = applyNativeTask(loaded.settings, 'worldOnlineRewards', false);
+      saveAutomationSettings('city', disabled, { file, revision: loaded.revision });
+      const reloaded = loadAutomationSettings('city', { file }).settings;
+      for (const schedule of [exportAutomationSettings(reloaded).settings.schedule, nativeTaskValues(reloaded, tasks)]) {
+        assert.equal(schedule.worldOnlineRewards, false);
+        assert(!Object.hasOwn(schedule, 'worldOnline'));
+      }
+    }
+    assert.equal(settingsFromNative({ worldOnline: true }).schedule.worldOnlineRewards, true);
+    assert.equal(defaultSettings().schedule.worldOnlineRewards, false);
+    const bad = defaultSettings();
+    bad.schedule.worldOnline = 'false';
+    assert.throws(() => validateSettings(bad), error => !!error.fields?.['schedule.worldOnline']);
+  });
+
   test('世界Boss旧、新领奖开关合并后保留启用状态和独立首战配置', () => {
     for (const version of [1, 9]) for (const legacyEnabled of [false, true]) for (const rewardsEnabled of [false, true]) for (const dispatchEnabled of [false, true]) {
       const settings = defaultSettings();
@@ -752,12 +784,18 @@ try {
     for (const value of [undefined, false, true]) {
       const document = structuredClone(legacy);
       if (value !== undefined) document.settings.merchant.fullCargoRoutes = value;
+      if (value === true) document.settings.merchant.periodPointerLimit = 0;
       const expected = structuredClone(document.settings);
+      delete expected.schedule.worldOnline;
       delete expected.merchant.speedUpMinProfit;
       expected.merchant.speedUpMode = 'deadline';
       expected.merchant.fullCargoRoutes = value ?? defaultSettings().merchant.fullCargoRoutes;
+      expected.merchant.periodPointerLimit = document.settings.merchant.periodPointerLimit ?? -1;
+      expected.afk = { claimIntervalHours: 0 };
+      expected.schedule.afkUpgrade = false;
       expected.museum.targetFragments = [];
       expected.museum.unlockCases = false;
+      Object.assign(expected.pet, { levelUp: false, levelUids: [] });
       expected.treasure.chasePlayerIds = [];
       expected.alliance.memberIds = [];
       Object.assign(expected.factory,{strategy:'smart',simulatedTargets:[]});
@@ -854,7 +892,7 @@ try {
     assert.throws(() => validateSettings(settings), error => !!error.fields['alliance.memberIds']);
   });
   test('版本1升级后重复迁移保持一致，保留有效的用户值', () => {
-    assert.equal(SETTINGS_SCHEMA_VERSION, 58);
+    assert.equal(SETTINGS_SCHEMA_VERSION, 63);
     const settings = legacySettings();
     settings.factory.checkEverySeconds = 270;
     settings.resources.diamondDailyLimit = 1234;
@@ -868,6 +906,32 @@ try {
     assert.equal(exported.version, SETTINGS_SCHEMA_VERSION);
     assert.deepEqual(importAutomationSettings(exported), migrated);
     assert.deepEqual(importAutomationSettings(exportAutomationSettings(importAutomationSettings(exported))), migrated);
+  });
+  test('旧挂机收益设置沿用满额领取，按小时配置可保存并校验', () => {
+    const old = defaultSettings();
+    delete old.afk;
+    old.schedule.afk = true;
+    const settings = importAutomationSettings({ format: SETTINGS_FORMAT, version: 60, settings: old });
+    assert.equal(settings.afk.claimIntervalHours, 0);
+    assert.equal(settings.schedule.afk, true);
+    settings.afk.claimIntervalHours = 6;
+    assert.deepEqual(importAutomationSettings(exportAutomationSettings(settings)), settings);
+    for (const invalid of [-1, 1.5, '']) {
+      settings.afk.claimIntervalHours = invalid;
+      assert.throws(() => validateSettings(settings), error => !!error.fields['afk.claimIntervalHours']);
+    }
+  });
+  test('61 版挂机收益保留领取间隔，升级默认关闭且可独立开启', () => {
+    const old = defaultSettings();
+    old.schedule.afk = true;
+    old.afk.claimIntervalHours = 6;
+    delete old.schedule.afkUpgrade;
+    const migrated = importAutomationSettings({ format: SETTINGS_FORMAT, version: 61, settings: old });
+    assert.equal(migrated.schedule.afkUpgrade, false);
+    assert.equal(migrated.schedule.afk, true);
+    assert.equal(migrated.afk.claimIntervalHours, 6);
+    Object.assign(migrated.schedule, { afk: false, afkUpgrade: true });
+    assert.deepEqual(importAutomationSettings(exportAutomationSettings(migrated)), migrated);
   });
   test('旧配置和已打开的页面移除六项锻造与套装限制，保留其他选择', () => {
     const expected = defaultSettings();

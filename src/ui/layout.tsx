@@ -88,7 +88,7 @@ export function journal() {
         <button type="button" id="log-all" aria-pressed="true">全部</button>
         <button type="button" id="log-issues" aria-pressed="false">警告与错误</button>
       </div>
-      <Button id="log-clear" size="sm" variant="outline" disabled aria-label="清空所选账号日志" title="选择一个账号后可清空该账号的全部运行日志">清空</Button>
+      <Button id="log-clear" size="sm" variant="outline" aria-label="清空全部账号和系统的运行日志" title="清空全部账号和系统的运行日志（包含被筛选隐藏的记录）">清空</Button>
     </div>
     <div id="log-panel" role="tabpanel" aria-labelledby="log-tab-all" tabIndex={0}>
       <div id="log" role="log" aria-live="polite" aria-label="操作记录" />

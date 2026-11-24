@@ -457,18 +457,16 @@ try {
     t.f.beforeRead = null; await read(t);
     assert.equal(t.ledger.keyRecords()['resource-field:1001001:10'].confirmed, true);
   });
-  await test('满额手动替换先确认旧田移除再派遣，新旧产量明确，跨资源也可选择', async () => {
-    for (const grid of [10, 11]) {
-      const t = replacing(), p = await replacePreview(t, grid);
-      assert.equal(p.replaceGridIdx, 20); assert.equal(p.replacement.grid, 20);
-      assert.equal(p.replacement.effectivePerHour, 540); assert.equal(p.perHour, 780);
-      assert.equal(p.resourceId, grid === 10 ? '汽油' : '种子'); assert.equal(p.level, 8);
-      const result = await send(t, p); assert.equal(result.status, 'confirmed'); assert.equal(result.released, true); assert.equal(result.partial, false);
-      assert.deepEqual(t.f.client.writes.map(write => [write.name, write.body.resFieldGridIdx]), [['GiveUpResFieldRequest', 20], ['ChallengeResFieldRequest', grid]]);
-      assert.equal(t.f.state.fields.length, 0); assert.equal(t.ledger.confirmedCounters().resourceFieldPetrol, 300);
-      assert.equal(t.ledger.hasKey('resource-field-replace:1001001:20'), false);
-      await assert.rejects(() => send(t, p)); assert.equal(t.f.client.writes.length, 2);
-    }
+  await test('满额手动替换同类田，先确认旧田移除再派遣', async () => {
+    const t = replacing(), p = await replacePreview(t);
+    assert.equal(p.replaceGridIdx, 20); assert.equal(p.replacement.grid, 20);
+    assert.equal(p.replacement.effectivePerHour, 540); assert.equal(p.perHour, 780);
+    assert.equal(p.resourceId, '汽油'); assert.equal(p.level, 8);
+    const result = await send(t, p); assert.equal(result.status, 'confirmed'); assert.equal(result.released, true); assert.equal(result.partial, false);
+    assert.deepEqual(t.f.client.writes.map(write => [write.name, write.body.resFieldGridIdx]), [['GiveUpResFieldRequest', 20], ['ChallengeResFieldRequest', 10]]);
+    assert.equal(t.f.state.fields.length, 0); assert.equal(t.ledger.confirmedCounters().resourceFieldPetrol, 300);
+    assert.equal(t.ledger.hasKey('resource-field-replace:1001001:20'), false);
+    await assert.rejects(() => send(t, p)); assert.equal(t.f.client.writes.length, 2);
   });
   await test('替换旧田必须是不同且本人已占的田，未知收益不默认允许', async () => {
     const t = replacing(); await assert.rejects(() => replacePreview(t, 10, 10), /旧田/);
@@ -486,11 +484,16 @@ try {
     assert.deepEqual(t.f.client.writes.map(w => w.body.resFieldGridIdx), [20, 10]);
     t.f.finish(10, true); await run(t); assert.equal(t.f.client.writes.length, 2);
   });
-  await test('种子不足时按配额替换超额汽油，同级汽油也能换种子', async () => {
-    const t = replacing(); t.f.state.fields = [{ gridIdx: 10, cityId: 1, type: 3 }];
-    Object.assign(automatic(t), { allocationMode: 'quota', quotas: { fuel: 0, seeds: 1, tech: 0 } });
-    await run(t); assert.deepEqual(t.f.client.writes.map(w => w.body.resFieldGridIdx), [10, 11]);
-    t.f.finish(11, true); await run(t); assert.equal(t.f.client.writes.length, 2);
+  await test('汽油超配且种子不足时保留汽油田，有空位后直接补种子', async () => {
+    for (const mode of ['quota', 'ratio']) {
+      const t = replacing(), amounts = { fuel: 0, seeds: 1, tech: 0 };
+      Object.assign(automatic(t), { allocationMode: mode, quotas: amounts, ratios: amounts });
+      const planned = await previewResourceFieldPlan(t.f.client, t.f.protocol, t.f.config, t.f.player, t.options);
+      assert.deepEqual(planned.actions, []); await run(t); assert.deepEqual(t.f.client.writes, []);
+      t.f.state.maxNum = 2; await run(t);
+      assert.deepEqual(t.f.state.fields.map(field => field.gridIdx), [20]);
+      assert.deepEqual(t.f.client.writes.map(w => [w.name, w.body.resFieldGridIdx]), [['ChallengeResFieldRequest', 11]]);
+    }
   });
   await test('在途计入固定配额；旧账本只留格子、所属城市易主也不多派', async () => {
     const t = setup();
@@ -542,6 +545,7 @@ try {
       t => { t.f.state.cities[0].guildIdx = 8; },
       t => { t.f.state.fleets[0].state = 3; },
       t => { t.f.state.fuel = 1; },
+      t => { t.f.state.fields[0].type = 2; },
       t => { t.f.config.tables.WorldParamCfg.data[0].paramValue = 301; },
       t => { t.f.config.tables['1_ResFieldTypeCfg'].data.find(row => row.type === 3 && row.level === 8).product[1] = 779; },
       t => { t.f.config.tables['1_ResFieldTypeCfg'].data.find(row => row.type === 3 && row.level === 4).product[1] = 541; },
@@ -569,7 +573,8 @@ try {
     const t = replacing(), p = await replacePreview(t); t.f.unknownRequest = 'GiveUpResFieldRequest';
     const result = await send(t, p); assert.equal(result.status, 'unknown'); assert.equal(result.released, false);
     assert.equal(pendingPetrol(t.ledger), 300); assert.equal(t.f.state.fields[0].gridIdx, 20);
-    t.options.ledger = t.createLedger(); assert((await replacePreview(t, 11)).fleets.every(row => !row.available));
+    t.f.state.mapFields.push({ gridIdx: 13, cityId: 1, resType: 3 });
+    t.options.ledger = t.createLedger(); assert((await replacePreview(t, 13)).fleets.every(row => !row.available));
     await checkFleetSettlement(t.f.client, t.f.player, t.options.ledger);
     assert.equal(t.options.ledger.keyRecords()['resource-field:1001001:10'].confirmed, false);
     automatic(t); await run(t); assert.equal(t.f.client.writes.length, 1);
@@ -614,6 +619,26 @@ try {
       assert.equal(pendingPetrol(t.options.ledger), 0);
     });
   }
+  await test('旧版跨类型换田已放弃旧田时，恢复后结束预留并报告部分完成', async () => {
+    const t = replacing(); automatic(t);
+    t.f.beforeRead = name => {
+      if (name === 'RadarInfoRequest' && t.f.client.writes.length) throw Error('timeout');
+    };
+    assert.equal((await run(t))[0].status, 'pending');
+    const key = 'resource-field:1001001:10', record = t.ledger.keyRecords()[key];
+    assert.equal(record.details.phase, 'released');
+    const replacement = { ...record.details.replacement, resourceId: '种子', type: 2 };
+    t.ledger.updateKeyDetails(key, { ...record.details, replacement }, record);
+    t.options.ledger = t.createLedger(); t.f.beforeRead = null;
+    const planned = await previewResourceFieldPlan(t.f.client, t.f.protocol, t.f.config, t.f.player, t.options);
+    assert.deepEqual(planned.actions, []); assert(planned.notes.some(note => note.includes('相同资源类型')));
+    const [result] = await run(t);
+    assert.equal(result.status, 'cancelled'); assert.equal(result.partial, true);
+    assert.match(result.reason, /旧田已放弃.*相同资源类型/);
+    assert.deepEqual(t.f.client.writes.map(w => w.name), ['GiveUpResFieldRequest']);
+    assert.equal(pendingPetrol(t.options.ledger), 0);
+    assert.equal(t.options.ledger.hasKey(replacement.lock.key), false);
+  });
   await test('原目标出征结果未知时，重启并跨日不会再次放弃或出征', async () => {
     const t = replacing(); automatic(t); t.f.unknownRequest = 'ChallengeResFieldRequest';
     assert.equal((await run(t))[0].status, 'unknown');

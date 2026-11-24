@@ -207,6 +207,9 @@ try {
       {actor:f.ctx.player,marketHistory:history});
     f.state.player.goods=[];
     assert.equal(plan(f.marketHistory).accelerationReason,'stockRace');
+    const shortageHistory = f.marketHistory.map(m => ({ ...m, rareGoodsId: 1003,
+      goods: m.goods.map(row => row.goodsId === 1002 ? { ...row, goodsId: 1003 } : row) }));
+    assert.notEqual(plan(shortageHistory).kind, 'speed', '历史上只有当地紧缺货被买走，不为抢这批货花针');
     const selfBought=f.marketHistory.map((m,i)=>({...m,held:i?[{cityId:20,goodsId:1002,num:1000}]:[]}));
     assert.notEqual(plan(selfBought).kind,'speed','自己买走的库存不能触发抢货消费');
     const alternate=f.marketHistory.map(m=>({...m,goods:[...m.goods,{goodsId:1003,price:10,stock:0}]}));

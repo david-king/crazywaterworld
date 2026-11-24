@@ -74,6 +74,7 @@ import { claimExtraRewards, extraRewardKeys } from './extra-rewards.mjs';
 
 import { setTimeout as pause } from 'node:timers/promises';
 import { claimRewards } from './claim-rewards.mjs';
+import { upgradeAfk } from './afk-upgrade.mjs';
 import { claimWeekly, runLinkage, weekSchedule, readWeekOrder, runAutomaticWeekOrder } from './activities.mjs';
 import { automationTasks, dailyTaskKey, defaultCompassSpinCount, worldTaskKey } from './automation.mjs';
 import { automationControls } from './automation-controls.mjs';
@@ -106,6 +107,7 @@ export async function runLoop(client, protocol, {
   isTrialBusy = () => false, isPirateBusy = () => false,
   challengeRun = createChallengeRun(),
   getSettings = () => null, getHeroSettings = getSettings, getBlockedCollectionTypes, onFishBookComplete,
+  getAfkSettings = getSettings, getAfkClaimHours = () => getAfkSettings()?.afk?.claimIntervalHours,
   usageLedger = null, heroUsageLedger = usageLedger,
   getEveryMs = () => everyMs,
   schedule = work => work(),
@@ -183,6 +185,10 @@ export async function runLoop(client, protocol, {
     && isEnabled('merchantTrade'));
   const merchantActive = () => merchantSelected() && runtimeActive();
   const serverNowSeconds = () => Math.floor((Date.now() + (client.serverClockOffsetMs || 0)) / 1000);
+  const worldOnlineNext = () => {
+    if (!isEnabled?.('worldOnlineRewards')) return Infinity;
+    return (rewards.scheduledAt('worldOnlineRewards') ?? 0) * 1000 - (client.serverClockOffsetMs || 0);
+  };
   let merchantRunAfter = 0;
   const merchantNext = () => merchantSelected()
     ? Math.max(merchantRunAfter, merchantMonitor.nextCheckAt * 1000 - (client.serverClockOffsetMs || 0)) : Infinity;
@@ -268,6 +274,10 @@ export async function runLoop(client, protocol, {
         .some(member => member && !member.isNpc && (p.chasePlayerIds?.length || p.chaseNames.includes(member.name))))) treasureScan.invalidate();
     }
     if (name === 'SCWarDeclaration' || name === 'SCCityWarTime') { recallStarts.cityWar = null; cityWarScan.invalidate(); }
+    if (name === 'SCCityWarTime' || name === 'SCDailyTaskReset') {
+      rewards?.clearTask('worldOnlineRewards');
+      if (isEnabled?.('worldOnlineRewards')) scheduler.wake();
+    }
     const now = serverNowSeconds();
     const inWar = cityWarState?.startTime <= now && now < cityWarState?.endTime;
     if (inWar && name === 'SCity') cityWarScan.invalidate();
@@ -341,7 +351,7 @@ export async function runLoop(client, protocol, {
   scheduler.addCleanup(() => watchFleetMaintenance(client).hold([]));
   // Main-round checkpoints and the idle wait consult the same fleet deadlines.
   const mainScanNext = () => Math.min(treasureScan.nextAt(), cityWarScan.nextAt(), radarScan.nextAt(), resourceFieldsNext());
-  scheduler.listen(client, 'pong', () => scheduler.wakeIfEarlier(Math.min(treasureScan.nextAt(), cityWarScan.nextAt())));
+  scheduler.listen(client, 'pong', () => scheduler.wakeIfEarlier(Math.min(treasureScan.nextAt(), cityWarScan.nextAt(), worldOnlineNext())));
   const dispatchNext = () => dispatchSettingsPending ? 0 : Math.min(
     mainScanNext(), siliconNext(),
     fleetMaintenanceEnabled(getSettings()) ? maintenanceAt : Infinity,
@@ -393,8 +403,16 @@ export async function runLoop(client, protocol, {
       try {const value=await work();for(const key of active){if(rewards?.status(key)===before.get(key))rewards?.observe(key,'已检查，当前没有新增可执行动作');rewards?.expect(key,rewards.now()+Math.ceil(getEveryMs()/1000));}return value;}
       catch(error){for(const key of active)rewards?.observe(key,error.message,'error');throw error;}
     }
-    let afkDeadline;
-    const rememberDeadline = time => { afkDeadline = time; };
+    let afkDeadline = Date.now() + 60_000;
+    let scheduledAfkHours = settings?.afk?.claimIntervalHours;
+    const rememberDeadline = time => {
+      afkDeadline = time;
+      scheduledAfkHours = getSettings()?.afk?.claimIntervalHours;
+    };
+    const nextAfkCheck = () => {
+      if (!isEnabled || !enabled('afk')) return Infinity;
+      return scheduledAfkHours === getSettings()?.afk?.claimIntervalHours ? afkDeadline : 0;
+    };
     const logReward = (entry, category = '领奖') => stepLog('tasks')({ title: entry.label, ...entry, taskKey:entry.taskKey||entry.key, category });
     const reportTrial = (key, raids, entry, raidId) => {
       if (entry.pending) entry = { ...entry, status: 'pending' };
@@ -406,8 +424,7 @@ export async function runLoop(client, protocol, {
     const allowDaily = (id, action) => !(getSettings() && action.request === 'ClickGoldRequest' && !action.body.free) && enabled(dailyTaskKey(id, action));
     const allowWorld = kind => enabled(worldTaskKey(kind));
     const active = key => !!isEnabled && selected(key) && runtimeActive();
-    const aliases = { worldOnlineRewards:['worldOnline'],
-      festivalActiveRewards:['festivalActive'], battleReportRewards:['campaignReports'],
+    const aliases = { festivalActiveRewards:['festivalActive'], battleReportRewards:['campaignReports'],
       weekSupplyFree:['weekChipFree','weekUniqueFree'],
       merchantRewards:['tradeTasks'], festivalFreeGift:['festivalGifts'],
       riverScore:['snowballFree'], riverHelp:['snowballFree'],
@@ -417,6 +434,19 @@ export async function runLoop(client, protocol, {
       && (enabled(key) || Boolean((getSettings() || key === 'battleReportRewards') && aliases[key]?.some(enabled)));
     const serviceActive = key => isActivityTaskAvailable(key, client) && nativePreferenceEnabled(getSettings(), key)
       && (active(key) || Boolean((getSettings() || key === 'battleReportRewards') && aliases[key]?.some(active)));
+    async function checkWorldOnline() {
+      if (worldOnlineNext() > Date.now()) return;
+      // 读取失败时也留出退避时间。确定的开场、档位或重试时间由领取流程覆盖。
+      rewards.defer('worldOnlineRewards', rewards.now() + 60);
+      try {
+        const entry = await claimWorldOnlineReward(client, config, player, {
+          ledger: usageLedger, enabled: () => serviceActive('worldOnlineRewards'), scheduler: rewards,
+        });
+        summary.tasks.results.push(entry);
+        if (!entry.skipped) summary.tasks.planned++;
+        logReward({ ...entry, taskKey: 'worldOnlineRewards' }, '联盟/城战');
+      } catch (error) { phaseFailure('tasks', '城战在线奖励', error, 'worldOnlineRewards'); }
+    }
     const takeoverReason = key => {
       if (key === 'heroGrowth') return '指定英雄养成';
       return null;
@@ -460,15 +490,17 @@ export async function runLoop(client, protocol, {
         const currentSettings = getSettings();
         const current = () => !stop.aborted && runtimeActive() && client.connected !== false && currentSettings === getSettings();
         const canFactory = key => current() && factoryDue && factorySchedule.active() && enabled(key);
-        const holdForOrders = canFactory('startProduce') || enabled('finishOrder') || checkUpgrade;
+        const simulateNative = currentSettings?.factory?.strategy === 'nativeSimulation';
+        const holdForOrders = (!simulateNative && canFactory('startProduce')) || enabled('finishOrder') || checkUpgrade;
+        const cargoDemand = (!simulateNative || holdForOrders) && needsCargoDemand(currentSettings);
         let version = factorySchedule.version();
         const survey = await surveyWorld(client, protocol, { config, player,
           includeProductionTiming: canFactory('startProduce') && currentSettings?.factory?.produce !== false,
-          includeWeekOrder: holdForOrders || needsCargoDemand(currentSettings),
-          includeCargo: (enabled('cargo') && holdForOrders) || needsCargoDemand(currentSettings) });
+          includeWeekOrder: holdForOrders || cargoDemand,
+          includeCargo: (enabled('cargo') && holdForOrders) || cargoDemand });
         // 募兵、上船和订单可能已改变需求，不能沿用主轮的备料快照。
         let demand = [];
-        if (currentSettings && canFactory('startProduce')) {
+        if (currentSettings && canFactory('startProduce') && (!simulateNative || checkUpgrade)) {
           const extra = await surveyBaseAutomation(client, protocol, config, player, currentSettings, survey,
             { ledger: usageLedger, enabled: current });
           if (current()) demand = baseDemands(extra, config, currentSettings);
@@ -479,7 +511,7 @@ export async function runLoop(client, protocol, {
           if (kind === 'gainFactory') return canFactory('collect');
           if (kind === 'finishUpgrade') return checkUpgrade && enabled('finishUpgrade');
           if (kind === 'upgrade') return checkUpgrade && enabled('upgrade') && orderRead;
-          return ['startProduce', 'nativeProduce'].includes(kind) && canFactory('startProduce') && orderRead;
+          return ['startProduce', 'nativeProduce'].includes(kind) && canFactory('startProduce') && (simulateNative || orderRead);
         };
         const plan = planWorld(survey, { config, enabled: allow, settings: currentSettings, blockedCollectionTypes: getBlockedCollectionTypes?.(), usage: usage(), extraDemand: demand, factoryWaitHistory });
         if (currentSettings?.factory?.cooperateNative && allow('startProduce')) observeNativePlan(survey, plan);
@@ -855,7 +887,7 @@ export async function runLoop(client, protocol, {
         try {
            const includeTask = id => id === 1007 || (id === 1010 && settings)
              ? false : !isEnabled || dailyKeys[id]?.some(enabled);
-          const survey = await surveyDailies(client, protocol, { config, player, includeTask, probeGift: !isEnabled, idle: !!isEnabled, allowRecruitTickets: false, settings, ledger: usageLedger });
+          const survey = await surveyDailies(client, protocol, { config, player, includeTask, probeGift: !isEnabled, idle: !!isEnabled, allowRecruitTickets: false, settings, afkClaimHours: getAfkClaimHours(), ledger: usageLedger });
           for (const entry of survey.tasks) for (const key of dailyKeys[entry.task.id]??[]) rewards?.observe(key, entry.reason || (Number.isFinite(entry.task.progress)&&Number.isFinite(entry.task.targetProgress)?entry.task.progress+'/'+entry.task.targetProgress+(entry.task.progress>=entry.task.targetProgress?' · 今日目标已完成':' · 等待执行'):'已读取任务状态'));
            const recruit = survey.tasks.find(entry => entry.task.id === 1002 && entry.status === 'waiting');
            if (recruit && (includeRepeatedWaits || recruit.reason !== lastRecruitWait)) stepLog('dailies')({ title: recruit.task.title, skipped: true, reason: recruit.reason, taskKey: 'freeRecruit' });
@@ -927,10 +959,30 @@ export async function runLoop(client, protocol, {
       }
       if (isEnabled && groupEnabled('领奖')) {
         const results = await observed(['tasks','dailyRewards','chests','gift','mail','afk'],()=>claimRewards(client, protocol, config, logReward, enabled, rememberDeadline, rewards, player, { settings, getSettings }));
-        summary.tasks = { planned: results.length, results };
+        summary.tasks.planned += results.length;
+        summary.tasks.results.push(...results);
         try { await claimAfkAdNow(); } catch (error) { phaseFailure('tasks', '闯关挂机广告收益', error); }
       }
       yield;
+      const afkEpoch = client.connectionEpoch;
+      const upgradeEnabled = () => client.connectionEpoch === afkEpoch && client.connected !== false
+        && enabled('afkUpgrade') && getAfkSettings()?.schedule?.afkUpgrade === true;
+      while (upgradeEnabled()) {
+        let entry;
+        try {
+          entry = await upgradeAfk(client, protocol, config, player, { ledger: usageLedger ?? heroUsageLedger, guard, enabled: upgradeEnabled });
+          summary.tasks.results.push(entry);
+          if (!entry.skipped) summary.tasks.planned++;
+          logReward({ ...entry, label: entry.label ?? '自动升级挂机等级', taskKey: 'afkUpgrade' }, '挂机升级');
+          // 升级回包可能更新本段计时，重新核对已开启的领取任务。
+          if (entry.ok || (entry.status === 'pending' && !entry.skipped)) rememberDeadline(0);
+        } catch (error) {
+          phaseFailure('tasks', '自动升级挂机等级', error, 'afkUpgrade');
+          break;
+        }
+        yield;
+        if (entry.status !== 'confirmed') break;
+      }
       if (isEnabled && enabled('adShop')) {
         await observed(['adShop'],()=>claimAdShop(client, config, { ...adChannel, player, getSettings, enabled: () => enabled('adShop'),
           schedule: rewards, report(entry) {
@@ -967,14 +1019,6 @@ export async function runLoop(client, protocol, {
           report: (entry, id, mode) => reportTrial(mode === 'paid' ? 'trialPaidSweep' : 'trialAdSweep', raids, entry, id) });
       }
       yield;
-      if (isEnabled && serviceEnabled('worldOnlineRewards')) {
-        try {
-          const entry = await claimWorldOnlineReward(client, config, player, { ledger: usageLedger, enabled: () => serviceActive('worldOnlineRewards'), scheduler: rewards });
-          summary.tasks.results.push(entry);
-          if (!entry.skipped) summary.tasks.planned++;
-          logReward({...entry,taskKey:'worldOnlineRewards'}, '联盟/城战');
-        } catch (error) { phaseFailure('tasks', '城战在线奖励', error, 'worldOnlineRewards'); }
-      }
       if (isEnabled) {
         const extraReport=entry=>{summary.tasks.results.push(entry);if(!entry.skipped)summary.tasks.planned++;logReward(entry,'免费领奖');};
         for(const [key,service] of [['vipDaily',claimVipDaily],['guildTitleReward',claimGuildTitleReward],['limitedFreeGifts',claimLimitedFree],['weekHeroStar',claimWeekHeroStar],['pirateRankRewards',(c,f,o)=>claimOpenRank(c,f,o,3)],['warRankRewards',(c,f,o)=>claimOpenRank(c,f,o,4)],['festivalActiveRewards',claimFestivalActive],['battleReportRewards',claimReportRewards],['leagueCollect',claimLeagueCollect],['leaguePassRewards',claimLeaguePass],['weekSupplyFree',claimWeekSupply],['worldBossRewards',claimWorldBossDamage],['comicDrama',claimComicDrama],['tournamentDailyGift',claimTournamentDaily]]) {
@@ -1036,7 +1080,7 @@ export async function runLoop(client, protocol, {
       if (isEnabled) {
         // 保存的旧开关仍可用；有详细配置时，重叠协议统一走新账本，防止跨入口重发。
         const report = serviceReport('tasks', '兼容领奖');
-        const mapped = new Set(['worldOnline','tradeTasks','worldBossDamage','vipDaily','campaignReports','weekChipFree','weekUniqueFree','festivalActive','snowballFree']);
+        const mapped = new Set(['tradeTasks','worldBossDamage','vipDaily','campaignReports','weekChipFree','weekUniqueFree','festivalActive','snowballFree']);
         const rewardActive = key => legacyActive(key) &&
           !['guildTitleReward','heroRecruitRewards'].includes(key) &&
           !(getSettings() && (mapped.has(key) || ['festivalSign','compassSpin','weekHeroStar','weekOrderSubmit'].includes(key)));
@@ -1176,13 +1220,17 @@ export async function runLoop(client, protocol, {
           } catch (error) { phaseFailure('world', '广告加速', error); }
         }
         const usesOrders = allowWorld('finishOrder') || allowWorld('denyOrder');
+        const simulateNative = settings?.factory?.strategy === 'nativeSimulation';
+        const factoryOrders = !simulateNative && allowWorld('startProduce');
+        const readsOrders = usesOrders || factoryOrders || allowWorld('farm') || allowWorld('upgrade');
+        const cargoDemand = needsCargoDemand(settings) && (!simulateNative || readsOrders
+          || allowWorld('speedUpProduce') && settings.factory.speedUpSources.includes('cargo'));
         const factoryReadVersion = factorySchedule.version();
         const survey = await surveyWorld(client, protocol, { config, player,
           includeProductionTiming: allowWorld('startProduce') && settings?.factory?.produce !== false,
-          includeCargo: needsCargoDemand(settings) || (!!isEnabled && enabled('cargo') && (allowWorld('startProduce') || usesOrders)),
-          includeWeekOrder: needsCargoDemand(settings) || (allowWorld('speedUpProduce') && settings?.factory.speedUpSources.includes('merchant'))
-            || usesOrders || allowWorld('startProduce') || allowWorld('farm') || allowWorld('upgrade') });
-        if (settings && ((allowWorld('startProduce') && (settings.factory.demandFirst || settings.alliance?.enabled &&
+          includeCargo: cargoDemand || (!!isEnabled && enabled('cargo') && (factoryOrders || usesOrders)),
+          includeWeekOrder: readsOrders || cargoDemand || (allowWorld('speedUpProduce') && settings?.factory.speedUpSources.includes('merchant')) });
+        if (settings && ((allowWorld('startProduce') && (!simulateNative || readsOrders) && (settings.factory.demandFirst || settings.alliance?.enabled &&
           settings.alliance.recruit && settings.alliance.recruitProduction || settings.guildShip?.enabled && settings.guildShip.produceMissing)) || settings.factory.speedUpSources.length > 0)) {
           const extra = await surveyBaseAutomation(client, protocol, config, player, settings, survey, { ledger: usageLedger, enabled: () => !stop.aborted && runtimeActive() && client.connected !== false });
           extraDemand = baseDemands(extra, config, settings);
@@ -1307,7 +1355,7 @@ export async function runLoop(client, protocol, {
             if (player?.level >= unlockLevel) {
               waitReason = '已检查贸易港，暂无可交付或领取的货物';
               await serviceCargo(client, config, {
-                enabled: () => enabled('cargo'), getSettings, ledger: usageLedger,
+                enabled: () => enabled('cargo'), getSettings, ledger: usageLedger, cargoLoadLimits: plan.cargoLoadLimits,
                 beforeAction: guard.before, afterAction: guard.after, cancelAction: guard.cancel,
                 log(title, details) {
                   waitReason = details?.reason;
@@ -1385,7 +1433,11 @@ export async function runLoop(client, protocol, {
       await checkDispatch();
     }
     await scheduler.runSteps(mainSteps(), {
-      nextAt: mainScanNext, runPending: checkDispatch,
+      nextAt: () => Math.min(mainScanNext(), worldOnlineNext()),
+      runPending: async () => {
+        if (mainScanNext() <= Date.now()) await checkDispatch();
+        await checkWorldOnline();
+      },
       afterStep: () => checkFactoryDue({ checkpoint: true }),
     });
     mainRoundFinished = true;
@@ -1404,10 +1456,9 @@ export async function runLoop(client, protocol, {
           const weeklyAt = nextWeeklyActivityBoundary(client, getWeeklySettings(), roundStartedMs);
           const activityAt = activityVersion !== roundActivityVersion ? 0
             : nextActivityBoundary(client, activityConfigured, roundStartedMs);
-          const afkAt = isEnabled && enabled('afk') ? (afkDeadline ?? Date.now() + 60_000) : Infinity;
-          const wakeAt = Math.min(nextRound, activityAt, weeklyAt, factorySchedule.nextAt(), dispatchNext(), extendedNext(), merchantNext(), appointmentNext(),
+          const wakeAt = Math.min(nextRound, activityAt, weeklyAt, factorySchedule.nextAt(), dispatchNext(), extendedNext(), merchantNext(), appointmentNext(), worldOnlineNext(),
             isEnabled && enabled('upgrade') ? upgradeAt : Infinity,
-            antiqueEnabled(getSettings()) ? antiqueAt : Infinity, afkAt);
+            antiqueEnabled(getSettings()) ? antiqueAt : Infinity, nextAfkCheck());
           if (wakeAt > Date.now()) await scheduler.waitUntil(wakeAt);
           if (!scheduler.active() || Date.now() >= waitStartedAt + getEveryMs()) break;
           if (activityVersion !== roundActivityVersion || activityAt <= Date.now() || weeklyAt <= Date.now()) {
@@ -1416,6 +1467,7 @@ export async function runLoop(client, protocol, {
           }
           // 推送或保存设置可能早于原定时间唤醒；必须重读当前到期时间与开关。
           await scheduler.runDue('dispatch', dispatchNext, checkDispatch);
+          await scheduler.runDue('worldOnlineRewards', worldOnlineNext, checkWorldOnline);
           const checkUpgrade = !!isEnabled && enabled('upgrade') && upgradeAt <= Date.now();
           if (factorySchedule.due() || checkUpgrade) {
             await scheduler.runDue('factory', () => Math.min(factorySchedule.nextAt(),
@@ -1426,15 +1478,11 @@ export async function runLoop(client, protocol, {
           await scheduler.runDue('extended', extendedNext, checkExtended);
           await scheduler.runDue('appointments', appointmentNext, checkAppointments);
           await scheduler.runDue('antique', () => antiqueEnabled(getSettings()) ? antiqueAt : Infinity, checkAntique);
-          if (afkAt <= Date.now() && enabled('afk')) {
-            afkDeadline = undefined;
-            await scheduler.runDue('afk', () => enabled('afk') ? afkAt : Infinity, async () => {
-              if (!enabled('afk')) return;
-              await claimRewards(client, protocol, config, logReward, key => key === 'afk' && enabled(key), rememberDeadline, rewards, player, { settings: getSettings() });
-              try { await claimAfkAdNow(); } catch (error) { phaseFailure('tasks', '闯关挂机广告收益', error); }
-            });
-            if (!afkDeadline || afkDeadline <= Date.now()) afkDeadline = Date.now() + 60_000;
-          }
+          await scheduler.runDue('afk', nextAfkCheck, async () => {
+            rememberDeadline(Date.now() + 60_000);
+            await claimRewards(client, protocol, config, logReward, key => key === 'afk' && enabled(key), rememberDeadline, rewards, player, { getSettings });
+            try { await claimAfkAdNow(); } catch (error) { phaseFailure('tasks', '闯关挂机广告收益', error); }
+          });
         }
       }
       catch (error) { if (!stop.aborted) throw error; }

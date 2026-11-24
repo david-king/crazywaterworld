@@ -4,7 +4,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { createUsageLedger } from '../src/automation-settings.mjs';
 import { loadProtocol } from '../src/proto.mjs';
-import { merchantSpeedMatches, planMerchantSpeed, runMerchantSpeed } from '../src/merchant-speed.mjs';
+import { merchantSpeedMatches, planMerchantSpeed, readMerchantDockBudget, runMerchantSpeed } from '../src/merchant-speed.mjs';
 import {
   beginOrderMaterialSpend, cancelOrderMaterialSpend, pendingOrderMaterialSpends, refreshOrderMaterialSpends
 } from '../src/order-reservations.mjs';
@@ -68,6 +68,97 @@ function fixture(at = now) {
 async function test(name, run) { await run(); passed++; console.log('通过：' + name); }
 
 try {
+  await test('已确认的隔夜航程自然到港可赶上开市时，即使全速模式也保留库存', async () => {
+    const f = fixture(), c = f.state.cargo, opening = now + 12 * 3600 + 45 * 60;
+    f.event.endTime = opening + 86400;
+    Object.assign(f.settings.merchant, { speedUpMode: 'full', autoBuyPointers: true, keepPointers: 0 });
+    f.ledger.confirm(f.ledger.reserve({}, {}, {}, { uniqueKey: 'opening-leg', details: {
+      scope: 'merchant:' + f.event.startTime + ':' + f.event.period, expected: {
+        request: 'TradeMoveRequest', city: c.cityId, destination: c.moveToCityId, start: c.moveStartTime, plannedOpening: opening } } }));
+    assert.equal(f.plan({ plannedOpening: c.moveEndTime - 1 }).kind, 'speed');
+    await f.run();
+    assert.equal(f.calls.length, 0);
+    c.moveStartTime += 30;
+    await f.run();
+    assert.equal(f.sent().length, 1, '手动改航后，旧航程的开市计划不影响新航程');
+  });
+  await test('整期总针数跨日、跨重启核对，未知扣针占额，下期重新开始', async () => {
+    const f = fixture(), settings = { ...f.settings.merchant, speedUpMode: 'full', keepPointers: 0, dailyPointerLimit: 45, periodPointerLimit: 12 };
+    Object.assign(f.settings.merchant, settings);
+    const scope = 'merchant:' + f.event.startTime + ':' + f.event.period;
+    const record = (key, scope, useNum) => f.ledger.reserve({}, {}, {}, { uniqueKey: key, details: {
+      scope, attemptedAt: f.now - 86400, expected: { request: 'TradeSpeedRequest', period: f.event.period, useNum } } });
+    f.ledger.confirm(record('yesterday', scope, 8));
+    record('unknown', scope, 2);
+    f.ledger.confirm(record('previous-event', 'merchant:1:' + f.event.period, 40));
+    f.ledger.resolveKey('unknown', false);
+    const reopened = createUsageLedger('merchant-speed-' + count, { file: path.join(folder, count + '.json') });
+    const budget = policy => readMerchantDockBudget(async () => ({ items: [{ itemId: pointer, num: 100 }] }), reopened, policy, f.now, f.event);
+    assert.equal((await budget(settings)).periodRemaining, 2);
+    await f.run();
+    assert.deepEqual(f.sent().map(r => r.body.useNum), [2]);
+    assert.equal(await budget(settings), null);
+    await f.run();
+    assert.equal(f.sent().length, 1);
+    assert.equal((await budget({ ...settings, periodPointerLimit: 13 })).periodRemaining, 1, '切换预算继续扣除本期已用');
+    const fresh = await readMerchantDockBudget(async () => ({ items: [] }), reopened, settings, f.now, { ...f.event, startTime: f.now });
+    assert.equal(fresh.periodRemaining, 12);
+  });
+  await test('目标冲刺对比剩余自然航次，能达标或多用针无收益时留针', () => {
+    const f = fixture(now - (8 * 60 + 30) * 60); // 12:45，正常 14:00 到港。
+    f.event.endTime += 3 * 86400; // 活动前期仍按完整自然航次省针。
+    Object.assign(f.settings.merchant, { speedUpMode: 'goal', dailyPointerLimit: 45, keepPointers: 0 });
+    const extra = f.plan({ dailyUsed: 44 });
+    assert.equal(extra.accelerationReason, 'extraVoyage');
+    assert.equal(extra.useNum, 1);
+    assert.equal(f.plan().useNum, 1, '库存四根也只用能多跑一程所需的最少数量');
+    assert.equal(f.plan({ dailyUsed: 45 }).kind, 'wait');
+    assert.equal(f.plan({ exploration: true }).kind, 'none');
+    f.state.player.profit = 50_000_000 - 10_000;
+    assert.equal(f.plan().kind, 'none', '后续自然航次按当前货物收益估算已经足够');
+    f.state.player.profit = 2000;
+    f.state.cargo.moveEndTime -= 1800;
+    assert.notEqual(f.plan({ usedPointers: 1 }).kind, 'speed', '继续提速无法再增加完整航次');
+    f.state.player.goods[0].buyPrice = 50;
+    assert.notEqual(f.plan().kind, 'speed');
+  });
+  await test('目标冲刺在最后一晚仅用赶上清仓所需的两根，不为次日仍可卖的同一批货加速', () => {
+    const f = fixture();
+    Object.assign(f.settings.merchant, { speedUpMode: 'goal', keepPointers: 0 });
+    assert.equal(f.plan().useNum, 2);
+    assert.equal(f.plan().accelerationReason, 'deadline');
+    assert.notEqual(f.plan({ dailyUsed: 27 }).kind, 'speed', '剩一根不足以赶上成交');
+    f.event.endTime += 86400;
+    f.state.player.profit = 50_000_000 - 1000;
+    assert.equal(f.plan().kind, 'none');
+  });
+  await test('收尾能连续加速盈利航次，接近目标只付救回本船的根数', () => {
+    const f = fixture();
+    Object.assign(f.settings.merchant, { speedUpMode: 'goal', dailyPointerLimit: 45, keepPointers: 0 });
+    f.stock.set(pointer, 45);
+    const catchUp = f.plan();
+    assert.equal(catchUp.accelerationReason, 'goalCatchUp');
+    assert.ok(catchUp.useNum >= 2 && catchUp.useNum <= 3);
+    assert.equal(catchUp.reachesGoal, false);
+    assert.equal(f.plan({ dailyUsed: 43 }).useNum, 2);
+    assert.notEqual(f.plan({ dailyUsed: 44 }).kind, 'speed');
+    f.state.player.profit = 50_000_000 - 1000;
+    assert.equal(f.plan().useNum, 2);
+    f.state.player.profit += 1000;
+    assert.equal(f.plan().kind, 'none');
+  });
+  await test('倒数第二天在明日额度足够时留针，超出明日能力才提早追赶', () => {
+    const f = fixture();
+    f.event.endTime += 86400;
+    Object.assign(f.settings.merchant, { speedUpMode: 'goal', dailyPointerLimit: 45, keepPointers: 0 });
+    f.stock.set(pointer, 70);
+    f.state.player.profit = 50_000_000 - 35_000;
+    assert.equal(f.plan().kind, 'none');
+    f.state.player.profit = 0;
+    assert.equal(f.plan().accelerationReason, 'goalCatchUp');
+    f.stock.set(pointer, 1);
+    assert.notEqual(f.plan().kind, 'speed');
+  });
   await test('同港抢先比较最早的同盟船，并列多用一根，无法领先时留针', () => {
     const f = fixture(now - 6 * 3600);
     f.settings.merchant.speedUpMode = 'race';

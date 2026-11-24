@@ -32,6 +32,7 @@ export function rewardSchedule(client) {
     observe(key, text, state='waiting') { observations.set(key,{text,state,checkedAt:now()}); },
     expect(key, until) { if(Number.isFinite(until))expected.set(key,Math.ceil(until)); },
     status: key => observations.get(key) ?? null,
+    scheduledAt: key => deadlines.get(key),
     nextCheck: key => deadlines.get(key) > now() ? deadlines.get(key) : expected.get(key)>now()?expected.get(key):null,
     nextDay: () => (Math.floor((now() + beijing) / day) + 1) * day - beijing,
     due(key) {

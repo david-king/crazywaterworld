@@ -256,9 +256,12 @@ export function markFleetLineupsCancelled(ledger, keys) {
 
 // A lost pirate target can be retried by another fleet before this one is home.
 // Preserve its confirmed outcome before the dispatch key is reused.
-export function releaseLostPirateDispatch(ledger, dispatchKey) {
+export function releaseRetryablePirateDispatch(ledger, dispatchKey) {
   const records = ledger.keyRecords(), dispatch = records[dispatchKey];
-  if (!dispatch?.confirmed || dispatch.details?.kind !== 'pirateFirst' || dispatch.details.outcome !== 'lost') return;
+  if (dispatch?.details?.kind !== 'pirateFirst') return;
+  const lost = dispatch.confirmed && dispatch.details.outcome === 'lost';
+  const timedOut = dispatch.expired && dispatch.details.outcome === 'timedOut';
+  if (!lost && !timedOut) return;
   for (const [key, record] of Object.entries(records)) {
     const details = record.details;
     if (details?.kind === 'pirateLineup' && details.phase === 'dispatched'
@@ -266,5 +269,5 @@ export function releaseLostPirateDispatch(ledger, dispatchKey) {
       ledger.updateKeyDetails(key, { ...validateJournal(key, record), phase: 'settled' });
     }
   }
-  ledger.releaseCompletedKey(dispatchKey);
+  ledger.releaseCompletedKey(dispatchKey, dispatch);
 }

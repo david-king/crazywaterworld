@@ -4,6 +4,16 @@ import { createHmac, randomBytes } from 'node:crypto';
 import { fleetRecordReason, legacyFleetReservationReason } from './fleet-availability.mjs';
 import { prepareFleetLineups, fleetFormationSignature, markFleetLineupsDispatched, markFleetLineupsCancelled, recoverFleetLineups } from './fleet-lineups.mjs';
 
+export const PIRATE_CONFIRMATION_MS = 15 * 60 * 1000;
+export function pirateConfirmationStart(ledger, key, details) {
+  if (Number.isFinite(details.sentAt) && details.sentAt > 0) return details.sentAt;
+  return [ledger.reservationTime?.(key), details.confirmationSince, details.releasedAt * 1000]
+    .find(time => Number.isFinite(time) && time > 0);
+}
+export function pirateConfirmationTimedOut(sentAt, now) {
+  return Number.isFinite(sentAt) && sentAt > 0 && now - sentAt >= PIRATE_CONFIRMATION_MS;
+}
+
 // A map refresh can still contain a swept target, including after a lost reply.
 const dailySweepAttempts = new WeakMap();
 function sweepAttempts(client, resetTime, now) {
@@ -227,10 +237,14 @@ export function reconcilePirateFlights(client, records, worldId) {
     if (flight.world !== world || !flight.reservationId) continue;
     const key = `pirate-first:${world}:${flight.type}:${flight.level}:${flight.uid}`;
     const record = records?.[key], d = record?.details;
-    if (!record?.confirmed || record.expired || record.id !== flight.reservationId ||
+    if (record?.id !== flight.reservationId ||
         d?.kind !== 'pirateFirst' || String(d.world) !== world || d.buildingId !== flight.buildingId ||
-        d.uid !== flight.uid || d.type !== flight.type || d.level !== flight.level ||
-        !['won','lost'].includes(d.outcome)) continue;
+        d.uid !== flight.uid || d.type !== flight.type || d.level !== flight.level) continue;
+    if (record.expired && d.outcome === 'timedOut') {
+      session.pending.delete(flight.uid);
+      continue;
+    }
+    if (!record.confirmed || record.expired || !['won','lost'].includes(d.outcome)) continue;
     session.update(flight, d.outcome, d.outcome === 'won' ? '个人首杀记录已确认' : '个人战报已确认战败', true);
   }
 }
@@ -264,8 +278,11 @@ export function pirateTypePlan(progress, options, autoState) {
   if (!rows.length || rows.some(row => !Number.isSafeInteger(row.cleared) || row.cleared < 0)) return {};
   const failedTypes = new Set(autoState?.failedTypes);
   if (autoState?.failures >= options.maxFailures) failedTypes.add(autoState.type);
-  const remaining = rows.filter(row => row.cleared < row.limit && row.type >= (autoState?.type ?? 0) && !failedTypes.has(row.type));
+  const timedOutTypes = new Set(autoState?.timedOutTypes);
+  const remaining = rows.filter(row => row.cleared < row.limit && row.type >= (autoState?.type ?? 0) && !failedTypes.has(row.type) && !timedOutTypes.has(row.type));
   if (remaining.length) return autoState ? { current: remaining[0], next: remaining[1] } : {};
+  const skipped = rows.filter(row => timedOutTypes.has(row.type));
+  if (skipped.length) return { done: skipped.map(row => row.name).join('、') + '战果超过15分钟未确认，今日跳过；其余种类已结束' };
   if (failedTypes.size) return { done: '各类海盗均已达到连败上限或赛季等级上限' };
   const limits = [...new Set(rows.map(row => row.limit))];
   return { done: '海盗已达到当前赛季阶段的首杀等级上限' + (limits.length === 1 ? '（' + limits[0] + ' 级）' : '') };

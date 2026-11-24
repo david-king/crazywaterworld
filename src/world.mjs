@@ -21,7 +21,7 @@ import { randomUUID, createHash } from 'node:crypto';
 import { normalize } from './worlds.mjs';
 import { upgradeReason } from './building-upgrade-log.mjs';
 import { linkOperationResult } from './operation-log.mjs';
-import { residentFilter, resourceReserve, worldPreferenceEnabled, worldActionAllowed, factoryItemSpeedEnabled, exactAutomationId, AutomationSkip, createActionGuard } from './automation-policy.mjs';
+import { residentFilter, residentOrderStockWarning, resourceReserve, worldPreferenceEnabled, worldActionAllowed, factoryItemSpeedEnabled, exactAutomationId, AutomationSkip, createActionGuard } from './automation-policy.mjs';
 import { readWeekOrder } from './activities.mjs';
 import { RESOURCE, displayMaterial } from './config.mjs';
 import { captureFarmMaterialState, farmInventory, settleFarmMaterialState } from './farm-planting.mjs';
@@ -29,7 +29,7 @@ import { runFactoryProductionBatch, confirmFactoryProductionBeforeHarvest } from
 import { readOrderReservedStock } from './order-reservations.mjs';
 import { activityProductionEnabled } from './activity-automation.mjs';
 import { createProductionEligibility, factoryRecipeAvailability, factoryRecipeCosts, insertionRecipeReady } from './production-eligibility.mjs';
-import { simulateNativeFactoryStarts, simulatedFactoryQueueKey } from './factory-native-simulation.mjs';
+import { nativeMaterialReceipts, simulateNativeFactoryStarts, simulatedFactoryQueueKey } from './factory-native-simulation.mjs';
 import { createFactoryDispatch, shortFactoryFeed } from './factory-dispatch.mjs';
 import { factoryInsertions } from './factory-insert-store.mjs';
 import { insertionYieldsToProduction } from './factory-insertion-queue.mjs';
@@ -445,7 +445,8 @@ export async function surveyWorld(client, protocol, { config = null, player = nu
     let rewardExp = null;
     if (raw.isSpecial) {
       const row = specOrderCfg.get(raw.textId) ?? specOrderCfg.get(String(raw.textId));
-      rewardExp = Number((row?.reward ?? []).find((x) => x[0] === 'EXP')?.[1] ?? 0) || null;
+      const exp = (row?.reward ?? []).find((x) => x[0] === 'EXP')?.[1];
+      rewardExp = exp == null ? null : Number(exp);
     } else {
       let total = 0;
       let known = requirements.length > 0;
@@ -654,12 +655,8 @@ export function manualResidentOrderDecision(survey, order, config) {
   if (!order.requirements.length || order.requirements.some(r => !r.id || !Number.isSafeInteger(r.num) || r.num <= 0)) {
     return { status: 'unknown', reason: '尚未收到完整订单需求' };
   }
-  if (!survey.stockKnown) return { status: 'unknown', reason: '未能读取仓库库存' };
-  if (order.missing.length) {
-    const missing = order.missing.map(({ id, num }) => displayMaterial(config, id) + ' ×' + num);
-    return { status: 'missing', reason: '仓库还缺 ' + missing.join('、') };
-  }
-  return { status: 'ready', reason: '仓库材料已齐，手动提交可使用挂机预留的材料' };
+  const warning = residentOrderStockWarning(survey.stockKnown ? survey.stock : null, order.requirements, config);
+  return { status: 'ready', reason: warning || '手动提交这张订单，由游戏确认交付结果' };
 }
 
 function residentDeliveryAction(order, orderOfTheDay, weeklyBorrowed = [], borrowedText = '') {
@@ -686,6 +683,7 @@ export function planWorld(survey, {
   blockedCollectionTypes = settings?.factory?.blockedCollectionTypes,
   usage = { counters: {} },
   extraDemand = [],
+  reserveFactoryInputs = false,
   factoryWaitHistory,
   checkShortFeeds = true,
 } = {}) {
@@ -723,14 +721,54 @@ export function planWorld(survey, {
     .map(order => ({ ...order, source: 'cargo' }));
   const orderPriority = settings?.factory?.demandPriority ?? ['merchant', 'cargo'];
   const orderRank = source => orderPriority.includes(source) ? orderPriority.indexOf(source) : orderPriority.length;
-  const productionOrders = [weeklyOrder, ...cargoOrders]
-    .sort((left, right) => orderRank(left.source) - orderRank(right.source))
-    .filter(order => {
-      const blockers = productionEligibility(order.requirements, { reserve: true });
-      if (blockers.length) notes.push((order.source === 'merchant' ? '不差钱商人 ' : '贸易港 ') + skipReason(blockers));
-      return blockers.length === 0;
-    });
-  const selectedOrders = new Set(productionOrders);
+  const simulateNative = settings?.factory.strategy === 'nativeSimulation';
+  const smart = !simulateNative && settings?.factory.demandFirst === true;
+  const smartOrders = smart && (enabled('startProduce') || reserveFactoryInputs && worldPreferenceEnabled(settings, 'startProduce'));
+  const directOrders = [weeklyOrder, ...cargoOrders];
+  const cargoItems = new Set(cargoOrders.flatMap(order => order.requirements.map(item => item.id)));
+  const lastClaim = new Map();
+  for (const order of directOrders) for (const { id } of order.requirements) {
+    lastClaim.set(id, Math.max(lastClaim.get(id) ?? -1, orderRank(order.source)));
+  }
+  const lastRank = Math.max(-1, ...lastClaim.values());
+  const activityOrders = extraDemand.filter(order => activityProductionEnabled(settings, order.source));
+  // An independent guild order's explicit reservations are reconciled by settingDemands.
+  const earlyOrders = new Set(smartOrders ? activityOrders.filter(order => order.source !== 'factory' && !order.reserved?.length
+    && orderRank(order.source) < lastRank) : []);
+  const factoryInputs = new Map();
+  const isNative = b => b.factory.autoProductId && (survey.autoProduceForever || survey.autoProduceEndTime > (survey.serverNow ?? now));
+  const canSchedule = recipe => factoryRecipeAvailability(recipe, survey.festivals, survey.serverNow ?? now).allowed
+    && survey.factories.some(b => b.type === recipe.buildType && b.level > 0 && b.level >= recipe.unlockLevel && !blockedFactory(b)
+      && (isNative(b) ? settings.factory.cooperateNative : settings.factory.produce));
+  const selectedOrders = new Set(), skippedActivityOrders = new Set();
+  function claimFactoryInputs(order, batches) {
+    const rank = orderRank(order.source);
+    if (earlyOrders.has(order) && [...batches.keys()].some(recipe => !canSchedule(recipe))) return false;
+    let competing = false;
+    for (const [recipe, count] of batches) {
+      if (!canSchedule(recipe)) continue;
+      for (const [id, num] of recipe.costItem ?? []) {
+        if (rank >= (lastClaim.get(id) ?? -1)) continue;
+        if (!factoryInputs.has(order.source)) factoryInputs.set(order.source, new Map());
+        const inputs = factoryInputs.get(order.source);
+        inputs.set(id, (inputs.get(id) ?? 0) + num * count);
+        competing = true;
+      }
+    }
+    if (competing) selectedOrders.add(order);
+    return competing || !earlyOrders.has(order);
+  }
+  const candidates = [...directOrders, ...earlyOrders].sort((a, b) => orderRank(a.source) - orderRank(b.source));
+  for (const order of candidates) {
+    const acceptBatches = smartOrders && orderRank(order.source) < lastRank ? batches => claimFactoryInputs(order, batches) : undefined;
+    const blockers = productionEligibility(order.requirements, { reserve: true, acceptBatches });
+    if (blockers.length) {
+      const label = order.source === 'merchant' ? '不差钱商人 ' : order.source === 'cargo' ? '贸易港 ' : '';
+      notes.push(label + skipReason(blockers));
+      if (earlyOrders.has(order)) skippedActivityOrders.add(order);
+    } else if (!earlyOrders.has(order)) selectedOrders.add(order);
+  }
+  const productionOrders = directOrders.filter(order => selectedOrders.has(order));
   const weeklyNeeds = selectedOrders.has(weeklyOrder) ? weeklyRequirements : [];
   const cargoNeeds = new Map();
   for (const order of cargoOrders.filter(order => selectedOrders.has(order))) {
@@ -738,20 +776,31 @@ export function planWorld(survey, {
   }
   const weeklyIncomplete = !survey.orderCheckError && weeklyNeeds.every(([id, num]) => id && Number.isSafeInteger(num) && num > 0)
     && weeklyNeeds.some(([id, num]) => have(id) < num);
-  for (const [id, required] of weeklyNeeds) {
-    const held = Math.min(required, have(id));
-    if (held > 0) reserve(id, held);
-    weeklyHeld.set(id, held);
-    weeklyGap.set(id, required - held);
-  }
   const cargoGap = new Map();
   const cargoHeld = new Map();
-  for (const [id, required] of cargoNeeds) {
-    const held = Math.min(required, free(id));
-    reserve(id, held);
-    cargoHeld.set(id, held);
-    cargoGap.set(id, required - held);
+  const cargoLoadLimits = new Map();
+  const holders = [...new Set(['merchant', 'cargo', ...factoryInputs.keys()])];
+  if (factoryInputs.size) holders.sort((a, b) => orderRank(a) - orderRank(b));
+  for (const source of holders) {
+    const stockHeld = source === 'merchant' ? weeklyHeld : cargoHeld;
+    const stockGap = source === 'merchant' ? weeklyGap : cargoGap;
+    const needs = source === 'merchant' ? weeklyNeeds : source === 'cargo' ? cargoNeeds : [];
+    for (const [id, required] of needs) {
+      const held = Math.min(required, Math.max(0, free(id)));
+      reserve(id, held);
+      stockHeld.set(id, held);
+      stockGap.set(id, required - held);
+    }
+    for (const [id, requested] of factoryInputs.get(source) ?? []) {
+      const held = Math.min(requested, Math.max(0, free(id)));
+      factoryInputs.get(source).set(id, held);
+      reserve(id, held);
+      if (cargoItems.has(id) && orderRank(source) < orderRank('cargo')) cargoLoadLimits.set(id, 0);
+    }
   }
+  // Cargo rereads the bag after factory writes. Cap its share instead of
+  // subtracting inputs again from a balance that may already reflect the debit.
+  for (const id of cargoLoadLimits.keys()) cargoLoadLimits.set(id, cargoHeld.get(id) ?? 0);
   const incomingForResidents = new Map();
   const credit = (id, num) => {
     const weekly = Math.min(weeklyGap.get(id) ?? 0, num);
@@ -1074,7 +1123,7 @@ export function planWorld(survey, {
     ...survey.orders.filter((order, i) => ['reserved', 'missing', 'disabled'].includes(orderDecisions[i]?.status))
       .map(order => ({ source: 'resident', requirements: order.requirements })),
     ...buildingSupplies,
-    ...extraDemand.filter(demand => activityProductionEnabled(settings, demand.source)),
+    ...activityOrders.filter(order => !skippedActivityOrders.has(order)),
   ], demandPriority, { settings, eligibility: productionEligibility, selectedOrders, speedQuota,
     onSkip: (record, blockers) => notes.push(skipReason(blockers)) }) : null;
   const productionNeeded = id => (detailedNeeds?.get(id)?.num ?? 0) > 0 && (settings?.factory.demandFirst ||
@@ -1104,14 +1153,16 @@ export function planWorld(survey, {
   // of lower-priority recipes so stocking the factory cannot starve the pet.
   const petRank = demandPriority.indexOf('petAdvance');
   const feedStock = new Map();
-  if (settings?.factory.demandFirst && petRank >= 0 && activityProductionEnabled(settings, 'petAdvance')) {
+  if (smart && petRank >= 0 && activityProductionEnabled(settings, 'petAdvance')) {
     for (const { requirements } of extraDemand.filter(row => row.source === 'petAdvance' && row.readyToFeed)) {
       if (requirements.every(({ id, num }) => free(id) - (feedStock.get(id) ?? 0) >= num)) {
         for (const { id, num } of requirements) feedStock.set(id, (feedStock.get(id) ?? 0) + num);
       }
     }
   }
-  const recipeFree = (row, id) => Math.max(0, free(id) - (recipeRank(row) >= petRank ? feedStock.get(id) ?? 0 : 0));
+  const assignedInputs = row => factoryInputs.get(demandPriority[itemOrderRank(row.itemId)]);
+  const recipeFree = (row, id) => Math.max(0, free(id) + (assignedInputs(row)?.get(id) ?? 0)
+    - (recipeRank(row) >= petRank ? feedStock.get(id) ?? 0 : 0));
   if(detailedNeeds)for(const crop of rowsOf(config,'FarmlandPlantCfg')) {const need=detailedNeeds.get(crop.id),seed=detailedNeeds.get(crop.material?.[0]);if(need?.num>0 && seed?.num>0)notes.push('生产依赖：缺'+name(crop.id)+' '+need.num+' → 缺'+name(crop.material[0])+' '+seed.num+' → 种子厂按需求补产'+(settings.factory.cooperateNative?'（已允许调整原生自动目标）':'（原生协同尚未开启）'));}
   if (enabled('farm') && settings && survey.autoFarming && (settings.farm.customPlant || !settings.farm.autoPlant)) {
     actions.push({ kind: 'farm', request: 'SetAutoFarmingRequest', response: null, body: { isOn: false }, label: '暂停游戏内自动种植，应用当前种植设置' });
@@ -1155,14 +1206,11 @@ export function planWorld(survey, {
   const factoryReasons = new Map();
   const timing = createProductionTiming({ config, ...survey.productionTiming, serverNow: survey.serverNow ?? now });
   const dispatch = createFactoryDispatch(survey, timing, canCollect, rowsOf(config, 'FarmlandPlantCfg'));
-  const simulateNative = settings?.factory.strategy === 'nativeSimulation';
-  const smart = !simulateNative && settings?.factory.demandFirst === true;
   const revisit = settings?.factory.checkEverySeconds ?? 30;
   const nextWaits = new Map();
   // Each source tier allocates shared inputs across all factories.
   const priorities = demandPriority.map((_, i) => i).filter(i => demandPriority[i] === 'factory' ? i === stockRank && stockTarget > 0
     : [...detailedNeeds.values()].some(need => (need.productionBySource[demandPriority[i]] ?? 0) > 0));
-  const isNative = b => b.factory.autoProductId && (survey.autoProduceForever || survey.autoProduceEndTime > (survey.serverNow ?? now));
   const fullForInsertion = id => survey.stockCap > 0 && survey.stockKnown !== false
     && warehouseCount(id) + (incoming.get(id) ?? 0) >= survey.stockCap;
   const facilities = survey.factories.filter(b => {
@@ -1260,6 +1308,11 @@ export function planWorld(survey, {
       choices.sort((a,b) => recipeRank(a) - recipeRank(b) ||
         Number(b.itemId === bFactoryTarget) - Number(a.itemId === bFactoryTarget) || (detailedNeeds.get(b.itemId)?.num ?? 0) - (detailedNeeds.get(a.itemId)?.num ?? 0));
       const best = choices[0];
+      // The native target may stay unchanged until the game starts its next batch.
+      if (best) for (const [id, n] of best.costItem ?? []) {
+        const inputs = assignedInputs(best);
+        if (inputs?.has(id)) inputs.set(id, Math.max(0, inputs.get(id) - n));
+      }
       if (best && best.itemId !== b.factory.autoProductId) {
         actions.push({kind:'startProduce',request:'SetFactoryAutoProduceRequest',response:null,
           body:{buildingId:b.buildingId,productId:best.itemId},previousProduct:b.factory.autoProductId,eligibilityKey:factoryRecipeAvailability(best,survey.festivals,survey.serverNow??now).signature+':'+b.level,
@@ -1288,6 +1341,13 @@ export function planWorld(survey, {
       // Reserve one runnable batch for a blocked higher-priority recipe.
       if (stockouts && !roomForRecipe(row)) continue;
       for (const [item, n] of row.costItem ?? []) protectedInputs.set(item, (protectedInputs.get(item) ?? 0) + n);
+    }
+    // The source's share is already excluded from the lower tier's free stock.
+    for (const [source, inputs] of factoryInputs) {
+      if (orderRank(source) >= tier) continue;
+      for (const [id, held] of inputs) {
+        if (protectedInputs.has(id)) protectedInputs.set(id, Math.max(0, protectedInputs.get(id) - held));
+      }
     }
     const jobs = [];
     for (let slot = state.count; slot < slotLimit; slot++) {
@@ -1370,7 +1430,10 @@ export function planWorld(survey, {
         || a.produceTime - b2.produceTime
         || projectedStock(a.itemId) - projectedStock(b2.itemId))[0];
       for (const [id, n] of best.costItem ?? []) {
-        reserve(id, n);
+        const inputs = assignedInputs(best);
+        const assigned = Math.min(inputs?.get(id) ?? 0, n);
+        if (assigned) inputs.set(id, inputs.get(id) - assigned);
+        reserve(id, n - assigned);
         committedInputs.set(id, (committedInputs.get(id) ?? 0) + n);
       }
       const need = demand.get(best.itemId) ?? 0;
@@ -1447,10 +1510,21 @@ export function planWorld(survey, {
     for (const b of facilities.filter(isNative)) planFactory(b);
     const ordinary = facilities.filter(b => !isNative(b));
     if (simulateNative) {
-      const picks = settings.factory.produce ? simulateNativeFactoryStarts({
-        buildings: ordinary, recipes: produceRows, targets: settings.factory.simulatedTargets, timing,
+      const collecting = new Set(actions.filter(step => step.kind === 'gainFactory').map(step => step.body.buildingId));
+      const receipts = nativeMaterialReceipts(survey.factories, b => collecting.has(b.buildingId));
+      // Earlier actions will spend these units before the factories start. An
+      // unsubmitted order has no such cost and cannot hold a factory's inputs.
+      const spending = new Map();
+      for (const step of actions) for (const { id, num } of step.costs ?? []) {
+        spending.set(id, (spending.get(id) ?? 0) + num);
+      }
+      const confirmedStock = survey.nativeFactoryStock ?? have;
+      const picks = settings.factory.produce && survey.stockKnown !== false ? simulateNativeFactoryStarts({
+        buildings: ordinary, recipes: rowsOf(config, 'BuildingProduceCfg'), availableProducts: craftable,
+        targets: settings.factory.simulatedTargets, timing,
         now: survey.serverNow ?? now, cap: survey.stockCap, slots: survey.factorySlots, insertions:survey.factoryInsertions,
-        available: id => free(id) - (feedStock.get(id) ?? 0), owned: id => warehouseCount(id) + (incoming.get(id) ?? 0),
+        available: id => confirmedStock(id) + (receipts.get(id) ?? 0) - (spending.get(id) ?? 0) - resourceReserve(settings, id),
+        owned: id => warehouseCount(id) + (incoming.get(id) ?? 0) - (spending.get(id) ?? 0),
       }) : [];
       for (const { building, row, seconds, primary, laneUntil } of picks) {
         for (const [id, n] of row.costItem) reserve(id, n);
@@ -1671,7 +1745,7 @@ export function planWorld(survey, {
     if (left === speeders) notes.push(`${SPEED_UP_ITEM} 有 ${speeders} 个，但没有等待中的建造或生产`);
   }
 
-  return { actions, notes, factoryReasons, upgradeChecks, upgradeReasons: upgradeChecks.map(upgradeReason), orderDecisions,
+  return { actions, notes, factoryReasons, cargoLoadLimits, upgradeChecks, upgradeReasons: upgradeChecks.map(upgradeReason), orderDecisions,
     demands: detailedNeeds ? [...detailedNeeds].map(([id, need]) => ({ id, ...need })) : [], reserved: [...reserved].filter(([, n]) => n > 0) };
 }
 
@@ -1866,7 +1940,8 @@ async function confirmResidentOrder(client, protocol, step, config, player, carg
   if (!order || (step.orderKey && order.orderKey !== step.orderKey)) return { reason: '这条居民订单已刷新或已处理，请查看当前订单' };
   if (step.manualCheck) {
     const decision = manualResidentOrderDecision(survey, order, config);
-    return decision.status === 'ready' ? { action: residentDeliveryAction(order, survey.orderOfTheDay) } : { reason: decision.reason };
+    if (decision.status !== 'ready') return { reason: decision.reason };
+    return { action: { ...residentDeliveryAction(order, survey.orderOfTheDay), manualCheck: true, acceptStockWarning: step.acceptStockWarning } };
   }
   if (survey.orderCheckError) return { reason: survey.orderCheckError };
   if (order.workerId !== step.workerId || order.textId !== step.textId ||
@@ -1912,18 +1987,19 @@ export async function rerollResidentOrder(client,protocol,{index,orderKey,config
  }catch(error){if(error.prompt&&error.request==='DenyOrderRequest')ledger.cancel(ticket);throw error;}
 }
 
-export async function submitResidentOrder(client, protocol, { index, orderKey, config, player, enabled = () => true }) {
+export async function submitResidentOrder(client, protocol, { index, orderKey, config, player, acceptStockWarning = false, enabled = () => true }) {
   if (!Number.isSafeInteger(index) || index < 0 || index > 2147483647 || typeof orderKey !== 'string' || !orderKey) {
     throw new Error('请从当前居民订单列表中选择要交付的一单');
   }
   if (!enabled()) throw new Error('账号托管状态已变化，已取消手动交单');
   if (trackResidentOrders(client).get(index)?.key !== orderKey) throw new Error('这条居民订单已刷新或已处理，请查看当前订单');
   const step = { kind: 'finishOrder', request: 'FinishWorkerOrderRequest', response: 'FinishWorkerOrderResponse',
-    body: { index }, orderKey, manualCheck: true, label: '交付居民订单 #' + index };
+    body: { index }, orderKey, manualCheck: true, acceptStockWarning, label: '交付居民订单 #' + index };
   const { results } = await runWorld(client, protocol, { actions: [step] }, {
     config, player, allowMutate: true, enabled,
   });
   const [entry] = results;
+  if (entry?.stockWarning) return { index, stockWarning: entry.stockWarning };
   if (!entry?.ok) throw new Error(entry?.error || '账号托管状态已变化，已取消手动交单');
   const reward = normalize(entry.body.reward);
   const prize = reward.asset.map(item => displayMaterial(config, item.id) + ' ×' + item.num).join('、');
@@ -2119,7 +2195,7 @@ export async function runWorld(client, protocol, plan, {
       // resource barrier, while a manual order keeps its own explicit consent.
       const localGuard = step.manualCheck || !beforeStep ? createActionGuard(client,
         () => step.manualCheck ? null : getSettings?.() ?? settings, null,
-        { player, enabled: () => enabled(step.kind) }) : null;
+        { player, config, enabled: () => enabled(step.kind) }) : null;
       const prepareAction = localGuard?.before ?? beforeStep;
       const finishAction = localGuard?.after ?? afterStep;
       const cancelAction = localGuard?.cancel ?? cancelStep;
@@ -2253,6 +2329,7 @@ export async function runWorld(client, protocol, plan, {
           blocked.add(step.kind);
         }
         entry = { step, ok: false, ...(error.code === 'AUTOMATION_SKIP' ? { skipped: true } : {}), error: error.message };
+        if (error.stockWarning) entry.stockWarning = error.stockWarning;
         if (step.request === 'FarmPlantRequest' && prepared && !notSent && !(error.prompt && error.request === actual.request)) {
           entry.status = 'unknown';
           entry.reason = '播种响应未确认：' + error.message;

@@ -2,7 +2,8 @@
 import assert from 'node:assert/strict';
 import { EventEmitter } from 'node:events';
 import { loadProtocol } from '../src/proto.mjs';
-import { claimExtraRewards, extraRewardKeys, gameplayOpenDay, seasonRows, seasonTaskReady, worldBossRewardLevel, worldOnlineState } from '../src/extra-rewards.mjs';
+import { claimExtraRewards, extraRewardKeys, gameplayOpenDay, seasonRows, seasonTaskReady, worldBossRewardLevel } from '../src/extra-rewards.mjs';
+import { readWorldOnlineReward } from '../src/world-online-rewards.mjs';
 import { redPointTasks, rewardSchedule } from '../src/reward-schedule.mjs';
 import { automationControls } from '../src/automation-controls.mjs';
 import { automationTasks, taskSettings } from '../src/automation.mjs';
@@ -57,25 +58,24 @@ assert.equal(Math.floor(seasonPlayer.worldId / 1e6) % 1000, 1);
 assert.deepEqual(seasonRows(config, 'HeroRecruitTaskCfg', seasonPlayer).map(row => row.id), [1, 2], '不能用未来赛季的配置');
 assert.equal(gameplayOpenDay(config, seasonPlayer, '国战'), 2);
 
-// ---- 世界在线奖励时间窗 ----
-const day = 86400 * 20000;
-const beijing = hour => day - 8 * 3600 + hour * 3600;
-const opened = { ...seasonPlayer, worldOpenTime: beijing(0) - 86400 * 5 };
-const at = (stage, last, now, player = opened) => worldOnlineState(config, player, stage === null ? null : { num: { low: stage, high: 0 }, updateTime: last }, now);
-assert.equal(at(0, 0, beijing(19)).status, 'waiting', '20 点前不开放');
-assert.equal(at(0, 0, beijing(19)).at, beijing(20) + 1);
-assert.equal(at(0, 0, beijing(20)).status, 'waiting', '与客户端相同：恰好 20:00 还未开放');
-assert.equal(at(null, 0, beijing(20) + 5).status, 'ready', '服务端未返回计数时按 0 档处理');
-assert.equal(at(0, 0, beijing(20) + 5).next.stage, 1);
-assert.equal(at(1, beijing(20) + 5, beijing(20) + 30).status, 'waiting', '每档从上次领取开始计时');
-assert.equal(at(1, beijing(20) + 5, beijing(20) + 30).at, beijing(20) + 65);
-assert.equal(at(1, beijing(20) + 5, beijing(20) + 65).status, 'ready');
-assert.equal(at(1, beijing(21), beijing(22)).status, 'waiting', '21:00 后领过则今天结束');
-assert.equal(at(1, beijing(20) + 5, beijing(22)).status, 'ready', '21:00 前的计时仍可在之后领取');
-assert.equal(at(2, beijing(20), beijing(20) + 500).reason, '今日 2 档已全部领完');
-assert.equal(at(2, beijing(20), beijing(20) + 500).at, beijing(44) + 1);
-const newWorld = { ...seasonPlayer, worldOpenTime: beijing(1) };
-assert.equal(at(0, 0, beijing(21), newWorld).at, beijing(44) + 1, '国战未开放的新区要等到开放日 20:00');
+// 城战在线奖励只走统一入口，覆盖开场、档位计时和跨点补领边界。
+const start = Date.parse('2026-11-23T20:00:00+08:00') / 1000;
+async function onlineAt(seconds, stage, last) {
+  const client = fakeClient({
+    WarDeclarationRequest: { startTime: start, endTime: start + 3600 },
+    CounterInfoRequest: { counters: stage == null ? [] : [{ type: 'DAILY_WORLD_ONLINE_RWD', num: stage, updateTime: last }] },
+  });
+  client.serverClockOffsetMs = (start + seconds) * 1000 - Date.now();
+  return readWorldOnlineReward(client, config, seasonPlayer);
+}
+assert.equal((await onlineAt(-60, 0, 0)).nextAt, start + 1);
+assert.equal((await onlineAt(0, 0, 0)).ready, false);
+assert.equal((await onlineAt(5, null, 0)).stage, 1);
+assert.equal((await onlineAt(30, 1, start + 5)).nextAt, start + 65);
+assert.equal((await onlineAt(65, 1, start + 5)).ready, true);
+assert.equal((await onlineAt(7200, 1, start + 3600)).ready, false);
+assert.equal((await onlineAt(7200, 1, start + 5)).ready, true);
+assert.match((await onlineAt(500, 2, start)).reason, /全部领取/);
 
 // ---- 领取流程 ----
 const run = async (client, player, keys, scheduler) => {
@@ -86,56 +86,11 @@ const run = async (client, player, keys, scheduler) => {
 };
 
 const now = () => Math.floor(Date.now() / 1000);
-const onlinePlayer = { ...seasonPlayer, worldOpenTime: now() - 86400 * 9 };
-const onlineDue = worldOnlineState(config, onlinePlayer, { num: 0, updateTime: 0 }, now());
-if (onlineDue.status === 'ready') {
-  let stage = 0;
-  const client = fakeClient({
-    CounterInfoRequest: () => ({ counters: [{ type: 'DAILY_WORLD_ONLINE_RWD', num: { low: stage, high: 0 }, updateTime: 0 }] }),
-    GotWorldOnlineRwdRequest: () => { stage = 1; return reward('汽油', 7000); },
-  });
-  const reports = await run(client, onlinePlayer, ['worldOnline']);
-  assert(reports[0].ok, JSON.stringify(reports));
-  assert.match(reports[0].label, /第 1 档/);
-}
-{
-  // 服务端拒绝时要报告失败，不能当作已领取。
-  const prompt = Object.assign(new Error('server prompt: closed'), { prompt: {} });
-  const client = fakeClient({
-    CounterInfoRequest: { counters: [] },
-    GotWorldOnlineRwdRequest: () => { throw prompt; },
-  });
-  const realNow = Date.now;
-  Date.now = () => beijing(20) * 1000 + 5000;
-  try {
-    const reports = await run(client, { ...seasonPlayer, worldOpenTime: beijing(0) - 86400 * 9 }, ['worldOnline']);
-    assert.equal(reports[0].ok, false);
-    assert.match(reports[0].error, /closed/);
-  } finally { Date.now = realNow; }
-}
-{
-  // 回包丢失但计数已前进，算领取成功；计数未前进算失败。
-  const realNow = Date.now;
-  Date.now = () => beijing(20) * 1000 + 5000;
-  const player = { ...seasonPlayer, worldOpenTime: beijing(0) - 86400 * 9 };
-  try {
-    let stage = 0;
-    const lost = fakeClient({
-      CounterInfoRequest: () => ({ counters: [{ type: 'DAILY_WORLD_ONLINE_RWD', num: stage, updateTime: 0 }] }),
-      GotWorldOnlineRwdRequest: () => { stage = 1; throw new Error('timeout'); },
-    });
-    assert.equal((await run(lost, player, ['worldOnline']))[0].ok, true);
-    const stuck = fakeClient({
-      CounterInfoRequest: { counters: [{ type: 'DAILY_WORLD_ONLINE_RWD', num: 0, updateTime: 0 }] },
-      GotWorldOnlineRwdRequest: () => { throw new Error('timeout'); },
-    });
-    assert.equal((await run(stuck, player, ['worldOnline']))[0].ok, false);
-  } finally { Date.now = realNow; }
-}
 {
   const client = fakeClient({});
-  assert.match((await run(client, { ...seasonPlayer, level: 10 }, ['worldOnline']))[0].reason, /16 级开放/);
-  assert.equal(client.calls.length, 0, '等级不足时不发请求');
+  assert.deepEqual(await run(client, seasonPlayer, ['worldOnline', 'worldOnlineRewards']), []);
+  assert.equal((await readWorldOnlineReward(client, config, { ...seasonPlayer, level: 10 })).ready, false);
+  assert.equal(client.calls.length, 0);
 }
 {
   const client = fakeClient({

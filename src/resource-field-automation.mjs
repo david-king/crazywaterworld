@@ -242,6 +242,7 @@ export async function readResourceFieldsOverview(...args) {
 }
 
 const effectiveYield = field => field?.active === false ? 0 : field?.active === true && integer(field.perHour) ? field.perHour : null;
+const differentResourceReason = '只能替换相同资源类型的旧田';
 function plan(state, gridIdx, fleetId, replaceGridIdx = null) {
   if (state.reason) throw Error(state.reason);
   const replacement = replaceGridIdx === null ? null : state.owned.find(field => field.grid === replaceGridIdx);
@@ -251,6 +252,7 @@ function plan(state, gridIdx, fleetId, replaceGridIdx = null) {
   if (replacement ? !(state.maxNum - state.count - state.pending.length - state.returnChecks.length + 1 > 0) : !(state.remaining > 0)) throw Error('占田名额已满或已被在途任务预留');
   const target = state.candidates.find(row => row.grid === gridIdx), fleet = state.fleets.find(row => row.id === fleetId);
   if (!target) throw Error('目标已占领、城市不属于本盟或田地信息未同步');
+  if (replacement && replacement.resourceId !== target.resourceId) throw Error(differentResourceReason);
   if (target.reason) throw Error(target.reason);
   if (!fleet?.available) throw Error(fleet?.reason || '舰队未同步');
   if (state.fuel - state.pendingFuel < state.cost) throw Error('可用汽油不足（含其他任务待确认消耗）');
@@ -261,6 +263,7 @@ function plan(state, gridIdx, fleetId, replaceGridIdx = null) {
 // Once a replacement has released its old field, finish only the originally reserved dispatch.
 function automaticPlan(state, policy, releasedTarget = null) {
   if (!policy?.enabled) return { reason: '资源田自动化未开启' };
+  if (releasedTarget && releasedTarget.replacement.resourceId !== releasedTarget.target.resourceId) return { reason: differentResourceReason };
   const readReason = state.reason || state.autoStopReason || state.lossHistoryReason || (releasedTarget && state.syncFailure);
   if (readReason) return { reason: readReason, wait: true };
   if (releasedTarget && !policy.fleetIds.includes(releasedTarget.fleetId)) return { reason: '原换田舰队已移出参与配置' };
@@ -285,7 +288,6 @@ function automaticPlan(state, policy, releasedTarget = null) {
   const replaceable = state.owned.filter(f => !f.replacementReason && !f.dispatchActive && effectiveYield(f) !== null
     && (f.active ? integer(f.level, 1) : policy.refillAfterLoss))
     .sort((a, b) => Number(a.active) - Number(b.active) || a.level - b.level || a.grid - b.grid);
-  const surplus = replaceable.find(f => (counts[f.resourceId] - (policy.refillAfterLoss && f.active ? inactive[f.resourceId] : 0)) > targets[f.resourceId]);
   let choice = null;
   // Candidates are sorted by descending level. Prefer filling a missing resource, then
   // upgrade an existing field of the same resource even if the configured quota is full.
@@ -300,8 +302,8 @@ function automaticPlan(state, policy, releasedTarget = null) {
     const productiveShortage = policy.refillAfterLoss && counts[id] - inactive[id] < targets[id];
     const restoringInactive = restoringOwnSlot && releasedTarget.replacement.active === false && productiveShortage;
     const missing = restoringInactive || counts[id] + (restoringOwnSlot ? 0 : losses[id]) < targets[id];
-    if (missing && (state.remaining > 0 || (surplus && !releasedTarget))) {
-      choice = { target, fleet, old: state.remaining > 0 ? null : surplus };
+    if (missing && state.remaining > 0) {
+      choice = { target, fleet };
       break;
     }
     if (productiveShortage && !releasedTarget) {

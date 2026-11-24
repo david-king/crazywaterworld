@@ -76,7 +76,7 @@ try {
   assert.equal(await page.locator('#journal select').count(), 1, '大类只占一个选择框，功能和账号可直接点击');
   assert.equal(await page.locator('#log-account-tabs [data-log-account="logs-a"]').getAttribute('title'), longTitle);
   assert.equal(await page.locator('#journal a[href*="github.com"]').count(), 0);
-  assert(await page.locator('#log-clear').isDisabled());
+  assert(await page.locator('#log-clear').isEnabled(), '默认的全部账号视图可以清空日志');
   assert.equal(await page.locator('#log .row').filter({ hasText: '工厂完成木板生产' }).locator('.log-account').textContent(), longTitle);
   assert.equal(await page.locator('#log .row').filter({ hasText: '城战舰队等待维修' }).locator('.log-account').textContent(), '远航舰队');
   assert.doesNotMatch(await page.locator('#journal').textContent(), /logs-a|logs-b/, '内部ID不占用页面空间');
@@ -247,8 +247,22 @@ try {
   app.emit(b, 'info', '重连后收到乙账号新日志', { category: 'alliance' });
   await page.locator('#log .log-message').filter({ hasText: '重连后收到乙账号新日志' }).waitFor();
   assert.equal(await page.locator('#log .log-message').filter({ hasText: '城战舰队等待维修' }).count(), 0);
+  await second.locator('#log .log-message').filter({ hasText: '重连后收到乙账号新日志' }).waitFor();
+  await page.locator('#log-issues').click();
+  await page.locator('#log-clear').click();
+  for (const tab of [page, second]) {
+    await tab.waitForFunction(() => document.querySelector('#log-top-count').textContent === '0');
+    assert.equal(await tab.locator('#log-count').textContent(), '0');
+  }
+  await page.locator('#log-all').click();
+  assert(await page.locator('#log-empty').isVisible());
+  await page.reload();
+  await page.locator('#logs-open').click();
+  app.emit(null, 'info', '全部清空后的新系统日志');
+  await page.locator('#log .log-message').filter({ hasText: '全部清空后的新系统日志' }).waitFor();
+  assert.equal(await page.locator('#log .row').count(), 1);
   await second.close();
-  console.log('通过：备注刷新、文本安全渲染、多窗口清空与SSE重连回放');
+  console.log('通过：多窗口同步清空全部账号及系统日志，刷新后只显示新记录');
 
   await page.evaluate(() => {
     const now = Date.now();

@@ -1,6 +1,6 @@
 // 海商王观察与成交日志。只存玩法字段；复用调用方账号账本，不读取账号凭据。
 import { createHash } from 'node:crypto';
-import { merchantActionSeconds, merchantSettings, merchantTiming, planMerchant } from './merchant-planner.mjs';
+import { merchantActionSeconds, merchantOpeningCargo, merchantSettings, merchantTiming, planMerchant } from './merchant-planner.mjs';
 
 const natural = value => Number.isSafeInteger(value) && value >= 0;
 const positive = value => natural(value) && value > 0;
@@ -34,10 +34,10 @@ function cleanState(state) {
 function cleanExpected(expected) {
   if (!expected || typeof expected.request !== 'string' || !/^Trade[A-Za-z]+Request$/.test(expected.request)) return null;
   return fields(expected, ['request', 'city', 'goodsId', 'price', 'owned', 'coins', 'pid', 'profit', 'gain', 'proceeds', 'destination',
-    'start', 'marketEpoch', 'cargoSignature', 'exploration', 'period', 'moveStartTime', 'beforeEndTime', 'afterEndTime', 'useNum',
+    'start', 'marketEpoch', 'cargoSignature', 'plannedOpening', 'exploration', 'period', 'moveStartTime', 'beforeEndTime', 'afterEndTime', 'useNum',
     'diamondCost', 'cost', 'beforeLevel', 'afterLevel', 'level', 'cargoLv', 'beforeDiamonds', 'afterDiamonds',
     'startTime', 'fromLevel', 'toLevel', 'diamonds', 'accelerationReason', 'incrementalProfit',
-    'estimatedIncrementalProfit', 'savedSeconds', 'estimatedProfit', 'priceNote', 'saleCount', 'saleSeconds', 'evidenceExpiresAt']);
+    'estimatedIncrementalProfit', 'savedSeconds', 'estimatedProfit', 'discountedProfit', 'priceNote', 'saleCount', 'saleSeconds', 'evidenceExpiresAt']);
 }
 function emptyJournal(event) {
   return { version: 1, event, snapshots: [], trades: [], archivedTotals: totals(), archivedIds: [], batches: [],
@@ -106,7 +106,7 @@ export function recordMerchantSnapshot(ledger, { event, state, market, radar, ti
   const marketData = { cityId: observed.cargo.cityId, goods: market.goods.map(g => fields(g, ['goodsId', 'price', 'stock'])).sort((a, b) => a.goodsId - b.goodsId),
     ...fields(market, ['specGoodsId', 'rareGoodsId', 'isReport']) };
   const radarData = { radar: (Array.isArray(radar?.radar) ? radar.radar : []).filter(r => positive(r?.cityId))
-    .map(r => fields(r, ['cityId', 'specGoodsId', 'rareGoodsId', 'manualIntel'])).sort((a, b) => a.cityId - b.cityId) };
+    .map(r => fields(r, ['cityId', 'specGoodsId', 'rareGoodsId', 'manualIntel', 'openingShips'])).sort((a, b) => a.cityId - b.cityId) };
   const observedAt = market.observedAt ?? time;
   if (!positive(observedAt) || observedAt > time) return { recorded: false, reason: '港口报价采集时间无效' };
   const epoch = config ? merchantTiming(config, event, observedAt).marketEpoch : market.marketEpoch ?? 'sample:' + Math.floor(observedAt / 300);
@@ -133,10 +133,10 @@ function confirmedMetrics(entry) {
   if (!before || !after) { result.unverifiedConfirmations = 1; return result; }
   const b = before.player, a = after.player, request = expected.request;
   if (request === 'TradeBuyRequest') {
-    const added = a.goods.filter(g => g.goodsId === expected.goodsId && g.cityId === expected.city && (expected.price == null || g.buyPrice === expected.price))
-      .reduce((sum, g) => sum + g.num - (b.goods.find(old => old.pid === g.pid)?.num ?? 0), 0);
+    const value = goods => goods.filter(g => g.goodsId === expected.goodsId && g.cityId === expected.city)
+      .reduce((sum, g) => sum + g.num * g.buyPrice, 0);
     const cost = b.coins - a.coins;
-    if (!positive(added) || !positive(cost) || !signed(cost)) result.unverifiedConfirmations = 1;
+    if (!positive(cost) || value(a.goods) - value(b.goods) !== cost) result.unverifiedConfirmations = 1;
     else { result.confirmedTrades = result.buys = 1; result.buyCost = cost; }
   } else if (request === 'TradeSellRequest') {
     const batch = b.goods.find(g => g.pid === expected.pid), retained = a.goods.find(g => g.pid === expected.pid);
@@ -284,8 +284,10 @@ export function replayMerchantJournal(config, entries, { variants = [{ name: '�
         const visited = pastTrades.filter(trade => trade.expected?.request === 'TradeMoveRequest' && trade.before &&
           hash([trade.before.player.coins, trade.before.player.goods]) === signature).map(trade => trade.expected.city);
         const previous = pastTrades.findLast(t => t.expected?.request === 'TradeMoveRequest' && t.expected.destination === snapshot.state.cargo.cityId);
+        const lastMove = pastTrades.findLast(t => t.expected?.request === 'TradeMoveRequest');
         const plan = planMerchant(config, event, snapshot.state, snapshot.market, snapshot.radar, snapshot.time, visited,
-          { settings, markets, preferredPort: previous?.expected.city, actionSeconds: actionSeconds ?? snapshot.actionSeconds });
+          { settings, markets, preferredPort: previous?.expected.city, actionSeconds: actionSeconds ?? snapshot.actionSeconds,
+            openingCargoPids: merchantOpeningCargo(lastMove, snapshot.state), plannedOpening: lastMove?.expected.plannedOpening });
         const round = merchantTiming(config, event, snapshot.market.observedAt).marketEpoch;
         const marketKey = identity + ':' + snapshot.market.cityId + ':' + round;
         if (!history.has(marketKey) || snapshot.market.observedAt >= history.get(marketKey).observedAt)

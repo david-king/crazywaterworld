@@ -48,10 +48,12 @@
 .resource-fields-table td small { margin-top:2px; font-size:12px }
 .resource-fields-table :is(th,td):nth-child(2),.resource-fields-table :is(th,td):nth-child(3) { text-align:right }
 .resource-fields-table :is(th,td):last-child { text-align:right }
+.resource-fields-table td:last-child:not([colspan]) { text-overflow:clip }
 .resource-fields-table td[colspan] { text-align:center; white-space:normal }
 .resource-fields-owned-table th:nth-child(2) { width:12% }
 .resource-fields-owned-table th:nth-child(3) { width:25% }
 .resource-fields-owned-table th:last-child { width:6rem }
+#resource-fields-manager[data-view="choose-old"] .resource-fields-owned-table th:last-child { width:7rem }
 .resource-fields-candidate-table { min-width:23.5rem }
 .resource-fields-candidate-table th:nth-child(2),.resource-fields-candidate-table th:nth-child(3) { width:22% }
 .resource-fields-candidate-table th:last-child { width:8.75rem }
@@ -72,6 +74,7 @@
  .resource-fields-table-scroll { max-height:min(52dvh,28rem) }
  .resource-fields-owned-table th:nth-child(3) { width:31% }
  .resource-fields-owned-table th:last-child { width:4.8rem }
+ #resource-fields-manager[data-view="choose-old"] .resource-fields-owned-table th:last-child { width:6rem }
  .resource-fields-candidate-table { min-width:17rem }
  .resource-fields-candidate-table :is(th,td) { padding-inline:3px }
  .resource-fields-candidate-table th:nth-child(2) { width:26% }

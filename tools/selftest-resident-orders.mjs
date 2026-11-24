@@ -24,7 +24,9 @@ function mock() {
       this.calls.push(name);
       switch (name) {
         case 'OnWaterRequest': return { workerOrder: this.onWater, building: this.buildings };
-        case 'AllItemRequest': return this.itemReply ?? { items: [{ itemId: '烤鱼', num: this.stock }, ...this.otherStock] };
+        case 'AllItemRequest':
+          if (this.itemReply instanceof Error) throw this.itemReply;
+          return this.itemReply ?? { items: [{ itemId: '烤鱼', num: this.stock }, ...this.otherStock] };
         case 'AllResourceRequest': return { list: [] };
         case 'WeekInfoRequest': return { activityTime: this.weekly === 0 ? [] : [{ type: 5, period: 1001, startTime: now - 60, endTime: now + 3600 }] };
         case 'WeekOrderInfoRequest':
@@ -37,7 +39,10 @@ function mock() {
         case 'FinishWorkerOrderRequest':
           assert.equal(response, 'FinishWorkerOrderResponse');
           for (const item of this.onWater.find(row => row.index === body.index)?.requirements ?? []) {
-            if (item.id === '烤鱼') { assert(this.stock >= item.num); this.stock -= item.num; }
+            if (item.id === '烤鱼') {
+              if (this.stock < item.num) throw Object.assign(new Error('游戏返回：订单材料不足'), { request: name, prompt: {} });
+              this.stock -= item.num;
+            }
             else {
               const stored = this.otherStock.find(row => row.itemId === item.id);
               assert(stored && stored.num >= item.num); stored.num -= item.num;
@@ -205,13 +210,25 @@ async function testManualResidentOrder() {
     assert.equal(manual.calls.filter(name => name === 'FinishWorkerOrderRequest').length, 1);
     assert(!manual.calls.some(name => ['WeekInfoRequest', 'WeekOrderInfoRequest', 'CargoShipsRequest'].includes(name)));
   }
-  for (const block of [c => { c.stock = 2; }, c => { c.itemReply = {}; }]) {
-    const waiting = setup();
-    const id = (await survey(waiting)).orders[1].orderKey;
-    block(waiting);
-    await assert.rejects(submitResidentOrder(waiting, protocol, { ...context(waiting), index: 2, orderKey: id }), /仓库还缺 烤鱼 ×1|未能读取仓库库存/);
-    assert(!waiting.calls.includes('FinishWorkerOrderRequest'));
+  for (const itemReply of [{ items: [{ itemId: '烤鱼', num: 0 }] }, {}, new Error('库存请求超时')]) {
+    const manual = setup();
+    manual.itemReply = itemReply;
+    const id = (await survey(manual)).orders[1].orderKey;
+    const pick = { ...context(manual), index: 2, orderKey: id };
+    const warning = await submitResidentOrder(manual, protocol, pick);
+    assert.match(warning.stockWarning, itemReply.items ? /还缺烤鱼 ×3/ : /库存尚未同步/);
+    assert(!manual.calls.includes('FinishWorkerOrderRequest'), '确认缺料提示之前不交单');
+    const delivered = await submitResidentOrder(manual, protocol, { ...pick, acceptStockWarning: true });
+    assert.deepEqual(delivered.reward, reward, '本地库存不足或未同步时由游戏核定实际库存');
+    assert.equal(manual.calls.filter(name => name === 'FinishWorkerOrderRequest').length, 1);
   }
+  const short = setup();
+  short.stock = 2;
+  const shortKey = (await survey(short)).orders[1].orderKey;
+  const shortPick = { ...context(short), index: 2, orderKey: shortKey };
+  assert.match((await submitResidentOrder(short, protocol, shortPick)).stockWarning, /还缺烤鱼 ×1/);
+  await assert.rejects(submitResidentOrder(short, protocol, { ...shortPick, acceptStockWarning: true }), /游戏返回：订单材料不足/);
+  assert.equal(short.calls.filter(name => name === 'FinishWorkerOrderRequest').length, 1);
   const cancelled = setup();
   const cancelKey = (await survey(cancelled)).orders[1].orderKey;
   cancelled.calls.length = 0;

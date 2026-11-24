@@ -270,6 +270,14 @@ await check('品质匹配的闲置海兽无论养成都放生，未选品质、�
   assert.deepEqual(f.rows.map(row => exactAutomationId(row.uid)), [3, 4, 5, 10].map(id));
 });
 
+await check('离开值守的升级目标按完整编号保留，同品种的其他海兽仍可放生', async () => {
+  const f = fixture('pet');
+  f.rows = [f.item(1), f.item(2)];
+  f.group.levelUids = [id(1)];
+  assert.equal((await f.run()).status, 'confirmed');
+  assert.deepEqual(f.writes, [[id(2)]]);
+});
+
 await check('所选海兽全部值守或在编队时报告跳过', async () => {
   const f = fixture('pet');
   f.rows = [f.item(1), f.item(2), f.item(3), f.item(4)];

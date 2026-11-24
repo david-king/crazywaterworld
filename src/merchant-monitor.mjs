@@ -16,7 +16,7 @@ export function watchMerchant(client) {
   if (watchers.has(client)) return watchers.get(client);
   const listeners = new Set();
   let nextAt = 0, event = null, cityId = null, market = null, ports = new Set(), dirty = false, revision = 0;
-  let attached = false, destination = null, fleetRevision = 0;
+  let attached = false, destination = null, fleetRevision = 0, quoteRevision = 0, quoteReaders = 0;
   let priorityAt = 0;
   const inboundShips = new Set();
   const notify = reason => {
@@ -29,7 +29,10 @@ export function watchMerchant(client) {
   };
   const onMessage = ({ name, body } = {}) => {
     if (name === 'SCTradeCityGoods') {
-      if (positive(cityId) && body?.cityId === cityId) invalidate('本港价格或联盟库存已变化');
+      if (positive(cityId) && body?.cityId === cityId) {
+        quoteRevision++;
+        invalidate('本港价格或联盟库存已变化');
+      }
     } else if (name === 'SCTradeCargoMove' && positive(destination)) {
       const voyage = body?.cargo?.cargo;
       const shipId = exactAutomationId(body?.cargo?.playerId);
@@ -53,11 +56,16 @@ export function watchMerchant(client) {
     client.on?.('message', onMessage); client.on?.('close', onClose); attached = true;
   };
   const detach = () => {
-    if (!attached) return;
+    if (!attached || listeners.size || quoteReaders) return;
     const off = client.off?.bind(client) ?? client.removeListener?.bind(client);
     off?.('message', onMessage); off?.('close', onClose); attached = false;
   };
   const monitor = {
+    async trackQuotes(work) {
+      quoteReaders++; attach();
+      try { return await work(() => quoteRevision); }
+      finally { quoteReaders--; detach(); }
+    },
     subscribe(listener) {
       if (typeof listener !== 'function') throw new TypeError('海商王监控回调必须是函数');
       listeners.add(listener); attach();
@@ -118,11 +126,11 @@ export function watchMerchant(client) {
         if (positive(timing.nextRefreshAt) && timing.nextRefreshAt > time) deadlines.push(timing.nextRefreshAt);
         if (positive(timing.tradeStartTime) && timing.tradeStartTime > time) deadlines.push(timing.tradeStartTime);
       }
-      if (settings?.autoSpeedUp && input.expedite) priorityAt = time + 1;
+      if (input.openingBatchRemoved || (settings?.autoSpeedUp && input.expedite)) priorityAt = time + 1;
       if (priorityAt) deadlines.push(priorityAt);
       if (positive(input.plan?.nextCheckAt) && input.plan.nextCheckAt > time) {
         deadlines.push(input.plan.nextCheckAt);
-        if (input.plan.mode === 'WAIT_FINAL_CARGO' ||
+        if (input.plan.mode === 'WAIT_FINAL_CARGO' || input.plan.mode === 'WAIT_OPENING' ||
           (settings?.fullCargoRoutes && (['WAIT_REFRESH', 'WAIT_DEPARTURE'].includes(input.plan.mode) || input.plan.kind === 'buy')))
           priorityAt = Math.min(priorityAt || Infinity, input.plan.nextCheckAt);
       }

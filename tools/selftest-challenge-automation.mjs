@@ -219,6 +219,174 @@ try {
     assert.equal(state.pirate.state.spent, 300);
     assert.equal(f.client.writes.length, 5);
   });
+  await test('首杀成功后重建挂机和连接，从下一关继续，通关原因可以跨重启查看', async () => {
+    const file = path.join(root, 'resume-hunt.json');
+    const round = async level => {
+      const f = pirateAdvanceFixture(), state = createChallengeRun();
+      f.settings.pirate.enabled = f.settings.pirateHunt.enabled = true;
+      f.state.level = level;
+      const ledger = createUsageLedger('role', {file});
+      let report;
+      await runChallengeRound(f.client, f.config, {player: f.player, state, ledger, mode: 'pirate',
+        getSettings: () => f.settings, report: entry => { report = entry; }});
+      assert.equal(ledger.snapshot().counters.pirateAutoRuns1001001, 1);
+      return {progress: state.pirate.state, writes: f.client.writes.map(w => w.body.uid), report};
+    };
+    for (let level = 0; level < 3; level++) {
+      const {progress, writes} = await round(level);
+      assert.deepEqual(writes, [201 + level]);
+      assert.equal(progress.wins, level + 1);
+      assert.equal(progress.spent, 300 * (level + 1));
+    }
+    for (let i = 0; i < 2; i++) {
+      const {progress, writes, report} = await round(3);
+      assert.deepEqual(writes, []);
+      assert.equal(progress.halted, true);
+      assert.match(report.reason, /等级上限（3 级）/);
+    }
+  });
+  await test('首笔派遣记账后立即退出，恢复时先确认旧战果，再派下一关', async () => {
+    const file = path.join(root, 'before-reply.json'), crash = path.join(root, 'interrupted.json');
+    const f = pirateAdvanceFixture({mode: 'unknown'});
+    f.settings.pirate.enabled = f.settings.pirateHunt.enabled = true;
+    const round = (f, file, state = createChallengeRun()) => runChallengeRound(f.client, f.config, {
+      player: f.player, state, ledger: createUsageLedger('role', {file}), mode: 'pirate', getSettings: () => f.settings,
+    });
+    const send = f.client.sendWatch;
+    f.client.sendWatch = async (...args) => {
+      fs.copyFileSync(file, crash); // 此时已预留汽油，还没有收到发送结果。
+      return send(...args);
+    };
+    await round(f, file);
+    for (const saved of [file, crash]) {
+      const fresh = pirateAdvanceFixture();
+      fresh.settings.pirate.enabled = fresh.settings.pirateHunt.enabled = true;
+      await round(fresh, saved);
+      await round(fresh, saved);
+      assert.deepEqual(fresh.client.writes, []);
+      fresh.state.level = 1;
+      const state = createChallengeRun();
+      await round(fresh, saved, state);
+      assert.deepEqual(fresh.client.writes.map(w => w.body.uid), [202]);
+      assert.equal(state.pirate.state.wins, 2);
+      assert.equal(state.pirate.state.spent, 600);
+    }
+  });
+  await test('未知首杀满15分钟跳过该类，归队后释放占用，可打其他种类且次日可重试原目标', async () => {
+    const f = pirateAdvanceFixture({mode:'unknown', types:[1,2]});
+    let serverNow = Date.UTC(2026,10,23,4);
+    const l = createUsageLedger('role', {file:path.join(root,'timeout-types.json'), now:()=>serverNow});
+    f.settings.pirate.enabled = f.settings.pirateHunt.enabled = true;
+    const round = async () => {
+      f.client.serverClockOffsetMs = serverNow - Date.now();
+      const state = createChallengeRun();
+      await runChallengeRound(f.client, f.config, {player:f.player, state, ledger:l, mode:'pirate', getSettings:()=>f.settings});
+      return state.pirate.state;
+    };
+    await round();
+    const key='pirate-first:1001001:1:1:201', first=l.keyRecords()[key];
+    serverNow += 14*60000;
+    await round();
+    assert.equal(l.pendingCounters().piratePetrol,300);
+    assert.deepEqual(f.client.writes.map(w=>w.body.uid),[201]);
+    serverNow += 61000;
+    const skipped = await round();
+    assert.match(skipped.reason,/先锋.*15分钟.*跳过/);
+    assert.equal(skipped.failures,0);
+    assert.equal(skipped.wins,0);
+    const expired = l.keyRecords()[key];
+    assert.equal(expired.details.outcome,'timedOut');
+    assert.equal(expired.expired,true);
+    assert.equal(expired.confirmed,false);
+    assert.equal(l.pendingCounters().piratePetrol??0,0);
+    assert.equal(l.confirmedCounters().piratePetrol??0,0);
+    assert.equal(l.snapshot().counters.piratePetrol,300);
+    f.state.mode='win';
+    await round();
+    assert.deepEqual(f.client.writes.map(w=>w.body.uid),[201,301]);
+    serverNow += 86400000;
+    await round();
+    assert.deepEqual(f.client.writes.map(w=>w.body.uid),[201,301,201]);
+    assert.notEqual(l.keyRecords()[key].id,first.id);
+    assert.equal(l.keyRecords()[key].details.outcome,'won');
+  });
+  await test('超时仍在途时结束本类等待，舰队归队前保留占用', async () => {
+    const f = pirateAdvanceFixture({mode:'wait'}), l = ledger();
+    f.settings.pirate.enabled = f.settings.pirateHunt.enabled = true;
+    const round = async () => {
+      const state=createChallengeRun();
+      await runChallengeRound(f.client, f.config, {player:f.player, state, ledger:l, mode:'pirate', getSettings:()=>f.settings});
+      return state.pirate.state;
+    };
+    await round();
+    const key='pirate-first:1001001:1:1:201';
+    f.client.serverClockOffsetMs=16*60000;
+    assert.match((await round()).reason,/15分钟.*跳过/);
+    assert.equal((await round()).halted,true);
+    assert.notEqual(l.keyRecords()[key].details.active,false);
+    assert.equal(l.keyRecords()[key].expired,undefined);
+    Object.assign(f.fleet,{state:1,curGridIdx:0,targetGridIdx:0});
+    await round();
+    assert.equal(l.keyRecords()[key].details.outcome,'timedOut');
+    assert.equal(l.keyRecords()[key].details.active,false);
+    assert.equal(f.client.writes.length,1);
+  });
+  await test('重启保留各类连败，重试被明确拒绝后仍能继续同一轮', async () => {
+    const f = pirateAdvanceFixture({mode: 'lose', types: [1,2]}), l = ledger();
+    f.settings.pirate.enabled = f.settings.pirateHunt.enabled = true;
+    f.settings.pirateHunt.maxFailures = 2;
+    const round = async () => {
+      const state = createChallengeRun();
+      await runChallengeRound(f.client, f.config, {player: f.player, state, ledger: l, mode: 'pirate', getSettings: () => f.settings});
+      return state.pirate.state;
+    };
+    assert.equal((await round()).failures, 1);
+    const send = f.client.sendWatch;
+    f.client.sendWatch = async name => { throw Object.assign(Error('明确拒绝'), {prompt: true, request: name}); };
+    assert.match((await round()).reason, /明确拒绝/);
+    f.client.sendWatch = send;
+    assert.deepEqual((await round()).failedTypes, [1]);
+    assert.equal((await round()).failures, 1);
+    assert.deepEqual((await round()).failedTypes, [1,2]);
+    f.settings.pirateHunt.maxFailures = 5;
+    assert.match((await round()).reason, /连续战败 2 次/);
+    assert.deepEqual(f.client.writes.map(w => w.body.uid), [201,201,301,301]);
+    assert.equal(l.snapshot().counters.piratePetrol, 1200);
+  });
+  await test('两次挂机检查之间收到的战败也保留当时的停止上限', async () => {
+    const f = pirateAdvanceFixture({mode: 'wait'}), l = ledger();
+    f.settings.pirate.enabled = f.settings.pirateHunt.enabled = true;
+    const round = async () => {
+      const state = createChallengeRun();
+      await runChallengeRound(f.client, f.config, {player: f.player, state, ledger: l, mode: 'pirate', getSettings: () => f.settings});
+      return state.pirate.state;
+    };
+    await round();
+    Object.assign(f.fleet, {state: 3, curGridIdx: 401});
+    f.client.emit('message', {name: 'SCMyFleetUpdate', body: {fleets: [f.fleet]}});
+    f.client.emit('message', {name: 'SCPirateCampaignEnd', body: {uid: 201, isWin: false}});
+    Object.assign(f.fleet, {state: 1, curGridIdx: 0, targetGridIdx: 0});
+    f.settings.pirateHunt.maxFailures = 3;
+    const progress = await round();
+    assert.equal(progress.halted, true);
+    assert.equal(progress.failures, 1);
+    assert.equal(f.client.writes.length, 1);
+  });
+  await test('升级前只有当日计数时说明原因，北京时间换日后正常推关', async () => {
+    let now = Date.UTC(2026, 10, 21, 15, 59, 59);
+    const f = pirateAdvanceFixture(), l = createUsageLedger('role', {file: path.join(root, 'legacy-hunt.json'), now: () => now});
+    l.confirm(l.reserve({pirateAutoRuns1001001: 1, piratePetrol: 300}));
+    f.settings.pirate.enabled = f.settings.pirateHunt.enabled = true;
+    let report;
+    const round = () => runChallengeRound(f.client, f.config, {player: f.player, state: createChallengeRun(), ledger: l,
+      mode: 'pirate', getSettings: () => f.settings, report: entry => { report = entry; }});
+    await round();
+    assert.match(report.reason, /旧版.*未记录推进进度/);
+    assert.deepEqual(f.client.writes, []);
+    now += 1000;
+    await round();
+    assert.equal(f.client.writes.length, 1);
+  });
   await test('海盗每日首轮在出征时占用，舰队未就绪或明确拒绝后仍能开始，跨日未知派遣不重发', async () => {
     const f = pirateAdvanceFixture({ mode: 'unknown' }), state = createChallengeRun();
     let now = Date.UTC(2026, 10, 21, 15, 59, 59);
@@ -539,7 +707,9 @@ try {
       await round();
       const halted = await preview(); assert.equal(halted.actions.length, 0); assert.match(halted.notes.join(' '), /失败停止次数/);
       session.loop.running = false;
-      assert.equal((await preview()).actions.length, 0);
+      const stopped = await preview();
+      assert.equal(stopped.actions.length, 0);
+      assert.match(stopped.notes.join(' '), /失败停止次数/);
       f.client.serverClockOffsetMs = 86400000;
       session.loop.running = true;
       assert.equal((await preview()).actions.length, 1);

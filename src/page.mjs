@@ -225,10 +225,12 @@ async function call(path, options) {
   versionGuard.assertWritable(path, method);
   const headers = new Headers(opts.headers); headers.set('X-CW-Console-Version', versionGuard.version); opts.headers = headers;
   let url = path;
-  if (current && url.indexOf('/api/') === 0 && url.indexOf('account=') < 0) {
+  const params = new URL(path, location.href).searchParams;
+  let account = params.get('account');
+  if (current && path.startsWith('/api/') && account === null && params.get('scope') !== 'all') {
+    account = current;
     url += (url.indexOf('?') < 0 ? '?' : '&') + 'account=' + encodeURIComponent(current);
   }
-  const account = new URL(url, location.href).searchParams.get('account');
   trackCall(1);
   try {
     const res = await fetch(url, opts);
@@ -481,8 +483,10 @@ function updateLogAccounts() {
   }
 }
 function clearedLog(entry) {
-  const watermark = logClearWatermarks.get(entry.account || '');
-  return watermark && (entry.id ? entry.id <= watermark.before : entry.t <= watermark.at);
+  return ['all', entry.account].some(key => {
+    const watermark = logClearWatermarks.get(key);
+    return watermark && (entry.id ? entry.id <= watermark.before : entry.t <= watermark.at);
+  });
 }
 let guildRefreshTimer;
 const featureOrder = new Intl.Collator('zh-CN', { numeric: true });
@@ -553,9 +557,11 @@ function updateLogSummary() {
     const label = (option.value === 'all' ? '全部分类' : option.value) + ' · ' + (groupCounts[option.value] || 0);
     if (option.textContent !== label) option.textContent = label;
   }
-  const account = accounts.find(item => item.id === logAccount);
-  $('log-clear').disabled = logClearing || !account;
-  $('log-clear').title = account ? '清空“' + logAccountLabel(logAccount) + '”的全部运行日志（不限当前分类）' : '选择一个账号后可清空该账号的全部运行日志';
+  const clearButton = $('log-clear');
+  clearButton.disabled = logClearing || (logAccount !== 'all' && !accounts.some(item => item.id === logAccount));
+  const clearLabel = logAccount === 'all' ? '清空全部账号和系统的运行日志' : '清空“' + logAccountLabel(logAccount) + '”的运行日志';
+  clearButton.title = clearLabel + '（包含被筛选隐藏的记录）';
+  clearButton.setAttribute('aria-label', clearLabel);
   $('log-top-count').textContent = logEl.children.length;
   $('log-count').textContent = String(count);
   $('log-empty').hidden = logEl.childElementCount > 0 || logAccount !== 'all' || logGroup !== 'all' || logFeature !== 'all' || onlyIssues;
@@ -653,23 +659,25 @@ function appendLog(entry) {
   }
 }
 function clearLogBefore(data) {
-  if (!data.account) return;
-  const previous = logClearWatermarks.get(data.account);
-  logClearWatermarks.set(data.account, { before: Math.max(previous?.before || 0, data.before || 0), at: Math.max(previous?.at || 0, data.at || 0) });
+  const key = data.scope === 'all' ? 'all' : data.account;
+  if (!key) return;
+  const previous = logClearWatermarks.get(key);
+  logClearWatermarks.set(key, { before: Math.max(previous?.before || 0, data.before || 0), at: Math.max(previous?.at || 0, data.at || 0) });
   for (const row of [...logEl.children]) {
-    if (row.dataset.account !== data.account) continue;
-    if (clearedLog(row.logEntry)) row.remove();
+    if (clearedLog(row.logEntry)) {
+      seen.delete(row.logEntry.id);
+      row.remove();
+    }
   }
-  seen.clear();
-  for (const row of logEl.children) if (row.logEntry.id) seen.add(row.logEntry.id);
   updateLogSummary();
 }
 $('log-clear').onclick = async () => {
-  if (logClearing || !accounts.some(account => account.id === logAccount)) return;
-  const account = logAccount;
+  if ($('log-clear').disabled) return;
+  const account = logAccount === 'all' ? null : logAccount;
+  const query = account === null ? 'scope=all' : 'account=' + encodeURIComponent(account);
   logClearing = true; updateLogSummary();
   try {
-    const data = await call('/api/logs/clear?account=' + encodeURIComponent(account), { method: 'POST', body: JSON.stringify({ confirm: true }) });
+    const data = await call('/api/logs/clear?' + query, { method: 'POST', body: JSON.stringify({ confirm: true }) });
     clearLogBefore(data);
   } catch (error) { reportError(error, undefined, account); }
   finally { logClearing = false; updateLogSummary(); }
@@ -1470,33 +1478,46 @@ const pendingResidentOrders = new Set();
 function residentOrderButton(order) {
   const account = current, key = account + ':' + order.index;
   const pending = pendingResidentOrders.has(key);
-  const button = smallButton(pending ? '提交中…' : '提交订单');
+  const button = smallButton(pending ? '提交中…' : '强制提交');
   button.dataset.residentOrder = String(order.index);
   const ready = Boolean(order.orderKey) && order.manualDecision?.status === 'ready';
   button.disabled = pending || !ready || !account || snapshot.paused || disconnected.has(account);
   button.title = pending ? '账号忙时自动排队，结果见运行日志' : order.manualDecision?.reason || '请先刷新订单状态';
-  button.setAttribute('aria-label', '提交' + (order.workerName || '居民') + '的订单 #' + order.index);
-  button.onclick = async () => {
-    if (button.disabled || pendingResidentOrders.has(key) || current !== account || snapshot.paused || disconnected.has(account)) return;
+  button.setAttribute('aria-label', '强制提交' + (order.workerName || '居民') + '的订单 #' + order.index);
+  const submit = async (acceptStockWarning = false) => {
+    if (pendingResidentOrders.has(key) || current !== account || snapshot.paused || disconnected.has(account)) return;
     pendingResidentOrders.add(key);
     button.disabled = true;
-    button.textContent = '提交中…';
+    button.textContent = acceptStockWarning ? '提交中…' : '正在核对…';
+    let stockWarning;
     try {
-      await call('/api/world/order/submit', { method: 'POST', body: JSON.stringify({ confirm: true, index: order.index, orderKey: order.orderKey }) });
+      const result = await call('/api/world/order/submit', { method: 'POST', body: JSON.stringify({
+        confirm: true, index: order.index, orderKey: order.orderKey, acceptStockWarning,
+      }) });
+      stockWarning = result.stockWarning;
     } catch (error) {
       if (current === account) reportError(error, '提交居民订单');
     } finally {
       pendingResidentOrders.delete(key);
       if (current === account) {
         const displayed = $('world-orders').querySelector('[data-resident-order="' + order.index + '"]');
-        if (displayed) {
-          displayed.disabled = true;
-          displayed.textContent = '待刷新';
+        if (stockWarning && displayed === button) {
+          button.disabled = snapshot.paused || disconnected.has(account);
+          button.textContent = '强制提交';
+        } else {
+          if (displayed) {
+            displayed.disabled = true;
+            displayed.textContent = '待刷新';
+          }
+          refreshManualWorld(true);
         }
-        refreshManualWorld(true);
       }
     }
+    if (stockWarning && current === account && !snapshot.paused && !disconnected.has(account)) {
+      openConfirm((order.workerName || '居民') + '的订单 #' + order.index, [el('p', '', stockWarning)], () => submit(true), '继续提交');
+    }
   };
+  button.onclick = () => { if (!button.disabled) return submit(); };
   return button;
 }
 
@@ -2081,23 +2102,75 @@ function buildingListSection(title, className, content, collapsed) {
   return buildingSection(title, className, content, button);
 }
 
+function orderRewardNode(required, progress) {
+  let status = '未达标';
+  if (required <= progress.rewardedNum) status = '已领取';
+  else if (required <= progress.orderNum) status = required === progress.tier ? '可领取' : '已达标';
+  else if (progress.cap != null && required > progress.cap) status = '超出账号上限';
+  else if (progress.configuredCap != null && required > progress.configuredCap) status = '超挂机上限';
+  else if (required === progress.tier) status = '下一档';
+
+  const node = el('li', 'resident-reward-node', required);
+  node.dataset.status = status;
+  node.title = required + ' 单档 · ' + status;
+  node.setAttribute('aria-label', node.title);
+  return node;
+}
+
 function renderOrderProgress(progress) {
   const box = $('resident-order-progress');
   clear(box);
-  box.hidden = !(progress && Number.isFinite(progress.total) && progress.total > 0);
+  box.hidden = !progress;
   if (box.hidden) return;
   const head = el('div', 'resident-order-progress-head');
-  head.append(el('span', 'dim', '今日居民订单'), el('strong', '', progress.orderNum + '/' + progress.total));
-  const track = el('div', 'resident-order-progress-track');
-  const fill = el('i');
-  fill.style.width = Math.max(0, Math.min(100, Number(progress.percent) || 0)) + '%';
-  track.append(fill);
-  const note = el('div', 'dim resident-order-progress-note');
-  const capNote = '今日上限 ' + progress.cap + (progress.bonus ? '（基础 ' + progress.baseMax + ' + 加成 ' + progress.bonus + '）' : '');
-  note.textContent = progress.totalKind === 'rewardTier'
-    ? '当前奖励档位；已领档位 ' + progress.rewardedNum + (progress.claimable ? '，可领取' : '') + '；' + capNote
-    : capNote;
-  box.append(head, track, note);
+  const maximum = progress.configuredCap || progress.cap;
+  const count = el('strong', '', maximum > 0 ? progress.orderNum : '已交 ' + progress.orderNum + ' 单');
+  if (maximum > 0) {
+    const source = progress.configuredCap ? '设定上限' : '账号上限';
+    count.append(el('span', 'resident-order-limit-label', ' / ' + source + ' '), el('span', '', maximum));
+  }
+  head.append(el('span', 'dim', '今日居民订单'), count);
+  box.append(head);
+  const tiers = progress.reqNums;
+  if (progress.total > 0 || tiers.length) {
+    const timeline = el('div', 'resident-order-timeline');
+    const scale = el('div', 'resident-order-scale');
+    const track = el('div', 'resident-order-progress-track');
+    const fill = el('i');
+    const end = tiers.length ? Math.max(progress.total ?? 0, tiers.at(-1), progress.orderNum) : progress.total;
+    const position = value => Math.min(100, value / end * 100) + '%';
+    track.style.setProperty('--goal', position(progress.total ?? end));
+    fill.style.width = position(progress.orderNum);
+    track.append(fill);
+    scale.append(track);
+    if (tiers.length) {
+      const rewards = el('ol', 'resident-reward-steps');
+      rewards.setAttribute('aria-label', '奖励档位（单）');
+      const gaps = tiers.map((required, index) => required - (tiers[index - 1] ?? 0));
+      // Leave room for adjacent numbers when a high daily cap compresses the reward tiers.
+      scale.style.setProperty('--scale-intervals', String(end / Math.min(...gaps)));
+      tiers.forEach((required, index) => {
+        const node = orderRewardNode(required, progress);
+        node.style.left = position(required);
+        node.style.width = position(Math.min(gaps[index], gaps[index + 1] ?? gaps[index]));
+        rewards.append(node);
+      });
+      scale.append(rewards);
+    }
+    timeline.append(scale);
+    box.append(timeline);
+  }
+  const limits = [];
+  if (progress.cap == null) limits.push('账号上限待同步');
+  else if (progress.configuredCap) limits.push('账号上限 ' + progress.cap + ' 单');
+  if (progress.bonus > 0) limits.push('基础 ' + progress.baseMax + ' + 加成 ' + progress.bonus);
+  if (tiers.includes(progress.tier)) {
+    const tier = progress.tier;
+    limits.push(progress.orderNum >= tier ? tier + ' 单档可领取' : '下一档 ' + tier + ' 单');
+  }
+  if (limits.length) box.append(el('div', 'dim resident-order-progress-note', limits.join(' · ')));
+
+  if (!tiers.length) box.append(el('div', 'dim resident-order-progress-note', '奖励档位待同步'));
 }
 
 function renderWorld(data) {
@@ -2160,13 +2233,20 @@ function renderWorld(data) {
   const obox = clear($('world-orders'));
   renderOrderProgress(data.orderProgress);
   if (data.orders?.length) {
-    const ordersTable = table(['订单', '居民', '需求', '挂机交付', '手动操作'], data.orders.map((o) => [
-      '#' + o.index,
-      { cell: o.workerIcon, text: (o.workerName || '未知居民') + (o.isSpecial ? '（特殊）' : '') },
-      o.requirements.length && o.decision?.status !== 'refreshing' ? planMaterialList(o.requirements, recipes, 'resident-order-products-' + o.index) : '—',
-      orderState(o, data),
-      residentOrderActions(o),
-    ]), 'sea-records');
+    const headers = ['订单', '居民', '需求', { label: '经验', num: true }, { label: '金币', num: true }, '挂机交付', '手动操作'];
+    const ordersTable = table(headers, data.orders.map((o) => {
+      const refreshing = o.refreshPending || o.refreshTime || o.decision?.status === 'refreshing';
+      const rewardCell = value => ({ num: true, text: !refreshing && Number.isFinite(value) ? fmt(value) : '—' });
+      return [
+        '#' + o.index,
+        { cell: o.workerIcon, text: (o.workerName || '未知居民') + (o.isSpecial ? '（特殊）' : '') },
+        o.requirements.length && !refreshing ? planMaterialList(o.requirements, recipes, 'resident-order-products-' + o.index) : '—',
+        rewardCell(o.rewardExp),
+        rewardCell(o.rewardGold),
+        orderState(o, data),
+        residentOrderActions(o),
+      ];
+    }), 'sea-records');
     obox.appendChild(ordersTable);
   } else {
     obox.appendChild(el('p', 'resident-order-empty', Array.isArray(data.orders)

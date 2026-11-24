@@ -34,7 +34,7 @@ function fixture() {
 }
 const products = plan => plan.actions.filter(step => step.request === 'StartFactoryProduceRequest').map(step => step.body.productId);
 
-test('模拟原生先做主产物，候补按账号实际小于5秒分档，再按库存；不填等待格', () => {
+test('模拟原生先做主产物，实际耗时 5 秒的候补归入短件档，同档按库存选品', () => {
   const f = fixture(), rows = f.config.tables.BuildingProduceCfg.data;
   const [short, long] = rows;
   Object.assign(f.settings.factory,{strategy:'nativeSimulation',simulatedTargets:[long.itemId],keepStock:0,demandFirst:true});
@@ -46,6 +46,8 @@ test('模拟原生先做主产物，候补按账号实际小于5秒分档，再�
   f.survey.productionTiming = {observedDurations:[observed(4)]};
   assert.deepEqual(products(f.plan()),['另一候补']);
   f.survey.productionTiming.observedDurations=[observed(5)];
+  assert.deepEqual(products(f.plan()),['另一候补']);
+  f.survey.productionTiming.observedDurations=[observed(6)];
   assert.deepEqual(products(f.plan()),[short.itemId]);
   short.produceTime=8;
   f.survey.productionTiming.observedDurations=[observed(80)];
@@ -57,6 +59,53 @@ test('模拟原生先做主产物，候补按账号实际小于5秒分档，再�
   f.factory.factory.factoryQ=[]; f.survey.autoProduceForever=true; f.factory.factory.autoProductId=short.itemId;
   f.settings.factory.cooperateNative=true;
   assert(!f.plan().actions.some(job=>job.kind==='startProduce'));
+});
+
+test('默认配方暂时不可用时直接比较候补，恢复开放后重选主产物', () => {
+  const f = fixture(), recipes = f.config.tables.BuildingProduceCfg.data;
+  const [ordinary, primary] = recipes;
+  ordinary.produceTime = 30;
+  primary.limitType = '限时配方';
+  const fast = { ...ordinary, itemId: '快件', produceTime: 2 };
+  recipes.push(fast);
+  f.settings.factory.strategy = 'nativeSimulation';
+  for (const targetFrom of ['工厂', '模拟设置']) {
+    f.factory.factory.autoProductId = targetFrom === '工厂' ? primary.itemId : ordinary.itemId;
+    f.settings.factory.simulatedTargets = targetFrom === '工厂' ? [] : [primary.itemId];
+    f.survey.festivals = [];
+    assert.deepEqual(products(f.plan()), [fast.itemId]);
+    f.survey.festivals = [{ festivalData: { limitTimeItem: [{ item: primary.limitType, openTime: 50, closeTime: 150 }] } }];
+    assert.deepEqual(products(f.plan()), [primary.itemId]);
+  }
+  f.survey.festivals = [];
+  ordinary.produceTime = 4;
+  f.stock.set(ordinary.itemId, 0);
+  assert.deepEqual(products(f.plan()), [ordinary.itemId], '两个短件库存相同时沿用配方顺序');
+  f.stock.set(ordinary.itemId, 1);
+  assert.deepEqual(products(f.plan()), [fast.itemId], '同档改选库存较少的短件');
+  f.survey.stockKnown = false;
+  assert.deepEqual(products(f.plan()), [], '仓库未读全时不能将未知库存当作零库存');
+});
+
+test('订单优先级不改变模拟原生选品，已安排交单的材料只能使用一次', () => {
+  const f = fixture();
+  f.stock.set('木材', 1);
+  f.survey.cargoOrder.set('木材', 1);
+  f.settings.factory.demandFirst = true;
+  assert.deepEqual(products(f.plan()), [], '智能排产给待交货单留料');
+  f.settings.factory.strategy = 'nativeSimulation';
+  f.settings.factory.simulatedTargets = ['长时品'];
+  for (const priority of [['cargo', 'factory'], ['factory', 'cargo']]) {
+    f.settings.factory.demandPriority = priority;
+    assert.deepEqual(products(f.plan()), ['长时品'], '主产物可用待交订单也需要的最后一件原料');
+  }
+  f.survey.cargoOrder.clear();
+  f.settings.resident.enabled = true;
+  f.survey.orders = [{ index:1, requirements:[{ id:'木材', num:1 }], rewardExp:1000, rewardGold:1000 }];
+  const dispatched = planWorld(f.survey, { config:f.config, settings:f.settings,
+    enabled:kind => kind === 'finishOrder' || kind === 'startProduce' });
+  assert(dispatched.actions.some(step => step.kind === 'finishOrder'));
+  assert.deepEqual(products(dispatched), [], '先执行的交单已用掉同一件原料');
 });
 
 test('模拟原生只用已解锁的并行位，两个开工计划共同扣料并检查月卡到期', () => {
@@ -73,6 +122,50 @@ test('模拟原生只用已解锁的并行位，两个开工计划共同扣料�
   assert.deepEqual(products(f.plan()),[primary,'短时品']);
   card.endTime=90;
   assert.deepEqual(products(f.plan()),[primary]);
+});
+
+test('模拟原生随本轮真实扣料重排主产物与候补，在产成品不能提前付料', () => {
+  const f = fixture(), [a,b] = f.config.tables.BuildingProduceCfg.data;
+  const child = { ...f.factory, buildingId:'1装配厂', type:'装配厂', factory:{factoryQ:[],finishedProducts:[]} };
+  const assembly = { itemId:'装配件', buildType:child.type, unlockLevel:1, costItem:[[a.itemId,3]], produceTime:60 };
+  f.config.tables.BuildingProduceCfg.data.push(assembly);
+  const cap = f.survey.stockCap;
+  f.settings.factory.strategy = 'nativeSimulation';
+  f.settings.factory.simulatedTargets = [a.itemId];
+  f.stock.set(a.itemId,cap); f.stock.set(b.itemId,cap);
+  f.survey.buildings.push(child); f.survey.factories.push(child);
+  assert.deepEqual(products(f.plan()), [assembly.itemId,a.itemId], '先前满仓的上游可在下游扣料后开工');
+  f.survey.factories.reverse();
+  assert.deepEqual(products(f.plan()), [assembly.itemId,a.itemId]);
+  const primary={...b,itemId:'主产物'};
+  f.config.tables.BuildingProduceCfg.data.push(primary);
+  f.settings.factory.simulatedTargets=[primary.itemId];
+  f.stock.set(primary.itemId,cap); f.stock.set(a.itemId,4); f.stock.set(b.itemId,3);
+  a.produceTime=8;
+  assert.deepEqual(products(f.plan()), [assembly.itemId,a.itemId], '原有四件扣到一件后优先于三件的同档候补');
+  f.survey.factories.reverse();
+  f.stock.set(a.itemId,0); assembly.costItem=[[a.itemId,1]];
+  assert.deepEqual(products(f.plan()), [a.itemId], '新增在产只占仓容，必须完工入库后才能支付下游');
+  f.stock.set(a.itemId,1);
+  assert(products(f.plan()).includes(assembly.itemId), '下一次读数包含实物，沿用同一套规则');
+});
+
+test('模拟原生优先用本轮可领取的上游成品做主产物，排除禁收、选种厂及仍在产的材料', () => {
+  const f=fixture(), [fallback,primary]=f.config.tables.BuildingProduceCfg.data;
+  Object.assign(f.settings.factory,{strategy:'nativeSimulation',gain:true,simulatedTargets:[primary.itemId]});
+  primary.costItem=[['配料',1]];
+  const upstream={...f.factory,type:'材料厂',buildingId:'1材料厂',factory:{factoryQ:[],finishedProducts:[{id:'配料',num:1}]}};
+  f.survey.factories.push(upstream);
+  const head=()=>products(planWorld(f.survey,{config:f.config,settings:f.settings,enabled:k=>['gainFactory','startProduce'].includes(k)}))[0];
+  assert.equal(head(),primary.itemId);
+  f.settings.factory.blockedCollectionTypes=[upstream.type];
+  assert.equal(head(),fallback.itemId);
+  f.settings.factory.blockedCollectionTypes=[];
+  upstream.type='种子厂';
+  assert.equal(head(),fallback.itemId);
+  upstream.type='材料厂';
+  upstream.factory.finishedProducts=[]; upstream.factory.factoryQ=[{idx:1,productId:'配料',finishTime:105}];
+  assert.equal(head(),fallback.itemId);
 });
 
 test('新版按本号耗时补足两段短件再回到长单，同步保留长单原料', () => {
@@ -362,6 +455,53 @@ test('原生自动生产保持原目标，仅明确开启协同才允许切换',
   assert.deepEqual(f.plan().actions.map(step => step.request), ['SetFactoryAutoProduceRequest']);
   f.settings.factory.produce = false;
   assert.deepEqual(f.plan().actions.map(step => step.request), ['SetFactoryAutoProduceRequest']);
+});
+
+test('探宝与货船争用氧气瓶时，普通和原生工厂按优先级分配现货', () => {
+  for (const native of [false, true]) {
+    const f = fixture();
+    const recipe = f.config.tables.BuildingProduceCfg.data[1];
+    Object.assign(recipe, { itemId: '水族箱', costItem: [['氧气瓶', 1]] });
+    Object.assign(f.settings.factory, { demandFirst: true, cooperateNative: true, keepStock: 0, demandPriority: ['museum', 'cargo'] });
+    if (native) {
+      f.survey.autoProduceForever = true;
+      f.factory.factory.autoProductId = '短时品';
+    }
+    f.survey.cargoOrder.set('氧气瓶', 1);
+    const demand = { source: 'museum', requirements: [{ id: '水族箱', num: 1 }] };
+    const plan = () => planWorld(f.survey, { config: f.config, settings: f.settings, extraDemand: [demand], enabled: k => k === 'startProduce' });
+    const wantsTank = result => result.actions.some(step => step.body.productId === '水族箱'
+      && step.request === (native ? 'SetFactoryAutoProduceRequest' : 'StartFactoryProduceRequest'));
+    assert.equal(wantsTank(plan()), false);
+    f.stock.set('氧气瓶', 1);
+    const first = plan();
+    assert.equal(wantsTank(first), true);
+    assert.equal(first.cargoLoadLimits.get('氧气瓶'), 0);
+    assert.equal(new Map(first.reserved).get('氧气瓶'), 1);
+    const weekly = planWorld(f.survey, { config: f.config, settings: f.settings, extraDemand: [demand],
+      enabled: () => false, reserveFactoryInputs: true });
+    assert.equal(wantsTank(weekly), false);
+    assert.equal(weekly.cargoLoadLimits.get('氧气瓶'), 0);
+    const control = native ? 'cooperateNative' : 'produce';
+    f.settings.factory[control] = false;
+    assert.equal(plan().cargoLoadLimits.has('氧气瓶'), false);
+    f.settings.factory[control] = true;
+    f.settings.factory.demandPriority.reverse();
+    assert.equal(wantsTank(plan()), false);
+    f.settings.factory.demandPriority.reverse();
+    f.stock.set('氧气瓶', 2);
+    const surplus = plan();
+    assert.equal(wantsTank(surplus), true);
+    assert.equal(surplus.cargoLoadLimits.get('氧气瓶'), 1);
+    f.stock.set('氧气瓶', 1);
+    f.factory.factory.factoryQ.push({ idx: 1, productId: '水族箱', finishTime: 200 });
+    const queued = plan();
+    assert.equal(wantsTank(queued), false);
+    assert.equal(queued.cargoLoadLimits.has('氧气瓶'), false, '已有在产水族箱的原料已扣除');
+    f.factory.factory.factoryQ.length = 0;
+    recipe.unlockLevel = 2;
+    assert.equal(plan().cargoLoadLimits.has('氧气瓶'), false, '未解锁的配方不能占用货船材料');
+  }
 });
 
 test('商人整单缺少未解锁材料时释放库存，其他需求继续排产', () => {

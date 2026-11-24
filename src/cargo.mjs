@@ -4,7 +4,7 @@ import { linkOperationResult } from './operation-log.mjs';
 import { normalize } from './worlds.mjs';
 import { SPEED_UP_ITEM, SPEED_UP_ITEM_TYPE } from './world.mjs';
 
-export async function serviceCargo(client, config, { enabled, log, testSpeedUp = false, getSettings, ledger, beforeAction, afterAction, cancelAction, dryRun = false }) {
+export async function serviceCargo(client, config, { enabled, log, testSpeedUp = false, getSettings, ledger, beforeAction, afterAction, cancelAction, dryRun = false, cargoLoadLimits }) {
   const active = () => {
     const current = getSettings?.();
     return enabled() && (!current || (current.loop.world && current.cargo.enabled));
@@ -54,6 +54,7 @@ export async function serviceCargo(client, config, { enabled, log, testSpeedUp =
         ]);
         available = new Map((inventory.items ?? []).map(item => [item.itemId, Number(item.num)]));
         if (!order.finished) for (const [id, num] of order.needed) available.set(id, (available.get(id) ?? 0) - num);
+        for (const [id, limit] of cargoLoadLimits ?? []) available.set(id, Math.min(available.get(id) ?? 0, limit));
       }
       const slots = [], labels = [];
       for (const [i, slot] of (state.orderItem ?? []).entries()) {

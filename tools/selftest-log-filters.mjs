@@ -56,8 +56,8 @@ function subscribe(query = '', headers = {}) {
   });
 }
 const messages = stream => stream.events.filter(event => event.type === 'log').map(event => event.data.message);
-const clear = async account => {
-  const response = await fetch(base + '/api/logs/clear?account=' + account, { method: 'POST', body: JSON.stringify({ confirm: true }) });
+const clear = async query => {
+  const response = await fetch(base + '/api/logs/clear?' + query, { method: 'POST', body: JSON.stringify({ confirm: true }) });
   assert.equal(response.status, 200); return response.json();
 };
 
@@ -103,7 +103,7 @@ try {
   } finally { fs.readFileSync = readFileSync; }
   console.log('通过：账号备注立即更新到业务日志，日志热路径不读取账号凭据文件');
 
-  const cleared = await clear('logs-a');
+  const cleared = await clear('account=logs-a');
   assert.equal(cleared.account, 'logs-a');
   await waitFor(() => [all, scoped].every(stream => stream.events.some(event => event.type === 'logs-cleared')), '清空通知');
   assert(!system.events.some(event => event.type === 'logs-cleared'));
@@ -118,7 +118,7 @@ try {
   assert.deepEqual(replay.events[0], { type: 'logs-cleared', data: cleared });
   console.log('通过：清空按账号广播，全账号回放保留其他账号与系统记录');
 
-  await clear('logs-b');
+  await clear('account=logs-b');
   const next = app.emit(b, 'info', '乙账号清空后新记录');
   const reconnect = await subscribe('?scope=all', { 'Last-Event-ID': String(after.id) });
   await waitFor(() => messages(reconnect).includes(next.message), '重连回放');
@@ -127,6 +127,27 @@ try {
   const ids = all.events.filter(event => event.type === 'log').map(event => event.data.id);
   assert.deepEqual(ids, [...ids].sort((left, right) => left - right));
   console.log('通过：重连先同步每个账号的清空水位，再按全局编号回放新增日志');
+
+  const clearedAll = await clear('scope=all');
+  assert.equal(clearedAll.scope, 'all');
+  assert.equal(a.log.length, 0);
+  assert.equal(b.log.length, 0);
+  for (const stream of [all, scoped, system]) {
+    await waitFor(() => stream.events.some(event => event.type === 'logs-cleared' && event.data.scope === 'all'), '全量清空通知');
+  }
+  const newSystem = app.emit(null, 'info', '全量清空后的系统记录');
+  const newB = app.emit(b, 'info', '全量清空后的乙账号记录');
+  const clearedA = await clear('account=logs-a');
+  const replayAll = await subscribe('?scope=all', { 'Last-Event-ID': String(next.id) });
+  await waitFor(() => messages(replayAll).includes(newB.message), '全量清空后断线重连');
+  assert.deepEqual(replayAll.events, [
+    { type: 'logs-cleared', data: clearedAll }, { type: 'logs-cleared', data: clearedA },
+    { type: 'log', data: newSystem }, { type: 'log', data: newB },
+  ]);
+  const replaySystem = await subscribe();
+  await waitFor(() => messages(replaySystem).includes(newSystem.message), '全量清空后回放系统记录');
+  assert.deepEqual(replaySystem.events, [{ type: 'logs-cleared', data: clearedAll }, { type: 'log', data: newSystem }]);
+  console.log('通过：全量清空同步到所有订阅，重连保留清空后的系统与账号日志');
 
   const baseline = terminal.length;
   const compact = await subscribe('?account=logs-a&compact=1');

@@ -131,12 +131,21 @@ const forecastStatusLabels = {
   running: '生产中',
   queued: '游戏内排队中',
   planned: '计划排队中',
+  batch: '已加入计划',
+  accepted: '已进游戏队列',
+  ready: '待领取',
+  elapsed: '已到时，待游戏确认',
   unconfirmed: '游戏内状态待确认',
 };
 
 function forecastRunStatus(run) {
   // Older forecasts merged in-progress and waiting entries of the same product.
   return run.status ?? (run.existing ? 'unconfirmed' : 'planned');
+}
+
+function forecastBatchLabel(run) {
+  if (run.supplyFor) return '为' + run.supplyFor + '补料 · 已加入计划';
+  return run.inserted ? '已加入计划 · 插单' : forecastStatusLabels[forecastRunStatus(run)];
 }
 
 function forecastDuration(seconds) {
@@ -159,102 +168,215 @@ function showProductionDayNotice(message) {
   $('production-day-result').appendChild(el('p', 'plan-day-note', message));
 }
 
-// The rows are batches, so a one-second run has the same reading and click area as any other.
-function renderFactorySchedule(container, day, factory) {
-  const panel = el('div', 'plan-day-panel');
-  clear(container).appendChild(panel);
-  if (!Array.isArray(factory.runs)) {
-    panel.appendChild(el('p', 'dim', '请重新生成计划以查看生产任务。'));
-    return;
+// Keep journal batches whole. Their position is known even when their time is not.
+function facilityScheduleRows(day, facility, includeGaps) {
+  const runs = facility.runs ?? [];
+  const afterExisting = runs.findLastIndex(run => run.existing || ['running','queued'].includes(run.status)) + 1;
+  const before = new Map();
+  function place(index, row) {
+    if (!before.has(index)) before.set(index, []);
+    before.get(index).push(row);
+  }
+  for (const job of facility.untimedQueue ?? []) place(afterExisting, {...job, status:'accepted'});
+  const pinned = facility.pendingInsertions ?? [];
+  const remainder = facility.unscheduled ?? [];
+  // In a snapshot without simulation the remaining journal already is the complete queue.
+  const observed = day.unavailable || day.unsynced?.includes(facility);
+  let saved;
+  if (observed && remainder.length) saved = remainder;
+  else {
+    saved = [...pinned.map(job => ({...job, inserted:true})),
+      ...remainder.filter(job => !job.inserted || !pinned.length)];
+    saved.sort((a,b) => Number(!!b.staged) - Number(!!a.staged) || (a.planIndex ?? Infinity) - (b.planIndex ?? Infinity));
+  }
+  for (const [i, job] of saved.entries()) {
+    const index = job.beforeRun ?? (observed || job.inserted ? afterExisting : runs.length);
+    place(index, {...job, status:'batch', note:i === 0 ? facility.insertNote : undefined});
   }
   const rows = [];
+  for (const job of facility.ready ?? []) rows.push({...job, status:'ready'});
+  for (const job of facility.elapsed ?? []) rows.push({...job, status:'elapsed'});
   let covered = day.startAt, idle = 0;
+  const gapLabel = facility.unknown ? '待定' : facility.disabled ? '停用' : '空闲';
   function gap(to) {
-    if (to <= covered) return;
+    if (!includeGaps || to <= covered) return;
     idle += to - covered;
-    rows.push({ from: covered, to });
+    rows.push({status:'gap', gapLabel, from:covered, to});
+    covered = to;
   }
-  for (const run of factory.runs) {
+  for (const [index, run] of runs.entries()) {
+    for (const job of before.get(index) ?? []) {
+      if (job.estimatedStart >= run.from) gap(run.from);
+      rows.push(job);
+    }
     gap(run.from);
-    rows.push(run);
+    if (!run.inserted || !pinned.length) rows.push(run);
     covered = Math.max(covered, run.to);
   }
+  for (const job of before.get(runs.length) ?? []) rows.push(job);
   gap(day.endAt);
-  const gapLabel = factory.unknown ? '待定' : factory.disabled ? '停用' : '空闲';
-  const totals = el('div', 'plan-day-totals');
-  for (const [label, seconds] of [['运行', day.endAt - day.startAt - idle], [gapLabel, idle]]) {
-    const stat = el('span', null, label + ' ');
-    stat.appendChild(el('strong', null, forecastDuration(seconds)));
-    totals.appendChild(stat);
+  return {rows, idle, gapLabel, notes:[facility.unknown, saved.length ? null : facility.insertNote].filter(Boolean)};
+}
+
+// Use the next dated row as a sorting anchor only. Within each facility the
+// journal order wins. At an equal anchor, upstream batches precede consumers.
+function overviewScheduleRows(day, groups) {
+  const depths = new Map();
+  function depth(id, path = new Set()) {
+    if (depths.has(id)) return depths.get(id);
+    if (path.has(id)) return 0;
+    path.add(id);
+    const inputs = day.materials?.[id]?.inputs ?? [];
+    const level = inputs.reduce((n, cost) => Math.max(n, 1 + depth(cost.id, path)), 0);
+    path.delete(id);
+    depths.set(id, level);
+    return level;
   }
-  panel.appendChild(totals);
-  if (factory.pendingInsertions?.length) {
-    panel.appendChild(el('h3', 'production-pending-title', '待入队插单'));
-    const pending = el('ol', 'production-pending-list');
-    for (const job of factory.pendingInsertions) {
-      pending.appendChild(el('li', null, job.name + ' ×' + job.quantity + (job.supplyFor ? '（为' + job.supplyFor + '补料）' : '')));
+  // An undated supply and its undated consumer share the earliest known
+  // queue anchor for that order, even if only the consumer has a dated neighbour.
+  const anchors = new Map();
+  const queues = groups.map(({rows, facility}) => {
+    let nextTime = Infinity;
+    const group = rows.map(run => ({run, facility}));
+    for (let i = group.length - 1; i >= 0; i--) {
+      const row = group[i], run = row.run;
+      const time = ['ready','elapsed'].includes(run.status) ? -Infinity : run.from ?? run.estimatedStart ?? Infinity;
+      nextTime = Math.min(nextTime, time);
+      row.orderTime = nextTime;
+      if (time === Infinity && run.inserted) {
+        const target = run.supplyFor ? run.supplyTarget : facility.id;
+        if (target != null) {
+          row.order = JSON.stringify([target, run.supplyFor || run.name]);
+          anchors.set(row.order, Math.min(anchors.get(row.order) ?? Infinity, nextTime));
+        }
+      }
     }
-    panel.appendChild(pending);
-  }
-  if (factory.upstream?.length) {
-    panel.appendChild(el('h3', 'production-pending-title', '上游补料插单'));
-    const list = el('ol', 'production-pending-list');
-    for (const job of factory.upstream) {
-      list.appendChild(el('li', null, job.factory + ' · ' + job.name + ' ×' + job.quantity + (job.crop ? ' 茬' : '')));
+    return group;
+  });
+  for (const group of queues) {
+    let nextTime = Infinity, nextPriority = Infinity;
+    for (let i = group.length - 1; i >= 0; i--) {
+      const row = group[i];
+      row.orderTime = Math.min(nextTime, row.orderTime, anchors.get(row.order) ?? Infinity);
+      const priority = row.run.supplyFor ? depth(row.run.id) : Infinity;
+      row.priority = row.orderTime === nextTime ? Math.min(nextPriority, priority) : priority;
+      nextTime = row.orderTime;
+      nextPriority = row.priority;
     }
-    panel.appendChild(list);
   }
-  for (const note of [factory.unknown, factory.insertNote]) if (note) panel.appendChild(el('p', 'plan-day-note', note));
-  const list = el('ol', 'production-batches');
-  list.setAttribute('aria-label', factory.name + ' 排产顺序');
-  panel.appendChild(list);
-  const nav = el('div', 'production-batches-nav');
-  panel.appendChild(nav);
-  const pageSize = 24;
-  const detailedClock = new Intl.DateTimeFormat('zh-CN', { timeZone:'Asia/Shanghai', hourCycle:'h23',
-    hour:'2-digit', minute:'2-digit', second:'2-digit' });
+  return queues.flat().sort((a,b) => a.orderTime - b.orderTime || a.priority - b.priority);
+}
+
+const forecastSeconds = new Intl.DateTimeFormat('zh-CN', {timeZone:'Asia/Shanghai', hourCycle:'h23',
+  hour:'2-digit', minute:'2-digit', second:'2-digit'});
+
+function renderScheduleTable(panel, day, entries, factory, selectFactory) {
+  const wrap = panel.appendChild(el('div','production-schedule-scroll'));
+  const grid = wrap.appendChild(el('table','production-schedule-table'));
+  grid.setAttribute('aria-label', (factory?.name ?? '全部设施') + '排产顺序');
+  const header = grid.appendChild(el('thead')).appendChild(el('tr'));
+  const actions = !!day.insertKey && !day.unavailable;
+  const columns = ['顺序', ...(!factory ? ['生产设施'] : []), '生产物品', '排产时间', '时长', '状态', ...(actions ? ['操作'] : [])];
+  for (const label of columns) header.appendChild(el('th', null, label)).setAttribute('scope','col');
+  const body = grid.appendChild(el('tbody','production-batches'));
+  const nav = panel.appendChild(el('div','production-batches-nav'));
+  const pageSize = 24, pages = Math.ceil(entries.length / pageSize);
   const nextDay = (Math.floor((day.startAt + 28800) / 86400) + 1) * 86400 - 28800;
   function draw(page) {
-    clear(list);
+    clear(body);
     clear(nav);
-    for (const run of rows.slice(page * pageSize, (page + 1) * pageSize)) {
-      const status = run.name ? forecastRunStatus(run) : 'gap';
-      const row = el('li', 'production-batch ' + status);
-      const heading = el('div', 'production-batch-name');
-      heading.appendChild(el('strong', null, run.name || gapLabel));
-      if (run.name) heading.appendChild(el('span', 'production-batch-quantity', '×' + run.quantity));
-      row.appendChild(heading);
-      const duration = run.to - run.from;
-      const time = t => (t >= nextDay ? '次日 ' : '') + (duration < 60 ? detailedClock.format(t * 1000) : forecastTime(t));
-      const times = el('span', 'production-batch-time', time(run.from) + ' – ' + time(run.to));
-      row.appendChild(times);
-      row.appendChild(el('span', 'production-batch-duration', forecastDuration(duration) + (run.continues ? '以上' : '')));
-      row.appendChild(el('span', 'production-batch-state', forecastStatusLabels[status] || gapLabel));
-      if (day.insertKey && !factory.unknown && !factory.editing && status !== 'unconfirmed') {
-        const button = el('button', 'production-batch-insert', '插单');
-        button.type = 'button';
-        button.setAttribute('aria-label', (run.name || gapLabel) + ' · 插入排产');
-        const open = () => openBatchInsertion(day, factory, run, status, panel).catch(reportError);
-        button.onclick = open;
-        row.oncontextmenu = event => { event.preventDefault(); return open(); };
-        row.appendChild(button);
+    const start = page * pageSize;
+    for (let i = start; i < Math.min(start + pageSize, entries.length); i++) {
+      const {run, facility} = entries[i];
+      const status = forecastRunStatus(run);
+      const row = body.appendChild(el('tr','production-batch ' + status));
+      row.appendChild(el('td','production-batch-position', i + 1));
+      if (!factory) {
+        const cell = row.appendChild(el('td'));
+        if (selectFactory && day.factories?.includes(facility)) {
+          const link = cell.appendChild(el('button','production-sequence-facility',facility.name));
+          link.type = 'button';
+          link.onclick = () => selectFactory(facility);
+        } else cell.textContent = facility.name;
       }
-      list.appendChild(row);
+      const name = row.appendChild(el('td','production-batch-name'));
+      name.appendChild(el('strong', null, run.name || run.gapLabel));
+      if (run.name) name.appendChild(el('span','production-batch-quantity','×' + run.quantity + (facility.crop ? ' 茬' : '')));
+      let time = '', duration = '';
+      if (run.from != null && run.to != null) {
+        const seconds = run.to - run.from;
+        const clock = t => (t >= nextDay ? '次日 ' : '') + (seconds < 60 ? forecastSeconds.format(t * 1000) : forecastTime(t));
+        time = clock(run.from) + ' – ' + clock(run.to);
+        duration = forecastDuration(seconds) + (run.continues ? '以上' : '');
+      } else if (run.estimatedStart != null) {
+        time = '预计 ' + productionPlanTime(run.estimatedStart) + (run.estimatedFinish != null ? ' – ' + productionPlanTime(run.estimatedFinish) : ' 开始');
+      } else if (status === 'accepted' || status === 'batch') {
+        time = run.at > day.startAt ? '最早 ' + productionPlanTime(run.at) : '开工时间待定';
+      }
+      row.appendChild(el('td','production-batch-time',time));
+      row.appendChild(el('td','production-batch-duration',duration));
+      const state = row.appendChild(el('td','production-batch-state', run.gapLabel ||
+        (facility.crop && status === 'running' ? '生长中' : forecastBatchLabel(run))));
+      if (run.total > run.quantity) state.appendChild(el('div',null,'整批共 ' + run.total + (facility.crop ? ' 茬' : ' 件')));
+      if (run.note) state.appendChild(el('div','plan-day-note',run.note));
+      if (actions) {
+        const cell = row.appendChild(el('td'));
+        if (!facility.crop && !facility.unknown && !facility.editing && status !== 'unconfirmed'
+          && (Number.isFinite(run.from) || (run.inserted && Number.isSafeInteger(run.planIndex)))) {
+          const button = cell.appendChild(el('button','production-batch-insert','插单'));
+          button.type = 'button';
+          button.setAttribute('aria-label',(run.name || run.gapLabel) + ' · 插入排产');
+          const open = () => openBatchInsertion(day, facility, run, status, panel).catch(reportError);
+          button.onclick = open;
+          row.oncontextmenu = event => { event.preventDefault(); return open(); };
+        }
+      }
     }
-    if (rows.length <= pageSize) return;
-    const pages = Math.ceil(rows.length / pageSize);
-    const turn = (label, target) => {
-      const button = el('button', 'btn', label);
+    if (pages < 2) return;
+    function turn(label, target) {
+      const button = el('button','btn',label);
       button.type = 'button';
       button.disabled = target < 0 || target >= pages;
-      button.onclick = () => { draw(target); list.scrollTop = 0; };
+      button.onclick = () => { draw(target); wrap.scrollTop = 0; };
       return button;
-    };
-    nav.appendChild(turn('上一页', page - 1));
-    nav.appendChild(el('span', null, (page + 1) + ' / ' + pages));
-    nav.appendChild(turn('下一页', page + 1));
+    }
+    nav.appendChild(turn('上一页',page - 1));
+    nav.appendChild(el('span',null,(page + 1) + ' / ' + pages));
+    nav.appendChild(turn('下一页',page + 1));
   }
   draw(0);
+}
+
+function renderProductionOverview(container, day, selectFactory) {
+  const panel = clear(container).appendChild(el('div','plan-day-panel'));
+  const facilities = [...(day.factories ?? []), ...(day.farms ?? []), ...(day.unsynced ?? [])];
+  const groups = facilities.map(facility => ({facility, ...facilityScheduleRows(day, facility, false)}));
+  for (const {facility, notes} of groups) {
+    for (const note of notes) panel.appendChild(el('p','plan-day-note',facility.name + ' · ' + note));
+  }
+  const rows = overviewScheduleRows(day, groups);
+  if (rows.length) renderScheduleTable(panel, day, rows, null, selectFactory);
+  else panel.appendChild(el('p','plan-day-note','当前没有生产批次。选择工厂可在空闲时段插单。'));
+}
+
+function renderFactorySchedule(container, day, factory) {
+  const panel = clear(container).appendChild(el('div','plan-day-panel'));
+  if (!Array.isArray(factory.runs)) {
+    panel.appendChild(el('p','dim','请重新生成计划以查看生产任务。'));
+    return;
+  }
+  const timedFactory = !day.unavailable && day.factories?.includes(factory);
+  const {rows, idle, gapLabel, notes} = facilityScheduleRows(day, factory, timedFactory);
+  if (timedFactory) {
+    const totals = panel.appendChild(el('div','plan-day-totals'));
+    for (const [label, seconds] of [['运行', day.endAt - day.startAt - idle], [gapLabel, idle]]) {
+      const stat = totals.appendChild(el('span',null,label + ' '));
+      stat.appendChild(el('strong',null,forecastDuration(seconds)));
+    }
+  }
+  for (const note of notes) panel.appendChild(el('p','plan-day-note',note));
+  if (rows.length) renderScheduleTable(panel, day, rows.map(run => ({run, facility:factory})), factory);
+  else panel.appendChild(el('p','plan-day-note','当前没有生产批次。'));
 }
 
 async function openBatchInsertion(day, factory, run, status, panel) {
@@ -262,13 +384,14 @@ async function openBatchInsertion(day, factory, run, status, panel) {
   const valid = () => panel.isConnected && !productionPlanBusy && current === account && version === productionPlanVersion
     && productionAccountReady();
   if (!valid()) return;
-  const target = { planKey: day.insertKey, buildingId: factory.id, from: run.from, lane: run.lane, status, id: run.id };
+  const target = { planKey: day.insertKey, buildingId: factory.id, from: run.from, lane: run.lane,
+    planIndex:run.planIndex, status, id: run.id };
   const post = (path, body) => call('/api/world/production-insert' + path, { method: 'POST', body: JSON.stringify(body) });
   const form = el('div', 'production-insert-form');
-  const notice = el('p', 'plan-day-note', '正在核对库存和可插入数量…');
+  const notice = el('p', 'plan-day-note', '正在读取配方和补料计划…');
   notice.setAttribute('role', 'status');
   form.appendChild(notice);
-  openConfirm(factory.name + ' · 插入排产', [form], submitInsertion, '确认插入');
+  openConfirm(factory.name + ' · 插入排产', [form], submitInsertion, '加入计划队列');
   $('m-ok').disabled = true;
   const dialogCurrent = () => $('modal').open && $('m-body').firstElementChild === form;
   let options;
@@ -285,7 +408,7 @@ async function openBatchInsertion(day, factory, run, status, panel) {
   }
   const { products, count, reordersQueue } = options;
   clear(form);
-  if (reordersQueue) form.appendChild(el('p', 'plan-day-note', '插入位置之后的游戏待排任务会先撤下，再按原顺序补回。'));
+  if (reordersQueue) form.appendChild(el('p', 'plan-day-note', '执行计划时，此位置之后的游戏待排任务会先撤下，再按原顺序补回。'));
   function field(label, node) {
     const wrap = el('label', null, label);
     wrap.appendChild(node);
@@ -304,7 +427,7 @@ async function openBatchInsertion(day, factory, run, status, panel) {
   const select = field('生产物品', el('select'));
   for (const product of products) {
     const option = el('option', null, product.name + (product.autoSupply ? '（自动补料）'
-      : product.max === null ? '（无需原料）' : '（最多 ' + product.max + ' 件）'));
+      : product.requiresMaterials ? '（到料后生产）' : product.max === null ? '（无需原料）' : '（最多 ' + product.max + ' 件）'));
     option.value = product.id;
     option.disabled = product.max === 0;
     select.appendChild(option);
@@ -322,10 +445,10 @@ async function openBatchInsertion(day, factory, run, status, panel) {
     qty.max = max == null ? '' : String(max);
     $('m-ok').disabled = !validPosition() || !validQuantity(Number(qty.value));
     if (chosen()?.autoSupply) {
-      hint.textContent = '缺少的可生产原料会优先插到对应工厂或农田，已有库存、在产和已插单的数量会先抵扣。'
+      hint.textContent = '整批成品和缺少的可生产原料会一次加入计划队列。执行时按库存和空位派单。'
         + (max != null && Number(qty.value) > max ? '按当前原料和设施最多可插入 ' + max + ' 件。' : '');
     } else {
-      hint.textContent = !chosen() || max === 0 ? '当前可用原料不足。' : '成品满仓时先做后面能做的任务，腾出仓容后优先补产。';
+      hint.textContent = !chosen() || max === 0 ? '当前可用原料不足。' : '整批加入计划队列，执行时按库存和空位派单。';
     }
   }
   select.onchange = qty.oninput = update;
@@ -344,7 +467,8 @@ async function openBatchInsertion(day, factory, run, status, panel) {
 }
 
 function renderProductionDay(day, orders) {
-  if (day?.unavailable) {
+  const facilities = [...(day?.factories ?? []), ...(day?.farms ?? []), ...(day?.unsynced ?? [])];
+  if (day?.unavailable && !facilities.length) {
     showProductionDayNotice(day.unavailable);
     return;
   }
@@ -352,21 +476,27 @@ function renderProductionDay(day, orders) {
   if (!day) return;
   const box = $('production-day-result');
   $('production-day-card').hidden = false;
-  const factories = day.factories;
   const count = orders.filter(order => !order.skipped).length;
   const mode = day.strategy === 'nativeSimulation' ? '模拟游戏原生' : '智能排产';
-  box.appendChild(el('p', 'plan-day-meta', mode + ' · 北京时间 ' + forecastTime(day.startAt) + ' 起'
+  box.appendChild(el('p', 'plan-day-meta', mode + (day.startAt > 0 ? ' · 北京时间 ' + forecastTime(day.startAt) + ' 起' : '')
     + (count ? ' · 预计备齐 ' + day.completions.length + ' / ' + count + ' 笔需求' : '')));
-  if (day.partial) box.appendChild(el('p', 'plan-day-note', '部分快照数据或材料扣款待确认，仅按已知条件推演。'));
-  if (!factories.length) {
+  if (day.unavailable) {
+    box.appendChild(el('p','plan-day-note',day.unavailable + '以下保留已保存的计划和已知游戏队列。'));
+  } else if (day.partial) box.appendChild(el('p', 'plan-day-note', '部分快照数据或材料扣款待确认，仅按已知条件推演。'));
+  if (!facilities.length) {
     box.appendChild(el('p', 'plan-day-note', '当前快照中没有已建工厂。'));
     return;
   }
   const picker = $('production-day-factory');
-  for (const factory of factories) {
+  for (const factory of facilities) {
     const option = el('option', null, factory.name);
     option.value = String(factory.id);
     picker.appendChild(option);
+  }
+  if (day.materials) {
+    const all = el('option',null,'全部设施');
+    all.value = '';
+    picker.appendChild(all);
   }
   $('production-day-picker').hidden = false;
   const body = el('div');
@@ -376,8 +506,17 @@ function renderProductionDay(day, orders) {
     picker.value = String(factory.id);
     renderFactorySchedule(body, day, factory);
   }
-  picker.onchange = () => selectFactory(factories[picker.selectedIndex]);
-  selectFactory(factories.find(factory => factory.id === selectedForecastFactory) ?? factories[0]);
+  function selectOverview() {
+    selectedForecastFactory = '';
+    picker.value = '';
+    renderProductionOverview(body,day,selectFactory);
+  }
+  picker.onchange = () => {
+    if (picker.selectedIndex === facilities.length) selectOverview();
+    else selectFactory(facilities[picker.selectedIndex]);
+  };
+  if (selectedForecastFactory === '' && day.materials) selectOverview();
+  else selectFactory(facilities.find(factory => factory.id === selectedForecastFactory) ?? facilities[0]);
 }
 
 function renderProductionPlan(data) {

@@ -6,7 +6,7 @@ export const maxCompassSpinCount = 999;
 // 旧字段仅兼容导入，统一停用，不能在新模块关闭后恢复执行。
 // 装备由 forge.enabled 控制；联盟募兵、互助由 alliance.enabled 及对应细项控制；巨轮由 treasure.enabled 控制。
 export const migratedAutomationTasks = new Set(['museumCollect', 'museumExplore', 'petCollect', 'petBreed', 'radarAuto', 'radarRepair', 'museumRevenue', 'museumAchievements', 'worldBossDamage']);
-export const removedScheduleKeys = new Set([...migratedAutomationTasks, 'ticketRecruit']);
+export const removedScheduleKeys = new Set([...migratedAutomationTasks, 'ticketRecruit', 'worldOnline']);
 export const retiredAutomationTasks = new Set(['equipmentCollect', 'equipmentCraft', 'guildOrders', 'guildAidCollect', 'guildAidHelp', 'treasureLoot', ...removedScheduleKeys]);
 
 export const automationTasks = [
@@ -30,7 +30,6 @@ export const automationTasks = [
   ['farm', '农田种植与收获', '海面', false],
   ['guildWelfare', '领取联盟福利礼包', '联盟', false],
   ['guildTitleReward', '联盟每日职级礼包', '联盟', false],
-  ['worldOnline', '世界在线奖励', '联盟', false],
   ['tradeTasks', '海商王联盟任务', '周期活动', false],
   ['guildAidCollect', '联盟互助收取', '联盟', false],
   ['seasonTasks', '赛季任务奖励', '周期活动', false],
@@ -94,7 +93,8 @@ export const automationTasks = [
   ['gift', '每日免费赠礼', '领奖', false],
   ['adShop', '广告商店资源', '领奖', false],
   ['mail', '邮件附件', '领奖', false],
-  ['afk', '闯关挂机收益（满额领取）', '领奖', false],
+  ['afk', '闯关挂机收益', '领奖', false],
+  ['afkUpgrade', '自动升级挂机等级', '领奖', false],
   ['afkAd', '闯关挂机广告收益', '领奖', false],
   ['freeRecruit', '英雄免费招募', '日常', false],
   ['heroRecruitRewards', '英雄累计招募档位领奖', '招募', false],
@@ -124,6 +124,7 @@ export function taskSettings(saved = {}) {
   if (saved?.vipDailyGift === true) saved = { ...saved, vipDaily: true };
   // 旧、新世界 Boss 领奖开关原先按“任一开启”执行，读取旧任务时保留此选择。
   if (saved?.worldBossDamage === true) saved = { ...saved, worldBossRewards: true };
+  if (saved?.worldOnline === true) saved = { ...saved, worldOnlineRewards: true };
   return Object.fromEntries(automationTasks.map(({ key, initial }) =>
     [key, retiredAutomationTasks.has(key) ? false : typeof saved?.[key] === 'boolean' ? saved[key] : initial]));
 }

@@ -1,6 +1,6 @@
 import { exactAutomationId } from './automation-policy.mjs';
 import { normalize } from './worlds.mjs';
-import { reconcilePirateFlights } from './pirates.mjs';
+import { pirateConfirmationStart, pirateConfirmationTimedOut, reconcilePirateFlights } from './pirates.mjs';
 import { emitDiagnostic } from './trace-log.mjs';
 import { fleetRepairConfirmed } from './fleet-repair-confirmation.mjs';
 import { fleetSpeedConfirmed } from './fleet-speed-evidence.mjs';
@@ -216,7 +216,7 @@ export function cancelResourceFieldReplacement(ledger, key, record, now, reason)
 // 对已有派遣做结算，不发出游戏动作。先按读回前的记录编号限定范围，防止迟到快照释放新占用。
 export function settleFleetSnapshot(
   ledger,
-  { worldId, fleets, events, reports, kills, cargoUids, resourceFields, resourceFieldPolicy, now, readStartedAt, kinds, baseline, allowBossTimeout = true }
+  { worldId, fleets, events, reports, kills, cargoUids, resourceFields, resourceFieldPolicy, now, readStartedAt, kinds, baseline, allowBossTimeout = true, finalizePirateTimeout = false }
 ) {
   if (!ledger?.keyRecords || !worldId || !Array.isArray(fleets)) return [];
   const records = ledger.keyRecords(),
@@ -378,12 +378,21 @@ export function settleFleetSnapshot(
       }
       // 本人舰队归队可以解除占用，战果、目标防重和未知汽油仍保存在原记录中。
       // 未确认出征的请求先保留原有 15 分钟战果等待窗口，避免发送后状态尚未同步就释放。
-      const sentAt = d.sentAt ?? ledger.reservationTime?.(key);
-      const timedOut = Number.isFinite(sentAt) && integer(now) && now * 1000 - sentAt >= 900000;
+      const sentAt = pirateConfirmationStart(ledger,key,d);
+      const timedOut = pirateConfirmationTimedOut(sentAt, now * 1000);
+      if (home && timedOut && finalizePirateTimeout && Array.isArray(kills) && !['won','lost'].includes(outcome)) {
+        const reason = '首杀战果超过15分钟未确认，舰队已归队，本次派遣按超时结束';
+        if (ledger.expirePirateDispatch(key, records[key], {...d, sentAt, active:false, outcome:'timedOut', releaseReason:reason, releasedAt:now}))
+          changes.push({key, reason});
+        continue;
+      }
       if (home && d.active !== false && !['won', 'lost'].includes(outcome) && (r.confirmed || timedOut)) {
         const reason = r.confirmed ? '首杀舰队已归队，战果继续待核对' : '首杀请求超过等待窗口且舰队已归队';
         ledger.updateKeyDetails(key, { ...d, active: false, releaseReason: reason, releasedAt: now });
         changes.push({ key, reason });
+      } else if (!Number.isFinite(sentAt) && integer(now) && !['won','lost'].includes(outcome)) {
+        // 旧记录可能没有发送时间。首次核对只建立计时起点。
+        ledger.updateKeyDetails(key, {...d, confirmationSince: now * 1000}, records[key]);
       }
       continue;
     }
@@ -606,7 +615,8 @@ export async function checkFleetSettlement(client, player, ledger, { afterPush =
       }
     }
     if (!sameOwner() || client.connected === false) return changes;
-    if (needReport.length) changes.push(...settleFleetSnapshot(ledger, { ...snapshot, reports }));
+    if (needReport.length || (owner && kinds.has('pirateFirst')))
+      changes.push(...settleFleetSnapshot(ledger, { ...snapshot, reports, finalizePirateTimeout: Boolean(owner), kinds: needReport.length ? undefined : ['pirateFirst'] }));
     const current = ledger.keyRecords();
     reconcilePirateFlights(client, current, worldId);
     const scan = needReport.length ? reportCache.get(client) : null;

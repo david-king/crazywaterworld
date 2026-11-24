@@ -1,6 +1,6 @@
 import { optimizeProductionSchedule } from './production-optimizer.mjs';
 import { planStockRefills, scheduleRankedStock } from './production-restock.mjs';
-import { simulateNativeFactoryStarts } from './factory-native-simulation.mjs';
+import { nativeMaterialReceipts, simulateNativeFactoryStarts } from './factory-native-simulation.mjs';
 import { createProductionTiming } from './production-timing.mjs';
 import { resourceReserve, worldPreferenceEnabled } from './automation-policy.mjs';
 import { activityProductionEnabled } from './activity-automation.mjs';
@@ -234,7 +234,9 @@ export function planProduction(snapshot, config, settings, options = {}) {
     const eligible = new Set(snapshot.factories.filter(f => f.enabled && !f.nativeAutoActive).map(f => f.id));
     const unlocked = new Set(snapshot.recipes.filter(r => r.available).map(r => r.productId));
     const stock = new Map(snapshot.inventory.map(item => [item.id, item.num]));
-    const available = new Map(model.input.inventory.map(item => [item.itemId, item.quantity]));
+    const warehouse = new Map(stock);
+    const receipts = nativeMaterialReceipts(snapshot.buildings, b => worldPreferenceEnabled(settings, 'gainFactory')
+      && !settings.factory.blockedCollectionTypes?.includes(b.type));
     for (const f of snapshot.factories) {
       for (const item of [...f.finished, ...f.queue.map(job => ({ id: job.productId, num: 1 }))]) {
         stock.set(item.id, (stock.get(item.id) ?? 0) + item.num);
@@ -245,11 +247,11 @@ export function planProduction(snapshot, config, settings, options = {}) {
       && settings.factory.enabled && settings.factory.produce && settings.loop?.world !== false;
     const picks = canPlan ? simulateNativeFactoryStarts({
       buildings: snapshot.buildings.filter(b => eligible.has(b.id)),
-      recipes: rows(config, 'BuildingProduceCfg').filter(r => unlocked.has(r.itemId)),
+      recipes: rows(config, 'BuildingProduceCfg'), availableProducts: unlocked,
       targets: settings.factory.simulatedTargets,
       timing: createProductionTiming({ config, ...snapshot.timing, serverNow: now }),
       now, cap: snapshot.stockCap, slots: snapshot.factories[0]?.capacity ?? 0,
-      available: id => pendingInputs.has(id) ? 0 : available.get(id) ?? 0,
+      available: id => pendingInputs.has(id) ? 0 : (warehouse.get(id) ?? 0) + (receipts.get(id) ?? 0) - (resourceReserve(settings, id) || 0),
       owned: id => stock.get(id) ?? 0,
     }) : [];
     const next = picks.map(({ building, row, lane }) => ({

@@ -1,10 +1,11 @@
 import {recordsInWorld, checkFleetSettlement, settleFleetSnapshot} from './fleet-settlement.mjs';
 import { fleetRecordReason, reserveDispatch, dispatchReservationReason } from './fleet-availability.mjs';
 import { setTimeout as delay } from 'node:timers/promises';
-import { inspectHunt, pirateTypePlan, startPirateHunt } from './pirates.mjs';
+import { inspectHunt, pirateConfirmationStart, pirateConfirmationTimedOut, pirateTypePlan, startPirateHunt } from './pirates.mjs';
 import { normalize } from './worlds.mjs';
 import { pendingPetrol } from './dispatch-preview.mjs';
-import { recoverFleetLineups, releaseLostPirateDispatch } from './fleet-lineups.mjs';
+import { recoverFleetLineups, releaseRetryablePirateDispatch } from './fleet-lineups.mjs';
+import { beijingDay } from './usage-ledger.mjs';
 
 function otherFleetRecords(ledger, lineupKeys) {
  const records=ledger.keyRecords();
@@ -13,11 +14,12 @@ function otherFleetRecords(ledger, lineupKeys) {
 }
 
 // 汽油确认与终态在同一次账本写入中完成。迟到的行军消息不能覆盖已确认的战果。
-export function savePirateOutcome(ledger, key, event, dispatchId) {
+export function savePirateOutcome(ledger, key, event, dispatchId, failureLimit) {
  const record = ledger.keyRecords()[key];
  if (!record || record.expired || (dispatchId && record.id!==dispatchId)) return;
  if (['won','lost'].includes(record.details?.outcome)) return record.details.outcome;
  const details = { ...record.details, outcome:event.status };
+ if (event.status === 'lost' && failureLimit) details.failureLimit = failureLimit;
  if (event.arrivalAt) details.arrivalAt = event.arrivalAt;
  if (event.ownBattle) details.ownBattle = true;
  if (event.battleAt) details.battleAt = event.battleAt;
@@ -44,7 +46,7 @@ export async function runSinglePirateHunt(client,config,player,{targetKey,fleetK
    if(reason)throw Error(reason);
    if(view.fuel-pendingPetrol(ledger)<view.fuelPerFleet)throw Error('可用汽油不足以出征');
    const world=String(normalize(player.worldId));key='pirate-first:'+world+':'+target.type+':'+target.level+':'+target.uid;
-   releaseLostPirateDispatch(ledger,key);
+   releaseRetryablePirateDispatch(ledger,key);
    ticket=ledger.reserve({piratePetrol:view.fuelPerFleet},{},{},{uniqueKey:key,details:{kind:'pirateFirst',world,type:target.type,level:target.level,uid:target.uid,grid:target.gridIdx,scenarioId:player.scenarioId||1,sentAt:Date.now()+(client.serverClockOffsetMs||0),buildingId:fleet.buildingId,outcome:'sent'}});
    return {...ticket,key};
   }});
@@ -53,13 +55,28 @@ export async function runSinglePirateHunt(client,config,player,{targetKey,fleetK
 }
 
 const sameOptions=(a,b)=>JSON.stringify(a)===JSON.stringify(b);
-export function pirateAutoDay(ledger, player, checkpoint) {
+export function pirateTimeoutTypes(ledger, world, day, now) {
+ const types = new Set();
+ for (const [key,record] of Object.entries(recordsInWorld(ledger.keyRecords(), world))) {
+  const d=record.details;
+  if (d?.kind!=='pirateFirst' || String(d.world)!==world || ['won','lost'].includes(d.outcome)) continue;
+  const sentAt=pirateConfirmationStart(ledger,key,d);
+  if (record.expired) {
+   if (d.outcome==='timedOut' && (d.huntDay ?? (Number.isFinite(sentAt) && beijingDay(sentAt)))===day) types.add(d.type);
+  } else if (pirateConfirmationTimedOut(sentAt,now)) types.add(d.type);
+ }
+ return [...types];
+}
+export function pirateAutoDay(ledger, player, previous) {
  if (!ledger?.snapshot) throw Error('未取得首杀出征确认记录');
- const {day, counters} = ledger.snapshot();
- const counter = 'pirateAutoRuns' + normalize(player.worldId);
+ const world = String(normalize(player.worldId));
+ const {day, counters, pirateRun} = ledger.snapshot(world);
+ const counter = 'pirateAutoRuns' + world;
  const scope = counter + ':' + day;
- const ownsRun = checkpoint?.scope === scope && checkpoint.started;
- return {day, counter, scope, reason: counters[counter] && !ownsRun ? '今日已执行过一轮海盗自动首杀，明日再试' : ''};
+ let checkpoint = previous?.scope === scope && !previous.started ? previous : {scope};
+ if (pirateRun) checkpoint = {...pirateRun, scope, started: true};
+ const reason = counters[counter] && !pirateRun ? '旧版已占用今日海盗首杀轮次，未记录推进进度，明日恢复自动挑战' : '';
+ return {day, counter, scope, checkpoint, reason};
 }
 
 export function selectPirateAdvance(snapshot,options,{pendingFuel=0,firstSelection,autoState}={}) {
@@ -89,26 +106,34 @@ export async function runPirateAdvance({client,config,player,options,ledger,getS
  const prefix='pirate-first:'+world+':';
  const state=checkpoint.state??={wins:0,failures:0,spent:0,target:null,reason:'正在检查首杀目标'};
  let active=checkpoint.active??null, fuelCeiling=checkpoint.fuelCeiling??null;
+ const previousProgress=dailyRun && JSON.stringify({state,active,fuelCeiling});
+ let rolledBack=false;
  if(!Number.isSafeInteger(maxFailures)||maxFailures<1||maxFailures>100)throw Error('海盗失败停止次数必须为1–100的整数');
  const live=()=>!signal?.aborted && enabled() && optionsCurrent() && String(normalize(player.worldId))===world
   && (!dailyRun || ledger.snapshot().day===dailyRun.day);
  const stopLabel=dailyRun?'今日海盗自动首杀已停止，明日再试':'本次首杀推进已停止，重新开启后可继续';
  const autoState=dailyRun ? state : undefined;
  const recordType=()=>{
-  if(!autoState)return;
+  if(!dailyRun)return;
   if(state.type!==active.type)state.failures=0;
   state.type=active.type;
   state.typeName=active.name;
   state.nextTypeName=active.nextTypeName;
  };
+ const skipTimedOutType=()=>{
+  recordType();
+  state.timedOutTypes=[...new Set([...(state.timedOutTypes??[]),active.type])];
+  active=null;
+  return {stop:state.typeName+'战果超过15分钟未确认，今日跳过该类'};
+ };
  const stopFailedType=()=>{
-  if(autoState){
+  if(dailyRun){
    state.failedTypes??=[];
    if(state.failedTypes.includes(state.type))return;
    state.failedTypes.push(state.type);
   }
   state.reason=(state.typeName??'')+'连续战败 '+state.failures+' 次，达到失败停止次数';
-  if(autoState && state.nextTypeName){
+  if(dailyRun && state.nextTypeName){
    state.reason+='，下一类挑战'+state.nextTypeName;
   }else{
    state.halted=true;
@@ -116,25 +141,29 @@ export async function runPirateAdvance({client,config,player,options,ledger,getS
   }
  };
  const publish=()=>onState({...state});
- const countOutcome=outcome=>{
-  if(!active || active.counted || !['won','lost'].includes(outcome))return;
+ const failureLimit=()=>dailyRun ? getSettings()?.pirateHunt?.maxFailures ?? maxFailures : maxFailures;
+ const countOutcome=(outcome,observedLimit)=>{
+  if(!active || !['won','lost'].includes(outcome))return;
+  active.result=outcome;
+  if(active.counted)return;
   active.counted=true;
   recordType();
   if(outcome==='won'){
    state.wins++;
    state.failures=0;
   }else state.failures++;
-  const limit=dailyRun ? getSettings()?.pirateHunt?.maxFailures ?? maxFailures : maxFailures;
+  const limit=Math.min(failureLimit(),observedLimit??Infinity);
   if(state.failures>=limit)stopFailedType();
   else if(state.halted)state.reason=(outcome==='won'?'已确认首杀成功':'已确认首杀战败')+'；'+stopLabel;
  };
  const activeOutcome=record=>record?.id===active.id ? record.details?.outcome??active.result : active.result;
  const update=(key,event,dispatchId)=>{
   try {
-   const outcome=savePirateOutcome(ledger,key,event,dispatchId);
+   const observedLimit=dailyRun && event.status==='lost' ? failureLimit() : undefined;
+   const outcome=savePirateOutcome(ledger,key,event,dispatchId,observedLimit);
    if(outcome && active?.key===key && active.id===dispatchId){
     active.result=outcome;
-    if(dailyRun)countOutcome(outcome);
+    if(dailyRun && outcome===event.status)countOutcome(outcome,observedLimit);
    }
   } catch(error){state.reason='首杀记录保存失败：'+error.message;}
  };
@@ -145,7 +174,11 @@ export async function runPirateAdvance({client,config,player,options,ledger,getS
   await schedule(async()=>{
    if(!live())return;
    await checkFleetSettlement(client,player,ledger);
-   if(active)countOutcome(activeOutcome(ledger.keyRecords()[active.key]));
+   if(active){
+    const record=ledger.keyRecords()[active.key];
+    if(record?.id===active.id && record.details?.outcome==='timedOut' && !dailyRun)state.reason=record.details.releaseReason;
+    else countOutcome(activeOutcome(record),record?.id===active.id?record.details?.failureLimit:active.failureLimit);
+   }
   });
   publish();return state;
  }
@@ -157,6 +190,16 @@ export async function runPirateAdvance({client,config,player,options,ledger,getS
    if(!live())return{stop:'执行条件已变化，停止推进'};
    await checkFleetSettlement(client,player,ledger);
    if(!live())return{stop:'执行条件已变化，停止推进'};
+   if(dailyRun){
+    const serverNow=now()+(client.serverClockOffsetMs||0);
+    const timedOut=pirateTimeoutTypes(ledger,world,dailyRun.day,serverNow);
+    if(timedOut.length)state.timedOutTypes=[...new Set([...(state.timedOutTypes??[]),...timedOut])];
+    if(active){
+     const record=ledger.keyRecords()[active.key],outcome=activeOutcome(record);
+     const overdue=record?.id===active.id && pirateConfirmationTimedOut(record.details?.sentAt,serverNow);
+     if(!['won','lost'].includes(outcome) && (outcome==='timedOut' || overdue || pirateConfirmationTimedOut(active.sentAt,now())))return skipTimedOutType();
+    }
+   }
    if(preset)await recoverFleetLineups(client,player,ledger,{enabled:live});
    await prepareDispatch();
    const baseline=ledger.keyRecords();
@@ -172,11 +215,21 @@ export async function runPirateAdvance({client,config,player,options,ledger,getS
     now:Math.floor((Date.now()+(client.serverClockOffsetMs||0))/1000),kinds:['pirateFirst'],baseline});
    if(active) {
     const record=ledger.keyRecords()[active.key],outcome=activeOutcome(record);
-    if(outcome==='unknown'){state.halted=true;return{stop:'出征或战果未确认，已停止并保留派遣记录'};}
-    if(record?.details?.active===false&&!['won','lost'].includes(outcome)){state.halted=true;return{stop:'舰队已归队，首杀战果仍待确认，已停止推进并保留派遣记录'};}
+    if(outcome==='timedOut'){
+     if(dailyRun)return skipTimedOutType();
+     state.halted=true;return{stop:record?.details?.releaseReason??'首杀战果确认超时，本次推进已结束'};
+    }
+    if(outcome==='unknown'){
+     if(dailyRun)return{stop:'出征或战果未确认，等待服务器确认后继续'};
+     state.halted=true;return{stop:'出征或战果未确认，已停止并保留派遣记录'};
+    }
+    if(record?.details?.active===false&&!['won','lost'].includes(outcome)){
+     if(dailyRun)return{stop:'舰队已归队，等待确认上一场首杀战果'};
+     state.halted=true;return{stop:'舰队已归队，首杀战果仍待确认，已停止推进并保留派遣记录'};
+    }
     const fleet=snap.ownFleets.find(f=>f.buildingId===active.buildingId);
     if(outcome==='won'||outcome==='lost') {
-     countOutcome(outcome);
+     countOutcome(outcome,record?.id===active.id?record.details?.failureLimit:active.failureLimit);
      if(state.halted)return{stop:state.reason};
      if(dailyRun && snap.doneReason)return{stop:snap.doneReason,completed:true};
      if(fleet?.state===1 && !fleet.curGridIdx && !fleet.treasureLootUid && !fleet.chipWar?.rewardTs){active=null;}
@@ -187,11 +240,14 @@ export async function runPirateAdvance({client,config,player,options,ledger,getS
       return{wait:true};
      }
     } else {
-     if(now()-active.sentAt>900000){state.halted=true;return{stop:'等待战果超时，已停止并保留派遣记录'};}
+     if(pirateConfirmationTimedOut(active.sentAt,now())){
+      state.halted=true;return{stop:'等待战果超时，已停止并保留派遣记录'};
+     }
      state.reason=outcome==='started'||outcome==='ended'?'等待个人首杀记录更新':'等待服务器确认出征';return{wait:true};
     }
    }
-   const unresolved=Object.values(ledger.keyRecords()).find(r=>r.details?.kind==='pirateFirst' && String(r.details.world)===world && !['won','lost'].includes(r.details.outcome));
+   const unresolved=Object.values(ledger.keyRecords()).find(r=>!r.expired && r.details?.kind==='pirateFirst' && String(r.details.world)===world &&
+    !['won','lost'].includes(r.details.outcome) && !autoState?.timedOutTypes?.includes(r.details.type));
    if(unresolved)return{stop:'前次首杀出征结果仍待确认，禁止重复派遣'};
    if(fuelCeiling!==null && Number.isSafeInteger(snap.view.fuel))snap.view.fuel=Math.min(snap.view.fuel,fuelCeiling);
    for(const f of snap.view.fleets)f.reason ||= fleetRecordReason(ledger.keyRecords(),f.buildingId,world) || dispatchReservationReason(client,getSettings(),'pirateHunt',f.buildingId);
@@ -218,15 +274,25 @@ export async function runPirateAdvance({client,config,player,options,ledger,getS
       const firstToday=dailyRun && !checkpoint.started;
       const counters={piratePetrol:view.fuelPerFleet}, limits={};
       if(firstToday){
-       const {reason}=pirateAutoDay(ledger,player,checkpoint);
-       if(reason)throw Error(reason);
        counters[dailyRun.counter]=1;
        limits[dailyRun.counter]=1;
       }
-      releaseLostPirateDispatch(ledger,key);
-      ticket=ledger.reserve(counters,limits,{},{uniqueKey:key,details:{kind:'pirateFirst',world,type:target.type,level:target.level,uid:target.uid,grid:reviewed.gridIdx,scenarioId:player.scenarioId||1,sentAt:Date.now()+(client.serverClockOffsetMs||0),buildingId:raw.buildingId,outcome:'sent'}});
-      if(dailyRun && ticket.day!==dailyRun.day)throw Object.assign(Error('已换日，等待重新检查海盗首杀'),{notSent:true});
-      active={key,id:ticket.id,type:target.type,name:target.name,nextTypeName:check.nextTypeName,buildingId:raw.buildingId,sentAt:now(),result:'sent',counted:false};
+      releaseRetryablePirateDispatch(ledger,key);
+      const dispatch = {
+       key, type: target.type, name: target.name, nextTypeName: check.nextTypeName,
+       buildingId: raw.buildingId, sentAt: now(), result: 'sent', counted: false,
+      };
+      const pirateRun = dailyRun && {
+       world, day: dailyRun.day, revision: checkpoint.revision ?? 0,
+       progress: {active: dispatch, fuelCeiling: quotedFuel-picked.cost,
+        state: {...state, spent: state.spent+picked.cost, reason: '等待服务器确认出征'}},
+      };
+      ticket=ledger.reserve(counters,limits,{},{uniqueKey:key,pirateRun,details:{
+       kind:'pirateFirst',world,type:target.type,level:target.level,uid:target.uid,grid:reviewed.gridIdx,
+       scenarioId:player.scenarioId||1,huntDay:dailyRun?.day??ledger.snapshot().day,sentAt:Date.now()+(client.serverClockOffsetMs||0),buildingId:raw.buildingId,outcome:'sent',
+      }});
+      if(pirateRun)checkpoint.revision=pirateRun.revision+1;
+      active={...dispatch,id:ticket.id};
       return {...ticket,key};
      },report:event=>update(key,event,ticket?.id)});
     firstSelection=null;
@@ -234,12 +300,16 @@ export async function runPirateAdvance({client,config,player,options,ledger,getS
     state.spent+=picked.cost;fuelCeiling=quotedFuel-picked.cost;update(key,reply,ticket.id);
     if(state.halted)return{stop:state.reason};
     if(autoState?.failedTypes?.includes(target.type))return{wait:true};
-    if(reply.status==='unknown'){
-     if(dailyRun)state.halted=true;
-     return{stop:reply.label};
-    }
+    if(reply.status==='unknown')return{stop:reply.label};
     state.reason=reply.label;return{wait:true};
-   } catch(error){if(ticket && (error.prompt&&error.request==='ChallengePirateRequest' || error.notSent===true)){ledger.cancel(ticket);active=null;}return{stop:error.message};}
+   } catch(error){
+    if(ticket && (error.prompt&&error.request==='ChallengePirateRequest' || error.notSent===true)){
+     ledger.cancel(ticket);
+     active=null;
+     rolledBack=true;
+    }
+    return{stop:error.message};
+   }
   });
   if(result.stop){
    state.reason=result.stop;
@@ -248,9 +318,16 @@ export async function runPirateAdvance({client,config,player,options,ledger,getS
   }
   publish();if(oneCheck)break;await sleep(options.checkEverySeconds*1000);
  }
- if(signal?.aborted)state.reason=signal.reason?.message||'已停止首杀推进';
+ if(signal?.aborted && !state.halted)state.reason=signal.reason?.message||'已停止首杀推进';
  publish();return state;
- } finally { checkpoint.active=active;checkpoint.fuelCeiling=fuelCeiling;reserveDispatch(client,'pirateHunt',[]); }
+ } finally {
+  reserveDispatch(client,'pirateHunt',[]);
+  checkpoint.active=active;checkpoint.fuelCeiling=fuelCeiling;
+  const progress={state,active,fuelCeiling};
+  if(dailyRun && checkpoint.started && !rolledBack && JSON.stringify(progress)!==previousProgress){
+   checkpoint.revision=ledger.savePirateRun({world,day:dailyRun.day,revision:checkpoint.revision,progress});
+  }
+ }
 }
 export function createPirateAdvanceTask() {
  let controller=null;let state={running:false,stopping:false,wins:0,spent:0,target:null,reason:''};

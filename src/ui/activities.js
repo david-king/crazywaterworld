@@ -20,6 +20,7 @@ const savingHeroRaidSettings = new Set();
 let seaMerchantSettingsData = null, seaMerchantSettingsOwner = null, seaMerchantSettingsVersion = 0;
 let seaMerchantSettingsStatus = '';
 const savingSeaMerchantSettings = new Set();
+let merchantManualOwner = null;
 let guildShipSettingsData = null, guildShipSettingsOwner = null, guildShipSettingsVersion = 0;
 let guildShipSettingsStatus = '';
 const savingGuildShipSettings = new Set();
@@ -730,8 +731,51 @@ function renderSeaMerchantSettings(box) {
     box.appendChild(el('p', 'dim', seaMerchantSettingsStatus || '正在读取海商王配置…'));
     return;
   }
-  renderActivitySettingsFields(box, { data: seaMerchantSettingsData, fields: merchantActivityFields,
-    saving: savingSeaMerchantSettings.has(account), statusText: seaMerchantSettingsStatus,
+  const saving = savingSeaMerchantSettings.has(account);
+  const displayed = seaMerchantSettingsData;
+  const section = el('div', 'activity-settings');
+  box.appendChild(section);
+  const presets = el('fieldset', 'merchant-presets');
+  presets.append(el('legend', '', '四天走商方案'),
+    el('p', 'dim', '套用后将为当前账号开启走商、领奖和情报共享。钻石只用于升船。'));
+  const choices = el('div', 'merchant-preset-choices');
+  for (const preset of seaMerchantSettingsData.presets ?? []) {
+    const card = el('div', 'merchant-preset');
+    card.dataset.active = String(preset.active);
+    card.append(el('h3', 'merchant-preset-title', preset.label),
+      el('p', 'merchant-preset-description', preset.description),
+      el('p', 'merchant-preset-forecast', preset.forecast));
+    const footer = el('div', 'merchant-preset-footer');
+    const budget = el('div', 'merchant-preset-budget');
+    budget.append(el('span', '', '总针数上限'), el('strong', '', preset.totalPointers === null ? '按实领' : preset.totalPointers + ' 根'));
+    const action = preset.active ? '使用中' : '套用方案';
+    const button = el('button', 'merchant-preset-apply', action);
+    button.type = 'button';
+    button.dataset.merchantPreset = preset.id;
+    button.setAttribute('aria-label', action + ' · ' + preset.label);
+    button.setAttribute('aria-pressed', String(preset.active));
+    button.disabled = saving || preset.active;
+    button.onclick = () => {
+      if (current === account && !button.disabled) return saveSeaMerchantSetting('preset', preset.id, displayed);
+    };
+    footer.append(budget, button);
+    card.appendChild(footer);
+    choices.appendChild(card);
+  }
+  presets.appendChild(choices);
+  if (choices.children.length) {
+    presets.appendChild(el('p', 'dim merchant-model-note', '模拟从 1 万商会币、1 级船开始，假设升船用的 4,100 钻石及方案内指南针均可及时使用，平均买卖价差 30%，本金充足时装载约 75% 舱位。实际收益随行情和联盟库存变化。'));
+    section.appendChild(presets);
+  }
+  const manual = el('details', 'merchant-manual-settings');
+  manual.appendChild(el('summary', '', '手动调整活动设置'));
+  manual.open = merchantManualOwner === account || !choices.children.length;
+  manual.ontoggle = () => {
+    if (current === account && manual.isConnected) merchantManualOwner = manual.open ? account : null;
+  };
+  section.appendChild(manual);
+  renderActivitySettingsFields(manual, { data: seaMerchantSettingsData, fields: merchantActivityFields,
+    statusBox: section, saving, statusText: seaMerchantSettingsStatus,
     prefix: 'sea-merchant', dataset: 'seaMerchantSetting', save: saveSeaMerchantSetting, title: '海商王',
     note: '自动升船以本期满级为目标，按实际钻石余额支付。指南针补购使用单独设置的每日预算。' });
 }
@@ -748,10 +792,10 @@ function renderGuildShipSettings(box) {
     note: '钻石补货需开启全局自动钻石消耗，并设置商船每日上限。' });
 }
 
-function renderActivitySettingsFields(box, { data, fields, saving, statusText, prefix, dataset, save, title, note }) {
+function renderActivitySettingsFields(box, { data, fields, saving, statusText, prefix, dataset, save, title, note, statusBox }) {
   const account = current;
   const settings = data.settings;
-  const section = el('div', 'activity-settings');
+  const section = el('div', statusBox ? 'merchant-field-list' : 'activity-settings');
   const activeFields = new Map();
   for (const field of fields) {
     const [group, key] = field.key.split('.');
@@ -828,8 +872,8 @@ function renderActivitySettingsFields(box, { data, fields, saving, statusText, p
   section.appendChild(el('p', 'dim', note));
   const status = el('p', 'dim', saving ? '正在保存…' : statusText);
   status.setAttribute('role', 'status');
-  section.appendChild(status);
   box.appendChild(section);
+  (statusBox ?? section).appendChild(status);
 }
 
 async function refreshSeaMerchantSettings(account) {
@@ -846,7 +890,7 @@ async function refreshSeaMerchantSettings(account) {
   }
 }
 
-async function saveSeaMerchantSetting(key, value) {
+async function saveSeaMerchantSetting(key, value, displayed = seaMerchantSettingsData) {
   const account = current;
   if (!account || seaMerchantSettingsOwner !== account || !seaMerchantSettingsData || savingSeaMerchantSettings.has(account)) return;
   const version = ++seaMerchantSettingsVersion;
@@ -857,7 +901,7 @@ async function saveSeaMerchantSetting(key, value) {
   try {
     if (!await configFlush()) throw new Error('配置尚未保存，请先处理配置页的提示');
     if (account !== current || seaMerchantSettingsOwner !== account || version !== seaMerchantSettingsVersion) return;
-    const latest = await call('/api/merchant/settings?account=' + encodeURIComponent(account));
+    const latest = key === 'preset' ? displayed : await call('/api/merchant/settings?account=' + encodeURIComponent(account));
     if (account !== current || seaMerchantSettingsOwner !== account || version !== seaMerchantSettingsVersion) return;
     const saved = await call('/api/merchant/settings?account=' + encodeURIComponent(account), {
       method: 'POST', body: JSON.stringify({ key, value, revision: latest.revision, baseRevision: latest.baseRevision, confirm: true }),

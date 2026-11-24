@@ -31,7 +31,7 @@ export async function reconcileMerchantAction(client, ctx, [key, record], state,
 }
 
 export function merchantStrategyPlan(plan, config, event, state, policy, time, ledger) {
-  if (policy.profitLimit > 0 && state.player?.profit >= policy.profitLimit)
+  if (!(plan.kind === 'sell' && plan.mode === 'OPENING_SALE') && policy.profitLimit > 0 && state.player?.profit >= policy.profitLimit)
     return { kind: 'wait', reason: '已达本期累计利润上限，领奖仍按独立开关执行' };
   const swap = plan.kind === 'sell' && plan.mode === 'SWAP';
   if (!swap && !['buy', 'move'].includes(plan.kind)) return plan;
@@ -46,13 +46,13 @@ export function merchantStrategyPlan(plan, config, event, state, policy, time, l
       const at = dayOf(time) * 86400 - 28800 + hour * 3600 + minute * 60;
       if (time < at && (!policy.fullCargoRoutes || plan.kind === 'move' || at >= plan.latestActionAt))
         return { kind: 'wait', reason: '等待首趟指定出发时间 ' + policy.firstDepartureTime, nextCheckAt: at };
-    } else if (plan.exploration || plan.waitForFirstDeparture) {
+    } else if (!plan.plannedOpening && (plan.exploration || plan.waitForFirstDeparture)) {
       const at = Math.max(event.startTime, timing.tradeStartTime) + policy.firstDepartureWaitMinutes * 60;
       if (time < at) return { kind: 'wait', reason: policy.fullCargoRoutes ? '首趟等待折后仍可盈利的满舱双向航线' :
         '首趟等待盈利商品或共享商情，稍后按参考价配货或换港寻价', nextCheckAt: at };
     }
   }
-  if ((plan.kind === 'move' || swap) && policy.speedUpMode === 'arrival' && today.some(record =>
+  if ((plan.kind === 'move' || swap) && !plan.plannedOpening && policy.speedUpMode === 'arrival' && today.some(record =>
     merchantTiming(config, event, record.details.expected.start).marketEpoch === timing.marketEpoch))
     return { kind: 'wait', reason: '本次刷新周期已经出航，等待下一次刷新', nextCheckAt: timing.nextRefreshAt };
   return plan;
@@ -71,7 +71,7 @@ async function inventory(client) {
 }
 export async function buyMerchantPointers(client, config, ctx, event, state, purchasePlan, validPlan) {
   const policy = settings(ctx).merchant ?? {}, ledger = ctx.ledger;
-  if (!ledger || policy.autoSpeedUp !== true || policy.autoBuyPointers !== true || !validPlan()) return false;
+  if (!ledger || policy.autoSpeedUp !== true || policy.autoBuyPointers !== true || policy.speedUpMode === 'eventFree' || !validPlan()) return false;
   const report = entry => ctx.report({ label: '海商王 · 补足商会指针', ...entry });
   const skip = reason => { report({ skipped: true, reason }); return true; };
   const stamp = JSON.stringify(policy), actor = JSON.stringify(ctx.player), today = dayOf(clock(client));

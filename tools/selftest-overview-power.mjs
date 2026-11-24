@@ -99,7 +99,7 @@ try {
 
   const schedule = rewardSchedule(session.client);
   const unlockTasks = ['adShop', 'weekPass', 'trialSweep', 'dailyRewards', 'chests', 'museumCollect', 'museumExplore',
-    'petCollect', 'petBreed', 'worldOnline', 'tradeTasks', 'seasonTasks', 'museumRevenue', 'museumAchievements',
+    'petCollect', 'petBreed', 'worldOnlineRewards', 'tradeTasks', 'seasonTasks', 'museumRevenue', 'museumAchievements',
     'heroGrowth', 'stageAuto', 'treasureLoot'];
   for (const key of [...unlockTasks, 'mail']) schedule.defer(key, schedule.now() + 3600);
   schedule.defer('museumExplore:1', schedule.now() + 3600);

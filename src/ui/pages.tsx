@@ -213,7 +213,7 @@ export function manualPage() {
     <Button id="production-day-jump" className="justify-self-end" variant="outline" size="sm" aria-controls="production-day-card">查看排产清单</Button>
     <div id="world-view" className="dim" role="status" aria-label="海面" />
     <div id="world-factories" />
-    <div className="world-orders-panel"><Panel title="居民订单" help="材料已齐时可手动提交，结果见运行日志。「需」为订单需求，「缺」为仍欠的数量，「留」为库存中已预留或被本轮其他操作占用的数量。">
+    <div className="world-orders-panel"><Panel title="居民订单" help="点击「强制提交」会先核对库存。缺料时会列出差额，可取消或继续交给游戏处理。「挂机交付」显示自动筛选结果，「需」「缺」「留」分别表示需求量、缺口和已预留或占用的库存。">
       <div id="resident-order-progress" className="resident-order-progress" role="status" aria-live="polite" />
       <div id="world-orders" />
     </Panel></div>

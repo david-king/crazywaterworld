@@ -41,19 +41,27 @@ function accountKey(player) {
   return JSON.stringify([role, world]);
 }
 
-export function beginOrderMaterialSpend(player, costs, label, { farm = null, museum = null, operation = null } = {}) {
+export function beginOrderMaterialSpend(player, costs, label, { farm = null, museum = null, operation = null, serverChecksOrderStock = false } = {}) {
   const account = accountKey(player);
   const remaining = new Map();
+  const scope = new Set();
   const checkedCosts = [];
+  if (serverChecksOrderStock && operation?.request !== 'FinishWorkerOrderRequest') throw new Error('仅手动居民交单可由游戏核对库存');
   for (const row of list(costs, '加工品消费清单')) {
-    if (typeof row?.id !== 'string' || !row.id || remaining.has(row.id)) throw new Error('加工品消费材料编号异常');
-    const have = amount(row.have, '消费前材料库存');
+    if (typeof row?.id !== 'string' || !row.id || scope.has(row.id)) throw new Error('加工品消费材料编号异常');
+    scope.add(row.id);
     const need = amount(row.need, '加工品消费数量', true);
-    if (need > have) throw new Error('加工品消费超过已核对库存');
-    remaining.set(row.id, have - need);
-    checkedCosts.push({ id: row.id, have, need });
+    if (serverChecksOrderStock) {
+      // The order receipt and a fresh bag settle this spend, even without a starting balance.
+      checkedCosts.push({ id: row.id, need });
+    } else {
+      const have = amount(row.have, '消费前材料库存');
+      if (need > have) throw new Error('加工品消费超过已核对库存');
+      remaining.set(row.id, have - need);
+      checkedCosts.push({ id: row.id, have, need });
+    }
   }
-  if (!remaining.size) throw new Error('加工品消费清单为空');
+  if (!scope.size) throw new Error('加工品消费清单为空');
   if (operation !== null && (farm !== null || museum !== null || typeof operation !== 'object'
     || (operation.verify != null && typeof operation.verify !== 'function'))) throw new Error('材料消费核对方式异常');
   let checkedFarm = null;
@@ -79,7 +87,6 @@ export function beginOrderMaterialSpend(player, costs, label, { farm = null, mus
       endTime: amount(museum.endTime, '派遣前探宝结束时间'), heroIds: [...heroIds] };
     if (checkedMuseum.endTime !== 0) throw new Error('探宝地图已有队伍，不能重复派遣');
   }
-  const scope = new Set(remaining.keys());
   const saved = materialSpends.get(account) ?? new Set();
   for (const prior of saved) {
     if ((!prior.farm && !prior.museum && !prior.operation) || [...scope].some(id => prior.scope.has(id))

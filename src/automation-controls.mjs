@@ -47,7 +47,7 @@ add('appointments.enabled','自动英雄委任','英雄',{configLabel:'自动委
 add('weeklyActivity.enabled','军备竞赛主题行动','活动',{
   configuredFields:['farm','pet','antique','order','forge','hero'].map(kind=>'weeklyActivity.'+kind+'Enabled'),
 });
-add('resourceFields.enabled','自动占领资源田','世界与挑战',{help:'按比例或配额占领本盟城市内的资源田，每次检查最多派一队。名额已满时，可放弃超过目标块数的田地来补足其他资源，也会把同类低级田换成可占的高级田。'});
+add('resourceFields.enabled','自动占领资源田','世界与挑战',{help:'按比例或配额占领本盟城市内的资源田，每次检查最多派一队。有空位时优先补足缺少的资源。换田只在同类资源之间进行，可把低级田换成可占的高级田。'});
 add('trials.paid','试炼钻石扫荡','世界与挑战',{gates:['resources.allowDiamonds']});
 add('trials.ads','试炼免广告扫荡','世界与挑战');
 for (const [key,label,group,gates] of [

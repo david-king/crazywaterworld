@@ -118,6 +118,16 @@ export async function testMaterialMigration() {
       await oldFirst.read();
     }
 
+    const priority = fixture(directory);
+    priority.ships[0].orderItem = [asset('fish', 1), asset('fish', 1), asset('wood', 1)]
+      .map(item => ({ filled: false, asset: item }));
+    await priority.cargo({ cargoLoadLimits: new Map([['fish', 0]]) });
+    assert.deepEqual(priority.ships[0].orderItem.map(item => item.filled), [false, false, true]);
+    priority.stale = false;
+    await priority.cargo({ cargoLoadLimits: new Map([['fish', 1]]) });
+    assert.deepEqual(priority.ships[0].orderItem.map(item => item.filled), [true, false, true]);
+    await priority.read();
+
     const cargoFirst = fixture(directory);
     cargoFirst.ships[0].orderItem = [2, 3].map(num => ({ filled: false, asset: asset('fish', num) }));
     cargoFirst.inventory = items => { if (cargoFirst.writes.length) throw new Error('消费后库存暂不可读'); return items; };

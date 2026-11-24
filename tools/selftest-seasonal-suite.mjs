@@ -18,6 +18,10 @@ import {
 } from '../src/seasonal-activities.mjs';
 import { merchantActivity, merchantProgress, readMerchantStatus, merchantJournalSummary, readMerchantJournal } from '../src/merchant-activity.mjs';
 import { seasonalFixture } from './fixtures/seasonal-suite.mjs';
+import { read } from '../src/activity-actions.mjs';
+import { observeFreePointers } from '../src/merchant-free-pointers.mjs';
+import { readMerchantDockBudget } from '../src/merchant-speed.mjs';
+import { merchantPresets } from '../src/merchant-presets.mjs';
 
 const folder = fs.mkdtempSync(path.join(os.tmpdir(), 'cw-activity-')),
   file = () => path.join(folder, Math.random() + '.json');
@@ -206,13 +210,129 @@ await test('无紧缺共享时仍可买入并走普通港，到港出售不依�
   await f.run(merchantActivity, 'merchantTrade');
   assert.equal(f.sent('TradeSellRequest').length, 1);
   f.state.radar.radar = radar;
-  f.state.markets[20].goods = [{ goodsId: 1002, price: 35, stock: 0 }];
+  f.state.markets[20].goods = [{ goodsId: 1002, price: 10, stock: 0 }, { goodsId: 1004, price: 35, stock: 0 }];
   await f.run(merchantActivity, 'merchantTrade');
-  assert.equal(f.sent('TradeBuyRequest')[1].body.goodsId, 1002);
+  assert.equal(f.sent('TradeBuyRequest')[1].body.goodsId, 1004);
   const empty = setup();
   empty.state.radar.radar = [];
   await empty.run(merchantActivity, 'merchantTrade');
   assert.equal(empty.state.writes.length, 0, '港口列表完全未知时不盲目装货或选取世界城市');
+});
+await test('休市期间预览与执行均可提前出航，抵港后等到开市重新核价出售', async () => {
+  const f = setup();
+  const setHour = hour => { f.client.serverClockOffsetMs = (f.now + (hour - 12) * 3600) * 1000 - Date.now(); };
+  const run = () => f.run(merchantActivity, 'merchantTrade');
+  setHour(21.75);
+  await run();
+  assert.equal(f.state.writes[0].name, 'TradeBuyRequest');
+  setHour(23);
+  Object.assign(f.settings.merchant, { autoUpgrade: true, autoShareIntel: true, autoSpeedUp: true, speedUpMode: 'full' });
+  f.state.trade.player.profit = 10000;
+  f.state.diamonds = 300;
+  f.state.stock['海商王加速'] = 4;
+  f.state.markets[10].isReport = false;
+  const preview = await merchantProgress(f.config, f.client.tradeWindow, f.state.trade, f.player, f.now + 11 * 3600,
+    async name => name === 'TradeGuildRadar' ? f.state.radar : f.state.markets[10], f.ledger, f.settings);
+  assert.match(preview, /提前出航/);
+  await run();
+  await run();
+  assert.deepEqual(f.state.writes.map(row => row.name), ['TradeBuyRequest', 'TradeMoveRequest']);
+  setHour(25);
+  Object.assign(f.state.trade.cargo, { cityId: 20, moveToCityId: 0, moveEndTime: 0 });
+  f.state.markets[20].isReport = false;
+  await run();
+  assert.match(f.reports.at(-1).reason, /开市后重新核价/);
+  assert.equal(f.state.writes.length, 2);
+  setHour(34);
+  f.settings.merchant.autoUpgrade = false;
+  f.settings.merchant.autoShareIntel = false;
+  f.state.markets[20].goods[0].price = 72;
+  await run();
+  assert.deepEqual(f.state.writes.map(row => row.name), ['TradeBuyRequest', 'TradeMoveRequest', 'TradeSellRequest']);
+  assert.equal(f.state.trade.player.coins, 18240, '开市报价 72，按 1 级船的 3% 利润加成结算');
+});
+await test('活动首日零点空船提前避开同盟在途船，等到十点读取新价采购', async () => {
+  const f = setup(), start = f.now - 12 * 3600, opening = start + 10 * 3600;
+  f.client.tradeWindow.startTime = start;
+  f.settings.merchant.autoShareIntel = false;
+  const setTime = t => { f.client.serverClockOffsetMs = t * 1000 - Date.now(); };
+  const run = () => f.run(merchantActivity, 'merchantTrade');
+  f.state.trade.worldCargo = [{ playerId: '1234', guildIdx: 1, cargo: {
+    cityId: 30, moveToCityId: 10, moveStartTime: start, moveEndTime: start + 7200 } }];
+  setTime(start);
+  await run();
+  assert.deepEqual(f.state.writes.map(w => w.name), ['TradeMoveRequest']);
+  assert.equal(f.state.trade.cargo.moveToCityId, 20);
+  const snapshot = readMerchantJournal(f.ledger, f.client.tradeWindow).find(r => r.type === 'snapshot');
+  assert.equal(snapshot.radar.radar.find(p => p.cityId === 10).openingShips, 1);
+  Object.assign(f.state.trade.cargo, { cityId: 20, moveToCityId: 0, moveEndTime: 0 });
+  setTime(opening - 1);
+  await run();
+  assert.equal(f.state.writes.length, 1);
+  f.state.markets[20] = { specGoodsId: 1002, rareGoodsId: 1001, isReport: true, goods: [{ goodsId: 1002, price: 10, stock: 0 }] };
+  setTime(opening);
+  await run();
+  assert.deepEqual(f.state.writes.map(w => w.name), ['TradeMoveRequest', 'TradeBuyRequest'], JSON.stringify(f.reports.at(-1)));
+  assert.deepEqual([f.state.trade.player.goods[0].goodsId, f.state.trade.player.goods[0].buyPrice], [1002, 10]);
+});
+await test('为次日备货的买单在发送前跨过今日收盘时撤销', async () => {
+  const f = setup();
+  const close = f.now + 10 * 3600;
+  f.client.serverClockOffsetMs = (close - 10) * 1000 - Date.now();
+  const reserve = f.ledger.reserve;
+  let checked = false;
+  f.ledger.reserve = (...args) => {
+    const ticket = reserve(...args);
+    if (args[3]?.details?.expected?.request === 'TradeBuyRequest') {
+      checked = true;
+      f.client.serverClockOffsetMs = close * 1000 - Date.now();
+    }
+    return ticket;
+  };
+  await f.run(merchantActivity, 'merchantTrade');
+  assert(checked);
+  assert.equal(f.state.writes.length, 0);
+  assert.equal(f.ledger.snapshot().uncertain, 0);
+});
+await test('隔夜满舱跨重启按开市实价清完亏损和平价批次，再买首轮新货', async () => {
+  for (const stopAtProfitLimit of [false, true]) {
+    const f = setup(), trade = f.state.trade;
+    const setHour = hour => { f.client.serverClockOffsetMs = (f.now + (hour - 12) * 3600) * 1000 - Date.now(); };
+    const run = () => merchantActivity(f.client, f.config, { player: f.player, key: 'merchantTrade', label: '海商王',
+      ledger: createUsageLedger('fixture', { file: f.store }), settings: () => f.settings, enabled: () => true,
+      report: r => f.reports.push(r) });
+    trade.player.coins = 100000;
+    f.settings.merchant.maxLossPercent = 0;
+    f.state.markets[10].goods = [{ goodsId: 1001, price: 70, stock: 59400 }, { goodsId: 1004, price: 80, stock: 59600 }];
+    setHour(21.5);
+    await run();
+    await run();
+    assert.deepEqual(trade.player.goods.map(b => b.num), [600, 400]);
+    await run();
+    assert.deepEqual(f.state.writes.map(w => w.name), ['TradeBuyRequest', 'TradeBuyRequest', 'TradeMoveRequest']);
+    setHour(25);
+    Object.assign(trade.cargo, { cityId: 20, moveToCityId: 0, moveEndTime: 0 });
+    await run();
+    assert.equal(f.state.writes.length, 3);
+    setHour(34);
+    if (stopAtProfitLimit) f.settings.merchant.profitLimit = trade.player.profit;
+    f.state.markets[20].goods = [{ goodsId: 1001, price: 20, stock: 0 }, { goodsId: 1003, price: 10, stock: 0 }];
+    const profit = trade.player.profit;
+    await run();
+    assert.equal(f.sent('TradeSellRequest')[0].body.sellNum, 600);
+    assert.equal(trade.player.profit, profit, '亏损只影响周转本金');
+    await run();
+    assert.equal(f.state.writes.length, 4, '剩余隔夜货暂缺实价时先等报价，不能抢先采购或换港');
+    f.state.markets[20].goods.push({ goodsId: 1004, price: 80, stock: 0 });
+    await run();
+    assert.deepEqual(trade.player.goods, []);
+    assert.equal(trade.player.coins, 70000);
+    await run();
+    const afterArrival = f.state.writes.slice(3).map(w => w.name);
+    assert.deepEqual(afterArrival, stopAtProfitLimit ? ['TradeSellRequest', 'TradeSellRequest'] :
+      ['TradeSellRequest', 'TradeSellRequest', 'TradeBuyRequest']);
+    if (!stopAtProfitLimit) assert.equal(trade.player.goods[0].goodsId, 1003);
+  }
 });
 await test('大跌幅但少量库存不再压过整船收益，售罄商品不进入组合', async () => {
   for (const remaining of [1, 0]) {
@@ -220,11 +340,11 @@ await test('大跌幅但少量库存不再压过整船收益，售罄商品不�
     f.state.radar.radar[1].specGoodsId = 1003;
     f.state.markets[10].goods = [
       { goodsId: 1001, price: 10, stock: 60000 - remaining },
-      { goodsId: 1002, price: 35, stock: 0 }
+      { goodsId: 1004, price: 35, stock: 0 }
     ];
     await f.run(merchantActivity, 'merchantTrade');
     const buy = f.sent('TradeBuyRequest')[0].body;
-    assert.equal(buy.goodsId, 1002);
+    assert.equal(buy.goodsId, 1004);
     assert.equal(buy.buyNum, 285);
     await f.run(merchantActivity, 'merchantTrade');
     if (remaining) assert.deepEqual(f.sent('TradeBuyRequest')[1].body, { cityId: 10, goodsId: 1001, buyNum: 1 });
@@ -236,12 +356,12 @@ await test('多商品组合逐笔复查采购，夹具更新库存并为每批�
   f.state.radar.radar[1].specGoodsId = 1003;
   f.state.markets[10].goods = [
     { goodsId: 1001, price: 20, stock: 59990 },
-    { goodsId: 1002, price: 30, stock: 59980 }
+    { goodsId: 1004, price: 30, stock: 59980 }
   ];
   await f.run(merchantActivity, 'merchantTrade');
   assert(f.reports.some(row => /组合 2 种/.test(row.label)));
   await f.run(merchantActivity, 'merchantTrade');
-  assert.deepEqual(f.sent('TradeBuyRequest').map(row => [row.body.goodsId, row.body.buyNum]), [[1002, 20], [1001, 10]]);
+  assert.deepEqual(f.sent('TradeBuyRequest').map(row => [row.body.goodsId, row.body.buyNum]), [[1004, 20], [1001, 10]]);
   assert.equal(f.state.trade.player.coins, 9200);
   assert.equal(new Set(f.state.trade.player.goods.map(g => g.pid)).size, 2);
   assert.deepEqual(f.state.markets[10].goods.map(g => g.stock), [60000, 60000]);
@@ -324,6 +444,7 @@ await test('发送前库存变化、暂停和策略变化均撤销旧采购计�
   for (const update of [
     f => { f.state.markets[10].goods[0].stock = 59999; },
     f => { f.state.markets[10].goods[0].price = 41; },
+    f => { Object.assign(f.state.markets[10], { specGoodsId: 1003, rareGoodsId: 1001 }); },
     f => f.pause(),
     f => { f.settings.merchant.minExpectedProfit = 100000; }
   ]) {
@@ -370,9 +491,9 @@ await test('同批货无利润寻价跨刷新与重载后不往返，换新货�
   g.state.markets[20].goods[0].price = 120;
   await g.run(merchantActivity, 'merchantTrade');
   assert.equal(g.sent('TradeSellRequest').length, 1);
-  g.state.markets[20].goods = [{ goodsId: 1002, price: 20, stock: 0 }];
+  g.state.markets[20].goods = [{ goodsId: 1004, price: 20, stock: 0 }];
   await g.run(merchantActivity, 'merchantTrade');
-  assert.equal(g.sent('TradeBuyRequest')[0].body.goodsId, 1002);
+  assert.equal(g.sent('TradeBuyRequest')[0].body.goodsId, 1004);
   await g.run(merchantActivity, 'merchantTrade');
   assert.deepEqual(g.sent('TradeMoveRequest').map(row => row.body.mvToCityId), [20, 10]);
   const legs = Object.values(g.ledger.keyRecords()).filter(row => row.details?.expected?.request === 'TradeMoveRequest');
@@ -757,12 +878,12 @@ await test('收盘前仅够买卖一种货时，按自然航行完成最高收�
   const f = setup();
   f.client.serverClockOffsetMs += (7 * 3600 + 56 * 60 + 45) * 1000;
   f.state.radar.radar[1].specGoodsId = 1008;
-  f.state.markets[10].goods = [{ goodsId: 1001, price: 40, stock: 59900 }, { goodsId: 1002, price: 30, stock: 59700 }];
-  f.state.markets[20].goods = [{ goodsId: 1002, price: 45, stock: 0 }];
+  f.state.markets[10].goods = [{ goodsId: 1001, price: 40, stock: 59900 }, { goodsId: 1004, price: 30, stock: 59700 }];
+  f.state.markets[20].goods = [{ goodsId: 1004, price: 45, stock: 0 }];
   const before = f.state.trade.player.profit;
   await f.run(merchantActivity, 'merchantTrade');
   const [buy] = f.sent('TradeBuyRequest');
-  assert.equal(buy.body.goodsId, 1002); assert.equal(buy.body.buyNum, 300);
+  assert.equal(buy.body.goodsId, 1004); assert.equal(buy.body.buyNum, 300);
   f.client.serverClockOffsetMs += 60000;
   await f.run(merchantActivity, 'merchantTrade');
   assert.equal(f.sent('TradeMoveRequest').length, 1);
@@ -802,7 +923,7 @@ await test('平价换货遵守首趟时间，原价回款后按新行情采购�
   const f = setup(), trade = f.state.trade;
   trade.player.coins = 0;
   trade.player.goods = [{ pid: 701, goodsId: 1001, cityId: 20, buyPrice: 45, num: 100 }];
-  f.state.markets[10].goods = [{ goodsId: 1001, price: 45, stock: 60000 }, { goodsId: 1002, price: 10, stock: 0 }];
+  f.state.markets[10].goods = [{ goodsId: 1001, price: 45, stock: 60000 }, { goodsId: 1004, price: 10, stock: 0 }];
   f.state.radar.radar[1].specGoodsId = 1003;
   const initialProfit = trade.player.profit;
   Object.assign(f.settings.merchant, { firstDepartureMode: 'time', firstDepartureTime: '16:00' });
@@ -816,7 +937,7 @@ await test('平价换货遵守首趟时间，原价回款后按新行情采购�
   f.state.markets[10].goods[1].price = 11;
   await f.run(merchantActivity, 'merchantTrade');
   assert.equal(f.sent('TradeBuyRequest').length, 1);
-  assert.equal(trade.player.goods[0].goodsId, 1002); assert.equal(trade.player.goods[0].buyPrice, 11);
+  assert.equal(trade.player.goods[0].goodsId, 1004); assert.equal(trade.player.goods[0].buyPrice, 11);
 });
 await test('期末保本清仓允许零收益成交，累计利润零字段可确认', async () => {
   const f = setup();
@@ -974,16 +1095,207 @@ await test('手动多卖一批的回款不归入旧卖单，下一轮按当前�
   assert.equal(f.ledger.snapshot().uncertain, 0);
   assert.equal(f.sent('TradeSellRequest').length, 1);
 });
-await test('卖出瞬间涨价时，用卖出回包与回读核实实际回款', async () => {
+await test('本港询价跨刷新时不交易、不把旧报价归入新一轮，下一次按新价采购', async () => {
   const f = setup();
-  f.state.trade.cargo.cityId = 20;
-  f.state.trade.player.goods = [{ pid: 501, goodsId: 1001, cityId: 10, buyPrice: 40, num: 10 }];
-  f.state.onWrite = name => { if (name === 'TradeSell') f.state.markets[20].goods[0].price = 70; };
+  f.client.serverClockOffsetMs += 7190000;
+  f.state.onRead = name => {
+    if (name === 'TradeCity') f.client.serverClockOffsetMs += 20000;
+  };
   await f.run(merchantActivity, 'merchantTrade');
-  assert.equal(f.reports.at(-1).status, 'confirmed');
-  const summary = merchantJournalSummary(f.ledger, f.client.tradeWindow);
-  assert.equal(summary.sells, 1);
-  assert.equal(summary.realizedProfit, 309);
+  assert.deepEqual(f.state.writes, []);
+  assert.match(f.reports.at(-1).reason, /行情已刷新/);
+  assert.equal(readMerchantJournal(f.ledger, f.client.tradeWindow).length, 0);
+  assert(!Object.keys(f.ledger.keyRecords()).some(key => key.startsWith('merchant-market:')));
+  f.state.onRead = null;
+  f.state.markets[10].goods[0].price = 30;
+  await f.run(merchantActivity, 'merchantTrade');
+  assert.equal(f.state.trade.player.goods[0].buyPrice, 30);
+});
+await test('发单复核时本港价格或库存有推送，本轮停止，下次读取新价', async () => {
+  const f = setup();
+  let radarReads = 0;
+  f.state.onRead = name => {
+    if (name !== 'TradeGuildRadar' || ++radarReads !== 2) return;
+    f.state.markets[10].goods[0].price = 30;
+    f.client.emit('message', { name: 'SCTradeCityGoods', body: { cityId: 10 } });
+  };
+  await f.run(merchantActivity, 'merchantTrade');
+  assert.deepEqual(f.state.writes, []);
+  assert.equal(f.client.listenerCount('message'), 0);
+  f.state.onRead = null;
+  await f.run(merchantActivity, 'merchantTrade');
+  assert.equal(f.state.trade.player.goods[0].buyPrice, 30);
+  assert.equal(f.client.listenerCount('message'), 0);
+});
+await test('买入瞬间变价，按回包、批次数量与实际扣款核账', async () => {
+  for (const price of [30, 43]) {
+    const f = setup();
+    f.state.trade.player.coins = 100000;
+    f.state.onWrite = name => { if (name === 'TradeBuy') f.state.markets[10].goods[0].price = price; };
+    await f.run(merchantActivity, 'merchantTrade');
+    const [order] = f.sent('TradeBuyRequest');
+    assert.equal(f.reports.at(-1).status, 'confirmed');
+    const summary = merchantJournalSummary(f.ledger, f.client.tradeWindow);
+    assert.equal(summary.buys, 1);
+    assert.equal(summary.buyCost, price * order.body.buyNum);
+    assert.equal(summary.batches[0].buyPrice, price);
+  }
+});
+await test('预设走商在途遵守零针或库存加速，冲刺达标后仍可自然走商', async () => {
+  for (const preset of merchantPresets) {
+    const f = setup();
+    Object.assign(f.settings.merchant, preset.settings.merchant);
+    f.state.stock['海商王加速'] = 8;
+    const run = () => f.run(merchantActivity, 'merchantTrade');
+    await run();
+    await run();
+    assert.equal(f.sent('TradeMoveRequest').length, 1);
+    await run();
+    if (preset.id === 'free' || preset.id === 'eventFree') {
+      assert.equal(f.sent('TradeSpeedRequest').length, 0);
+      assert.equal(f.state.stock['海商王加速'], 8);
+      continue;
+    }
+    assert.equal(f.sent('TradeSpeedRequest')[0].body.useNum, 1, '多跑相同的一程只用一根');
+    await run();
+    assert.equal(f.sent('TradeSpeedRequest').length, 1, '剩余航时自然走完');
+    const cargo = f.state.trade.cargo;
+    f.client.serverClockOffsetMs = cargo.moveEndTime * 1000 - Date.now();
+    Object.assign(cargo, { cityId: cargo.moveToCityId, moveToCityId: 0, moveEndTime: 0 });
+    f.state.trade.player.profit = 50_000_000;
+    f.state.trade.cargo.cargoLv = 5;
+    await run();
+    assert.equal(f.sent('TradeSellRequest').length, 1);
+    f.state.markets[20].goods[0].price = 30;
+    await run();
+    await run();
+    assert.equal(f.sent('TradeMoveRequest').length, 2);
+    await run();
+    assert.equal(f.sent('TradeSpeedRequest').length, 1);
+    assert.equal(f.state.stock['海商王加速'], 7);
+  }
+});
+await test('仅用本期免费针按实领记账，扣除付费、手动消耗和未确认用针，重启及换期保持隔离', async () => {
+  const f = setup(), pointer = '海商王加速', guild = f.player.guildId, day = 86400;
+  let ledger = f.ledger;
+  const observe = async () => observeFreePointers(f.client, f.config, f.client.tradeWindow,
+    await read(f.client, 'TradeInfo'), ledger, guild, () => true);
+  const state = f.state, pass = state.passes[3];
+  state.stock[pointer] = 100;
+  assert.equal((await observe()).available, 0);
+  pass.got = [{ id: 1, freeGot: true, payGot: true }];
+  state.tasks.gotTaskId = [1];
+  state.trade.gotReportRwdId = 1;
+  state.trade.player.buySpeedTimes = 3;
+  // 1 根免费战令、2 根任务、2 根商情；同档付费战令 4 根，另用钻石买 3 根。
+  state.stock[pointer] += 12;
+  assert.equal((await observe()).available, 5);
+  ledger = createUsageLedger('fixture', { file: f.store });
+  assert.equal((await observe()).available, 5);
+  state.stock[pointer] -= 3;
+  assert.equal((await observe()).available, 2, '手动用针先扣免费余额');
+  state.stock[pointer] += 7;
+  assert.equal((await observe()).available, 2, '其他入账不能恢复免费额度');
+  const pending = ledger.reserve({}, {}, {}, { uniqueKey: 'pending-free', details: {
+    scope: 'merchant:' + f.window.startTime + ':' + f.window.period, expected: { request: 'TradeSpeedRequest', useNum: 2 } } });
+  const budget = () => readMerchantDockBudget((key) => read(f.client, key), ledger,
+    merchantPresets.find(p => p.id === 'eventFree').settings.merchant, f.now, f.client.tradeWindow);
+  assert.equal(await budget(), null);
+  assert.equal(await observe(), null, '待确认扣针期间保留上次库存快照');
+  ledger.cancel(pending);
+  assert.equal((await budget()).periodRemaining, 2);
+  f.client.serverClockOffsetMs += day * 1000;
+  state.trade.gotReportRwdId = 0;
+  state.trade.player.buySpeedTimes = 0;
+  assert.equal((await observe()).available, 2);
+  state.trade.gotReportRwdId = 1;
+  state.stock[pointer] += 2;
+  assert.equal((await observe()).available, 4, '新一天的同档商情礼包可正常计入');
+  f.client.tradeWindow = { ...f.window, startTime: f.window.startTime + day };
+  assert.equal((await observe()).available, 0, '活动编号复用也不继承上期余额');
+});
+
+await test('仅用本期免费针可在途中使用新领的针，背包旧针和钻石都保留', async () => {
+  const f = setup(), mode = merchantPresets.find(p => p.id === 'eventFree').settings.merchant;
+  Object.assign(f.settings.merchant, mode, { autoBuyPointers: true, pointerDailyDiamondLimit: 8000 });
+  f.state.stock['海商王加速'] = 8;
+  const run = () => f.run(merchantActivity, 'merchantTrade');
+  await run();
+  await run();
+  await run();
+  assert.equal(f.sent('TradeSpeedRequest').length, 0);
+  f.state.passes[3].got = [{ id: 1, freeGot: true }];
+  await run();
+  assert.equal(f.sent('TradeSpeedRequest').length, 0, '只见领奖标记、没有到账不动用旧针');
+  f.state.tasks.gotTaskId = [1];
+  f.state.stock['海商王加速'] += 2;
+  await run();
+  assert.deepEqual(f.sent('TradeSpeedRequest').map(r => r.body.useNum), [1]);
+  assert.equal(f.state.stock['海商王加速'], 9);
+  assert.equal(f.sent('TradeBuySpeedItemRequest').length, 0);
+});
+await test('末日 21:15 从空船购货冲过目标，用成交所需的三根后停针', async () => {
+  const f = setup(), close = f.now + 10 * 3600, at = close - 45 * 60;
+  const run = () => f.run(merchantActivity, 'merchantTrade');
+  Object.assign(f.settings.merchant, merchantPresets.find(p => p.id === 'sprint').settings.merchant);
+  f.client.tradeWindow.endTime = close + 2 * 3600;
+  f.client.serverClockOffsetMs = at * 1000 - Date.now();
+  f.state.trade.player.profit = 50_000_000 - 500;
+  f.state.trade.cargo.cargoLv = 5;
+  f.state.stock['海商王加速'] = 2;
+  await run();
+  assert.equal(f.sent('TradeBuyRequest').length, 0, '两根只能减一小时，剩余 45 分钟不能采购出航');
+  f.state.stock['海商王加速'] = 10;
+  await run();
+  await run();
+  assert.equal(f.sent('TradeMoveRequest').length, 1);
+  await run();
+  assert.deepEqual(f.sent('TradeSpeedRequest').map(r => r.body.useNum), [3]);
+  const cargo = f.state.trade.cargo;
+  f.client.serverClockOffsetMs = cargo.moveEndTime * 1000 - Date.now();
+  Object.assign(cargo, { cityId: cargo.moveToCityId, moveToCityId: 0, moveEndTime: 0 });
+  f.state.markets[20].goods[0].price = 55;
+  await run();
+  assert.equal(f.sent('TradeSellRequest').length, 1);
+  assert.ok(f.state.trade.player.profit >= 50_000_000);
+  assert.equal(merchantJournalSummary(f.ledger, f.client.tradeWindow).realizedProfit,
+    f.state.trade.player.profit - (50_000_000 - 500));
+  await run();
+  assert.equal(f.sent('TradeBuyRequest').length, 1);
+  assert.equal(f.state.stock['海商王加速'], 7);
+});
+await test('收尾采购复核时库存不足或报价涨过成本线，取消依赖用针的采购', async () => {
+  for (const change of ['stock', 'price']) {
+    const f = setup(), at = f.now + 9 * 3600;
+    Object.assign(f.settings.merchant, merchantPresets.find(p => p.id === 'sprint').settings.merchant);
+    f.client.tradeWindow.endTime = f.now + 12 * 3600;
+    f.client.serverClockOffsetMs = at * 1000 - Date.now();
+    f.state.stock['海商王加速'] = 10;
+    let reads = 0;
+    f.state.onRead = name => {
+      if (name === (change === 'stock' ? 'AllItem' : 'TradeCity') && ++reads === 2) {
+        if (change === 'stock') f.state.stock['海商王加速'] = 1;
+        else f.state.markets[10].goods[0].price = 60;
+      }
+    };
+    await f.run(merchantActivity, 'merchantTrade');
+    assert.ok(reads >= 2);
+    assert.equal(f.sent('TradeBuyRequest').length, 0);
+    assert.equal(f.sent('TradeSpeedRequest').length, 0);
+  }
+});
+await test('卖出瞬间涨跌时，用卖出回包与回读核实实际回款和盈亏', async () => {
+  for (const [price, profit] of [[70, 309], [60, 206], [40, 0], [35, -50]]) {
+    const f = setup();
+    f.state.trade.cargo.cityId = 20;
+    f.state.trade.player.goods = [{ pid: 501, goodsId: 1001, cityId: 10, buyPrice: 40, num: 10 }];
+    f.state.onWrite = name => { if (name === 'TradeSell') f.state.markets[20].goods[0].price = price; };
+    await f.run(merchantActivity, 'merchantTrade');
+    assert.equal(f.reports.at(-1).status, 'confirmed');
+    const summary = merchantJournalSummary(f.ledger, f.client.tradeWindow);
+    assert.equal(summary.sells, 1);
+    assert.equal(summary.realizedProfit, profit);
+  }
 });
 await test('旧采购无快照时区分原始余额和已变化的持仓，二次回读不一致保留防重记录', async () => {
   const f = setup(), { player } = f.state.trade;

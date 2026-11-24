@@ -27,7 +27,7 @@ export const runtimeObservationKeys = {
   'gather.fishing':'autoFish', 'gather.upgradeFishing':'fishEnhance', 'gather.diving':'autoDive',
   'gather.salvage':'autoSalvage', 'gather.upgradeDiving':'diveEnhance', 'gather.upgradeSalvage':'salvageEnhance',
   'gather.floaters':'floaters', 'gather.antiqueFloaters':'antiqueFloaters',
-  'schedule.worldOnline':'worldOnlineRewards', 'schedule.tradeTasks':'merchantRewards',
+  'schedule.tradeTasks':'merchantRewards',
   'guildShip.enabled':'guildShip', 'guildFort.enabled':'guildFort', 'heroRaid.enabled':'heroRaid',
 };
 const sharedSchedules = {

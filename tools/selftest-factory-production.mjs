@@ -114,6 +114,21 @@ await test('模拟原生按仓容派单，策略、主产物或队列变化后�
   assert.equal(f.state.writes.length,1);
 });
 
+await test('模拟原生批内先扣上游成品再补回，反向顺序仍被满仓拦截', async () => {
+  for (const canStart of [true,false]) {
+    const f=fixture();
+    f.settings.factory.strategy='nativeSimulation';
+    f.config.tables.BuildingProduceCfg.data[1].costItem=[['产品甲',1]];
+    f.state.stock.set('产品甲',50);
+    const ids=canStart?['产品乙','产品甲']:['产品甲','产品乙'];
+    const steps=ids.map(id=>({...f.step(id),factoryStrategy:'nativeSimulation',simulatedTargetsKey:'[]',
+      simulatedQueueKey:'["",[]]',demandDriven:false}));
+    const result=await f.batch(steps);
+    assert.equal(f.state.writes.length,canStart?2:0);
+    if (canStart) assert(result.results.every(r=>r.ok));
+  }
+});
+
 await test('runWorld真实入口连续六件只在批首批末查询，不再逐件等待300毫秒', async () => {
   const f = fixture(), steps = Array.from({length:6}, () => f.step()), start = performance.now();
   const result = await runWorld(f.client, protocol, { actions: steps }, { ...f.options(), allowMutate: true });

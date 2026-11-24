@@ -198,6 +198,40 @@ try {
       assert.deepEqual(subset(validated.settings), view.settings);
     }
   });
+  await test('三套预设按账号一次保存，切换与自定义按实际配置回显', async () => {
+    const before = ok(await api('merchant/settings'));
+    const all = ok(await api('settings')).settings;
+    const other = ok(await api('merchant/settings', undefined, 'trade-b'));
+    assert.deepEqual(before.presets.map(p => p.id), ['free', 'eventFree', 'sprint']);
+    assert.deepEqual(before.presets.map(p => p.totalPointers), [0, null, 139]);
+    assert.equal((await api('merchant/settings', change(before, 'preset', 'unknown'))).status, 400);
+    const middle = ok(await api('merchant/settings', change(before, 'preset', 'eventFree')));
+    assert.deepEqual(middle.presets.filter(p => p.active).map(p => p.id), ['eventFree']);
+    assert.equal(middle.settings.merchant.speedUpMode, 'eventFree');
+    assert(middle.settings.merchant.autoUpgrade && middle.settings.merchant.autoSpeedUp);
+    assert.equal(middle.settings.merchant.autoBuyPointers, false);
+    const sprint = ok(await api('merchant/settings', change(middle, 'preset', 'sprint')));
+    assert.equal(sprint.revision, middle.revision + 1);
+    assert.deepEqual(sprint.presets.filter(p => p.active).map(p => p.id), ['sprint']);
+    assert.deepEqual(sprint.settings.schedule, { merchantTrade: true, merchantRewards: true, tradeTasks: true });
+    const m = sprint.settings.merchant;
+    assert(m.enabled && m.autoUpgrade && m.autoSpeedUp && m.autoShareIntel);
+    assert.deepEqual([m.speedUpMode, m.speedUpMaxPerLeg, m.dailyPointerLimit, m.profitLimit], ['goal', 4, 45, 0]);
+    assert.equal(m.periodPointerLimit, 139);
+    assert.equal(m.autoBuyPointers, false);
+    assert.equal(m.pointerDailyDiamondLimit, 0);
+    assert.equal((await api('merchant/settings', change(before, 'preset', 'free'))).status, 400);
+    const custom = ok(await api('merchant/settings', change(sprint, 'merchant.keepPointers', 12)));
+    assert(custom.presets.every(p => !p.active));
+    const free = ok(await api('merchant/settings', change(custom, 'preset', 'free')));
+    assert.deepEqual(free.presets.filter(p => p.active).map(p => p.id), ['free']);
+    assert.equal(free.settings.merchant.autoUpgrade, true);
+    assert.equal(free.settings.merchant.periodPointerLimit, 0);
+    assert.deepEqual([free.settings.merchant.autoSpeedUp, free.settings.merchant.dailyPointerLimit, free.settings.merchant.autoBuyPointers], [false, 0, false]);
+    assert.deepEqual(ok(await api('merchant/settings')), free);
+    assert.deepEqual(ok(await api('settings')).settings, { ...all, merchant: free.settings.merchant, schedule: { ...all.schedule, ...free.settings.schedule } });
+    assert.deepEqual(ok(await api('merchant/settings', undefined, 'trade-b')), other);
+  });
   console.log('海商王设置HTTP专项 ' + passed + '/' + passed + ' 通过');
 } finally {
   await app.close();

@@ -177,6 +177,15 @@ try {
     assert.equal(f.roundsDone.length, 1, '辅助生产检查不能推进主轮计数');
     assert(f.scheduled() >= 2); await f.clean();
   });
+  await test('模拟原生在首轮和完工补产时只需生产数据，即使设置保留了按订单优先', async () => {
+    const f = integration();
+    Object.assign(f.settings.factory, {strategy:'nativeSimulation', demandFirst:true, demandPriority:['cargo','factory']});
+    stopAfterRefill(f);
+    await f.run();
+    assert.deepEqual(writes(f).map(row => row.name), ['GainFactoryProduceRequest','StartFactoryProduceRequest']);
+    assert(!f.protocolCalls.some(row => ['WeekInfoRequest','WeekOrderInfoRequest','CargoShipsRequest'].includes(row.name)));
+    await f.clean();
+  });
   await test('缺少完工时间时按用户设置的七秒周期兜底检查', async () => {
     const f = integration({ finishAfterMs: null, fallbackSeconds: 7 }); stopAfterRefill(f);
     f.sleepHook(ms => { wall += ms; if (wall >= base + 7000) f.finish(); });

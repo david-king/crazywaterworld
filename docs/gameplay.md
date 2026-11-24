@@ -245,7 +245,7 @@ ChurnInfo            UltraOpen            BlackList
 ```
 AfkInfoRequest              -> AfkInfoResponse { afkInfo{level, afkStartTime, afkFinishTime, rewardedLevel}, clickGoldInfo }
 DrawAfkRewardRequest        -> DrawAfkRewardResponse { reward, afkStartTime, afkFinishTime }   领取本段收益并重置时间段
-UpgradeAfkLevelRequest{level}  ->  提升挂机等级，消耗 OfflineCfg 里该等级声明的物品
+UpgradeAfkLevelRequest{level}  ->  level 为本次提升的级数。按客户端按钮规则依次检查 1、5、10 级档位，主线能解锁目标等级且定位芯片足够时，发送最大可用档位。消耗为中间各级 OfflineCfg.consume 之和。
 DrawAfkLevelRewardRequest{level}  ->  领取等级奖励，level 取自 OfflineLvRewardCfg
 ```
 
@@ -492,6 +492,7 @@ node tools/selftest-describe.mjs    # 字段布局还原自检
 - `DispFactory{factoryQ:[{idx, productId, finishTime}], finishedProducts[], autoProductId}`。
 - 微信 v76 客户端在已建成工厂升级时仍可打开 `FactoryPop`。普通下单检查当前建筑等级、配方材料、库存和队列空间。首次建造中的 0 级地块尚不能生产。
 - `TipsDescCfg` 的「自动生产」说明和 `MonthCardCfg.effectList` 确认有效普通月卡提供「第二生产位」，两件产品可同时加工。当前高级月卡和 VIP 等级表均未单独提供这一效果。月卡按服务器时间判断，`endTime = -1` 表示永久。
+- 游戏内「自动生产」说明列出的顺序是本厂所选产品、短时可生产候补、库存最少的可生产候补。模拟按实际耗时不超过 5 秒划入短件档，含恰好 5 秒。主产物缺料或已达存量上限才转候补。缺料时可收取供应工厂已完成的材料，选种厂除外。游戏原生功能可以离线继续，直到该厂所有产品都不可生产。说明没有给出多个短件之间的完整排序，工具在同档内取预计库存最少的，同量沿用配方表顺序。
 - 同一工厂按 `factoryQ` 的数组顺序排队，`idx` 标识任务。每个已开工任务采用各自的 `finishTime`。临近月卡到期时，尚未开工的任务仅在预计能于到期前完成时计入第二位。跨到期时的实际开工行为尚无服务端样本。
 - 常量散在几张 param 表里：`制造位上限=6` 在 `BuildingProduceParamCfg`，
   `产品存量初始上限=50`、`初始人口上限=10` 在 `GameParamCfg`，`订单每日上限=40` 在 `OrderParamCfg`。
@@ -672,12 +673,14 @@ node tools/selftest-describe.mjs    # 字段布局还原自检
 
 以下规则读自 v75/v76 客户端和配置表，均由离线测试覆盖；其中海商王已增加真实账号只读和受保护单步门控验证（2026-11-13 08:35 实测处于 10:00–22:00 窗口外，未发送写请求），完整跨港航程仍需按实际到港结果确认。
 
-- **世界在线奖励：** `CounterInfoRequest` 的 `DAILY_WORLD_ONLINE_RWD` 给出已领档位和上次领取时间。当天 20:00 后开放，上次领取已在 21:00 后则当天结束，每档按上次领取时间计时。领取请求没有声明回包类型，所以用重新读取的计数确认结果。
+- **领取城战在线奖励** 使用 `CounterInfoRequest` 返回的 `DAILY_WORLD_ONLINE_RWD` 核对已领档位和上次领取时间。当天 20:00 后开放，每档从上次领取时计时。上一档在 21:00 前领取，当天仍可在到期后补领下一档。系统回读计数确认到账。旧配置中的「世界在线奖励」会并入此开关。
 - **海商王联盟任务：** `TradeGotTaskRequest` 的字段是 `day`，按天领取，只领活动已进行到的天数。活动时间取自 `SCAllActivity.trade`。
 - **海商王情报共享（#31，v76）：** `TradeCityReportRequest` 仅需 `cityId`，没有对应 `TradeCityReportResponse`；客户端在本港 `TradeCityResponse.isReport` 为 false 时共享，通过 `SCTradeCityReport` 更新情报。自动共享默认开启但仍受走商及所属分组开关控制，只处理已经停靠的当前港；发送后回读 `isReport` 为 true 才确认“本港情报已共享”，不能凭联盟 `guildReportNum` 增加认定本人首报。紧缺每天首个贸易时刻更新（当前为北京时间10:00），不是每两小时价格刷新；防重按活动期次、联盟、港口及紧缺周期隔离，未知结果先核对，不盲目重发，记录与买卖待确认状态分开。已有共享跳过，失败不阻塞交易，达到利润上限仍可共享当前港。2026-11-14 真实读取时本港已共享、联盟17港均已有紧缺情报和共享人，因此未发送共享请求，写入成功分支尚未在线验证。
-- **海商王走商（2026-11-12 核对 v76）：** `TradeGuildRadarResponse.radar` 提供可航行港口，未共享紧缺货仍可选港；不能用场景全部城市替代商港列表。客户端 `TradeUtil.openCiytTrade` 只查询当前港，未确认异地 `TradeCity` 可读，因此远端收益统一标为风险折扣估算，到港重读实价。`TradePlayerGoods` 的 `pid/goodsId/num/buyPrice/cityId` 是独立采购批次；禁止在来源港出售。`DispTradeGoods.stock` 为已购量，可购库存是 `TradeGoodsCfg.maxCount-stock`，且联盟共享，发送前须复查。`ActivityTradeCfg` 提供贸易时段、航程、加速时长和报价库存刷新；`TipsDescCfg[海商王]` 说明紧缺每天首个贸易时刻更新，不等于每次价格刷新。亏损不享受利润加成、不增加累计利润；只有明确配置清仓亏损上限才允许亏损出售。
+- **海商王走商（2026-11-12 核对 v76）：** `TradeGuildRadarResponse.radar` 提供可航行港口，未共享紧缺货仍可选港；不能用场景全部城市替代商港列表。客户端 `TradeUtil.openCiytTrade` 只查询当前港，未确认异地 `TradeCity` 可读，因此远端收益统一标为风险折扣估算，到港重读实价。`TradePlayerGoods` 的 `pid/goodsId/num/buyPrice/cityId` 是独立采购批次；禁止在来源港出售。`DispTradeGoods.stock` 为已购量，可购库存是 `TradeGoodsCfg.maxCount-stock`，且联盟共享，发送前须复查。`ActivityTradeCfg` 提供贸易时段、航程、加速时长和报价库存刷新；`TipsDescCfg[海商王]` 说明紧缺每天首个贸易时刻更新，不等于每次价格刷新。亏损不享受利润加成、不增加累计利润；普通清仓按配置的亏损上限出售，隔夜船货在次日开市按实价清舱。
 - **海商王指针与升级：** 加速使用 `TradeSpeedRequest.useNum` 和已有道具 `海商王加速`，回包 `TradeSpeedResponse.moveEndTime` 必须配合同一航程提前的状态及完整库存回读确认；原航程自然到港不能证明未知加速成功。指针默认关闭，开启后默认使用稳定模式。最后一个交易日收盘前一程内，若可用指针足以直接到港，且来得及逐批卖完船上可售货物，就用针到港。`TradeShipCfg.upMoney` 是累计利润解锁门槛，`upCost` 才是钻石费用；船舶升级默认关闭，开启后在贸易时段按已实现的累计利润逐级解锁，并回读船级和钻石余额。升级以本期配置的最高船级为目标，按实际余额支付并独立记账。指南针补购另设每日预算。新策略已完成离线真实协议、HTTP、监控调度回归，并已在真实账号上完成只读状态和窗口外单步门控验证；完整两小时航程的成交结果仍以实际到港回读为准。
 - **赛季任务：** `GotSeasonTaskRequest` 没有字段，一次领取所有已达标档位。
+- **海商王跨时段出航（v76）**。客户端在港口买卖入口调用 `TradeUtil.canTrade` 检查每日贸易时段。商情面板的出航入口 `TradeMessageView._onMoveToCity` 检查在途状态，选定其他港口后可发送 `TradeMoveRequest`。当日来不及成交且次日仍开市时，挂机按剩余采购次数、联盟库存、舱位和本金尽量装满。目的港必须能出售整船货。开市时按出航快照逐批读取实价，平价或亏损也出售，清完再开始首轮采购。
+- **开市前的选港与成本**。游戏说明 `TipsDescCfg` 写明港口特产固定，紧缺货每日 10 点更新，库存由同盟共享。首日选采购港时，用 `TradeGoodsCfg.unitPrice`、载重和本金比较能承接的特产货值。隔夜选销港时，用各货种的实际投入本金衡量与目的港特产重合的风险。两种场景都参考开市前可抵达的可见同盟在途船。出航前的成本比例是整船进价除以按商品基准价计算的总货值，次日盈亏由实际成交价决定。
 - **海商王抢货时机（v76）：** `TradeInfoResponse.worldCargo` 和 `SCTradeCargoMove.cargo` 提供可见玩家、联盟编号、船级和航程。计算采购顺位只计同盟、同港、同轮补货的在途船。刷新窗口加速在设置的窗口内比较采购顺位。用本期同港同一历史刷新周期的两份实价和库存，分别按早到、晚到时能买到的组合估算差额，次优货也参与配货。自然领先或缺少可比记录时保留抢货用针。对手的货舱、停港等待者和目标商品不可见，成交以本船到港时的报价为准。
 - **红点：** `SCRedPoint` 带 `num` 表示有待处理事项，不带表示已清除。33 跨服排行、41 世界宝藏、42 收到互助、43 新求助、53 海商王任务、64 联盟职级、65 博物馆。
 - **联盟互助：** 每轮只响应一次，下一轮读到库存已扣减后才继续。
@@ -752,6 +755,8 @@ node tools/selftest-describe.mjs    # 字段布局还原自检
 - 赛季宝箱开放条件是 `GameplayOpenCfg` 的“赛季交换宝箱”（`openDays: [0,1,1,1]`，第一赛季关闭）。宝箱按 `SeasonExchangeChestCfg.stage` 循环；每次消耗 `costItemId` 列出的钥匙，种类随机且可重复。自动开启只接受 `SeasonChestKeyLibCfg` 中的钥匙。结果未知时，阶段变化视为已生效，超过 10 分钟阶段未变视为未生效。
 
 ## 15. 装备分解、海兽放生与城战选城（v76）
+
+- 海兽升级使用 `PetLevelUpRequest{buildingId}`，一次升一级。下一等级的角色等级要求与经验消耗取自 `PetLevelCfg`。发送前以 `OnWaterResponse.building[].petServe.petUid` 核对值守位置，发送后从 `AllPetResponse.pets` 按完整 UID 回读等级。升级名单也用于自动放生保护。
 
 - `DispEquip.star` 是锻造随机得到的装备星级，自动分解要求 `level <= 1`、`refineLv == 0` 且没有属性洗练记录。
 - 自动放生处理所选品质的海兽，包括已升级、升星、进阶或洗练的海兽。值守、主队、舰队、远征、极限试炼和积分赛编队中的海兽会跳过。巅峰擂台赛开放且本人取得参赛资格时，还会核对 `TournamentFormationResponse.team[].formation.petUid`。批量放生被拒时会回读占用和库存，确认有海兽刚被占用后，仅重试原批次中仍符合条件的 UID。

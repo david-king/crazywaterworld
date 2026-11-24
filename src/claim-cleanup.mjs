@@ -71,7 +71,7 @@ async function readPetAssignments(read, config, player, client) {
   return used;
 }
 
-async function eligibleItems(read, config, equipment, qualities, player, client) {
+async function eligibleItems(read, config, equipment, qualities, player, client, levelUids) {
   let used = new Set();
   let inventory, definitions;
   if (equipment) {
@@ -94,6 +94,7 @@ async function eligibleItems(read, config, equipment, qualities, player, client)
   for (const [id, item] of inventory) {
     const quality = definitions.get(equipment ? item.equipId : item.petId);
     if (!qualities.includes(quality)) continue;
+    if (levelUids.has(id)) continue;
     if (used.has(id)) {
       occupied.add(id);
       continue;
@@ -114,10 +115,12 @@ export async function cleanupAfterClaim(client, config, settings, ledger, kind, 
   const choice = equipment ? 'decomposeQualities' : 'releaseQualities';
   if (!group?.[toggle] || !group[choice]?.length || !ledger || !enabled() || activeClients.has(client)) return null;
   const qualities = [...group[choice]];
+  const levelUids = new Set(equipment ? [] : group.levelUids);
   const epoch = client.connectionEpoch, socket = client.socket, login = client.login;
   const active = () => enabled() && client.connected && client.connectionEpoch === epoch
     && client.socket === socket && client.login === login && settings[kind] === group
-    && group[toggle] && JSON.stringify(group[choice]) === JSON.stringify(qualities);
+    && group[toggle] && JSON.stringify(group[choice]) === JSON.stringify(qualities)
+    && (equipment || (group.levelUids ?? []).length === levelUids.size && (group.levelUids ?? []).every(uid => levelUids.has(uid)));
   const label = equipment ? '装备自动分解' : '海兽自动放生';
   const inventoryName = equipment ? 'Equips' : 'AllPet';
   const inventoryField = equipment ? 'equip' : 'pets';
@@ -135,7 +138,7 @@ export async function cleanupAfterClaim(client, config, settings, ledger, kind, 
     if (!active()) throw new AutomationSkip('清理已暂停或账号连接、设置已变化');
     return reply;
   };
-  const scan = () => eligibleItems(read, config, equipment, qualities, player, client);
+  const scan = () => eligibleItems(read, config, equipment, qualities, player, client, levelUids);
   let reconciled = 0, protectedCount = 0;
   const reconcile = inventory => {
     for (const [key, record] of Object.entries(ledger.keyRecords())) {

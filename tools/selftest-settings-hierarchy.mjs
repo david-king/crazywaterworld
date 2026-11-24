@@ -420,6 +420,18 @@ test('海兽、博物馆和情报只展示统一配置，探宝单开关直接�
   assert(visible(f.widget('museum.noRecommendedFactor').node)); assert.equal(f.editor.draft.museum.noRecommendedFactor, 3);
 });
 
+test('联盟城战只显示一个在线领奖开关，可独立启停', () => {
+  const f = fixture({ navigation: true });
+  f.renderPage(); f.activate('world'); f.activateGroup('cityWar');
+  const matches = [...f.editor.groups.values()].flatMap(group => group.fields)
+    .filter(field => ['schedule.worldOnline', 'schedule.worldOnlineRewards'].includes(field.key));
+  assert.deepEqual(matches.map(field => field.label), ['领取城战在线奖励']);
+  assert(visible(f.widget('schedule.worldOnlineRewards').node));
+  f.set('schedule.worldOnlineRewards', true);
+  assert.equal(f.editor.draft.schedule.worldOnlineRewards, true);
+  assert.equal(f.editor.draft.cityWar.enabled, false);
+});
+
 test('舰队职责隶属参与舰队，逐队加速合并且维修与派遣省钻仍各自嵌套',()=>{
   const f=fixture({navigation:true});f.editor.draft.cityWar.enabled=true;
   Object.assign(f.editor.draft.fleetSpeed.fleets[0],{repair:true,march:true});

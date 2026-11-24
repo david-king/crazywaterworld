@@ -164,9 +164,17 @@ export async function readLineupEditor(client, config, player) {
   const positions = rows(config, 'FormationTypePositionCfg');
   if (!positions.length || !rows(config, 'FormationHeroNumCfg').length) throw new Error('缺少阵型站位或人数配置');
   const formations = catalog.formations.map(definition => ({ ...definition, unlocked: unlocked.has(definition.presetId) }));
+  const pets = describePets(petList, config);
+  const capacity = rows(config, 'FormationHeroNumCfg').reduce((maximum, row) =>
+    player?.mainlineStage > row.mainlineStage ? Math.max(maximum, row.heroNum) : maximum, 0);
+  if (!Number.isSafeInteger(capacity) || capacity < 1) throw new Error('无法确认当前可上阵人数');
+  return { formation, heroes, formations, pets, capacity };
+}
+
+export function describePets(petList, config) {
   const breeds = new Map(rows(config, 'PetBreedCfg').map(pet => [pet.petId, pet]));
   const species = new Map(rows(config, 'PetSpeciesCfg').map(pet => [pet.spId, pet]));
-  const pets = petList.map(pet => {
+  return petList.map(pet => {
     const uid = uidText(pet.uid);
     if (!uid) throw new Error('海兽编号无效');
     const breed = breeds.get(pet.petId);
@@ -178,10 +186,6 @@ export async function readLineupEditor(client, config, player) {
     const details = [qualityNames[quality] || quality, star + '星', level + '级'].filter(Boolean).join(' · ');
     return { uid, petId: pet.petId, quality, star, level, name: speciesName + '（' + details + '）', icon: iconEntry(definition?.icon) };
   });
-  const capacity = rows(config, 'FormationHeroNumCfg').reduce((maximum, row) =>
-    player?.mainlineStage > row.mainlineStage ? Math.max(maximum, row.heroNum) : maximum, 0);
-  if (!Number.isSafeInteger(capacity) || capacity < 1) throw new Error('无法确认当前可上阵人数');
-  return { formation, heroes, formations, pets, capacity };
 }
 
 export function validateEditorFormation(formation, editor) {

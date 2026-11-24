@@ -20,6 +20,7 @@ import {activityRankCatalog,readActivityRanking} from './activity-rankings.mjs';
 import {readActivityStatistics} from './activity-statistics.mjs';
 import { merchantActivity, readMerchantStatus, readMerchantOverview, readMerchantJournal, merchantJournalSummary } from './merchant-activity.mjs';
 import { saveMerchantIntel } from './merchant-intel.mjs';
+import { merchantPresets, merchantPresetOptions } from './merchant-presets.mjs';
 import { watchMerchant } from './merchant-monitor.mjs';
 import { giftCodeStatus, giftCodeSummary, startGiftCodes, startGiftCodeBatch } from './gift-codes.mjs';
 import { publicGiftCodes } from './gift-code-library.mjs';
@@ -51,7 +52,7 @@ import { readAllianceRadar } from './alliance-radar.mjs';
 import { previewRadarSweep } from './radar-sweep.mjs';
 import { planRadarPreview, pendingPetrol } from './dispatch-preview.mjs';
 import { inspectHunt } from './pirates.mjs';
-import { pirateAutoDay, selectPirateAdvance, runSinglePirateHunt } from './pirate-advance.mjs';
+import { pirateAutoDay, pirateTimeoutTypes, selectPirateAdvance, runSinglePirateHunt } from './pirate-advance.mjs';
 import { fleetRecordReason, dispatchReservationReason, fleetDispatchView, dispatchLabels, bridgeFleetReservations } from './fleet-availability.mjs';
 import { watchFreeRewardClock } from './extra-free-rewards.mjs';
 import { createPirateAdvanceTask } from './pirate-advance.mjs';
@@ -71,7 +72,8 @@ import { readHeroEquipment, equipHeroEmptySlots, enhanceHeroEquipment, uidText }
 import { readEquipmentCrafting, startEquipmentCraft, collectEquipmentCraft } from './equipment-crafting.mjs';
 import { readLineups, applyLineup, editorLineupRecommendations } from './lineups.mjs';
 import { moveLeagueTeam, readManualLeagueOrder, recoverLeagueOrder } from './league-order.mjs';
-import { getLineupCatalog, normalizeFormation, readLineupEditor, validateLineupSettings } from './saved-lineups.mjs';
+import { describePets, getLineupCatalog, normalizeFormation, readLineupEditor, validateLineupSettings } from './saved-lineups.mjs';
+import { readPetLevelRoster } from './pet-leveling.mjs';
 import { readLineupRuntime, recoverLineup } from './lineup-runtime.mjs';
 import { createLineupExecutor, lineupRole, selectedSavedLineup } from './lineup-execution.mjs';
 import { lineupArt } from './lineup-art.mjs';
@@ -87,6 +89,7 @@ import { iconThumb } from './art-thumbs.mjs';
 import { listWorlds, enterWorld, describeRole } from './worlds.mjs';
 import { collectState, summarize, formatState, ENTRY_QUERIES } from './game.mjs';
 import { claimRewards } from './claim-rewards.mjs';
+import { readAfkUpgrade } from './afk-upgrade.mjs';
 import { newbieView } from './collections.mjs';
 import { normalize } from './worlds.mjs';
 import { pirateTracker, pirateHuntOptions, startPirateHunt } from './pirates.mjs';
@@ -205,6 +208,7 @@ export function createConsole({ host = '127.0.0.1', port = 17321, onLog, recover
   const traceLog = createTraceLog(TRACE_PATH, { maxBytes: TRACE_MAX_BYTES });
   const protocolDiagnostics = createProtocolDiagnostics(path.join(DATA_DIR, 'protocol-errors'));
   const globalLog = [];
+  let allLogsCleared = null;
   const streams = new Set();
   const sessions = new Map();
   const hostingChanges = new Map();
@@ -613,6 +617,9 @@ export function createConsole({ host = '127.0.0.1', port = 17321, onLog, recover
   function terminal(entry) {
     try { if (onLog) Promise.resolve(onLog(entry)).catch(() => {}); } catch { /* Logging is an observer. */ }
   }
+  function sendLogClear(stream, cleared) {
+    return writeStream(stream, `event: logs-cleared\ndata: ${JSON.stringify(cleared)}\n\n`);
+  }
   function flushBatch(session) {
     if (!session?.batchOutput) return;
     clearTimeout(session.batchOutput.timer);
@@ -777,8 +784,7 @@ export function createConsole({ host = '127.0.0.1', port = 17321, onLog, recover
       progressionJobs: new Map(),
       log: [],
       upgradeRevision: 0,
-      logClearBefore: 0,
-      logClearAt: 0,
+      logsCleared: null,
       dailySingle: dailySingleState(),
       shops: createShopState(),
       loop: {
@@ -1125,6 +1131,7 @@ export function createConsole({ host = '127.0.0.1', port = 17321, onLog, recover
         merchant: current.settings.merchant,
         schedule: Object.fromEntries(merchantTaskKeys.map(key => [key, current.settings.schedule[key]])),
       },
+      presets: merchantPresetOptions(current.settings),
       rules: { numbers: Object.fromEntries(Object.entries(current.rules.numbers).filter(([key]) => key.startsWith('merchant.'))) },
       revision: current.revision,
       baseRevision: current.baseRevision,
@@ -1234,21 +1241,25 @@ export function createConsole({ host = '127.0.0.1', port = 17321, onLog, recover
     const current=()=>session.client===instance && instance.connected && session.player && !session.paused && !session.productionSyncRequired;
     let servicingInserts = false;
     const insertTimer = setInterval(async () => {
-      if (servicingInserts || !current() || closing) return;
+      if (servicingInserts || !current() || closing || !session.loop.running) return;
       const player = session.player, generation = session.generation;
-      const enabled = () => current() && !closing && session.player === player && session.generation === generation;
+      const running = () => current() && !closing && session.player === player && session.generation === generation
+        && session.loop.running && !session.loop.controller?.signal.aborted;
       servicingInserts = true;
       try {
-        const ids = Object.keys(factoryInsertions(player));
-        if (ids.length) await enqueue(session, async () => {
-          for (const id of ids) {
-            if (!enabled()) return;
+        const entries = Object.entries(factoryInsertions(player));
+        if (entries.length) await enqueue(session, async () => {
+          for (const [id, entry] of entries) {
+            if (!running()) return;
+            const task = entry.jobs[0]?.crop ? 'farm' : 'startProduce';
+            const enabled = () => running() && session.loop.tasks[task] && nativePreferenceEnabled(session.preferences, task);
+            if (!enabled()) continue;
             const message = await advanceFactoryInsertion(instance, protocolFor(instance),
               { player, enabled, config:loadConfigSafe(), settings:session.preferences }, id);
             if (message) emit(session,'warn',message,{ worldUpdated:true });
           }
         }, '执行排产插单');
-      } catch (error) { if (enabled()) emit(session,'warn','排产插单待核对：' + error.message); }
+      } catch (error) { if (running()) emit(session,'warn','排产插单待核对：' + error.message); }
       finally { servicingInserts = false; }
     }, 10000);
     insertTimer.unref?.();
@@ -1325,7 +1336,7 @@ export function createConsole({ host = '127.0.0.1', port = 17321, onLog, recover
       if (name === 'SCPlayerExpUpdate' && session.client === instance && session.player && body.level > 0) {
         if (session.player.level !== body.level) {
           for (const key of ['adShop', 'afkAd', 'adSpeedUpProduce', 'adSpeedUpBuilding', 'adSpeedUpMuseum', 'weekPass', 'trialSweep', 'dailyRewards', 'chests',
-            'museumCollect', 'museumExplore', 'petCollect', 'petBreed', 'worldOnline', 'tradeTasks', 'seasonTasks',
+            'museumCollect', 'museumExplore', 'petCollect', 'petBreed', 'worldOnlineRewards', 'tradeTasks', 'seasonTasks',
             'museumRevenue', 'museumAchievements', 'heroGrowth', 'stageAuto', 'treasureLoot', 'comicDrama', 'tournamentDailyGift']) rewardSchedule(instance).clearTask(key);
         }
         session.player.level = body.level;
@@ -1972,16 +1983,16 @@ export function createConsole({ host = '127.0.0.1', port = 17321, onLog, recover
     return { ...survey, text: formatTaskPlan(survey) };
   }
 
-  function orderProgressView(config, survey, player) {
-    const order = survey.orderOfTheDay ?? {};
+  function orderProgressView(config, survey, player, configuredCap) {
+    const order = survey.orderOfTheDay;
+    if (!order) return null;
     const tier = nextOrderTier(config, { ...order, player, now: survey.serverNow });
     const baseMax = Number(config?.tables?.OrderParamCfg?.data
       ?.find(row => row.paramName === '订单每日上限')?.paramValue ?? 0);
-    const cap = Number.isSafeInteger(survey.residentOrderLimit) && survey.residentOrderLimit > 0
-      ? survey.residentOrderLimit
-      : (Number.isSafeInteger(baseMax) && baseMax > 0 ? baseMax : 0);
-    const bonus = Math.max(0, cap - baseMax);
-    const total = tier.tier ?? cap;
+    const cap = survey.residentOrderLimit;
+    const setting = configuredCap > 0 ? configuredCap : null;
+    const useSetting = setting !== null && (cap === null || setting < cap);
+    const total = useSetting ? setting : cap;
     const orderNum = Number(order.orderNum ?? 0);
     return {
       orderNum,
@@ -1990,10 +2001,11 @@ export function createConsole({ host = '127.0.0.1', port = 17321, onLog, recover
       reqNums: tier.reqNums,
       claimable: tier.claimable,
       baseMax,
-      bonus,
+      bonus: cap === null ? null : cap - baseMax,
       cap,
+      configuredCap: setting,
       total,
-      totalKind: tier.tier == null ? 'dailyCap' : 'rewardTier',
+      totalKind: useSetting ? 'configuredCap' : 'dailyCap',
       percent: total > 0 ? Math.min(100, Math.round(orderNum / total * 1000) / 10) : 0,
     };
   }
@@ -2100,7 +2112,7 @@ export function createConsole({ host = '127.0.0.1', port = 17321, onLog, recover
         orderNum: survey.orderOfTheDay.orderNum ?? 0,
         dailyLimit: survey.residentOrderLimit,
       },
-      orderProgress: orderProgressView(config, survey, session.player),
+      orderProgress: orderProgressView(config, survey, session.player, settings?.resident.dailyCap),
       autoProduce: autoProduceView(config, survey),
       orders: survey.orders.map((order) => ({
         ...order,
@@ -2485,14 +2497,19 @@ export function createConsole({ host = '127.0.0.1', port = 17321, onLog, recover
           ...Object.keys(current.settings.merchant).map(key => 'merchant.' + key),
           ...merchantTaskKeys.map(key => 'schedule.' + key),
         ]);
-        if (!fields.has(payload.key)) throw new SettingsError({ settings: '请选择有效的海商王活动设置' });
+        const preset = payload.key === 'preset' && merchantPresets.find(row => row.id === payload.value);
+        if (!preset && !fields.has(payload.key)) throw new SettingsError({ settings: '请选择有效的海商王活动设置' });
         if (!Number.isSafeInteger(payload.revision) || payload.revision !== current.revision
           || !current.revision && payload.baseRevision !== current.baseRevision) {
           throw new SettingsError({ revision: '海商王活动设置已变化，请重新读取后再保存' });
         }
         const next = structuredClone(current.settings);
-        const [group, field] = payload.key.split('.');
-        next[group][field] = payload.value;
+        if (preset) {
+          for (const [group, values] of Object.entries(preset.settings)) Object.assign(next[group], values);
+        } else {
+          const [group, field] = payload.key.split('.');
+          next[group][field] = payload.value;
+        }
         adoptPreferences(session, saveAutomationSettings(session.id, next, { revision: current.revision }));
         if (session.client) {
           for (const key of merchantTaskKeys) rewardSchedule(session.client).clearTask(key);
@@ -2522,6 +2539,24 @@ export function createConsole({ host = '127.0.0.1', port = 17321, onLog, recover
         adoptPreferences(session, entry);
         emit(session, 'info', '登录设置已保存，后续连接恢复将使用新策略');
         json(loginSettingsView(session));
+        return;
+      }
+      if (route === 'GET /api/settings/stationed-pets') {
+        const { session } = scoped_(parsed);
+        const { client, generation } = session;
+        const check = () => {
+          if (!client?.connected || session.client !== client || session.generation !== generation || session.paused)
+            throw Error('请先连接当前账号，再读取值守海兽');
+        };
+        check();
+        json(await readJob(session, async () => {
+          check();
+          const roster = await readPetLevelRoster(client);
+          check();
+          const stationed = [...roster.values()].filter(row => row.buildingId);
+          const pets = describePets(stationed.map(row => row.pet), loadConfigSafe());
+          return { pets: pets.map(({ uid, name }) => ({ value: uid, label: name + ' · ' + roster.get(uid).buildingId })) };
+        }, { recoverFormation: false }));
         return;
       }
       if (route === 'GET /api/settings/player-names') {
@@ -2795,11 +2830,13 @@ export function createConsole({ host = '127.0.0.1', port = 17321, onLog, recover
           if (category === 'pirateHunt') {
             const snapshot=await inspectHunt(client,config,session.player),ledger=usageFor(session);
             for(const fleet of snapshot.view.fleets??[])fleet.reason ||= (!settings.pirateHunt.fleetIds.includes(fleet.buildingId)?'未选择此舰队':'')|| fleetRecordReason(ledger.keyRecords(),fleet.buildingId,exactAutomationId(session.player.worldId))||(previewCityReserved.includes(fleet.buildingId)?'城战时段预留':dispatchReservationReason(client,settings,'pirateHunt',fleet.buildingId,{ignoreOwners:['cityWar']}));
-            const checkpoint=session.loop.running?session.loop.challengeRun?.pirate:null;
-            const dailyRun=pirateAutoDay(ledger,session.player,checkpoint);
-            const halted=checkpoint?.scope===dailyRun.scope && checkpoint.state?.halted;
-            const reason=dailyRun.reason || (halted && checkpoint.state.reason) || (session.pirateAdvance.view().running && '手动首杀推进中，本轮跳过');
-            const autoState=checkpoint?.scope===dailyRun.scope ? checkpoint.state??{} : {};
+            const dailyRun=pirateAutoDay(ledger,session.player,session.loop.running?session.loop.challengeRun?.pirate:null);
+            const {checkpoint}=dailyRun;
+            const timedOut=pirateTimeoutTypes(ledger,exactAutomationId(session.player.worldId),dailyRun.day,Date.now()+(client.serverClockOffsetMs||0));
+            const autoState={...checkpoint.state,timedOutTypes:[...new Set([...(checkpoint.state?.timedOutTypes??[]),...timedOut])]};
+            const reason=dailyRun.reason || (checkpoint.state?.halted && checkpoint.state.reason)
+              || (session.pirateAdvance.view().running && '手动首杀推进中，本轮跳过')
+              || (checkpoint.active && !checkpoint.active.counted && !autoState.timedOutTypes.includes(checkpoint.active.type) && '等待核对上一场海盗首杀战果');
             const selection=reason?{reason}:selectPirateAdvance(snapshot,settings.pirateHunt,{pendingFuel:pendingPetrol(ledger),autoState});
             const plan={actions:selection.reason?[]:[{kind:'pirateFirst',label:selection.fleet.name+' → '+selection.target.name+' '+selection.target.level+'级',costs:[{id:'汽油',num:selection.cost}]}],notes:selection.reason?[selection.reason]:[]};
             return {...output(plan,{fleets:snapshot.view.fleets?.length??0,targets:snapshot.view.targets?.length??0},'海盗首杀'),dispatch:{fleets:snapshot.view.fleets,fuel:snapshot.view.fuel,pending:pendingPetrol(ledger)}};
@@ -2821,7 +2858,7 @@ export function createConsole({ host = '127.0.0.1', port = 17321, onLog, recover
             const online = await readWorldOnlineReward(client, config, session.player);
             if (!settings.schedule.worldOnlineRewards) plan.notes.push('城战在线奖励自动领取未开启');
             else if (online.ready && worldOnlineRewardKey(session.player, online)) {
-              if (ledger.hasKey(worldOnlineRewardKey(session.player, online))) plan.notes.push('本档在线奖励已发送，等待计数确认，不重复领取');
+              if (ledger.hasKey(worldOnlineRewardKey(session.player, online))) plan.notes.push('本档已有领取记录，挂机将核对服务器计数');
               else plan.actions.push({ kind: 'worldOnlineReward', label: `领取城战在线奖励第 ${online.stage} 档`, costs: [] });
             }
             if (online.reason) plan.notes.push('城战在线奖励：' + online.reason);
@@ -2925,9 +2962,17 @@ export function createConsole({ host = '127.0.0.1', port = 17321, onLog, recover
             }
             const checked = budgetPreview(actions, new Map([['RUBY', daily.ruby]]), settings, usage);
             const dailyNotes = daily.tasks.filter(entry => entry.reason).map(entry => entry.task.title + '：' + entry.reason);
-            return { ...output({ ...checked, notes: [...tasks.notes, ...trialNotes, ...dailyNotes, ...checked.notes,
+            const rewardNotes = [...tasks.notes];
+            if (settings.schedule.afkUpgrade) {
+              const upgrade = await readAfkUpgrade(client, config, session.player, usageFor(session));
+              if (upgrade.action) {
+                checked.actions.push(upgrade.action);
+                rewardNotes.push('挂机升级预览显示下一次升级。实际运行时会连续升级，直到定位芯片用完或达到主线允许的等级。');
+              } else rewardNotes.push('自动升级挂机等级：' + upgrade.reason);
+            }
+            return { ...output({ ...checked, notes: [...rewardNotes, ...trialNotes, ...dailyNotes, ...checked.notes,
               '此处预览日常任务与领奖。限时活动、挑战的开放状态可在对应页面查看。'] }, { dailyTasks: daily.tasks.length }, '日常与任务奖励'),
-              moduleNotes: { 'daily-actions': dailyNotes, 'daily-challenges': trialNotes, rewards: tasks.notes } };
+              moduleNotes: { 'daily-actions': dailyNotes, 'daily-challenges': trialNotes, rewards: rewardNotes } };
           }
           const survey = await surveyWorld(client, protocolFor(client), { config, player: session.player, includeCargo: settings.cargo.enabled || settings.factory.demandPriority.includes('cargo') });
           const extra = await surveyBaseAutomation(client, protocolFor(client), config, session.player, settings, survey, { ledger: usageFor(session), enabled: () => session.client === client && client.connected !== false });
@@ -2935,7 +2980,7 @@ export function createConsole({ host = '127.0.0.1', port = 17321, onLog, recover
           const worldPlan = planWorld(survey, { config, settings, usage, extraDemand: baseDemands(extra, config, settings),
             enabled: kind => flags[worldTaskKey(kind)] === true, allowSpeedUp: flags.speedUp, allowReroll: settings.resident.reroll, minOrderExp: settings.resident.minExp });
           const extraPlan = planBaseAutomation(extra, config, settings, usage);
-          const nativePlan = await previewNativeAutomation(client, config, session.player, settings, flags, survey, usage);
+          const nativePlan = await previewNativeAutomation(client, config, session.player, settings, flags, survey, usage, worldPlan.cargoLoadLimits);
           const plan = budgetPreview([...worldPlan.actions, ...extraPlan.actions, ...nativePlan.actions], survey.stock, settings, usage);
           const moduleNotes = { ...nativePlan.moduleNotes, building: worldPlan.upgradeReasons,
             factory: [...worldPlan.factoryReasons].map(([id, reason]) => id+'：'+reason),
@@ -2991,17 +3036,23 @@ export function createConsole({ host = '127.0.0.1', port = 17321, onLog, recover
       }
       if (route === 'POST /api/logs/clear') {
         needConfirm(jsonBody());
-        const { session } = scoped_(parsed);
-        const cleared = { account: session.id, before: logId, at: Date.now() };
-        session.log.length = 0;
-        session.operations.clear();
-        clearTimeout(session.batchOutput?.timer);
-        session.batchOutput = null;
-        session.upgradeInspection = null;
-        session.logClearBefore = cleared.before;
-        session.logClearAt = cleared.at;
+        const all = parsed.searchParams.get('scope') === 'all';
+        const selected = all ? null : scoped_(parsed).session;
+        const cleared = { ...(all ? { scope: 'all' } : { account: selected.id }), before: logId, at: Date.now() };
+        if (all) {
+          globalLog.length = 0;
+          allLogsCleared = cleared;
+        }
+        for (const session of all ? sessions.values() : [selected]) {
+          session.log.length = 0;
+          session.operations.clear();
+          clearTimeout(session.batchOutput?.timer);
+          session.batchOutput = null;
+          session.upgradeInspection = null;
+          session.logsCleared = all ? null : cleared;
+        }
         for (const stream of streams) {
-          if (stream.allAccounts || stream.account === session.id) writeStream(stream, `event: logs-cleared\ndata: ${JSON.stringify(cleared)}\n\n`);
+          if (all || stream.allAccounts || stream.account === cleared.account) sendLogClear(stream, cleared);
         }
         json(cleared);
         return;
@@ -3019,9 +3070,10 @@ export function createConsole({ host = '127.0.0.1', port = 17321, onLog, recover
         res.once('close', () => streams.delete(res));
         const logSession = sessions.get(res.account);
         const logSessions = res.allAccounts ? [...sessions.values()] : logSession ? [logSession] : [];
-        const since = Math.max(Number(req.headers['last-event-id'] ?? 0) || 0, res.allAccounts ? 0 : logSession?.logClearBefore ?? 0);
+        const since = Math.max(Number(req.headers['last-event-id'] ?? 0) || 0, res.allAccounts ? 0 : logSession?.logsCleared?.before ?? 0);
+        if (allLogsCleared && !sendLogClear(res, allLogsCleared)) return;
         for (const item of logSessions) {
-          if (item.logClearAt && !writeStream(res, `event: logs-cleared\ndata: ${JSON.stringify({ account: item.id, before: item.logClearBefore, at: item.logClearAt })}\n\n`)) return;
+          if (item.logsCleared && !sendLogClear(res, item.logsCleared)) return;
         }
         const entries = [...globalLog, ...logSessions.flatMap(item => item.log)]
           .sort((a, b) => a.id - b.id).slice(-LOG_LIMIT);
@@ -4527,7 +4579,7 @@ export function createConsole({ host = '127.0.0.1', port = 17321, onLog, recover
         const enabled = () => quote && session.factoryInsertPlan === quote && quote.enabled()
           && quote.config === loadConfigSafe() && target.planKey === quote.forecast.insertKey;
         if (!enabled()) throw new Error('请重新生成当前账号的排产计划后插单');
-        const { client, player, generation } = session;
+        const { client, player } = session;
         const context = { config:quote.config, player, enabled, settings:session.preferences };
         const prepare = () => prepareFactoryInsertion(client, protocolFor(client), context, quote, target, submit);
         if (!submit) {
@@ -4541,15 +4593,8 @@ export function createConsole({ host = '127.0.0.1', port = 17321, onLog, recover
           session.factoryInsertPlan = null;
           session.productionPlanRead = null;
           session.worldRead = null;
-          context.enabled = () => session.client === client && client.connected && session.player === player
-            && session.generation === generation && !session.paused && !session.productionSyncRequired;
-          let warning;
-          try {
-            warning = await advanceFactoryInsertion(client, protocolFor(client), context, target.buildingId);
-          } catch (error) { warning = saved.label + '，等待核对游戏队列：' + error.message; }
-          const label = warning || saved.label;
-          emit(session, warning ? 'warn' : 'info', label, { worldUpdated:true });
-          return { ...saved, label, warning };
+          emit(session, 'info', saved.label, { worldUpdated:true });
+          return saved;
         }, '插入工厂排产');
         json(result);
         return;
@@ -4617,7 +4662,8 @@ export function createConsole({ host = '127.0.0.1', port = 17321, onLog, recover
           throw new Error('订单信息不完整，请刷新居民订单');
         }
         const isReroll=route.endsWith('/reroll');
-        const key = route+':'+index + ':' + orderKey;
+        const acceptStockWarning = !isReroll && payload.acceptStockWarning === true;
+        const key = JSON.stringify([route, index, orderKey, acceptStockWarning]);
         let job = session.residentJobs.get(key);
         if (!job) {
           const client = session.client, generation = session.generation;
@@ -4625,7 +4671,8 @@ export function createConsole({ host = '127.0.0.1', port = 17321, onLog, recover
           job = enqueue(session, async () => {
             if (!enabled()) throw new Error('账号连接已变化，请刷新居民订单');
             const result = await (isReroll?rerollResidentOrder:submitResidentOrder)(client, protocolFor(client), { index, orderKey, enabled, ledger:usageFor(session),
-              config: loadConfigSafe(), player: session.player });
+              config: loadConfigSafe(), player: session.player, acceptStockWarning });
+            if (result.stockWarning) return { ok: false, ...result };
             emit(session, 'info', result.label, { worldUpdated: true });
             return { ok: true, ...result };
           }, (isReroll?'手动换单 #':'手动提交居民订单 #') + index).finally(() => session.residentJobs.delete(key));
@@ -5014,14 +5061,17 @@ export function createConsole({ host = '127.0.0.1', port = 17321, onLog, recover
           const client = await ensureConnected(session, account);
           const config = loadConfigSafe();
           let nextCheck = 0;
+          let checkedAfkHours;
           return { client, player: session.player, config, schedule: work => enqueue(session, work),
             executeBattle: sessionLineupExecutor(session, client, payload.lineupId ?? ''), async beforeBattle(signal) {
             const enabled = key => key === 'afk' && session.loop.tasks.afk && !session.loop.running && !signal.aborted;
-            if (!enabled('afk') || Date.now() < nextCheck) return;
+            const hours = session.preferences?.afk?.claimIntervalHours;
+            if (!enabled('afk') || (hours === checkedAfkHours && Date.now() < nextCheck)) return;
+            checkedAfkHours = hours;
             nextCheck = Date.now() + 60_000;
             await claimRewards(client, protocolFor(client), config, ({ label, ok, error }) =>
               emit(session, ok ? 'info' : 'error', ok ? label : label + '：' + error),
-              enabled, time => { nextCheck = time; });
+              enabled, time => { nextCheck = time; }, undefined, session.player, { getSettings: () => session.preferences });
           } };
         }, (error) => emit(session, 'error', `主线推关失败：${error.message}`)));
         return;

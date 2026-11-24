@@ -20,6 +20,7 @@ const config = {
   FarmlandPlantCfg: [{ id: '小麦', time: 30, produceNum: 5, material: ['小麦种子', 1] }],
   BuildingProduceParamCfg: [{ paramName: '制造位上限', paramValue: 6 }],
   OrderParamCfg: [{ paramName: '订单每日上限', paramValue: 42 }],
+  OrderDailyRewardCfg: [6, 12, 18, 24, 30, 40, 45].map(reqNum => ({ reqNum })),
   GameParamCfg: [{ paramName: '初始人口', paramValue: 3 }, { paramName: '初始人口上限', paramValue: 100 }, { paramName: '产品存量初始上限', paramValue: 50 }],
   CargoUnlockCfg: [{ index: 1, playerLevel: 9 }],
   ModuleOpenCfg: [{ moduleId: '联盟情报', playerLevel: 18 }, { moduleId: '联盟商船', playerLevel: 18 }],
@@ -174,10 +175,28 @@ try {
       await f.api('connect', {});
       const readProgress = async () => (await f.api('world')).orderOfTheDay;
       assert.deepEqual(await readProgress(), { orderNum: 37, dailyLimit: 42 });
+      const view = async () => (await f.api('world')).orderProgress;
+      const initial = await view();
+      assert.equal(initial.total, 42);
+      assert.equal(initial.tier, 40);
+      assert.deepEqual(initial.reqNums, [6, 12, 18, 24, 30, 40, 45]);
       replies.GameEffectRequest.effects.push({ id: 18, value: 5 });
       assert.deepEqual(await readProgress(), { orderNum: 37, dailyLimit: 47 });
+      assert.equal((await view()).total, 47);
+      await updateSettings(f, settings => { settings.resident.dailyCap = 36; });
+      const limited = await view();
+      assert.deepEqual([limited.orderNum, limited.total, limited.cap, limited.configuredCap, limited.percent], [37, 36, 47, 36, 100]);
+      replies.OnWaterRequest.orderOfTheDay = { orderNum: 40, rewardedNum: 40 };
+      assert.equal((await view()).total, 36, '领取奖励不应改变交付目标');
+      await updateSettings(f, settings => { settings.resident.dailyCap = 50; });
+      assert.equal((await view()).total, 47, '设定值不能超过已确认的账号上限');
       delete replies.GameEffectRequest;
-      assert.deepEqual(await readProgress(), { orderNum: 37, dailyLimit: null });
+      assert.deepEqual(await readProgress(), { orderNum: 40, dailyLimit: null });
+      const unsynced = await view();
+      assert.equal(unsynced.total, 50);
+      assert.equal(unsynced.cap, null);
+      await updateSettings(f, settings => { settings.resident.dailyCap = 0; });
+      assert.equal((await view()).total, null);
     } finally { await f.close(); }
   });
   await test('仓库按账号效果刷新原料容量，挑战券按配置标记恢复上限并保留实际数量', async () => {
@@ -735,6 +754,10 @@ try {
         }
       };
       const {forecast} = await f.api('world/production-plan');
+      const config = f.session().factoryInsertPlan.config;
+      const {advanceFactoryInsertion} = await import('../src/factory-insertion.mjs');
+      const player = f.session().player;
+      const resumed = () => advanceFactoryInsertion(client,protocol,{player,config,enabled:()=>true,settings:f.session().preferences},'1食品厂');
       const run = forecast.factories[0].runs.find(r => r.status === 'queued');
       const target = {buildingId:'1食品厂', planKey:forecast.insertKey, id:run.id, from:run.from, lane:run.lane, status:run.status};
       const submit = () => f.response('world/production-insert',{...target, offset:1, productId:'面包',quantity:2,confirm:true});
@@ -743,22 +766,22 @@ try {
       let queuedSubmit;
       try {
         const options = await f.api('world/production-insert-options',target);
-        assert.deepEqual([options.count,options.products[0].max], [3,2]);
+        assert.deepEqual([options.count,options.products[0].max], [3,null]);
         queuedSubmit = submit();
         await waitFor(() => f.session().waitingJobs > 0);
         assert.deepEqual(writes, []);
-        wheat.num = 9;
+        q[2].finishTime = f.state.now + 60;
       } finally { round.resolve(); }
-      assert.match((await queuedSubmit).data.error, /最多可插入 1 件/);
-      stock.num = 43; wheat.num = 4;
-      assert.match((await submit()).data.error, /最多可插入 0 件/);
-      wheat.num = 14;
-      q[2].finishTime = f.state.now + 60;
-      assert.match((await submit()).data.error,/已变化/);
+      assert.match((await queuedSubmit).data.error,/已变化/);
       delete q[2].finishTime;
+      wheat.num = 4;
       assert.deepEqual(writes,[]);
       const accepted = await submit();
       assert.equal(accepted.status,200,JSON.stringify(accepted));
+      assert.deepEqual(writes,[]);
+      assert.deepEqual(q.map(j => j.idx), [4,5,6,7]);
+      wheat.num = 14;
+      await resumed();
       assert.deepEqual(writes, ['撤7','撤6','排9','排10','排11','排12']);
       assert.deepEqual(q.map(j => j.idx), [4,5,9,10,11,12]);
       assert.equal(wheat.num,4);
@@ -769,16 +792,13 @@ try {
       stock.num = 30; wheat.num = 25;
       const next = (await f.api('world/production-plan')).forecast;
       const last = next.factories[0].runs.find(r => r.status === 'queued');
-      const config = f.session().factoryInsertPlan.config;
       await f.api('world/production-insert',{...target,planKey:next.insertKey,from:last.from,lane:last.lane,
         offset:last.quantity-1,productId:'面包',quantity:2,confirm:true});
+      await resumed();
       assert.deepEqual(writes.slice(6),['撤12','排13']);
-      const { advanceFactoryInsertion } = await import('../src/factory-insertion.mjs');
       const { factoryInsertions } = await import('../src/factory-insert-store.mjs');
-      const player = f.session().player;
       const pending = () => factoryInsertions(player)['1食品厂']?.jobs.reduce((sum, job) => sum + (job.quantity ?? 1), 0) ?? 0;
       assert.equal(pending(),2);
-      const resumed = () => advanceFactoryInsertion(client,protocol,{player,config,enabled:()=>true,settings:f.session().preferences},'1食品厂');
       await resumed();
       assert.equal(pending(),2);
       for (let remaining=1; remaining>=0; remaining--) {
@@ -799,8 +819,8 @@ try {
       };
       const outcome = await f.api('world/production-insert',{...target,planKey:final.insertKey,from:waiting.from,lane:waiting.lane,
         offset:waiting.quantity-2,productId:'面包',quantity:1,confirm:true});
-      assert.match(outcome.label,/插单已撤回/);
-      assert.equal(outcome.warning, outcome.label);
+      assert.match(outcome.label,/已加入计划/);
+      assert.match(await resumed(),/插单已撤回/);
       assert.equal(q.includes(promoted),true);
       assert.equal(pending(),1);
       assert.equal(writes.at(-1),'撤'+tail.idx);
@@ -838,7 +858,7 @@ try {
       const target = {buildingId,planKey:forecast.insertKey,from:run.from,id:run.id,lane:run.lane,status:run.status};
       const { products } = await f.api('world/production-insert-options', target);
       assert.equal(products.find(p => p.id === '淡水').max, null);
-      assert(products.find(p => p.id === '面包').max >= 3);
+      assert.equal(products.find(p => p.id === '面包').max, null);
       const record = () => factoryInsertions(player)[buildingId];
       const resume = () => advanceFactoryInsertion(client, protocol, {player,config,settings,enabled:()=>true}, buildingId);
       const writes = [];
@@ -855,6 +875,8 @@ try {
         }
       };
       await f.api('world/production-insert',{...target,quantity:3,productId:'面包',confirm:true});
+      assert.deepEqual(writes,[]);
+      await resume();
       assert.deepEqual(writes,['饼干']);
       assert.equal(record().flight.jobIndex,1);
       await resume();
@@ -862,11 +884,11 @@ try {
       bread.num--; q.push({idx:1,productId:'饼干'});
       await resume();
       assert.deepEqual(writes,['饼干','面包']);
-      assert.deepEqual(record().jobs,[{id:'面包',quantity:2,pinned:true}]);
+      assert.deepEqual(record().jobs,[{id:'面包',quantity:2,pinned:true,waitForMaterials:true}]);
       assert.match(record().note,/满仓/);
       const partial = (await f.api('world/production-plan')).forecast;
       assert.deepEqual(partial.factories.find(row => row.id === buildingId).pendingInsertions,
-        [{id:'面包',name:'面包',quantity:2}]);
+        [{id:'面包',name:'面包',quantity:2,planIndex:0,beforeRun:0}]);
       assert.deepEqual(partial.factories.find(row => row.id === '2食品厂').pendingInsertions, []);
       const { runFactoryProductionBatch } = await import('../src/factory-production.mjs');
       const ordinary = {kind:'startProduce',request:'StartFactoryProduceRequest',body:{buildingId,productId:'饼干'},
@@ -887,7 +909,7 @@ try {
       assert.equal(record().jobs.length,1);
       assert.equal(record().jobs[0].quantity,1000000000);
       const refreshed = (await f.api('world/production-plan')).forecast.factories.find(row => row.id === buildingId);
-      assert.deepEqual(refreshed.pendingInsertions, [{id:'淡水',name:'淡水',quantity:1000000000}]);
+      assert.deepEqual(refreshed.pendingInsertions, [{id:'淡水',name:'淡水',quantity:1000000000,planIndex:0,beforeRun:0}]);
       assert.deepEqual(refreshed.runs, []);
       assert.equal(writes.length,5);
     } finally { recipes.splice(-2); await f.close(); }
@@ -937,9 +959,9 @@ try {
       const entries = factoryInsertions(player);
       assert.deepEqual(entries[waterId].jobs.map(j => [j.quantity,j.supplyFor]), [[4,'锅'],[2,undefined]]);
       assert.deepEqual(entries[metalId].jobs.map(j => [j.id,j.quantity]), [['铜锭',2]]);
-      assert.deepEqual(writes, []);
+      assert.deepEqual(writes, [], '提交整批计划只落盘');
       const preview = (await f.api('world/production-plan')).forecast;
-      assert.equal(preview.factories.find(row => row.id === waterId).pendingInsertions[0].quantity,4);
+      assert.deepEqual(preview.factories.find(row => row.id === waterId).pendingInsertions.map(j=>j.quantity),[4,2]);
       assert.deepEqual(preview.factories.find(row => row.id === finalId).upstream.map(j => j.quantity).sort(),[2,4]);
       await advance(waterId);
       assert.deepEqual(writes, Array(6).fill('淡水'));
@@ -969,9 +991,40 @@ try {
       };
       const withdrawn = await f.api('world/production-insert',{buildingId:finalId,planKey:next.insertKey,from:queued.from,
         id:queued.id,lane:queued.lane,status:queued.status,quantity:1,productId:'锅',confirm:true});
-      assert.match(withdrawn.warning,/已撤回/);
+      assert.match(withdrawn.label,/已加入计划/);
+      const staged = (await f.api('world/production-plan')).forecast;
+      assert(staged.factories.find(row => row.id === waterId).pendingInsertions.some(job => job.id === '淡水' && job.supplyFor === '锅'));
+      assert.match(await advance(finalId),/已撤回/);
       assert.deepEqual(factoryInsertions(player),{});
     } finally { buildings.splice(-2); recipes.splice(-3); await f.close(); }
+  });
+  await test('满仓且没有种子也可一次排整批面包和小麦，并在批内任意位置插单', async () => {
+    const f = await fixture({...protocol,...createDeclaredProtocol(['FarmPlantRequest','OkResponse'])});
+    try {
+      await f.api('connect', {});
+      const {OnWaterRequest:water,AllItemRequest:bag} = f.state.responses;
+      water.workerOrder = [];
+      f.state.responses.CargoShipsRequest.ship = [];
+      for (const item of bag.items) item.num = item.itemId === '面包' ? 50 : 0;
+      const read = async () => (await f.api('world/production-plan')).forecast;
+      const first = await read(), buildingId = '1食品厂';
+      await f.api('world/production-insert', {buildingId,planKey:first.insertKey,status:'gap',from:first.startAt,
+        productId:'面包',quantity:20,confirm:true});
+      const next = await read(), food = next.factories.find(row => row.id === buildingId);
+      assert.deepEqual(food.pendingInsertions.map(row => row.quantity), [20]);
+      assert.deepEqual(food.upstream.map(row => [row.name,row.quantity,row.crop]), [['小麦',20,true]]);
+      assert.deepEqual(next.farms[0].unscheduled.map(j => [j.id,j.quantity]), [['小麦',20]]);
+      assert.equal(next.materials['小麦种子'].stock,0);
+      assert.deepEqual(next.materials['小麦'].plans.map(p => [p.facility,p.quantity,p.target]),[['农田-1',20,'面包']]);
+      const target = {buildingId,planKey:next.insertKey,status:'batch',planIndex:food.pendingInsertions[0].planIndex,id:'面包'};
+      assert.equal((await f.api('world/production-insert-options',target)).count,20);
+      await f.api('world/production-insert',{...target,offset:19,productId:'面包',quantity:2,confirm:true});
+      const result = (await read()).factories.find(row => row.id === buildingId);
+      assert.deepEqual(result.pendingInsertions.map(row => row.quantity), [19,2,1]);
+      assert.equal(result.upstream.reduce((total,row) => total + row.quantity,0),22);
+      assert.deepEqual(water.building[0].factory.factoryQ, []);
+      assert(!f.state.requests.includes('FarmPlantRequest'));
+    } finally { await f.close(); }
   });
   await test('缺小麦时按每茬产量插入播种，重读确认后只执行一次', async () => {
     const farmProtocol = {...protocol, ...createDeclaredProtocol(['FarmPlantRequest','OkResponse'])};
@@ -987,23 +1040,25 @@ try {
       f.state.responses.CargoShipsRequest.ship = [];
       bag.items.find(r => r.itemId === '小麦').num = 1;
       const forecast = (await f.api('world/production-plan')).forecast;
-      await f.api('world/production-insert',{buildingId:'1食品厂',planKey:forecast.insertKey,status:'gap',from:forecast.startAt,
-        quantity:2,productId:'面包',confirm:true});
       const config = (await import('../src/config.mjs')).getConfig();
       const advance = () => advanceFactoryInsertion(client,farmProtocol,{config,player,settings,enabled:()=>true},'1农田');
       const farmEntry = () => factoryInsertions(player)['1农田'];
-      assert.deepEqual(farmEntry().jobs, [{id:'小麦',quantity:2,pinned:true,supplyFor:'面包',supplyTarget:'1食品厂',crop:true}]);
       const request = client.request.bind(client);
       let plantings = 0;
       client.request = async (name,...args) => {
         if (name !== 'FarmPlantRequest') return request(name,...args);
         plantings++;
         assert(farmEntry().flight);
+        assert.deepEqual(farmEntry().jobs, [{id:'小麦',quantity:2,pinned:true,supplyFor:'面包',supplyTarget:'1食品厂',crop:true}]);
         assert.deepEqual(args[0].args, [{buildingId:'1农田',productId:'小麦'}]);
         water.building[1].farm = {productId:'小麦',plantTime:f.state.now,ripeTime:f.state.now+30};
         bag.items.find(r => r.itemId === '小麦种子').num--;
         return {};
       };
+      await f.api('world/production-insert',{buildingId:'1食品厂',planKey:forecast.insertKey,status:'gap',from:forecast.startAt,
+        quantity:2,productId:'面包',confirm:true});
+      assert.equal(plantings,0,'提交计划时不播种');
+      assert.equal(farmEntry().jobs[0].quantity,2);
       await advance(); await advance(); await advance();
       assert.equal(plantings,1);
       assert.equal(farmEntry().jobs[0].quantity,1);

@@ -21,6 +21,7 @@ import { surveyWorld, planWorld, runWorld, runWorldRound, formatWorldPlan, forma
 import { runLoop, formatLoopRound, formatLoopStep } from './loop.mjs';
 import { runStages, stageFailureLimit } from './stages.mjs';
 import { loadAutomationSettings, createUsageLedger } from './automation-settings.mjs';
+import { afkClaimTime } from './afk-rewards.mjs';
 import { createActionGuard } from './automation-policy.mjs';
 import { guardRuntimeActions, validateRuntimeSettings } from './settings-runtime.mjs';
 import { assertResourcesReady } from './resource-store.mjs';
@@ -217,7 +218,7 @@ const asArray = (value) => (Array.isArray(value) ? value : []);
 
 // 一键领取：先采集状态判定哪些能领，再逐个执行，最后重新采集做前后对比。
 // 只包含领取类动作，不改动任何需要消耗资源的东西。
-function planLoot(ok, now, config = null, level = 1) {
+function planLoot(ok, now, config = null, level = 1, afkClaimHours) {
   const plan = [];
   const claimable = (list) => asArray(list).filter((task) => task.progress >= task.targetProgress && !task.rewardClaimed);
 
@@ -244,7 +245,8 @@ function planLoot(ok, now, config = null, level = 1) {
   for (const task of claimable(achievement?.task)) plan.push({ id: 'achievementDraw', params: { id: task.id }, why: `成就 ${task.id}` });
 
   const afk = ok.AfkInfoRequest?.afkInfo;
-  if (afk && afk.afkFinishTime > 0 && now >= afk.afkFinishTime) {
+  const claimTime = afkClaimTime(afk, afkClaimHours);
+  if (claimTime != null && now >= claimTime) {
     plan.push({ id: 'afkDraw', params: {}, why: '挂机本段收益' });
   }
   // 等级奖励的可领等级由 OfflineLvRewardCfg 决定，不是 rewardedLevel+1，也不能超过当前挂机等级。
@@ -296,7 +298,7 @@ const KEY_FIELDS = (ok) => {
 
 // 领取类动作：先判定后执行，最后重新采集对比。即发即弃的请求在断开前留出排空时间。
 async function loot({ allowMutate, dryRun = false }) {
-  const { url, login } = loadCredentials();
+  const { url, login, account } = loadCredentials();
   const protocol = loadProtocol();
   const client = new GameClient({ url, protocol });
   client.on('warn', (message) => console.log(`warn: ${message}`));
@@ -308,8 +310,8 @@ async function loot({ allowMutate, dryRun = false }) {
   const config = loadConfigSafe();
   try {
     const before = (await collectState(client, protocol)).ok;
-    const now = Date.now() / 1000;
-    const plan = planLoot(before, now, config, loginRole?.level ?? 1);
+    const now = (Date.now() + (client.serverClockOffsetMs || 0)) / 1000;
+    const plan = planLoot(before, now, config, loginRole?.level ?? 1, loadAutomationSettings(account.id).settings.afk.claimIntervalHours);
 
     console.log(`\n可领取 ${plan.length} 项:`);
     for (const step of plan) console.log(`  ${step.id} ${JSON.stringify(step.params)} — ${step.why}`);
@@ -424,7 +426,7 @@ async function heroes({ allowMutate, dryRun, allowUniversal }) {
 
 // 日常：先只读探一遍（--dry 到这里就够），--yes 才执行，--paid 才允许花钻石的动作。
 async function dailies({ allowMutate, dryRun, allowPaid }) {
-  const { url, login } = loadCredentials();
+  const { url, login, account } = loadCredentials();
   const protocol = loadProtocol();
   const client = new GameClient({ url, protocol });
   client.on('warn', (message) => console.log(`warn: ${message}`));
@@ -435,7 +437,8 @@ async function dailies({ allowMutate, dryRun, allowPaid }) {
   try {
     const loginRole = describeRole(response.playerInfo);
     console.log(`login ok: ${loginRole?.nickname} world=${loginRole?.worldName ?? loginRole?.worldId}`);
-    const survey = await surveyDailies(client, protocol, { config, player: response.playerInfo });
+    const surveyOptions = { config, player: response.playerInfo, afkClaimHours: loadAutomationSettings(account.id).settings.afk.claimIntervalHours };
+    const survey = await surveyDailies(client, protocol, surveyOptions);
     console.log(`\n${formatSurvey(survey)}\n`);
     for (const entry of survey.tasks) {
       for (const action of entry.actions ?? []) console.log(`  ${entry.task.id} ${action.request} ${JSON.stringify(action.body)} — ${action.note} (${action.cost})`);
@@ -458,7 +461,7 @@ async function dailies({ allowMutate, dryRun, allowPaid }) {
 
     // 完成数变化只认服务端回包，重新拉一次对照。
     await new Promise((resolve) => setTimeout(resolve, 1200));
-    const after = await surveyDailies(client, protocol, { config, player: response.playerInfo });
+    const after = await surveyDailies(client, protocol, surveyOptions);
     console.log('\n任务进度对比:');
     const before = new Map(survey.tasks.map((entry) => [entry.task.id, entry.task]));
     for (const entry of after.tasks) {
@@ -667,6 +670,7 @@ async function loopCli({ allowMutate, rounds, everySeconds, allowSpeedUp, allowR
     await runLoop(client, protocol, {
       config,
       getHeroSettings: () => loadAutomationSettings(account.id).settings,
+      getAfkSettings: () => loadAutomationSettings(account.id).settings,
       getBlockedCollectionTypes: () => loadAutomationSettings(account.id).settings.factory.blockedCollectionTypes,
       heroUsageLedger: createUsageLedger(account.id),
       refreshConfig: loadConfigSafe,

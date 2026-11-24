@@ -22,7 +22,7 @@ export const settingsFile = () => path.join(dataDirectory(), 'automation-setting
 export const SETTINGS_FORMAT = 'crazywaterworld-automation';
 // 文件 version / 账号 settingsVersion 是格式编号，只随结构迁移调整；
 // revision 是每次保存递增的修订号，仅用于并发冲突检查，不能用作格式版本。
-export const SETTINGS_SCHEMA_VERSION = 58;
+export const SETTINGS_SCHEMA_VERSION = 63;
 const LEGACY_SETTINGS_FORMAT = 'crazywaterword-automation';
 const treasureQualityLabels = { ORANGE: '万吨货轮', PURPLE: '中型货轮', BLUE: '小型货轮' };
 const treasureChaseDefaults = {
@@ -52,6 +52,7 @@ export const DEFAULT_SETTINGS = {
   // 时间使用北京时间（HH:mm）；深夜窗口支持跨午夜配置。
   login: { autoReconnect: false, intervalSeconds: 900, jitterSeconds: 0, quietHours: false, quietStart: '02:00', quietEnd: '07:00', quietIntervalSeconds: 60, maxRetries: 5 },
   schedule: savedSchedule(taskSettings()),
+  afk: { claimIntervalHours: 0 },
   discountShop: { rules: [], fallbackCheapest: false },
   eventActions: { compassThreshold: 10, compassDrawCount: 10 },
   activityAutomation: activityAutomationDefaults,
@@ -60,7 +61,7 @@ export const DEFAULT_SETTINGS = {
   merchant: { enabled: false, fullCargoRoutes: false, autoShareIntel: false, quoteMaxAgeSeconds: 300, estimateDiscountPercent: 0, refreshWaitSeconds: 120, liquidationMinutes: 120,
     maxLossPercent: 0, minExpectedProfit: 1, autoSpeedUp: false, keepPointers: 0,
     speedUpMode: 'deadline', guardLastPointer: false, speedUpMaxPerLeg: 4, monitorSeconds: 60,
-    refreshWindowMinutes: 8, dailyPointerLimit: 28, autoBuyPointers: false, pointerDailyDiamondLimit: 0,
+    refreshWindowMinutes: 8, dailyPointerLimit: 28, periodPointerLimit: -1, autoBuyPointers: false, pointerDailyDiamondLimit: 0,
     profitLimit: 0, firstDepartureMode: 'smart', firstDepartureTime: '10:00', firstDepartureWaitMinutes: 29,
     autoUpgrade: false },
   loop: { rounds: 0, everySeconds: 60, tasks: false, dailies: false, world: false, heroes: false },
@@ -72,7 +73,8 @@ export const DEFAULT_SETTINGS = {
   resident: { enabled: false, skipCrops: false, skipProduction: false, blockedMaterials: [], minExp: 0, minGold: 0, dailyCap: 0, rewards: false, reroll: false },
   cargo: { enabled: false, dailyLoadLimit: 0 },
   events: { enabled: false, otherOption: 1 },
-  pet: { release: false, releaseQualities: [], enabled: false, claim: false, breed: false, species: [], quality: 'BLUE', universal: false, feed: false, advance: false },
+  pet: { release: false, releaseQualities: [], enabled: false, claim: false, breed: false, species: [], quality: 'BLUE', universal: false, feed: false, advance: false,
+    levelUp: false, levelUids: [] },
   museum: { runEnabled: false, enabled: false, revenue: false, achievements: false, display: false, unlockCases: false, maxDispatches: 1, upgrade: false, factorMode: 'materials', fullRecommendedFactor: 3, partialRecommendedFactor: 2, noRecommendedFallback: false, noRecommendedFactor: 1, factor: 1, materialFactor: false, factorMaterials: [], stockThreshold: 0, matchedFactor: 1, maps: [], targetFragments: [], useGuide: false, dailyGuideLimit: 0 },
   resources: { keepAccelerators: 0, allowDiamonds: false, diamondThreshold: 0, diamondDailyLimit: 2000 },
   // noPrivilege 仅保留旧配置/导出的兼容字段；无权益账号统一走等待领取。
@@ -132,13 +134,14 @@ const constraints = {
   'merchant.quoteMaxAgeSeconds': int(86400, 1), 'merchant.estimateDiscountPercent': int(100),
   'merchant.refreshWaitSeconds': int(3600), 'merchant.liquidationMinutes': int(1440), 'merchant.maxLossPercent': int(100),
   'merchant.minExpectedProfit': int(1000000000, 1), 'merchant.keepPointers': int(1000000),
-  'merchant.speedUpMode': { kind: 'choice', values: ['deadline', 'refresh', 'arrival', 'race', 'full'] }, 'merchant.speedUpMaxPerLeg': int(100, 1),
-  'merchant.refreshWindowMinutes': int(30, 1), 'merchant.dailyPointerLimit': int(1000), 'merchant.pointerDailyDiamondLimit': int(100000),
+  'merchant.speedUpMode': { kind: 'choice', values: ['deadline', 'refresh', 'arrival', 'race', 'full', 'goal', 'eventFree'] }, 'merchant.speedUpMaxPerLeg': int(100, 1),
+  'merchant.refreshWindowMinutes': int(30, 1), 'merchant.dailyPointerLimit': int(1000), 'merchant.periodPointerLimit': int(1000000, -1), 'merchant.pointerDailyDiamondLimit': int(100000),
   'merchant.profitLimit': int(1000000000), 'merchant.firstDepartureMode': { kind: 'choice', values: ['smart', 'time'] },
   'merchant.firstDepartureTime': { kind: 'time' }, 'merchant.firstDepartureWaitMinutes': int(120),
   'merchant.monitorSeconds': int(300, 10),
 
   'ads.waitSeconds':int(120,5),
+  'afk.claimIntervalHours': int(),
   'fleetDispatch.priority': {...strings(8),values:['cityWar','pirateHunt','worldBoss','follow','treasure','radar','silicon','resourceFields']},
   'resourceFields.allocationMode': { kind: 'choice', values: ['ratio', 'quota'] },
   'resourceFields.ratios': { kind: 'resourceAmounts' }, 'resourceFields.quotas': { kind: 'resourceAmounts' },
@@ -159,6 +162,7 @@ const constraints = {
   'factory.speedUpItems': strings(), 'farm.crops': { kind: 'crops' }, 'gather.targetLevel': int(1000, 1),
   'resident.blockedMaterials': strings(), 'resident.minExp': int(), 'resident.minGold': int(), 'resident.dailyCap': int(),
   'pet.releaseQualities': { ...strings(4), values: ['BLUE','PURPLE','ORANGE','RED'] },
+  'pet.levelUids': strings(),
   'forge.decomposeQualities': { ...strings(5), values: ['GREEN','BLUE','PURPLE','ORANGE','RED'] },
   'cargo.dailyLoadLimit': int(), 'pet.species': strings(), 'pet.quality': { kind: 'choice', values: ['BLUE', 'PURPLE', 'ORANGE', 'RED'] },
   'museum.factorMode': { kind: 'choice', values: ['materials', 'recommended'] },
@@ -244,7 +248,7 @@ const nativeFields = {
   tasks: ['loop.tasks', 'resident.rewards'],
 };
 export function applyNativeTask(settings, key, enabled) {
-  const result = copy(settings);
+  const result = copy(migrateVersion62Settings(settings));
   if (removedScheduleKeys.has(key)) { delete result.schedule[key]; return result; }
   if (retiredAutomationTasks.has(key)) enabled = false;
   if (Object.hasOwn(result.schedule, key)) result.schedule[key] = enabled;
@@ -304,7 +308,7 @@ export function settingsFromLegacyNative(tasks, options) {
 }
 
 export function nativeTaskValues(settings, current) {
-  const result = { ...current, ...settings.schedule };
+  const result = { ...current, ...migrateVersion62Settings(settings).schedule };
   delete result.weekFactory;
   delete result.vipDailyGift;
   for (const [key, fields] of Object.entries(nativeFields)) result[key] = fields.some(field => { const [group, name] = field.split('.'); return settings[group][name]; });
@@ -373,6 +377,13 @@ function validateCurrentSettings(input, { partial = false, catalog = null } = {}
   input = migrateVersion54Settings(input);
   input = migrateVersion55Settings(input);
   input = migrateVersion57Settings(migrateVersion56Settings(input));
+  input = migrateVersion59Settings(migrateVersion58Settings(input));
+  input = migrateVersion60Settings(input);
+  input = migrateVersion61Settings(input);
+  input = migrateVersion62Settings(input);
+  if (plain(input?.merchant) && !Object.hasOwn(input.merchant, 'periodPointerLimit')) {
+    input = { ...input, merchant: { ...input.merchant, periodPointerLimit: DEFAULT_SETTINGS.merchant.periodPointerLimit } };
+  }
   if (plain(input?.resourceFields) && !Object.hasOwn(input.resourceFields, 'refillAfterLoss')) {
     input = { ...input, resourceFields: { ...input.resourceFields, refillAfterLoss: false } };
   }
@@ -501,6 +512,7 @@ function validateCurrentSettings(input, { partial = false, catalog = null } = {}
   for (const field of ['followNames', 'avoidNames', 'chaseNames']) if (output.treasure[field].some(value => value !== value.trim() || value.length > 40 || /[\r\n\u0000-\u001f]/.test(value))) errors['treasure.' + field] = '请输入不重复的完整昵称，每项不超过40字符，不含首尾空格或换行';
   for (const field of ['followPlayerIds', 'avoidPlayerIds', 'chasePlayerIds']) if (!output.treasure[field].every(validPlayerIdText)) errors['treasure.' + field] = '角色ID必须为完整的正整数文本，不能使用科学计数法';
   if (!output.alliance.memberIds.every(validPlayerIdText)) errors['alliance.memberIds'] = '请填写完整的正整数角色 ID';
+  if (!output.pet.levelUids.every(validPlayerIdText)) errors['pet.levelUids'] = '请选择编号有效的海兽';
   if (output.treasure.fleetIds.some(value => !/^[1-9]\d*远征船$/.test(value))) errors['treasure.fleetIds'] = '请选择有效的远征舰队';
   if (output.cityWar.enabled && !output.cityWar.fleetIds.length) errors['cityWar.fleetIds'] = '请明确选择参与城战接续的舰队';
   if (output.cityWar.fleetIds.some(value => !/^[1-9]\d*远征船$/.test(value))) errors['cityWar.fleetIds'] = '请选择有效的远征舰队';
@@ -738,6 +750,11 @@ export function importAutomationSettings(document, options) {
 }
 
 const settingsMigrations = new Map([[1, migrateVersion1Settings], [2, migrateVersion2Settings], [3, migrateVersion3Settings], [4, migrateVersion4Settings], [5, migrateVersion5Settings], [6, migrateVersion6Settings], [7, migrateVersion7Settings], [8, migrateVersion8Settings], [9, migrateVersion9Settings], [10, migrateVersion10Settings], [11, migrateVersion11Settings], [12, migrateVersion12Settings], [13, migrateVersion13Settings], [14, migrateVersion14Settings], [15, migrateVersion15Settings], [16, migrateVersion16Settings], [17, migrateVersion17Settings], [18, migrateVersion18Settings], [19, migrateVersion19Settings], [20, migrateVersion20Settings], [21, migrateVersion21Settings], [22, migrateVersion22Settings], [23, migrateVersion23Settings], [24, migrateVersion24Settings], [25, migrateVersion25Settings], [26, migrateVersion26Settings], [27, migrateVersion27Settings], [28, migrateVersion28Settings], [29, migrateVersion29Settings], [30, migrateVersion30Settings], [31, migrateVersion31Settings], [32, migrateVersion32Settings], [33, migrateVersion33Settings], [34, migrateVersion34Settings], [35, migrateVersion35Settings], [36, migrateVersion36Settings], [37, migrateVersion37Settings], [38, migrateVersion38Settings], [39, migrateVersion39Settings], [40, migrateVersion40Settings], [41, migrateVersion41Settings], [42, migrateVersion42Settings], [43, migrateVersion43Settings], [44, migrateVersion44Settings], [45, migrateVersion45Settings], [46, migrateVersion46Settings], [47, migrateVersion47Settings], [48, migrateVersion48Settings], [49, migrateVersion49Settings], [50, migrateVersion50Settings], [51, migrateVersion51Settings], [52, migrateVersion52Settings], [53, migrateVersion53Settings], [54, migrateVersion54Settings], [55, migrateVersion55Settings], [56, migrateVersion56Settings], [57, migrateVersion57Settings]]);
+settingsMigrations.set(58, migrateVersion58Settings);
+settingsMigrations.set(59, migrateVersion59Settings);
+settingsMigrations.set(60, migrateVersion60Settings);
+settingsMigrations.set(61, migrateVersion61Settings);
+settingsMigrations.set(62, migrateVersion62Settings);
 const supportedSettingsVersion = version => Number.isSafeInteger(version) && version >= 1;
 const entrySettingsVersion = entry => Object.hasOwn(entry, 'settingsVersion') ? entry.settingsVersion : 1;
 function newestSettingsVersion(store) {
@@ -1021,15 +1038,23 @@ function migrateVersion8Settings(settings) {
 // Version 10 unifies the world Boss reward switches. Either old switch could
 // enable claims; preserve that choice once without enabling fleet dispatch.
 function migrateVersion9Settings(settings) {
-  if (!plain(settings) || !plain(settings.schedule) || !Object.hasOwn(settings.schedule, 'worldBossDamage')) return settings;
+  return mergeRewardSwitch(settings, 'worldBossDamage', 'worldBossRewards');
+}
+
+function migrateVersion62Settings(settings) {
+  return mergeRewardSwitch(settings, 'worldOnline', 'worldOnlineRewards');
+}
+
+function mergeRewardSwitch(settings, legacyKey, currentKey) {
+  if (!plain(settings) || !plain(settings.schedule) || !Object.hasOwn(settings.schedule, legacyKey)) return settings;
   const schedule = { ...settings.schedule };
-  for (const key of ['worldBossDamage', 'worldBossRewards']) {
+  for (const key of [legacyKey, currentKey]) {
     if (Object.hasOwn(schedule, key) && typeof schedule[key] !== 'boolean') {
       throw new SettingsError({ ['schedule.' + key]: '开关值必须为 true 或 false' });
     }
   }
-  schedule.worldBossRewards = schedule.worldBossRewards === true || schedule.worldBossDamage === true;
-  delete schedule.worldBossDamage;
+  schedule[currentKey] = schedule[currentKey] === true || schedule[legacyKey] === true;
+  delete schedule[legacyKey];
   return { ...settings, schedule };
 }
 
@@ -1155,6 +1180,27 @@ function migrateVersion22Settings(settings) {
 function migrateVersion55Settings(settings) {
   if (!plain(settings?.factory) || Object.hasOwn(settings.factory, 'strategy') && Object.hasOwn(settings.factory, 'simulatedTargets')) return settings;
   return { ...settings, factory: { strategy: 'smart', simulatedTargets: [], ...settings.factory } };
+}
+
+function migrateVersion58Settings(settings) {
+  if (!plain(settings?.pet) || Object.hasOwn(settings.pet, 'levelUp') && Object.hasOwn(settings.pet, 'levelUids')) return settings;
+  return { ...settings, pet: { levelUp: false, levelUids: [], ...settings.pet } };
+}
+
+function migrateVersion59Settings(settings) {
+  if (!plain(settings?.pet) || !Object.hasOwn(settings.pet, 'targetLevel')) return settings;
+  const { targetLevel, ...pet } = settings.pet;
+  return { ...settings, pet };
+}
+
+function migrateVersion60Settings(settings) {
+  if (!plain(settings) || Object.hasOwn(settings, 'afk')) return settings;
+  return { ...settings, afk: { ...DEFAULT_SETTINGS.afk } };
+}
+
+function migrateVersion61Settings(settings) {
+  if (!plain(settings?.schedule) || Object.hasOwn(settings.schedule, 'afkUpgrade')) return settings;
+  return { ...settings, schedule: { ...settings.schedule, afkUpgrade: false } };
 }
 
 function migrateVersion57Settings(settings) {

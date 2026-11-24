@@ -113,6 +113,32 @@ try {
     assert.equal(f.client.writes.length, 2);
     assert.equal(f.ledger.confirmedCounters().piratePetrol, 600);
   });
+  await test('超过确认窗口时优先采用本次查回的胜利或个人战败证据', async () => {
+    for (const outcome of ['won','lost']) {
+      const f = outcome==='lost' ? await lostWithoutEndPush() : fixture('unknown');
+      if (outcome==='won') { await f.run(); f.state.level=1; }
+      f.client.serverClockOffsetMs=16*60000;
+      await checkFleetSettlement(f.client,f.player,f.ledger);
+      const [,record]=recordOf(f);
+      assert.equal(record.details.outcome,outcome);
+      assert.equal(record.confirmed,true);
+      assert(!record.expired);
+    }
+  });
+  await test('超时时读不到个人首杀记录，保留未知汽油直至重新取得归队和首杀记录', async () => {
+    const f=fixture('unknown'); await f.run();
+    f.client.serverClockOffsetMs=16*60000;
+    const request=f.client.request;
+    f.client.request=async(name,...args)=>name==='PirateKillRecordRequest'?{}:request(name,...args);
+    await checkFleetSettlement(f.client,f.player,f.ledger);
+    assert.equal(f.ledger.pendingCounters().piratePetrol,300);
+    assert(!recordOf(f)[1].expired);
+    f.client.request=request;
+    await checkFleetSettlement(f.client,f.player,f.ledger);
+    assert.equal(recordOf(f)[1].details.outcome,'timedOut');
+    assert.equal(f.ledger.pendingCounters().piratePetrol??0,0);
+    assert.equal(pirates.pirateHuntFlights(f.client).length,0);
+  });
   await test('纯账本结算后重新检查首杀也能清理内存，不依赖公共结算产生新变化', async () => {
     const f = await lostWithoutEndPush();
     settleFleetSnapshot(f.ledger, { worldId: String(f.player.worldId), fleets: [f.fleet], reports: [f.report], now: Math.floor(Date.now() / 1000) });
