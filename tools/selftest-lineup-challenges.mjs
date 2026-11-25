@@ -119,6 +119,49 @@ function startTask(f, mode, onError) {
   return task;
 }
 
+await test('手动接管在途主线时等待挂机结算和还原，再挑战更新后的关卡', async () => {
+  const f = fixture();
+  f.settings.progression.trials = false;
+  const sent = pending(), reply = pending(), restoring = pending(), restored = pending();
+  f.beforeReply = () => { sent.resolve(); return reply.promise; };
+  f.restore = () => { restoring.resolve(); return restored.promise; };
+  let task;
+  const round = f.round({ isStageBusy: () => task?.view().running });
+  await sent.promise;
+  task = startTask(f, 'mainline');
+  await nextTurn();
+  reply.resolve();
+  await restoring.promise;
+  assert.equal(task.view().running, true);
+  assert.deepEqual(f.writes.map(write => write.body.stage), [1]);
+  f.won = false;
+  restored.resolve();
+  await round;
+  await finishTask(task);
+  assert.deepEqual(f.writes.map(write => write.body.stage), [1, 2]);
+  assert.equal(f.state.mainline.wins, 1);
+  assert.match(f.state.mainline.reason, /已通关/);
+  assert.equal(task.view().failures, 1);
+});
+
+await test('手动接管未发出的挑战时挂机只跳过同一目标，释放后继续', async () => {
+  for (const mode of ['mainline', 'trial']) {
+    const f = fixture(), reports = [];
+    let busy = false;
+    f.afterApply = context => { if (context.mode === mode) busy = true; };
+    const options = { isStageBusy: () => busy && mode === 'mainline', isTrialBusy: id => busy && mode === 'trial' && id === 1,
+      report: entry => reports.push(entry) };
+    await f.round(options);
+    const writes = f.writes.map(write => write.name);
+    assert.deepEqual(writes, [mode === 'mainline' ? 'TrialRaidChallengeRequest' : 'ChallengeStageRequest']);
+    assert(reports.some(entry => entry.skipped && !entry.error && entry.reason.includes('手动挑战')));
+    busy = false;
+    f.afterApply = undefined;
+    await f.round(options);
+    assert.deepEqual(f.writes.slice(1).map(write => write.name), ['ChallengeStageRequest', 'TrialRaidChallengeRequest']);
+  }
+});
+
 await test('单次和连续主线/试炼在同一队列中依次切阵、确认战果、还原', async () => {
   for (const mode of ['mainline', 'trial', 'single']) {
     const f = fixture();

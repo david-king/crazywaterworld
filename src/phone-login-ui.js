@@ -4,7 +4,7 @@ let phoneBusy = false;
 let phonePending = null;
 let phoneSavedAccount = null;
 let phoneGeneration = 0;
-let phoneChoiceId = '';
+const phoneSelection = createRoleSelection();
 let phoneRoleInputs = [];
 let phoneExpiryTimer = null;
 let smsTimer = null;
@@ -34,7 +34,7 @@ function setPhoneBusy(busy) {
   const expired = !phonePending || phonePending.expiresAt <= Date.now();
   for (const input of phoneRoleInputs) input.disabled = busy || expired;
   $('phone-roles-retry').disabled = busy || expired;
-  $('phone-save').disabled = busy || expired || !selectedPhoneRole();
+  $('phone-save').disabled = busy || expired || !phoneSelection.selected(phonePending?.choices).length;
   updateSmsButton();
   if (typeof accountAddChanged === 'function') {
     accountAddChanged('phone', phoneSavedAccount ? 'saved' : phonePending ? 'selecting' : 'entry', { busy, account: phoneSavedAccount });
@@ -43,14 +43,6 @@ function setPhoneBusy(busy) {
 
 function phoneAccountName(value) {
   return String(value || '').replace(/\b(1[3-9][0-9])[0-9]{4}([0-9]{4})\b/g, '$1****$2');
-}
-
-function selectedPhoneRole() {
-  return phonePending?.choices?.find(choice => choice.id === phoneChoiceId);
-}
-
-function phoneRoleWorld(role) {
-  return role.roleWorldName || role.worldName || '区服 ' + role.worldId;
 }
 
 function phoneInvalid(id, message) {
@@ -180,10 +172,9 @@ function expirePhonePending() {
 }
 
 function renderPhonePending(data) {
-  const previous = selectedPhoneRole();
   phonePending = { ...data, expiresAt: data.expiresAt || Date.now() + 10 * 60 * 1000 };
   const choices = phonePending.choices || [];
-  phoneChoiceId = choices.find(choice => choice.accountId === previous?.accountId && choice.worldId === previous?.worldId)?.id || '';
+  phoneSelection.receive(data.id, choices);
   phoneRoleInputs = [];
   $('phone-entry').hidden = true;
   $('phone-success').hidden = true;
@@ -193,24 +184,24 @@ function renderPhonePending(data) {
   box.appendChild(el('p', null, '本次查询 ' + (data.linkedAccountCount || 1) + ' 个 APP 账号，已找到 ' + choices.length + ' 个角色。'));
   if (choices.length) {
     const list = el('fieldset', 'phone-roles');
-    list.appendChild(el('legend', null, '选择要使用的角色'));
+    list.appendChild(el('legend', null, '选择要使用的角色（可多选）'));
     for (const choice of choices) {
       const row = el('label', 'phone-role');
       const input = el('input');
-      input.type = 'radio';
+      input.type = 'checkbox';
       input.name = 'phone-role';
       input.value = choice.id;
-      input.checked = choice.id === phoneChoiceId;
+      input.checked = phoneSelection.has(choice);
       input.onchange = () => {
-        if (!input.checked || phoneBusy || phonePending.expiresAt <= Date.now()) return;
-        phoneChoiceId = choice.id;
+        if (phoneBusy || phonePending.expiresAt <= Date.now()) return;
+        phoneSelection.set(choice, input.checked);
         updatePhoneSelection();
         setPhoneBusy(false);
       };
       phoneRoleInputs.push(input);
       const info = el('div', 'phone-role-info');
       const heading = el('div', 'phone-role-heading');
-      heading.append(el('strong', null, choice.nickname || '未命名角色'), el('span', null, phoneRoleWorld(choice)));
+      heading.append(el('strong', null, choice.nickname || '未命名角色'), el('span', null, (choice.roleWorldName || choice.worldName || '区服 ' + choice.worldId)));
       info.appendChild(heading);
       const stats = [];
       if (choice.level != null) stats.push('等级 ' + choice.level);
@@ -218,7 +209,7 @@ function renderPhonePending(data) {
       if (stats.length) info.appendChild(el('p', 'dim', stats.join(' · ')));
       info.appendChild(el('p', 'dim', 'APP 账号 ' + phoneAccountName(choice.userName || data.phone || '益世界账号')));
       if (choice.roleWorldId && String(choice.roleWorldId) !== String(choice.worldId)) {
-        info.appendChild(el('p', 'dim', '原区服 ' + (choice.worldName || choice.worldId) + '，合服后位于 ' + phoneRoleWorld(choice)));
+        info.appendChild(el('p', 'dim', '原区服 ' + (choice.worldName || choice.worldId) + '，合服后位于 ' + (choice.roleWorldName || choice.worldName || '区服 ' + choice.worldId)));
       }
       if (choice.matched) info.appendChild(el('p', 'dim', '已有记录 ' + (choice.existingTitle || choice.nickname) + '，保存会刷新本角色的资料和登录凭据。'));
       row.append(input, info);
@@ -248,9 +239,9 @@ function renderPhonePending(data) {
 }
 
 function updatePhoneSelection() {
-  const role = selectedPhoneRole();
-  $('phone-selection').textContent = role
-    ? '已选择 ' + (role.nickname || '未命名角色') + ' · ' + phoneRoleWorld(role)
+  const roles = phoneSelection.selected(phonePending?.choices);
+  $('phone-selection').textContent = roles.length
+    ? '已选择 ' + selectedRoleNames(roles)
     : phonePending?.choices?.length ? '请选择要使用的角色，再点击「保存所选角色」。' : '当前没有可选择的角色，可重试读取或返回检查登录账号。';
 }
 
@@ -359,7 +350,7 @@ async function resetPhoneEntry() {
   }
   phonePending = null;
   phoneSavedAccount = null;
-  phoneChoiceId = '';
+  phoneSelection.reset();
   phoneRoleInputs = [];
   clearTimeout(phoneExpiryTimer);
   $('phone-preview').hidden = true;
@@ -405,8 +396,8 @@ $('phone-save').onclick = async () => {
   if (phoneBusy || !phonePending) return;
   const pending = phonePending;
   if (pending.expiresAt <= Date.now()) return expirePhonePending();
-  const role = selectedPhoneRole();
-  if (!role) {
+  const roles = phoneSelection.selected(phonePending?.choices);
+  if (!roles.length) {
     phoneHint('请先选择要使用的区服和角色。', true);
     phoneRoleInputs[0]?.focus();
     return;
@@ -414,28 +405,27 @@ $('phone-save').onclick = async () => {
   setPhoneBusy(true);
   $('phone-save').textContent = '正在保存…';
   try {
-    if (!await configMayChangeAccount(role.accountId)) {
+    if (!await configMayChangeAccount(roles[0].profileId || roles[0].accountId)) {
       phoneHint('当前账号的配置尚未保存，请处理配置后再次保存此账号。', true);
       return;
     }
-    const data = await call('/api/accounts/phone-login/save', { method: 'POST', body: JSON.stringify({ confirm: true, id: pending.id, choiceId: role.id }) });
+    const data = await call('/api/accounts/phone-login/save', { method: 'POST', body: JSON.stringify({ confirm: true, id: pending.id, ...roleSavePayload(roles) }) });
     phonePending = null;
     phoneSavedAccount = data.account;
     clearTimeout(phoneExpiryTimer);
     // 保存接口已切换服务端账号，客户端同步使用同一账号。
-    stateActions.upsertAccount({ ...accounts.find(account => account.id === data.account.id), ...data.account });
-    if (!accounts.find(account => account.id === data.account.id)?.status?.connected) stateActions.setFlag('disconnected', data.account.id, true);
+    showSavedRoleAccounts(data);
     accountDetailsOwner = null;
     selectLoadedAccount(data.account.id);
     renderAccounts();
     $('phone-preview').hidden = true;
     $('phone-success').hidden = false;
-    $('phone-saved-account').textContent = (role.nickname || '未命名角色') + ' · ' + phoneRoleWorld(role);
+    $('phone-saved-account').textContent = selectedRoleNames(data.selectedRoles || roles);
     let nextStep = '手动开始挂机';
     let nextHint = '账号已保存，尚未开始挂机。可先在「挂机配置」设置任务，再点击账号卡片或页头的「开始挂机」。';
     if (data.account.hasSiblingRoles && snapshot.paused) {
-      nextStep = '切换并托管';
-      nextHint = '角色已添加。配置好本角色的任务后，点击「切换并托管」即可从同账号的其他角色接手。';
+      nextStep = '同时托管此角色';
+      nextHint = '角色已添加。可在各角色卡片分别配置任务并开始托管。';
     } else if (snapshot.paused || snapshot.loginBlocked) {
       nextStep = '恢复托管';
       nextHint = '请点击页面顶部的「恢复托管」，连接后核对角色和区服。';

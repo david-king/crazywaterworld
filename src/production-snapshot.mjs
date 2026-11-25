@@ -5,6 +5,8 @@ import { toNumber } from './client.mjs';
 import { exactAutomationId, resourceReserve, worldPreferenceEnabled } from './automation-policy.mjs';
 import { makeTypeResolver, upgradeRow, factoryRecipeAvailability } from './world.mjs';
 import { readWeekOrder, weekSchedule } from './activities.mjs';
+import { guildOrderCounterChanged, guildOrderProgress, guildOrderQuota } from './guild-orders.mjs';
+import { beijingDay } from './usage-ledger.mjs';
 import { baseDemands } from './base-automation.mjs';
 import { readGuildShips, guildShipApplicationDeadline } from './guild-ships.mjs';
 import { watchHeroRaidPushes } from './hero-raid-automation.mjs';
@@ -156,10 +158,22 @@ export function buildProductionSnapshot(raw, config, settings = {}) {
     addOrder('cargo', String(ship.index ?? 0) + ':' + digest(ship.orderItem), ship.orderItem.filter(slot => !slot?.filled).map(slot => slot?.asset),
       null, { shipIndex: ship.index ?? 0, enabled: settings.cargo?.enabled !== false });
   }
-  if (raw.guildOrder?.order) addOrder('guildRecruit', digest(raw.guildOrder.order), raw.guildOrder.order.requirements,
-    null, { refreshAt: timestamp(raw.guildOrder.order.nextRefreshTime),
-      enabled: settings.alliance?.enabled === true && settings.alliance.recruit === true });
-  else if (raw.guildOrder != null) incomplete('GuildOrderRequest', '联盟订单未完整返回');
+  if (raw.guildOrder?.order) {
+    const order = raw.guildOrder.order;
+    const enabled = settings.alliance?.enabled === true && settings.alliance.recruit === true;
+    const metadata = { refreshAt: timestamp(order.nextRefreshTime), enabled };
+    if (order.requirements?.length) {
+      try {
+        const { maxNum } = guildOrderQuota(config, raw.player);
+        const { limitReason } = guildOrderProgress(raw.guildCounters, maxNum,
+          enabled ? settings.alliance.recruitDailyLimit : 0, raw.guildRecruitUsed);
+        if (limitReason) metadata.recruitBlock = { kind: 'dailyLimit', label: '今日募兵已达上限', reason: limitReason };
+      } catch (error) {
+        metadata.recruitBlock = { label: '募兵次数待确认', reason: error.message };
+      }
+    }
+    addOrder('guildRecruit', digest(order), order.requirements, null, metadata);
+  } else if (raw.guildOrder != null) incomplete('GuildOrderRequest', '联盟订单未完整返回');
   // A confirmed cabin.player is the existing guild-ship module's receipt for
   // GuildShipOrderRequest. Its materials have already been submitted.
   const shipCandidate = raw.guildShipView?.candidates?.find(row => row.kind === 'crew' && row.type === 3);
@@ -295,7 +309,7 @@ export async function readProductionSnapshot(client, protocol, config, player, s
     try {
       return await readSnapshotOnce(client, protocol, config, player, settings, options, checkContext);
     } catch (error) {
-      if (error.code !== 'PRODUCTION_SNAPSHOT_CHANGED' || !error.updatePush || attempt >= 3) throw error;
+      if (error.code !== 'PRODUCTION_SNAPSHOT_CHANGED' || !error.retryable || attempt >= 3) throw error;
       await delay(200 * attempt);
     }
   }
@@ -306,13 +320,13 @@ async function readSnapshotOnce(client, protocol, config, player, settings, opti
   const check = () => {
     checkContext();
     if (otherRequest) throw Object.assign(new Error('读取期间有其他游戏操作，请稍后重新生成计划'), { code: 'PRODUCTION_SNAPSHOT_CHANGED' });
-    if (updatePush) throw Object.assign(new Error('游戏数据仍在更新，请稍后重新生成计划'), { code: 'PRODUCTION_SNAPSHOT_CHANGED', updatePush });
+    if (updatePush) throw Object.assign(new Error('游戏数据仍在更新，请稍后重新生成计划'), { code: 'PRODUCTION_SNAPSHOT_CHANGED', updatePush, retryable: true });
   };
   const reads = [], cache = new Map(), raw = { player, reads };
   const allowed = new Set(['OnWaterRequest', 'AllItemRequest', 'AllResourceRequest', 'GameEffectRequest', 'WeekInfoRequest',
     'WeekOrderInfoRequest', 'CargoShipsRequest', 'GuildOrderRequest', 'GuildShipRequest', 'GuildInfoRequest', 'AllHeroRequest',
-    'RadarInfoRequest', 'MuseumInfoRequest', 'MonthCardRequest', 'AllPetRequest']);
-  const optional = new Set(['MonthCardRequest', 'AllHeroRequest', 'MuseumInfoRequest', 'GuildInfoRequest', 'GuildShipRequest', 'AllPetRequest']);
+    'RadarInfoRequest', 'MuseumInfoRequest', 'MonthCardRequest', 'AllPetRequest', 'CounterInfoRequest']);
+  const optional = new Set(['MonthCardRequest', 'AllHeroRequest', 'MuseumInfoRequest', 'GuildInfoRequest', 'GuildShipRequest', 'AllPetRequest', 'CounterInfoRequest']);
   const request = async (name, body = {}, response = name.replace(/Request$/, 'Response')) => {
     check();
     if (!allowed.has(name)) throw new Error('生产快照不允许此请求 ' + name);
@@ -346,8 +360,8 @@ async function readSnapshotOnce(client, protocol, config, player, settings, opti
   const observeFrame = ({ dir, name } = {}) => {
     if (dir === 'out' && !allowed.has(name) && !transport.has(name)) otherRequest = true;
   };
-  const observeMessage = ({ name } = {}) => {
-    if (changingPushes.has(name) || /^SC(?:HeroRaid|GuildShip)/.test(name ?? '')) updatePush ??= name;
+  const observeMessage = ({ name, body } = {}) => {
+    if (changingPushes.has(name) || guildOrderCounterChanged(name, body) || /^SC(?:HeroRaid|GuildShip)/.test(name ?? '')) updatePush ??= name;
   };
   client.on?.('frame', observeFrame);
   client.on?.('message', observeMessage);
@@ -379,8 +393,16 @@ async function readSnapshotOnce(client, protocol, config, player, settings, opti
     const cargoLevel = cargoLevels.length ? Math.min(...cargoLevels) : null;
     if (amount(cargoLevel) !== null && amount(player?.level) !== null && player.level < cargoLevel) reads.push({ request: 'CargoShipsRequest', status: 'notApplicable', reason: '贸易港尚未开放' });
     else await get('cargo', 'CargoShipsRequest');
+    let recruitDay;
     if (exactAutomationId(player?.guildId)) {
+      recruitDay = beijingDay(now() * 1000);
       await get('guildOrder', 'GuildOrderRequest');
+      if (raw.guildOrder?.order?.requirements?.length) {
+        await get('guildCounters', 'CounterInfoRequest');
+        if (settings.alliance?.enabled && settings.alliance.recruit && settings.alliance.recruitDailyLimit > 0) {
+          raw.guildRecruitUsed = options.ledger?.snapshot().counters.guildRecruit;
+        }
+      }
       const radarLevel = amount(rows(config, 'ModuleOpenCfg').find(row => row.moduleId === '联盟情报')?.playerLevel);
       if (radarLevel === null || amount(player?.level) === null) reads.push({ request: 'RadarInfoRequest', status: 'missing', reason: '联盟情报开放条件未确认' });
       else if (player.level < radarLevel) reads.push({ request: 'RadarInfoRequest', status: 'notApplicable', reason: '联盟情报尚未开放' });
@@ -418,6 +440,9 @@ async function readSnapshotOnce(client, protocol, config, player, settings, opti
     raw.observedDurations = options.observedDurations ?? [];
     raw.capturedAt = new Date(options.now?.() ?? Date.now()).toISOString();
     check();
+    if (raw.guildOrder?.order?.requirements?.length && recruitDay !== beijingDay(raw.serverNow * 1000)) {
+      throw Object.assign(new Error('募兵读取期间已换日，需重新核对订单和次数'), { code: 'PRODUCTION_SNAPSHOT_CHANGED', retryable: true });
+    }
     return buildProductionSnapshot(raw, config, settings);
   } finally {
     client.off?.('frame', observeFrame);

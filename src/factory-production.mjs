@@ -4,12 +4,14 @@ import { AutomationSkip, createActionGuard, resourceReserve, worldActionAllowed 
 import { goldAccountKey } from './gold-reservations.mjs';
 import { farmInventory } from './farm-planting.mjs';
 import { pendingOrderMaterialSpends, readOrderReservedStock, settleOrderMaterialState } from './order-reservations.mjs';
-import { insertionRecipeReady } from './production-eligibility.mjs';
+import { factoryRecipeCosts, insertionRecipeReady } from './production-eligibility.mjs';
 import { factoryProductionSnapshot, factoryProductionOperation } from './spend-evidence.mjs';
 import { factoryInsertions } from './factory-insert-store.mjs';
 import { insertionYieldsToProduction } from './factory-insertion-queue.mjs';
 import { emitDiagnostic } from './trace-log.mjs';
 import { simulatedFactoryQueueKey } from './factory-native-simulation.mjs';
+import { editingFactoryQueue, readyRefillUnits, resolveFactoryRefills, refillCanTakeOver, refillSpeedUpJobs, refillGoal, refillHistoryFor } from './factory-refill.mjs';
+import { productionDemandChanged, queueStamp } from './factory-replanning.mjs';
 
 const pending = new Map(), busy = new Set();
 const resourceIds = new Set(['GOLD', 'RUBY', 'EXP', 'ARENA_POINT', 'LEAGUE_POINT']);
@@ -129,15 +131,82 @@ export async function confirmFactoryProductionBeforeHarvest(client, protocol, bu
   finally { busy.delete(key); }
 }
 
+export function liveFactoryRefill(buildingId, {water, stock, incoming, cap, settings, config, client, player}) {
+  const owned = id => stock.get(id) ?? 0;
+  return resolveFactoryRefills(water.building,settings,{config,cap,owned,available:id => owned(id) - resourceReserve(settings,id),
+    incoming,now:clock(client),festivals:client.festivals,history:refillHistoryFor(player),record:true,
+    autoProduceForever:water.autoProduceForever,autoProduceEndTime:water.autoProduceEndTime}).get(buildingId);
+}
+
+export async function prepareFactoryInterruption(client, protocol, step, {player, config, enabled, getSettings}) {
+  const rule = step.refillRule, {buildingId} = step.body, productId = rule?.productId;
+  await confirmFactoryProductionBeforeHarvest(client, protocol, buildingId, {player, enabled});
+  const stock = farmInventory(normalize(await client.request('AllItemRequest', {}, 'AllItemResponse')));
+  const water = normalize(await client.request('OnWaterRequest', {}, 'OnWaterResponse'));
+  const live = factoryProductionSnapshot(water, buildingId);
+  if (!enabled() || !live
+    || live.building.factory.autoProductId && (water.autoProduceForever || water.autoProduceEndTime > clock(client))) {
+    throw new AutomationSkip('工厂生产状态已变化，等待重新排产');
+  }
+  const factorySettings = getSettings()?.factory, rules = factorySettings?.refillRules ?? [];
+  const verifiedSettings = JSON.stringify(factorySettings);
+  const cap = factoryStockCapacity(config, player);
+  const incoming = rules.length ? confirmedFactoryIncoming(water) : new Map();
+  const active = rules.length ? liveFactoryRefill(buildingId,{water,stock,incoming,cap,settings:getSettings(),config,client,player}) : undefined;
+  if (step.queueReplan && (queueStamp(live.queue) !== step.verify.queue
+    || step.verify.stock.some(([id,n]) => (stock.get(id) ?? 0) !== n))) {
+    throw new AutomationSkip('库存或等待队列已变化，重新核对需求');
+  }
+  if (active?.rule?.productId !== productId || !!active?.supply !== !!step.refillSupply
+    || rule && (stock.get(productId) ?? 0) + readyRefillUnits(water.building, productId) >= refillGoal(rule, cap)) {
+    throw new AutomationSkip('补库库存已变化，等待重新排产');
+  }
+  const cancel = step.request === 'CancelFactoryProduceRequest';
+  const job = live.queue.find(j => (j.idx ?? 0) === step.body.index);
+  if (!job || job.productId !== step.verify.productId || job.productId === productId
+    || (cancel ? job === live.queue[0] || job.finishTime : !refillSpeedUpJobs(live.queue, productId, clock(client)).includes(job))) {
+    throw new AutomationSkip('工厂队列已变化，等待重新排产');
+  }
+  if (rule) {
+    const missing = refillGoal(active.rule, cap) - (stock.get(productId) ?? 0) - (incoming.get(productId) ?? 0);
+    const available = id => (stock.get(id) ?? 0) - resourceReserve(getSettings(), id);
+    if (!refillCanTakeOver(live.queue, productId, missing, factoryRecipeCosts(active.recipe), available))
+      throw new AutomationSkip('补库原料不足或已排足，保留当前队列');
+  }
+  function beforeSend() {
+    const now = clock(client);
+    const insertion = factoryInsertions(player)[buildingId];
+    if (!enabled() || JSON.stringify(getSettings()?.factory) !== verifiedSettings || (step.queueReplan ? insertion : editingFactoryQueue(insertion)) ||
+      cancel && (!live.queue.some(j => j.finishTime > now) || live.queue.some(j => j.finishTime && j.finishTime <= now))) {
+      throw new AutomationSkip('工厂设置或生产格已变化，等待重新排产');
+    }
+  }
+  beforeSend();
+  return {water, beforeSend, async cancellationConfirmed() {
+    const after = factoryProductionSnapshot(normalize(await client.request('OnWaterRequest', {}, 'OnWaterResponse')), buildingId);
+    return !!after && !after.queue.some(j => (j.idx ?? 0) === step.body.index && j.productId === job.productId)
+      && (after.totals.get(job.productId) ?? 0) < live.totals.get(job.productId);
+  }};
+}
+
 // The wire protocol accepts one product per request. Reserve a bounded batch,
 // keep its writes serial, then reconcile it once against queue + finished stock.
 export async function runFactoryProductionBatch(client, protocol, steps, {
   config, player, settings = null, getSettings, enabled = () => true,
-  beforeStep, afterStep, cancelStep, window = 400, onStep, checkStep, checkSnapshot,
+  beforeStep, afterStep, cancelStep, window = 400, onStep, checkStep, checkSnapshot, beforeDispatch,
 } = {}) {
   if (!Array.isArray(steps) || !steps.length) return { results: [] };
   const results = [], attemptedEntries = new Set(), current = () => getSettings?.() ?? settings;
   let account, lock, batch, batchStep, ticket, prepared = false, acquired = false, actionGuard;
+  const supply = steps[0].refillSupply;
+  let supplyChanged = false;
+  const observeSupply = ({name,body}) => {
+    if (productionDemandChanged(name,body) || name === 'SCUpdateWaterBuilding' && body?.building?.length) supplyChanged = true;
+  };
+  const checkDispatch = step => {
+    beforeDispatch?.(step);
+    if (supplyChanged) throw new AutomationSkip('上游补料的库存或队列已变化，等待重新排产');
+  };
   const publish = () => {
     const members = [...attemptedEntries];
     const first = members[0];
@@ -167,6 +236,7 @@ export async function runFactoryProductionBatch(client, protocol, steps, {
     lock = account + ':' + buildingId;
     if (busy.has(lock)) { for (const step of steps) results.push(skipped(step, '同一工厂正在处理排产')); return publish(); }
     busy.add(lock); acquired = true;
+    if (supply) client.on?.('message',observeSupply);
     const live = () => enabled('startProduce') && client.connected !== false && goldAccountKey(player) === account;
     const ensureLive = () => { if (!live()) throw new AutomationSkip('排产已暂停、断开或账号已切换'); };
     ensureLive();
@@ -186,6 +256,7 @@ export async function runFactoryProductionBatch(client, protocol, steps, {
     const reserves = new Map(costsOf(selected).map(row => [row.id, resourceReserve(current(), row.id)]));
     const check = async step => {
       ensureLive();
+      checkDispatch(step);
       if (!worldActionAllowed(current(), step, config)) throw new AutomationSkip('普通排产已关闭或此工厂已禁用');
       if (JSON.stringify(current()?.factory) !== factorySettings) throw new AutomationSkip('工厂设置已变化，等待重新排产');
       if ([...reserves].some(([id, amount]) => resourceReserve(current(), id) > amount)) throw new AutomationSkip('材料保留量已提高，等待重新核对库存');
@@ -207,8 +278,9 @@ export async function runFactoryProductionBatch(client, protocol, steps, {
     };
     for (const step of selected) await check(step);
     if (checkSnapshot) { await checkSnapshot(snapshot.building); ensureLive(); }
-    const insertion = selected[0].factoryStrategy ? factoryInsertions(player)[buildingId] : null;
-    const alternativeStock = await readInsertionAlternativeStock(client, protocol, config, insertion, {player,settings:current(),enabled:live});
+    const refill = selected[0].refillRule;
+    const insertion = selected[0].factoryStrategy || refill ? factoryInsertions(player)[buildingId] : null;
+    const alternativeStock = refill ? null : await readInsertionAlternativeStock(client, protocol, config, insertion, {player,settings:current(),enabled:live});
     ensureLive();
     batch = { attempted: [], sealed: false };
     batch.operation = factoryProductionOperation(water, buildingId, batch);
@@ -221,6 +293,15 @@ export async function runFactoryProductionBatch(client, protocol, steps, {
     ensureLive();
     const cap = factoryStockCapacity(config, player);
     const incoming = confirmedFactoryIncoming(water);
+    const rules = current()?.factory?.refillRules ?? [];
+    let refillTarget;
+    if (refill || selected[0].factoryStrategy && rules.length) {
+      const active = liveFactoryRefill(buildingId,{water,stock,incoming,cap,settings:current(),config,client,player});
+      if (refill?.productId !== active?.rule.productId || !!selected[0].refillSupply !== !!active?.supply)
+        throw new AutomationSkip('补库状态已变化，等待重新排产');
+      if (refill) refillTarget = Math.min(refillGoal(refill,cap),refillGoal(active.rule,cap));
+      if (refill && snapshot.queue.some(j => !j.finishTime && j.productId !== refill.productId)) throw new AutomationSkip('等待撤下排队中的其他产品');
+    }
     const projected = new Map(incoming);
     for (const step of selected) {
       const id = step.body.productId;
@@ -229,7 +310,8 @@ export async function runFactoryProductionBatch(client, protocol, steps, {
       const preferences = current(), independent = preferences?.alliance?.enabled && (preferences.alliance.recruit && preferences.alliance.recruitProduction
         || preferences.guildShip?.enabled && preferences.guildShip.produceMissing);
       const stockOnly = step.demandDriven === false || step.demandDriven == null && preferences?.factory?.demandFirst === false && !independent;
-      if (stockOnly && preferences && step.factoryStrategy !== 'nativeSimulation' && (stock.get(id) ?? 0) + projected.get(id) > preferences.factory.keepStock) throw new AutomationSkip('最新库存已达到备货水位，等待重新排产');
+      if (refill && (id !== refill.productId || (stock.get(id) ?? 0) + projected.get(id) > refillTarget)) throw new AutomationSkip('优先补库已排足，等待重新排产');
+      if (!refill && stockOnly && preferences && step.factoryStrategy !== 'nativeSimulation' && (stock.get(id) ?? 0) + projected.get(id) > preferences.factory.keepStock) throw new AutomationSkip('最新库存已达到备货水位，等待重新排产');
       // This start must succeed before the next wire request can use the space.
       if (step.factoryStrategy === 'nativeSimulation') for (const { id: input, num } of step.costs) {
         projected.set(input, (projected.get(input) ?? 0) - num);
@@ -245,10 +327,13 @@ export async function runFactoryProductionBatch(client, protocol, steps, {
         batch.attempted.push({ body: { ...step.body }, costs: structuredClone(step.costs ?? []) }); attempted = true;
         const sent = await client.sendWatch(step.request, step.body, { window, beforeSend: () => {
           ensureLive();
-          if (!worldActionAllowed(current(), step, config)) throw new AutomationSkip('排产策略或目标已变化，等待重新排产');
+          checkDispatch(step);
+          if (!worldActionAllowed(current(), step, config) || JSON.stringify(current()?.factory) !== factorySettings) throw new AutomationSkip('排产策略或目标已变化，等待重新排产');
           if (step.latestStart != null && clock(client)>step.latestStart) throw new AutomationSkip('第二生产位剩余时间不足，等待重新排产');
           if (step.beforeInsertSend) step.beforeInsertSend();
-          else {
+          else if (refill) {
+            if (editingFactoryQueue(factoryInsertions(player)[buildingId])) throw new AutomationSkip('等待工厂插单操作确认');
+          } else {
             const entry = factoryInsertions(player)[buildingId];
             const isFull = id => (stock.get(id) ?? 0) + (incoming.get(id) ?? 0) >= cap;
             const now = clock(client);
@@ -307,6 +392,9 @@ export async function runFactoryProductionBatch(client, protocol, steps, {
       catch (settlementError) { await actionGuard.cancel(batchStep, ticket, { error: settlementError }); }
     }
     for (const step of steps) if (!results.some(entry => entry.step === step)) results.push({ ...skipped(step, error.message), failureError: error });
-  } finally { if (acquired) busy.delete(lock); }
+  } finally {
+    if (supply) client.off?.('message',observeSupply);
+    if (acquired) busy.delete(lock);
+  }
   return publish();
 }

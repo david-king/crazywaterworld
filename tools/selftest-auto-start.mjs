@@ -12,7 +12,7 @@ process.env.CW_CONFIG_PACK = path.join(directory, 'config.json');
 fs.writeFileSync(process.env.CW_CONFIG_PACK, '[]');
 
 const { GameClient } = await import('../src/client.mjs');
-const { loadStore, saveStore } = await import('../src/accounts.mjs');
+const { loadStore, saveStore, matchingProfile } = await import('../src/accounts.mjs');
 const { createConsole } = await import('../src/server.mjs');
 const { automationTasks } = await import('../src/automation.mjs');
 const { loadAutomationSettings, saveAutomationSettings, settingsFromNative } = await import('../src/automation-settings.mjs');
@@ -57,6 +57,7 @@ GameClient.prototype.request = async function (name) {
   }
   if (name === 'OnWaterRequest') return { building: [] };
   if (name === 'AllItemRequest') return { items: [] };
+  if (name === 'GameWorldListRequest') return { recentWorlds: this.fixture.worlds || [] };
   if (name === 'AchievementInfoRequest') return { task: this.fixture.achievement ? [this.fixture.achievement] : [] };
   return {};
 };
@@ -423,6 +424,30 @@ try {
     }
   });
 
+  await test('同账号两个区服并行挂机，重启恢复两者，暂停只断开目标角色', async () => {
+    const first = account({ autoStart: true });
+    const second = account({ autoStart: false, paused: true });
+    second.row.login.eworldParams.openId = first.id;
+    first.row.login.worldId = { low: 1001, high: 0, unsigned: false };
+    second.row.login.worldId = 1002;
+    await launch([first, second]);
+    assert.equal(matchingProfile(loadStore(), first.row, 1001)?.id, first.id);
+    assert.equal(matchingProfile(loadStore(), first.row, 1003), undefined);
+    await running(first.id);
+    const original = session(first.id).client;
+    await api(second.id, 'accounts/pause', { paused: false, start: true });
+    await running(second.id);
+    assert.equal(original.connected, true);
+    assert.equal(live.size, 2);
+    await shutdown(); await launch();
+    await Promise.all([running(first.id), running(second.id)]);
+    assert.equal(live.size, 2);
+    await api(second.id, 'accounts/pause', { paused: true });
+    assert.equal(session(first.id).loop.running, true);
+    assert.equal(session(first.id).client.connected, true);
+    assert.equal(live.size, 1);
+  });
+
   await test('同账号切换等待旧角色任务退出，重启只恢复接手角色', async () => {
     const first = account({ autoStart: true });
     const second = account({ autoStart: false, paused: true });
@@ -435,7 +460,7 @@ try {
     let switching;
     try {
       await waitFor(() => first.state.requests.includes('EmailBoxRequest'), '旧角色正在处理邮件');
-      switching = api(second.id, 'accounts/pause', { paused: false, start: true });
+      switching = api(second.id, 'accounts/pause', { paused: false, start: true, exclusive: true });
       await waitFor(() => session(first.id).paused, '切换已暂停旧角色');
       assert.equal(second.state.logins, 0);
     } finally { release(); }
@@ -604,6 +629,32 @@ try {
     await waitFor(() => f.state.logins === 2 && session(f.id).loop.running && session(f.id).loop.completed >= 1, '重连后自动挂机');
     assert.equal(session(f.id).loginBlocked, false);
     assert.equal(saved(f.id).autoStart, true);
+  });
+
+  await test('交互采集按勾选的角色批量入库，取消与过期选择不保存', async () => {
+    const f = account();
+    f.state.worlds = [1, 2, 3].map(n => ({ worldId: 9000 + n, roleInfo: { id: n, nickname: '船长' + n, worldId: 9000 + n } }));
+    await launch([]);
+    async function preview() {
+      await api('', 'capture/start', { selectRoles: true });
+      await capturedLogin({ url: f.row.url, body: f.row.login });
+      const { rolePreviewId: id } = await api('', 'capture');
+      const { choices } = await api('', 'capture/roles', { id });
+      assert.equal(choices.length, 3);
+      assert.equal(loadStore().accounts.length, 0);
+      return { id, choiceIds: choices.slice(1).map(row => row.id) };
+    }
+    const cancelled = await preview();
+    await api('', 'capture/cancel-roles', { id: cancelled.id });
+    assert.equal((await response('', 'capture/save-roles', cancelled)).status, 400);
+    const batch = await preview();
+    assert.equal((await response('', 'capture/save-roles', { ...batch, choiceIds: [batch.choiceIds[0], 'old'] })).status, 400);
+    assert.equal(loadStore().accounts.length, 0);
+    const saved = await api('', 'capture/save-roles', batch);
+    assert.deepEqual(saved.selectedRoles.map(r => r.nickname), ['船长2', '船长3']);
+    assert.deepEqual(loadStore().accounts.map(a => a.login.worldId), [9002, 9003]);
+    assert.equal(live.size, 0);
+    assert.equal((await api('', 'capture')).rolePreviewId, null);
   });
 
   await test('新采集账号默认停止，手动开启后运行，暂停与刷新凭证保留关闭选择', async () => {

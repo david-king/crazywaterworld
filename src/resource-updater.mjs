@@ -221,7 +221,7 @@ export function createResourceUpdater({ root = resourceDirectory(), policy, fetc
       if (!policy.enabled) { state.status = 'disabled'; notify('info', '资源自动更新未启动：' + policy.disabledReason); return; }
       notify('info', '配置表和地图自动更新：启动时检查，之后每 ' + policy.intervalMinutes + ' 分钟检查；'
         + (automaticPolicy && !process.env.CW_RESOURCE_APP_VERSION ? '自动识别本机微信客户端版本' : '指定客户端 ' + policy.appVersion)
-        + '。协议从本机游戏包读取，不在远程资源下载范围内');
+        + '。游戏协议随仓库提供，也可从本机游戏包更新');
       await check(); schedule();
     },
     async stop() {

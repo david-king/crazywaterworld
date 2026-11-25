@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto';
-import { exactAutomationId, resourceReserve, usageLimits } from './automation-policy.mjs';
+import { exactAutomationId, resourceReserve } from './automation-policy.mjs';
 import { displayMaterial } from './config.mjs';
+import { EXTENDED_DEFAULTS } from './extended-settings.mjs';
 import { toNumber } from './client.mjs';
 import { goodsRubyPrice, readDiamondBalance, readGoodsPurchaseBalances } from './goods-purchase.mjs';
 import { readOrderReservedStock, beginOrderMaterialSpend, cancelOrderMaterialSpend,
@@ -23,14 +24,14 @@ const observedEndTime = (client, period) => {
   return activity?.period === period && valid(activity.endTime) ? activity.endTime : 0;
 };
 const identity = player => [exactAutomationId(player?.worldId), exactAutomationId(player?.playerId), exactAutomationId(player?.guildId)].join(':');
-const defaults = { enabled:false, crew:false, captain:false, coinFilter:true, minCoinsSmall:15, minCoinsMedium:45,
-  minCoinsLarge:60, rewardFilter:false, rewardItems:[], disabledMaterials:[], mode:'redFirst', produceMissing:false,
-  allowDiamonds:false, diamondDailyLimit:0, redStartEnabled:false, redStartTime:'20:00' };
+const defaults = { ...EXTENDED_DEFAULTS.guildShip, coinFilter:true };
 const prefOf = settings => ({ ...defaults, ...settings?.guildShip });
 const quantity = (value, label) => { const n = toNumber(value); if (!valid(n)) throw new Error(label + '未完整确认'); return n; };
 const array = (value, label) => { if (!Array.isArray(value)) throw new Error(label + '未完整返回'); return value; };
 const isSelf = (ship, playerId) => ship.leaderId === playerId || ship.cabin.some(cabin => cabin.playerId === playerId);
 const digest = value => createHash('sha256').update(JSON.stringify(value)).digest('hex').slice(0,24);
+
+export const isGuildShipPush = name => name.startsWith('SCGuildShip') || name === 'SCJoinGuild' || name === 'SCLeaveGuild';
 
 // 必须在登录前注册，活动终止时刻只来自服务器推送，不能由活动期数猜测。
 export function watchGuildShipPushes(client, scheduler) {
@@ -41,7 +42,7 @@ export function watchGuildShipPushes(client, scheduler) {
   client.on?.('login', clear); client.on?.('close', clear);
   client.on?.('message', ({name,body}) => {
     if (name === 'SCGuildShipActivity') state.period = body?.period ? { ...body.period } : null;
-    if (name.startsWith('SCGuildShip') || ['SCJoinGuild','SCLeaveGuild'].includes(name)) {
+    if (isGuildShipPush(name)) {
       state.revision++;
       state.scheduler?.clearTask?.('guildShip');
     }
@@ -182,21 +183,19 @@ export async function planGuildShipBoarding(client, config, view, settings, ledg
   const missing = view.candidates.filter(row => row.kind === 'crew' && !candidateReady(row)
     && (!stock || row.priority < stock.priority));
   if (!pref.allowDiamonds || !missing.length) return fallback;
-  if (!settings.resources?.allowDiamonds) return { ...fallback, reason: '全局自动钻石消耗已关闭' };
   const records = ledger.keyRecords();
   if (Object.values(records).some(r => !r.confirmed && r.details?.kind === 'guildShipBuy' && sameActor(r.details, view))) {
     return { ...fallback, reason: '上次商船补货结果待确认，已保留钻石额度', pending: true };
   }
   const used = ledger.snapshot().counters;
-  const daily = Math.min(pref.diamondDailyLimit - (used.guildShipDiamonds ?? 0),
-    usageLimits(settings).diamonds - (used.diamonds ?? 0));
+  const daily = pref.diamondDailyLimit - (used.guildShipDiamonds ?? 0);
   const quotes = missing.filter(row => !records[applicationKey(view, row)] && !records[purchaseKey(view, row)])
     .map(candidate => ({ candidate, purchase: cargoQuote(candidate, config) }))
     .filter(plan => plan.purchase)
     // 同优先级比较整舱缺货总价，稳定排序在同价时沿用船号、舱号顺序。
     .sort((a,b) => a.candidate.priority - b.candidate.priority || a.purchase.cost - b.purchase.cost);
   if (!quotes.length) return { ...fallback, reason: '没有可按当前报价和库存预留补齐的新船舱' };
-  if (!quotes.some(plan => plan.purchase.cost <= daily)) return { ...fallback, reason: '商船或全局每日钻石剩余额度不足以补齐一舱' };
+  if (!quotes.some(plan => plan.purchase.cost <= daily)) return { ...fallback, reason: '商船每日钻石剩余额度不足以补齐一舱' };
   try {
     balance ??= await readDiamondBalance(client);
   } catch (error) {
@@ -306,8 +305,8 @@ async function buyGuildShipCargo(client, protocol, ledger, settings, view, candi
   const details = { kind:'guildShipBuy', worldId:view.worldId, playerId:view.playerId, guildId:view.guildId,
     period:view.period, shipId:candidate.shipId, crewId:candidate.crewId, ...purchase,
     expectedStock:candidate.costs.filter(item=>item.missing>0).map(item=>({id:item.id,num:item.have+item.missing})) };
-  const ticket = ledger.reserve({ diamonds:purchase.cost, guildShipDiamonds:purchase.cost },
-    { diamonds:usageLimits(settings).diamonds, guildShipDiamonds:prefOf(settings).diamondDailyLimit }, {}, { uniqueKey:key, details });
+  const ticket = ledger.reserve({ guildShipDiamonds:purchase.cost },
+    { guildShipDiamonds:prefOf(settings).diamondDailyLimit }, {}, { uniqueKey:key, details });
   let attempted = false, received = false;
   try {
     const reason = checkWindow() || (ledger.snapshot().day !== ticket.day ? '商船补货已跨日，重新核对今日额度' : '');
@@ -331,20 +330,24 @@ async function buyGuildShipCargo(client, protocol, ledger, settings, view, candi
 
 export async function serviceGuildShips(client,protocol,config,{player,getSettings=()=>({}),enabled=()=>false,ledger,report=()=>{},scheduler}={}){
   const state=watchGuildShipPushes(client,scheduler);
-  const preference=JSON.stringify(prefOf(getSettings()));
+  const pref=prefOf(getSettings());
+  const preference=JSON.stringify(pref);
   if(state.preference!==preference){state.preference=preference;state.lastResult=null;}
   const finish=(entry,remember=true)=>{const result={key:'guildShip',label:'联盟商船',...entry};if(remember)state.lastResult=result;report(result);return result;};
   const active=()=>enabled()&&prefOf(getSettings()).enabled;
-  const delay=seconds=>scheduler?.defer('guildShip',scheduler.now()+seconds);
   if(!active())return finish({skipped:true,reason:'联盟商船已关闭'});
   // 间隔内没有新的检查结果，不发布占位日志覆盖上次缺料、门控或失败原因。
   if(scheduler&&!scheduler.due('guildShip'))return {key:'guildShip',label:'联盟商船',skipped:true,
     reason:state.lastResult?.reason||state.lastResult?.error||'等待下次检查',...(state.lastResult?.pending?{pending:true}:{})};
   if(busy.has(client))return finish({skipped:true,reason:'正在核对联盟商船'},false);
+  const startedRevision=state.revision;
+  let opensAt, nextBatchAt;
   busy.add(client);
   try{
     if(!ledger)throw new Error('商船持久账本不可用');
     const initial=await readGuildShips(client,protocol,config,{player,getSettings,enabled:active,inventory:false});
+    opensAt=initial.nextCheckAt;
+    nextBatchAt=initial.batch?.next;
     const checkActor = () => {
       if (!active() || client.connected === false || identity(player) !== initial.identity) throw Error('账号、联盟或商船开关已变化');
     };
@@ -356,18 +359,20 @@ export async function serviceGuildShips(client,protocol,config,{player,getSettin
     }
     if(initial.state!=='ready'){
       if(initial.identity)await refreshOrderMaterialSpends(client,player,{enabled:active});
-      delay(initial.nextCheckAt ? Math.max(1,initial.nextCheckAt-nowOf(client)) : 180);
       return finish({skipped:true,reason:initial.reason});
     }
-    if(Object.values(ledger.keyRecords()).some(record=>!record.confirmed&&sameActor(record.details,initial)&&isApplication(record.details))){delay(60);return finish({skipped:true,pending:true,reason:'上次上船结果待确认，保留队列和材料，不重复申请'});}
+    if(Object.values(ledger.keyRecords()).some(record=>!record.confirmed&&sameActor(record.details,initial)&&isApplication(record.details)))return finish({skipped:true,pending:true,reason:'上次上船结果待确认，保留队列和材料，不重复申请'});
     await refreshOrderMaterialSpends(client,player,{enabled:active});
     const first=await readGuildShips(client,protocol,config,{player,getSettings,enabled:active});
-    if(first.state!=='ready'){delay(60);return finish({skipped:true,reason:first.reason});}
-    const policyOf=()=>JSON.stringify([prefOf(getSettings()),getSettings().resources]);
+    if(first.state!=='ready'){opensAt=first.nextCheckAt;return finish({skipped:true,reason:first.reason});}
+    const policyOf=()=>{
+      const settings=getSettings();
+      return JSON.stringify([prefOf(settings),settings.resources?.keepAccelerators,settings.resources?.diamondThreshold]);
+    };
     const policy=policyOf();
     const plan=await planGuildShipBoarding(client,config,first,getSettings(),ledger);
     const candidate=plan.candidate;
-    if(!candidate){delay(60);return finish({skipped:true,pending:plan.pending,reason:guildShipDiagnostics(first,getSettings(),config,plan).reason,demands:guildShipDemands(first,getSettings())});}
+    if(!candidate)return finish({skipped:true,pending:plan.pending,reason:guildShipDiagnostics(first,getSettings(),config,plan).reason,demands:guildShipDemands(first,getSettings())});
     // 先核对钻石余额，再重读所有候选舱位与库存，避免在等待余额时错过可直接装货的红船。
     const balance=plan.purchase ? await readDiamondBalance(client) : 0;
     const readCurrent=()=>readGuildShips(client,protocol,config,{player,getSettings,enabled:active});
@@ -381,11 +386,11 @@ export async function serviceGuildShips(client,protocol,config,{player,getSettin
       : first.candidates.some(row=>sameSeat(row,chosen));
     if(!verified||!active()||!sameView()||policy!==policyOf())return finish({skipped:true,reason:'商船、材料或配置已变化，下一轮重新核对'});
     const previousFinal=Object.values(ledger.keyRecords()).some(record=>sameActor(record.details,current)&&record.details.period===current.period&&record.details.finalFallback);
-    if(chosen.finalFallback&&previousFinal){delay(60);return finish({skipped:true,reason:'活动末日宽松兜底已申请过一船'});}
+    if(chosen.finalFallback&&previousFinal)return finish({skipped:true,reason:'活动末日宽松兜底已申请过一船'});
     const request=chosen.kind==='crew'?'GuildShipOrderRequest':'GuildShipSeekRequest';
     if(!protocol[request])throw new Error('缺少真实协议 '+request);
     const key=applicationKey(current,chosen);
-    if(ledger.hasKey(key)){delay(60);return finish({skipped:true,reason:'该商船本批次已有申请记录，等待服务端刷新'});}
+    if(ledger.hasKey(key))return finish({skipped:true,reason:'该商船本批次已有申请记录，等待服务端刷新'});
     const checkWindow=()=>{
       const now=nowOf(client);
       const closed=closedReason(observedEndTime(client,current.period)||current.activityEndTime,now);
@@ -397,7 +402,7 @@ export async function serviceGuildShips(client,protocol,config,{player,getSettin
     };
     if(fresh.purchase){
       const bought=await buyGuildShipCargo(client,protocol,ledger,getSettings(),current,chosen,fresh.purchase,checkWindow,checkActor);
-      if(!bought.ok){delay(60);return finish(bought);}
+      if(!bought.ok)return finish(bought);
       report({key:'guildShip',...bought});
       revision=state.revision;
       current=await readCurrent();
@@ -420,8 +425,16 @@ export async function serviceGuildShips(client,protocol,config,{player,getSettin
       await client.sendWatch(request,{shipId:chosen.shipId,...(chosen.kind==='crew'?{crewId:chosen.crewId}:{})},{window:400});sent=true;
       const after=await readGuildShips(client,protocol,config,{player,getSettings,enabled:active,inventory:false});
       if(!ownEvidence(after,details))throw new Error('服务端尚未确认本人船位');
-      ledger.confirm(ticket);confirmOrderMaterialOperation(debit);await refreshOrderMaterialSpends(client,player,{enabled:active});delay(30);
+      ledger.confirm(ticket);confirmOrderMaterialOperation(debit);await refreshOrderMaterialSpends(client,player,{enabled:active});
       return finish({ok:true,label:`联盟商船 · 已${chosen.kind==='crew'?'担任船员':'申请船长'}（${['','紫船','橙船','红船'][chosen.type]} #${chosen.shipId}）`});
-    }catch(error){const rejected=(!sent&&error.notSent===true)||error.prompt&&error.request===request;if(rejected){ledger.cancel(ticket);cancelOrderMaterialSpend(debit);}delay(60);return finish({ok:false,pending:!rejected,error:(rejected?'商船申请未执行：':'商船申请结果待确认，已保留记录：')+error.message});}
-  }catch(error){delay(60);return finish({ok:false,error:error.message});}finally{busy.delete(client);}
+    }catch(error){const rejected=(!sent&&error.notSent===true)||error.prompt&&error.request===request;if(rejected){ledger.cancel(ticket);cancelOrderMaterialSpend(debit);}return finish({ok:false,pending:!rejected,error:(rejected?'商船申请未执行：':'商船申请结果待确认，已保留记录：')+error.message});}
+  }catch(error){return finish({ok:false,error:error.message});}
+  finally {
+    busy.delete(client);
+    // 检查期间收到的推送或配置变更仍需在下一个调度点处理。
+    if (scheduler && state.revision === startedRevision && preference === JSON.stringify(prefOf(getSettings()))) {
+      const next = opensAt ?? Math.min(scheduler.now() + pref.checkEverySeconds, nextBatchAt ?? Infinity);
+      scheduler.defer('guildShip', next);
+    }
+  }
 }

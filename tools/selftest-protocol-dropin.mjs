@@ -5,6 +5,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
+import { getProtocol } from '../src/proto.mjs';
 
 const repository = path.resolve(import.meta.dirname, '..');
 const temporary = fs.realpathSync(os.tmpdir());
@@ -35,8 +36,9 @@ async function test(name, work) {
     fs.mkdirSync(path.dirname(target), { recursive: true });
     fs.copyFileSync(path.join(repository, relative), target);
   }
-  const original = { APPDATA: process.env.APPDATA, CW_PROTO_BUNDLE: process.env.CW_PROTO_BUNDLE };
+  const original = { APPDATA: process.env.APPDATA, CW_PROTO_BUNDLE: process.env.CW_PROTO_BUNDLE, CW_DATA_DIR: process.env.CW_DATA_DIR };
   process.env.APPDATA = path.join(root, 'client-data');
+  process.env.CW_DATA_DIR = path.join(root, 'data');
   delete process.env.CW_PROTO_BUNDLE;
   const cacheUsers = path.join(process.env.APPDATA, 'Tencent/xwechat/radium/users');
   const cacheRoot = path.join(cacheUsers, 'fixture/applet/packages', APPID);
@@ -58,9 +60,27 @@ try {
   await test('缺少协议时两个入口都列出程序目录、提取目录及显式配置方法', f => {
     for (const read of [f.protocolSourceInfo, f.readProtocolSource]) assert.throws(() => read(), error => {
       assert.match(error.message, /缺少协议文件/);
-      for (const location of [f.dropIn, f.nested, f.PROTO_BUNDLE, f.cacheUsers]) assert(error.message.includes(location));
+      for (const location of [f.dropIn, f.nested, f.PROTO_BUNDLE, f.BUNDLED_PROTOCOL, f.cacheUsers]) assert(error.message.includes(location));
       assert.match(error.message, /CW_PROTO_BUNDLE/); return true;
     });
+  });
+  await test('全新安装直接读取仓库协议，缺少微信分包也能编解码', f => {
+    write(f.BUNDLED_PROTOCOL, fs.readFileSync(path.join(repository, 'protocol/game.js')));
+    assert.equal(f.protocolSourceInfo().kind, 'bundled');
+    write(path.join(f.cacheRoot, '77/__APP__.wxapkg'), 'main only');
+    const fallback = f.protocolSourceInfo();
+    assert.equal(fallback.file, f.BUNDLED_PROTOCOL);
+    const { PingRequest } = getProtocol(fallback.file);
+    assert.equal(String(PingRequest.decode(PingRequest.encode({ clientTimestamp: 12345 }).finish()).clientTimestamp), '12345');
+  });
+  await test('更新仓库兜底文件后不再使用上一个仓库版本的本地解包缓存', f => {
+    write(f.BUNDLED_PROTOCOL, 'first bundled protocol');
+    f.cachePackageProtocol('local package protocol');
+    assert.equal(f.protocolSourceInfo().kind, 'cached');
+    assert.equal(f.readProtocolSource(), 'local package protocol');
+    write(f.BUNDLED_PROTOCOL, 'updated bundled protocol');
+    assert.equal(f.protocolSourceInfo().kind, 'bundled');
+    assert.equal(f.readProtocolSource(), 'updated bundled protocol');
   });
   await test('程序根目录协议自动识别并解包，切换工作目录不改变选择', f => {
     write(f.dropIn, archive('root protocol fixture'));
@@ -100,14 +120,15 @@ try {
     process.env.CW_PROTO_BUNDLE = missing;
     for (const read of [f.protocolSourceInfo, f.readProtocolSource]) assert.throws(() => read(), error => error.code === 'ENOENT');
   });
-  await test('缓存损坏或最新主包缺分包时不偷换旧缓存、自备包或 extracted', f => {
+  await test('损坏的协议包报错，最新微信主包缺分包时可直接用自备包', f => {
     write(f.dropIn, archive('root fixture')); write(f.PROTO_BUNDLE, 'extracted fixture');
     f.cache(71, 'cache 71'); const latest = f.cache(76, 'cache 76');
     fs.writeFileSync(latest, 'corrupt fixture');
     assert.equal(f.protocolSourceInfo().file, latest);
     assert.throws(() => f.readProtocolSource(), /wxapkg/);
     write(path.join(f.cacheRoot, '77/__APP__.wxapkg'), 'installed main package');
-    for (const read of [f.protocolSourceInfo, f.readProtocolSource]) assert.throws(() => read(), /77.*协议分包尚未下载/);
+    assert.equal(f.protocolSourceInfo().kind, 'drop-in');
+    assert.equal(f.readProtocolSource(), 'root fixture');
     assert.equal(f.readProtocolSource(f.dropIn), 'root fixture', '用户显式选择仍可覆盖');
   });
   await test('自动发现的非文件或损坏自备包明确报错，不跳到较低优先级', f => {

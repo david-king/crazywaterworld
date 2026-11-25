@@ -1,6 +1,9 @@
 // A connection-local clock only. The loop owns all reads/writes and calls this
 // scheduler at serial execution boundaries; push handlers never send requests.
 import { normalize } from './worlds.mjs';
+import { productionDemandChanged } from './factory-replanning.mjs';
+import { guildOrderCounterChanged } from './guild-orders.mjs';
+import { hasResidentMaterialRules } from './resident-materials.mjs';
 const MIN_CHECK_MS = 1000;
 const positiveTime = value => Number.isSafeInteger(value) && value > 0;
 const interval = value => Number.isFinite(Number(value)) ? Math.max(1, Math.min(300, Math.floor(Number(value)))) : 30;
@@ -53,6 +56,8 @@ export function createFactorySchedule(client, {
 } = {}) {
   let disposed = false, checkedOnce = false, checkedAt = now(), failed = false;
   let buildings = [], slots, progressed = false, version = 0, dirty = false, wakeAt = Infinity;
+  let demandVersion = 0;
+  let residentOrderChanged = false;
   let savedOffset = Number(client.serverClockOffsetMs) || 0;
   const signatures = new Map(), knownFactories = new Set();
   const preferences = () => getSettings()?.factory;
@@ -63,6 +68,11 @@ export function createFactorySchedule(client, {
       produce: common && (factory?.produce !== false || factory?.cooperateNative === true) && !!isEnabled('startProduce') };
   };
   const active = () => { const mode = modes(); return mode.collect || mode.produce; };
+  const watchResidentOrders = () => {
+    const settings = getSettings();
+    return !disposed && client.connected !== false && settings?.loop?.world && settings.resident?.enabled
+      && hasResidentMaterialRules(settings.resident) && isEnabled('denyOrder');
+  };
   const typeOf = building => {
     const unlocked = table(getConfig(), 'BuildingUnlockCfg').find(row => row.buildingId === building?.buildingId);
     if (typeof unlocked?.buildingType === 'string' && unlocked.buildingType) return unlocked.buildingType;
@@ -93,12 +103,17 @@ export function createFactorySchedule(client, {
     if (failed) return checkedAt + interval(preferences()?.checkEverySeconds ?? 30) * 1000;
     const mode = modes();
     const blocked = mode.collect ? getBlockedCollectionTypes() : null;
-    return nextFactoryCheck(buildings, { now: checkedAt, offset: Number(client.serverClockOffsetMs) || 0,
+    const next = nextFactoryCheck(buildings, { now: checkedAt, offset: Number(client.serverClockOffsetMs) || 0,
       ...mode, slots: slots ?? Number(table(getConfig(), 'BuildingProduceParamCfg').find(row => row.paramName === '制造位上限')?.paramValue),
       checkEverySeconds: preferences()?.checkEverySeconds ?? 30, progressed, eligible: isFactory,
       collectEligible: building => collectEligible(building, blocked), produceEligible });
+    // A bag shortage can occur while every slot is full and its next timer is hours away.
+    const factory = preferences();
+    return mode.produce && factory?.produce && (factory.refillRules?.length || factory.demandFirst && factory.strategy !== 'nativeSimulation')
+      ? Math.min(next, checkedAt + interval(preferences().checkEverySeconds) * 1000) : next;
   };
-  const nextAt = () => active() ? Math.min(baseDeadline(), wakeAt) : Infinity;
+  const nextAt = () => active() ? Math.min(baseDeadline(), wakeAt)
+    : residentOrderChanged && watchResidentOrders() ? wakeAt : Infinity;
   const wake = (immediate = false) => {
     const next = immediate || !checkedOnce ? now() : Math.max(now(), checkedAt + MIN_CHECK_MS);
     const shouldNotify = !dirty || next < wakeAt;
@@ -106,7 +121,27 @@ export function createFactorySchedule(client, {
     if (shouldNotify) notify();
   };
   const onMessage = ({ name, body } = {}) => {
-    if (disposed || name !== 'SCUpdateWaterBuilding' || !active() || !Array.isArray(body?.building)) return;
+    if (disposed) return;
+    const recruitChanged = name === 'SCGuildOrder' || guildOrderCounterChanged(name, body);
+    if (recruitChanged || productionDemandChanged(name, body)) {
+      if (name === 'SCWorkerOrder' && watchResidentOrders()) {
+        residentOrderChanged = true;
+        demandVersion++; version++; wake();
+        return;
+      }
+      const factory = preferences();
+      const items = Array.isArray(body?.items) ? body.items : [];
+      const dynamic = factory?.demandFirst && factory.strategy !== 'nativeSimulation';
+      const alliance = getSettings()?.alliance;
+      const recruitSupply = recruitChanged && factory?.produce && factory.strategy !== 'nativeSimulation'
+        && alliance?.enabled && alliance.recruit && alliance.recruitProduction;
+      const refill = items.some(item => factory?.refillRules?.some(rule => rule.productId === item?.itemId));
+      if (modes().produce && (dynamic || recruitSupply || factory?.produce && refill)) {
+        demandVersion++; version++; wake();
+      }
+      return;
+    }
+    if (name !== 'SCUpdateWaterBuilding' || !active() || !Array.isArray(body?.building)) return;
     let changed = false;
     for (const building of body.building) {
       if (!relevant(building)) continue;
@@ -116,7 +151,7 @@ export function createFactorySchedule(client, {
     }
     if (changed) { version++; wake(); }
   };
-  const onSettings = () => { if (!disposed) { version++; wake(true); } };
+  const onSettings = () => { if (!disposed) { residentOrderChanged = watchResidentOrders(); demandVersion++; version++; wake(true); } };
   const onPong = () => {
     if (disposed) return;
     const offset = Number(client.serverClockOffsetMs) || 0;
@@ -124,14 +159,15 @@ export function createFactorySchedule(client, {
   };
   client.on?.('message', onMessage); client.on?.('automationSettingsChanged', onSettings); client.on?.('pong', onPong);
   return {
-    active, nextAt, due: () => active() && nextAt() <= now(),
-    version: () => version, hasChecked: () => checkedOnce,
-    checked(state, { version: readVersion = version, progressed: madeProgress = false, slots: observedSlots } = {}) {
+    active, nextAt, due: () => nextAt() <= now(),
+    version: () => version, demandVersion: () => demandVersion, hasChecked: () => checkedOnce,
+    checked(state, { version: readVersion = version, demandVersion: readDemand = demandVersion, replan = false,
+      progressed: madeProgress = false, slots: observedSlots } = {}) {
       if (disposed) return;
       buildings = Array.isArray(state) ? structuredClone(state) : [];
       checkedAt = now(); checkedOnce = true; failed = false; progressed = !!madeProgress; slots = observedSlots;
-      if (readVersion >= version) {
-        dirty = false; wakeAt = Infinity; signatures.clear(); knownFactories.clear();
+      if (readVersion >= version && readDemand >= demandVersion && !replan) {
+        residentOrderChanged = false; dirty = false; wakeAt = Infinity; signatures.clear(); knownFactories.clear();
         for (const building of buildings) if (building?.factory && typeof building.buildingId === 'string' && isFactory(building)) {
           signatures.set(building.buildingId, signature(building)); knownFactories.add(building.buildingId);
         }
@@ -144,7 +180,7 @@ export function createFactorySchedule(client, {
     },
     failed() {
       if (disposed) return;
-      checkedAt = now(); checkedOnce = true; failed = true; dirty = false; wakeAt = Infinity;
+      checkedAt = now(); checkedOnce = true; failed = true; residentOrderChanged = false; dirty = false; wakeAt = Infinity;
     },
     dispose() {
       if (disposed) return;

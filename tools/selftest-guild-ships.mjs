@@ -16,7 +16,7 @@ const run=f=>serviceGuildShips(f.client,protocol,config,f.options);
 const paidFixture = (limit=100) => {
  const f=fixture();
  Object.assign(f.settings.guildShip,{allowDiamonds:true,diamondDailyLimit:limit});
- f.settings.resources.allowDiamonds=true;
+ Object.assign(f.settings.resources,{allowDiamonds:false,diamondDailyLimit:0});
  f.state.stock.橡胶圈=2;
  return f;
 };
@@ -28,6 +28,11 @@ const withServerClock=async(f,work)=>{
  const originalNow=Date.now;Date.now=()=>f.state.now*1000;f.advance(0);
  try{await work();}finally{Date.now=originalNow;}
 };
+function enableOnlyGuildShip(settings) {
+  Object.assign(settings.loop, { world:false, tasks:false, dailies:false, heroes:false });
+  for (const key of Object.keys(settings.schedule)) settings.schedule[key] = false;
+  for (const key of ['alliance', 'guildFort', 'heroRaid', 'silicon', 'progression', 'dailies']) settings[key].enabled = false;
+}
 try{
  await check('协议类型、完整int64身份、船舱和响应字段真实编解码',async()=>{const f=fixture();f.state.ships=[f.roundtripShip(f.state.ships[0])];const view=await read(f);assert.equal(view.ships[0].leaderId,'9007199254742222');assert.equal(view.candidates[0].costs[0].missing,0);for(const name of ['GuildShipRequest','GuildShipResponse','GuildShipOrderRequest','GuildShipSeekRequest','SCGuildShipActivity'])assert.equal(typeof protocol[name].encode,'function');});
  await check('默认关闭不读写，真实18级门槛，未入联盟和关闭活动不派船',async()=>{const f=fixture();f.settings.guildShip.enabled=false;assert((await run(f)).skipped);assert.equal(f.state.calls.length,0);f.settings.guildShip.enabled=true;f.player.level=17;assert.match((await run(f)).reason,/18/);f.player.level=30;f.player.guildId='0';assert.match((await run(f)).reason,/联盟/);f.player.guildId='9007199254742000';f.state.period=0;assert.match((await run(f)).reason,/未开放/);assert.equal(f.state.writes.length,0);});
@@ -73,10 +78,7 @@ try{
    const f=fixture(),originalNow=Date.now;let wall=f.state.now*1000;
    Date.now=()=>wall;f.advance(0);
    try{
-    Object.assign(f.settings.loop,{world:false,tasks:false,dailies:false,heroes:false});
-    for(const key of Object.keys(f.settings.schedule))f.settings.schedule[key]=false;
-    f.settings.alliance.enabled=false;f.settings.guildFort.enabled=false;f.settings.heroRaid.enabled=false;
-    f.settings.silicon.enabled=false;f.settings.progression.enabled=false;f.settings.dailies.enabled=false;
+    enableOnlyGuildShip(f.settings);
     const stop={aborted:false},sleeps=[],reports=[];
     watchGuildShipPushes(f.client);
     f.client.emit('message',{name:'SCGuildShipActivity',body:{period:{period:3,startTime:f.state.now+30,endTime:f.state.now+3600}}});
@@ -99,6 +101,68 @@ try{
     assert.equal(f.client.listenerCount('automationSettingsChanged'),0);
    }finally{Date.now=originalNow;}
   }
+ });
+ await check('一小时主循环内按五秒查船，改为三百秒即时生效，船位推送提前唤醒', async () => {
+  const {runLoop} = await import('../src/loop.mjs');
+  const f = fixture(), start = f.state.now, stop = {aborted:false}, checks = [];
+  enableOnlyGuildShip(f.settings);
+  f.settings.guildShip.checkEverySeconds = 5;
+  f.state.ships = [];
+  f.state.hook = name => {
+    const elapsed = f.state.now - start;
+    if (name === 'GuildShipRequest' && checks.at(-1) !== elapsed) checks.push(elapsed);
+  };
+  await withServerClock(f, async () => {
+    let sleeps = 0;
+    await runLoop(f.client, protocol, {config, player:f.player, getSettings:()=>f.settings, usageLedger:f.ledger,
+      rounds:2, everyMs:3600000, allowMutate:true, isEnabled:()=>false, stop,
+      sleep:async (ms, signal) => {
+        sleeps++;
+        assert.equal(ms, sleeps <= 2 ? 5000 : 300000);
+        if (sleeps === 1) { f.advance(5); return; }
+        if (sleeps === 4) { stop.aborted = true; return; }
+        assert(sleeps < 4);
+        if (sleeps === 2) {
+          f.advance(1);
+          f.settings.guildShip.checkEverySeconds = 300;
+          f.client.emit('automationSettingsChanged');
+        } else {
+          f.advance(2);
+          f.state.ships = [f.ship()];
+          f.client.emit('message', {name:'SCGuildShipOrder', body:{shipId:1, crewId:1}});
+        }
+        // 只有事件真正唤醒等待，才会在原定截止时间前继续。
+        await new Promise(resolve => setImmediate(resolve));
+        if (!signal.aborted) f.advance(ms / 1000);
+      },
+    });
+    assert.deepEqual(checks, [0, 5, 6, 8]);
+    assert.deepEqual(f.state.writes, [{name:'GuildShipOrderRequest', body:{shipId:1, crewId:1}}]);
+  });
+ });
+ await check('换批边界优先于长间隔，检查中收到多条推送只需再查一次', async () => {
+  const {rewardSchedule} = await import('../src/reward-schedule.mjs');
+  const f = fixture({hour:10, minute:59});
+  f.settings.guildShip.checkEverySeconds = 300;
+  f.state.ships = [];
+  const schedule = f.options.scheduler = rewardSchedule(f.client);
+  await withServerClock(f, async () => {
+    await run(f);
+    assert.equal(schedule.scheduledAt('guildShip'), f.state.now + 60);
+    f.advance(60);
+    f.state.hook = name => {
+      if (name !== 'GuildShipRequest') return;
+      f.state.hook = () => {};
+      for (const crewId of [1, 2]) f.client.emit('message', {name:'SCGuildShipOrder', body:{shipId:1, crewId}});
+    };
+    await run(f);
+    assert.equal(schedule.scheduledAt('guildShip'), undefined);
+    await run(f);
+    assert.equal(schedule.scheduledAt('guildShip'), f.state.now + 300);
+    const calls = f.state.calls.length;
+    await run(f);
+    assert.equal(f.state.calls.length, calls);
+  });
  });
  await check('紫船候选缺料明确列出可用量和订单预留，不误称可上船或触发红船补产',async()=>{
   const f=fixture();f.state.ships=[f.ship({type:1})];f.settings.guildShip.produceMissing=true;
@@ -294,7 +358,7 @@ try{
   ]);
   assert.equal(f.state.stock.橡胶圈,1);assert.equal(f.state.stock.耐火砖,0);
   assert.equal(f.state.ruby,965);
-  assert.deepEqual(f.ledger.confirmedCounters(),{diamonds:35,guildShipDiamonds:35});
+  assert.deepEqual(f.ledger.confirmedCounters(),{guildShipDiamonds:35});
  });
  await check('跨红船比较整舱报价，乱序回读和同价按船号、舱号稳定选位',async()=>{
   for (const cost of [0,30]) {
@@ -327,11 +391,39 @@ try{
   assert.equal((await run(f)).ok,true);assert.equal(f.state.ruby,920);
   assert.equal(f.options.ledger.confirmedCounters().guildShipDiamonds,50);
  });
- await check('商船和全局开关、两级预算、余额、预留、价格和禁用材料分别限制补货',async()=>{
+ await check('全局额度已用尽且发送前关闭全局开关，商船仍按本页剩余额度补货',async()=>{
+  const f=paidFixture(50);
+  Object.assign(f.settings.resources,{allowDiamonds:true,diamondDailyLimit:20});
+  // 同日旧版商船购买曾同时计入两本账。
+  f.ledger.confirm(f.ledger.reserve({diamonds:20,guildShipDiamonds:20}));
+  const reserve=f.ledger.reserve;
+  f.options.ledger={...f.ledger,reserve(counters,...args){
+   const ticket=reserve(counters,...args);
+   if(counters.guildShipDiamonds)Object.assign(f.settings.resources,{allowDiamonds:false,diamondDailyLimit:0});
+   return ticket;
+  }};
+  assert.equal((await run(f)).ok,true);
+  assert.deepEqual(f.ledger.confirmedCounters(),{diamonds:20,guildShipDiamonds:50});
+  f.state.ships.push(f.ship({id:2}));
+  assert.match((await run(f)).reason,/商船每日钻石剩余额度/);
+  assert.equal(f.state.ruby,970);
+ });
+ await check('新旧商船待确认货款各预留一次实际余额，新货款仅占商船预算',()=>{
+  const f=paidFixture();
+  const old=f.ledger.reserve({diamonds:10,guildShipDiamonds:10});
+  const cargo=f.ledger.reserve({guildShipDiamonds:20});
+  f.ledger.reserve({diamonds:5});
+  assert.deepEqual(f.ledger.pendingCounters(),{diamonds:35,guildShipDiamonds:30});
+  assert.deepEqual(f.ledger.snapshot().counters,{diamonds:15,guildShipDiamonds:30});
+  f.ledger.confirm(old);f.ledger.cancel(cargo);
+  assert.deepEqual(f.ledger.pendingCounters(),{diamonds:5});
+  assert.deepEqual(f.ledger.snapshot().counters,{diamonds:15,guildShipDiamonds:10});
+ });
+ await check('商船开关、独立日限、余额、预留、价格和禁用材料分别限制补货',async()=>{
   for(const change of [
-   f=>{f.settings.guildShip.allowDiamonds=false;}, f=>{f.settings.resources.allowDiamonds=false;},
+   f=>{f.settings.guildShip.allowDiamonds=false;},
    f=>{f.settings.guildShip.diamondDailyLimit=0;}, f=>{f.settings.guildShip.diamondDailyLimit=29;},
-   f=>{f.settings.resources.diamondDailyLimit=29;}, f=>{f.state.ruby=29;},
+   f=>{f.state.ruby=29;},
    f=>{f.settings.resources.diamondThreshold=971;},
    f=>{f.ledger.reserve({diamonds:971},{},{},{uniqueKey:'other'});},
    f=>{f.state.ships=[f.ship({material:'未知物料'})];},
@@ -344,7 +436,7 @@ try{
  });
  await check('发送补货前预占后关闭开关、调低上限、收到船位推送或进入结算均释放预算',async()=>{
   for(const change of [
-   f=>{f.settings.resources.allowDiamonds=false;}, f=>{f.settings.guildShip.allowDiamonds=false;},
+   f=>{f.settings.guildShip.allowDiamonds=false;}, f=>{f.settings.resources.diamondThreshold=971;},
    f=>{f.settings.guildShip.diamondDailyLimit=5;}, f=>{publishPeriod(f,{endTime:f.state.now+600});},
    f=>{f.client.emit('message',{name:'SCGuildShipOrder',body:{shipId:1,crewId:1}});},
   ]){
@@ -353,7 +445,8 @@ try{
    let reserved=false;
    f.options.ledger={...f.ledger,reserve(...args){const ticket=reserve(...args);reserved=true;change(f);return ticket;}};
    assert((await run(f)).skipped);assert(reserved);
-   assert.equal(f.state.writes.length,0);assert.equal(f.ledger.snapshot().counters.diamonds,0);
+   assert.equal(f.state.writes.length,0);assert.equal(f.ledger.snapshot().counters.guildShipDiamonds,0);
+   assert.equal(f.ledger.pendingCounters().diamonds??0,0);
    assert.deepEqual(f.ledger.keyRecords(),{});
   }
  });
@@ -387,7 +480,7 @@ try{
   f.state.hook=async()=>{};f.options.ledger=createUsageLedger('qa',{file:f.file,now:()=>f.state.now*1000});
   assert((await run(f)).ok);
   assert.deepEqual(f.state.writes.map(row=>row.name),['CommonBuyGoodsRequest','GuildShipOrderRequest']);
-  assert.equal(f.options.ledger.snapshot().uncertain,0);assert.equal(f.options.ledger.confirmedCounters().diamonds,30);
+  assert.equal(f.options.ledger.snapshot().uncertain,0);assert.deepEqual(f.options.ledger.confirmedCounters(),{guildShipDiamonds:30});
  });
  await check('购买回执先于库存到账时，其他缺同种货物的红船也不会重复购买',async()=>{
   const f=paidFixture();f.state.ships.push(f.ship({id:2}));

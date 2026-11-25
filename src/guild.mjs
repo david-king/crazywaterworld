@@ -1,5 +1,6 @@
 import { displayMaterial } from './config.mjs';
 import { normalize } from './worlds.mjs';
+import { playerPowerText } from './opponent-power.mjs';
 
 const task = 'guildWelfare';
 const title = '联盟福利礼包';
@@ -92,7 +93,7 @@ export async function readGuildMembers(client, config, player) {
       if (!id || !/^[1-9]\d{0,18}$/.test(id) || BigInt(id) > (1n << 63n) - 1n || typeof member.nickname !== 'string' || !member.nickname.trim()) throw new Error('盟友身份未能精确读取，请稍后重试');
       if (id === ownId) continue;
       if (members.has(id) && members.get(id).name !== member.nickname) throw new Error('盟友身份重复且昵称冲突，请重新读取');
-      members.set(id, { id, name: member.nickname, online: member.online === true, title: group.guildTitle });
+      members.set(id, { id, name: member.nickname, power: playerPowerText(member), online: member.online === true, title: group.guildTitle });
     }
   }
   return { state: 'member', guildName: status.name, total: response.total, checkedAt: new Date().toISOString(),

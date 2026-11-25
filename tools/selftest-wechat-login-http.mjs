@@ -428,6 +428,22 @@ try {
   assert.equal(sameClient.stopCount, 1);
 
   // 无角色与读取失败均可展示，保存始终只接受已读取的角色。
+  const batch = await capture(credential('batch-account'));
+  const choiceIds = [batch.choices[2].id, batch.choices[0].id];
+  const beforeBatch = loadStore();
+  for (const bad of [[], [choiceIds[0], 'stale'], [choiceIds[0], choiceIds[0]]]) {
+    assert.equal((await request('/save', { confirm: true, id: batch.id, choiceIds: bad })).status, 400);
+    assert.deepEqual(loadStore(), beforeBatch);
+  }
+  const batchSaved = await request('/save', { confirm: true, id: batch.id, choiceIds });
+  assert.equal(batchSaved.status, 200);
+  assert.deepEqual(batchSaved.data.selectedRoles.map(role => role.worldId), [4000000003, 3000000001]);
+  assert.equal(loadStore().activeId, batchSaved.data.accounts[0].id);
+  assert.equal(loadStore().accounts.length, beforeBatch.accounts.length + 2);
+  assert.equal(new Set(batchSaved.data.accounts.map(row => row.id)).size, 2);
+  assert(batchSaved.data.accounts.every(row => row.hasSiblingRoles && !row.status.looping));
+  assert.equal((await request('/save', { confirm: true, id: batch.id, choiceIds })).status, 400);
+
   roleLists.set('empty-account', []);
   const empty = await capture(credential('empty-account'));
   assert.deepEqual(empty.choices, []);

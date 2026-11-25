@@ -1,6 +1,7 @@
 import { runStages } from './stages.mjs';
 import { runTrialStages } from './trials.mjs';
 import { pirateAutoDay, runPirateAdvance } from './pirate-advance.mjs';
+import { pirateHuntEnabled } from './pirates.mjs';
 import { checkFleetSettlement } from './fleet-settlement.mjs';
 
 // 断线重连沿用本次进度。重开挂机时主线和试炼重新计数，海盗先检查当日轮次。
@@ -42,6 +43,9 @@ export async function runChallengeRound(client, config, { player, getSettings, s
       const result = await run({ beforeBattle, onBattle, enabled: live, onLineupPhase, executeBattle });
       if (!settled) { progress.reason = result.reason; finish({ skipped: true, reason: result.reason }); }
     } catch (error) {
+      const rejected = error.prompt && error.request === (key === 'stageAuto' ? 'ChallengeStageRequest' : 'TrialRaidChallengeRequest');
+      const unknown = sent && !settled && !error.notSent && !rejected;
+      if (unknown) progress.resultUnknown = true;
       if (error.lineupRestorePending) {
         progress.lineupRestorePending = true;
         if (progress.lineupPhase !== 'conflict') progress.lineupPhase = 'pending';
@@ -50,13 +54,12 @@ export async function runChallengeRound(client, config, { player, getSettings, s
         progress.reason = reason + '；阵容待恢复，恢复后请重新开始挂机';
         return finish({ ok: false, error: progress.reason });
       }
-      const rejected = error.prompt && error.request === (key === 'stageAuto' ? 'ChallengeStageRequest' : 'TrialRaidChallengeRequest');
+      if (busy() && (!sent || error.notSent)) return finish({ skipped: true, reason: '手动挑战进行中，本轮跳过' });
       if (rejected) {
         progress.reason = error.message + '；服务器明确拒绝，本次不计战败，下轮再检查';
         return finish({ skipped: true, reason: progress.reason });
       }
       // 超时和不匹配战报不能当作战败，也不能下一轮盲目重试。
-      const unknown = sent && !settled && !error.notSent;
       if (unknown) progress.halted = true;
       progress.reason = error.message + (unknown ? '；结果未确认，本次挂机停止该挑战' : '');
       finish({ skipped: !live(), ok: false, error: progress.reason });
@@ -74,10 +77,7 @@ export async function runChallengeRound(client, config, { player, getSettings, s
         () => isTrialBusy(raidId), options => runTrialStages(client, player, config, raidId, { ...options, signal, wait, maxFailures: 1, maxWins: 1 }));
     }
   }
-  const pirateEnabled = () => {
-    const settings = getSettings();
-    return settings?.pirate?.enabled && settings.pirateHunt.enabled;
-  };
+  const pirateEnabled = () => pirateHuntEnabled(getSettings());
   if (mode !== 'progression' && pirateEnabled() && current()) {
     if (isPirateBusy()) { report({ key: 'pirateAuto', label: '海盗首杀', skipped: true, reason: '手动首杀推进中，本轮跳过' }); return; }
     try {

@@ -2,6 +2,7 @@ import { readWeekOrder } from './activities.mjs';
 import { toNumber } from './client.mjs';
 import { readMuseumMaterialState, settleMuseumMaterialState } from './museum-materials.mjs';
 import { createProductionEligibility } from './production-eligibility.mjs';
+import { cropRelatedMaterialIds, residentMaterialRule } from './resident-materials.mjs';
 
 const rows = (config, name) => config?.tables?.[name]?.data ?? [];
 const now = client => Math.floor((Date.now() + (client.serverClockOffsetMs || 0)) / 1000);
@@ -385,8 +386,14 @@ export async function readOrderReservedStock(client, protocol, config, { player,
   const priority = settings?.factory?.demandPriority ?? ['merchant', 'cargo', 'resident'];
   const rank = source => priority.includes(source) ? priority.indexOf(source) : priority.length;
   orders.sort((a, b) => rank(a.source) - rank(b.source));
+  const cropRelatedIds = cropRelatedMaterialIds(config);
+  const weekly = orders.find(order => order.source === 'merchant');
+  const weeklyComplete = weekly && [...weekly.needs].every(([id, n]) => (stock.get(id) ?? 0) >= n);
+  const residentAvailable = id => (stock.get(id) ?? 0) - (reservations.cargo.get(id) ?? 0)
+    - (reservations.resident.get(id) ?? 0) - (weeklyComplete ? reservations.weekly.get(id) ?? 0 : 0);
   for (const order of orders) {
     const requirements = [...order.needs].map(([id, num]) => ({ id, num }));
+    if (order.source === 'resident' && residentMaterialRule(settings?.resident, requirements, cropRelatedIds, residentAvailable)) continue;
     if (eligible?.(requirements, { reserve: true }).length) continue;
     for (const [id, n] of order.needs) add(reservations[order.target], id, n);
   }

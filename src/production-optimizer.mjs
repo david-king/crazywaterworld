@@ -234,9 +234,13 @@ function actionsAt(data, state, heuristic = false) {
       >= Math.min(state.stock.get(id) ?? 0, tier.demand.get(id) ?? 0)));
   for (const [index, order] of data.orders.entries()) {
     if (!state.delivered[index] && state.time <= (order.deadline ?? Infinity) + EPSILON
-      && [...order.requirements].every(([id, quantity]) => (state.stock.get(id) ?? 0) >= quantity)
-      && (!heuristic || keepsHigherStock(order.requirements, order.priority))) {
-      actions.push({ kind: 'delivery', order: index, priority: order.priority });
+      && [...order.requirements].every(([id, quantity]) => (state.stock.get(id) ?? 0) >= quantity)) {
+      const delivery = { kind: 'delivery', order: index, priority: order.priority };
+      const autoCargo = order.source === 'cargo' && order.consumeOnCompletion;
+      const available = (!autoCargo && !heuristic) || keepsHigherStock(order.requirements, order.priority);
+      if (autoCargo && available) return [{ ...delivery, immediate: true }];
+      if (heuristic && !available) continue;
+      actions.push(delivery);
     }
   }
   const desired = needs.batches;
@@ -506,6 +510,9 @@ export function optimizeProductionSchedule(input, options = {}) {
     ? '开工前核验库存、待收、在途及已保留订单数量，允许本批越过上限'
     : '库存、待收、在途及已保留订单产出共同预占仓容');
   if (data.priorityLevels.length > 1) result.assumptions.push('先最小化最高优先级齐套时间，再依次最小化后续优先级齐套时间');
+  if (data.orders.some(order => order.source === 'cargo' && order.consumeOnCompletion)) {
+    result.assumptions.push('留足更高优先级需求后，已开启自动贸易的整船货物齐备即发船');
+  }
   if (!Number.isSafeInteger(limits.maxNodes) || limits.maxNodes < 1
     || !Number.isFinite(limits.maxMilliseconds) || limits.maxMilliseconds <= 0) {
     result.reasons = ['搜索预算无效'];
@@ -555,9 +562,11 @@ export function optimizeProductionSchedule(input, options = {}) {
     const key = stateKey(data, state);
     if (visited.has(key)) continue;
     visited.add(key);
-    const next = advance(data, state);
-    if (next) stack.push(next);
     const actions = actionsAt(data, state);
+    if (!actions[0]?.immediate) {
+      const next = advance(data, state);
+      if (next) stack.push(next);
+    }
     for (let index = actions.length - 1; index >= 0; index--) stack.push(applyAction(data, state, actions[index]));
   }
   if (data.errors.length) { result.reasons = [...new Set(data.errors)]; return finish(); }

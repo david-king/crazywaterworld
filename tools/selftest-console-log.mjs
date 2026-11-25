@@ -214,7 +214,7 @@ try {
   child.stderr.on('data', text => { stderr += text; });
   const started = /\[\d{2}:\d{2}:\d{2}\] \[系统\] \[系统与连接\] \[信息\] 控制台已启动 (http:\/\/127\.0\.0\.1:([1-9]\d*))/;
   const guidance = '关闭网页后挂机会继续，运行日志显示在此窗口。请保持此窗口打开；Ctrl+C 或关闭此窗口会结束后台进程。';
-  const artFailure = '[艺术资源] 同步失败：没找到微信小游戏缓存目录';
+  const artFailure = '[艺术资源] 同步失败：缺少图集版本清单。请在启用资源自动更新的环境中先运行 npm run sync-resources';
   await new Promise((resolve, reject) => {
     const timer = setTimeout(() => finish(new Error('CLI 启动输出超时：' + stderr)), 10000);
     const finish = error => {

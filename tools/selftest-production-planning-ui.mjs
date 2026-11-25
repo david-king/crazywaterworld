@@ -57,9 +57,16 @@ function fixture() {
       $('modal').open = true;
     };
     let current = env.current, snapshot = env.snapshot;
+    const document = {hidden:false};
+    const Date = class extends globalThis.Date { static now() { return env.now ?? super.now(); } };
     ${script}
     env.reset = resetProductionPlan;
     env.enter = refreshProductionPlan;
+    env.pollChanges = () => {
+      stateActions.setView({page:'manual'});
+      nextProductionRefresh = 0;
+      return refreshChangedProductionPlan();
+    };
     env.time = productionPlanTime;
     env.duration = productionPlanDuration;
     env.render = renderProductionPlan;
@@ -106,6 +113,49 @@ await test('断开、暂停、无账号和主动断开状态均不发送读取',
     await env.click();
     assert.deepEqual(env.calls, []);
   }
+});
+
+await test('正在查看的排产表随库存版本更新，重复推送合并，编辑插单时延后刷新', async () => {
+  const env = fixture();
+  env.snapshot.productionRevision = 1;
+  await env.enter();
+  await env.pollChanges();
+  assert.equal(env.calls.length,1);
+  env.snapshot.productionRevision = 3;
+  env.node('modal').open = true;
+  await env.pollChanges();
+  assert.equal(env.calls.length,1);
+  env.node('modal').open = false;
+  const pending = deferred();
+  env.respond = () => pending.promise;
+  const refreshing = env.pollChanges();
+  env.snapshot.productionRevision++;
+  await env.pollChanges();
+  assert.equal(env.calls.length,2);
+  pending.resolve({productionRevision:3});
+  await refreshing;
+  env.respond = async () => ({productionRevision:4});
+  await env.pollChanges();
+  await env.pollChanges();
+  assert.equal(env.calls.length,3);
+});
+
+await test('排产页跨北京时间零点自动重读已达上限的募兵单，无推送也能恢复', async () => {
+  const env = fixture();
+  const midnight = Date.parse('2026-11-26T00:00:00+08:00');
+  env.now = midnight - 60000;
+  env.snapshot.productionRevision = 1;
+  const capped = { skipped: true, metadata: { recruitBlock: { kind: 'dailyLimit', label: '今日募兵已达上限' } } };
+  env.respond = async () => ({ snapshotTime: env.now / 1000, orders: env.now < midnight ? [capped] : [] });
+  await env.enter();
+  env.now = midnight - 1000;
+  await env.pollChanges();
+  assert.equal(env.calls.length, 1);
+  env.now = midnight;
+  await env.pollChanges();
+  await env.pollChanges();
+  assert.equal(env.calls.length, 2);
+  assert.doesNotMatch(env.node('production-plan-result').textContent, /今日募兵已达上限/);
 });
 
 await test('等待期间按钮禁用，失败后恢复点击并显示错误状态', async () => {
@@ -190,6 +240,15 @@ await test('各需求保留状态与备齐时间，跳过的需求不计入完�
   ]);
   env.render({ orders: [skipped] });
   assert.match(env.node('production-plan-result').textContent, /本次需求均已跳过/);
+  for (const [recruitBlock, materialText] of [
+    [{ kind: 'dailyLimit', label: '今日募兵已达上限', reason: '已达到游戏每日募兵上限 10 次' }, '粗铁 ×9'],
+    [{ label: '募兵次数待确认', reason: '未能读取联盟募兵每日次数' }, '粗铁 ×9未能读取联盟募兵每日次数'],
+  ]) {
+    env.render({ snapshotTime: now, orders: [{ label: '联盟募兵', skipped: true, metadata: { recruitBlock },
+      reason: recruitBlock.reason, requirements: [{ id: '粗铁', num: 9 }] }] });
+    assert.deepEqual(env.tables.at(-1).rows[0].map(cell => cell.textContent),
+      ['联盟募兵', materialText, recruitBlock.label]);
+  }
 });
 
 function descendants(node) {

@@ -1,3 +1,4 @@
+import { worldNumber } from './world-name.mjs';
 import fs from 'node:fs';
 import { createHash } from 'node:crypto';
 import { ACCOUNTS_PATH, accountFromCredential, loadStore, loginProfiles, matchingProfile, refreshProfileLogin, worldProfileId } from './accounts.mjs';
@@ -119,7 +120,7 @@ function importPlan(document) {
     const existing = matchingProfile(next, account);
     if (existing) {
       account.id = existing.id;
-      if (!Number(account.login.worldId) && existing.login.worldId) {
+      if (!worldNumber(account.login.worldId) && worldNumber(existing.login.worldId)) {
         account.login.worldId = existing.login.worldId;
         account.loginFrameHex = null;
       }

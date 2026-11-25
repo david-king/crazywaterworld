@@ -102,6 +102,7 @@ const merchantActivityFields = [
 for (const field of merchantActivityFields) activityOwnedSettings.add(field.key);
 const guildShipActivityFields = [
     configField('guildShip.enabled','开启自动挂机'),configField('guildShip.crew','自动成为船员'),configField('guildShip.captain','自动成为船长'),
+    configField('guildShip.checkEverySeconds','船位检查间隔','number',{unit:'秒',help:'可设为 5–300 秒。活动开放、换批或收到商船推送时，会提前检查船位。'}),
     configField('guildShip.mode','上船策略','choice',{options:[['redFirst','红船优先'],['mediumLarge','中船和大船，优先红船'],['full','尽量满船（20分钟后补位）'],['small','仅小船'],['mediumSmall','中船和小船']],help:'按游戏当前赛季批次和实际航程预留名额。满船补位可临时尝试两种角色；禁用物料、库存预留和服务器名额始终有效。'}),
     configField('guildShip.coinFilter','按水姆币奖励筛选'),
     configField('guildShip.minCoinsSmall','小船最低水姆币','number',{ parent: 'guildShip.coinFilter',when:d=>d.guildShip.coinFilter}),
@@ -110,8 +111,8 @@ const guildShipActivityFields = [
     configField('guildShip.rewardFilter','按奖励物品筛选'),
     configField('guildShip.rewardItems','期望奖励物品','multi',{ parent: 'guildShip.rewardFilter',catalog:'materials',when:d=>d.guildShip.rewardFilter}),
     configField('guildShip.disabledMaterials','禁止消耗物料','multi',{catalog:'materials'}),
-    configField('guildShip.allowDiamonds','允许钻石补齐货物','switch',{help:'按上船策略优先选船型。同船型先选库存能装满的舱位，其次选整舱补货总价最低的。同价按船号、舱号从小到大选。需同时开启全局自动钻石消耗。'}),
-    configField('guildShip.diamondDailyLimit','商船补货每日钻石上限','number',{parent:'guildShip.allowDiamonds',when:d=>d.guildShip.allowDiamonds,unit:'钻石',help:'按账号在北京时间零点重置。0 表示只用库存，同时受全局每日钻石预算和钻石保留量限制。'}),
+    configField('guildShip.allowDiamonds','允许钻石补齐货物','switch',{help:'本开关独立控制商船钻石补货。按上船策略优先选船型。同船型先选库存能装满的舱位，其次选整舱补货总价最低的。同价按船号、舱号从小到大选。'}),
+    configField('guildShip.diamondDailyLimit','商船补货每日钻石上限','number',{parent:'guildShip.allowDiamonds',when:d=>d.guildShip.allowDiamonds,unit:'钻石',help:'商船补货单独记账，每个账号的额度在北京时间零点重置。填 0 只用库存。可用余额会扣除钻石保留量和待确认的消费。'}),
     configField('guildShip.produceMissing','红船缺料自动备料','switch',{help:'由工厂为符合当前策略的红船生产缺料。'}),
     configField('guildShip.redStartEnabled','指定红船申请船长时间'),
     configField('guildShip.redStartTime','红船申请船长时间','time',{ parent: 'guildShip.redStartEnabled',when:d=>d.guildShip.redStartEnabled,help:'北京时间。只控制申请船长的最早时间，满员或准备结束后由游戏服务器开船。'}),
@@ -123,7 +124,7 @@ const weeklyActivityFields = [
   ...[
     ['farm','周一 · 种田发育','活动日独立收获和种植，不受普通农田开关限制；已选自定义种植时沿用作物目标，否则智能种植。普通联盟城市募兵按本页次数参与。种田加速仍遵守加速器保留量和消费权限。'],
     ['pet','周二 · 海兽培养','按基地 → 海兽中已选的物种范围和最高品质参与培育，按本页品质顺序选择可执行方案。未选物种时等待。'],
-    ['antique','周三 · 藏品培养','活动日独立执行藏品升星和套装经验养成，不要求开启普通养成开关。复用藏品配置中已选的升星与套装品质及目标，未选品质时等待，升星时沿用万能碎片设置。'],
+    ['antique','周三 · 藏品培养','活动日按所选品质升星和升级套装，沿用目标星级及万能碎片设置。展开后可开启藏品券招募并设置当日用券上限。'],
     ['order','周四 · 基地订单','复用基地 → 居民订单的材料过滤、最低奖励及每日次数限制；货船和工厂加速仅按原有开关、目标及预算参与。'],
     ['forge','周五 · 装备打造','装备打造主题当天独立领取和制造，即使普通自动锻造、领取或续产开关关闭也可执行。沿用已选工厂、配方和万能材料设置，按本页品质顺序选配方。其他日子或活动达标后，普通锻造仍按自身开关运行。游戏原生模式由游戏处理。'],
     ['hero','周日 · 英雄培养','英雄培养主题当天独立执行指定英雄升星，不要求开启普通英雄养成或升星开关。复用英雄名单、星级目标及材料权限；未选择英雄时等待。普通用券招募按自身开关运行。'],
@@ -133,6 +134,10 @@ const weeklyActivityFields = [
     if (kind === 'farm') fields.push(
       configField('weeklyActivity.farmRecruitTimes','临时募兵次数','number',{parent:prefix+'Enabled',unit:'次/日',help:'普通联盟城市募兵，默认10次，0表示不参与。由本活动分项授权，仍遵守服务器次数、材料过滤、资源保留及预算限制。'}),
       configField('weeklyActivity.farmSpeedUp','种田加速','switch',{parent:prefix+'Enabled',help:'默认关闭。只在当日种田主题及积分目标内使用已授权的加速资源。'}),
+    );
+    if (kind === 'antique') fields.push(
+      configField('weeklyActivity.antiqueRecruitTickets','使用藏品券招募','switch',{parent:prefix+'Enabled',collapsible:false,help:'藏品日按库存和当日剩余额度优先五十连，其次十连，余下单抽。设置目标积分时，每批招募前检查是否达标。'}),
+      configField('weeklyActivity.antiqueTicketLimit','当日最多用券','number',{parent:'weeklyActivity.antiqueRecruitTickets',unit:'张',emptyAsZero:'用完为止',help:'留空或填 0 表示用完库存。设置目标积分时，达标后停止用券。'}),
     );
     if (kind === 'pet' || kind === 'forge') fields.push(configField(prefix+'QualityOrder',kind === 'pet' ? '培育品质顺序' : '打造品质顺序','radio',{
       parent:prefix+'Enabled',options:[['asc','从低到高'],['desc','从高到低']],help:'只调整已配置且材料充足的候选方案顺序，不扩大可用物种、配方或材料范围。',
@@ -285,14 +290,16 @@ const configGroups = [
   { id: 'factory', title: '工厂', category: 'base', fields: [
     configField('factory.enabled', '总开关'), configField('factory.gain', '自动领取产品'),
     configField('factory.blockedCollectionTypes', '禁止自动领取', 'multi', { catalog: 'collectionBuildings', empty: '未禁止任何建筑类型', help: '按类型选择要保留产物的建筑。挂机会跳过该类型所有建筑的产出、工厂成品或成熟作物。' }),
-    configField('factory.produce', '自动生产', 'switch', { help: '按原料、库存、在产和待收数量填充空余队列格。已建成的工厂升级时仍可生产当前等级的配方。' }),
-    configField('factory.strategy', '排产策略', 'choice', { options: [['smart','新版智能排产（推荐）'],['nativeSimulation','模拟游戏原生自动生产']], help: '智能排产使用账号加成、需求和备货水位。模拟原生按空闲生产位逐件选品，最多补到游戏仓容。' }),
-    configField('factory.simulatedTargets', '模拟原生主产物', 'multi', { catalog: 'factoryProducts', empty: '使用工厂已设目标或首个解锁配方', when: d => d.factory.strategy === 'nativeSimulation', help: '每厂优先生产主产物。缺料或满仓时，先选实际耗时不超过 5 秒的候补，同档选库存最少的。下游开工扣料、成品收取后都会重新判断主产物缺口。' }),
+    configField('factory.produce', '自动生产', 'switch', { editChildrenWhenOff:true, help: '按原料、库存、在产和待收数量填充空余队列格。已建成的工厂升级时仍可生产当前等级的配方。' }),
+    configField('factory.strategy', '排产策略', 'choice', { parent:'factory.produce', options: [['smart','智能排产（默认）'],['nativeSimulation','模拟游戏原生自动生产']], help: '智能排产使用账号加成、需求和备货水位。模拟原生按空闲生产位逐件选品，最多补到游戏仓容。' }),
+    configField('factory.simulatedTargets', '模拟原生主产物', 'multi', { parent:'factory.produce', catalog: 'factoryProducts', empty: '使用工厂已设目标或首个解锁配方', when: d => d.factory.strategy === 'nativeSimulation', help: '每厂优先生产主产物。缺料或满仓时，先选实际耗时不超过 5 秒的候补，同档选库存最少的。下游开工扣料、成品收取后都会重新判断主产物缺口。' }),
+    configField('factory.refillRules', '强制补库', 'refillRules', { parent:'factory.produce', wide:true, help:'同厂可开工的补库物品从上到下优先生产。缺少可加工的原料时，上游先做自己的补库物品，再按缺口补料。拖动手柄或使用上移、下移调整顺序。' }),
+    configField('factory.refillSpeedUp', '强制补库时使用加速器', 'switch', { parent:'factory.produce', help:'补库品已排队或原料够做一件时，先撤下其他等待项。再用保留量以外的加速器加速占位的旧品，单生产位一件，双生产位最多两件。关闭时等待自然完工。' }),
     configField('factory.cooperateNative', '按需求调整游戏自动生产目标', 'switch', { when: d => d.factory.strategy !== 'nativeSimulation', help:'只控制游戏中已开启的原生自动生产目标；关闭后，普通排产仍由“自动生产”和“按需优先生产”控制。开启时补齐种子及上游需求，保留正在生产队列，目标调整后回读确认并间隔至少60秒，不购买材料。' }),
     configField('factory.disabledTypes', '禁用工厂', 'multi', { catalog: 'factories', empty: '未选择，允许全部工厂', help: '控制台不再新增生产或加速，已完成产品仍按领取开关处理。游戏内已有的原生自动生产设置保持原状。' }),
     configField('factory.keepStock', '备货水位', 'number', { when: d => d.factory.strategy !== 'nativeSimulation', unit: '件 / 产品', help: '计入库存、待领取与在产数量，实际不超过游戏仓库上限。0 表示只为需求生产。' }),
     configField('factory.checkEverySeconds', '兜底检查间隔', 'number', { unit: '秒', help: '优先按服务端完工时间和建筑状态推送领取、补产；没有可靠完工时间、缺料、满仓或发生错误时，按此间隔复查。独立于主循环间隔；账号队列占用时等待。' }),
-    configField('factory.demandFirst', '按需优先生产', 'switch', { help: '开启后先补所选需求来源。同级需求先选耗时短的产品，有效月卡开启双生产位时可调整同批顺序以缩短工期。关闭后按备货水位从短到长补库存。联盟募兵、红船的独立备料开关仍各自生效。' }),
+    configField('factory.demandFirst', '按需优先生产', 'switch', { help: '库存变化后按需求优先级重新排产。游戏队列中尚未开工的任务也可调整，已开工的继续生产。同级需求先选耗时短的产品，有效月卡开启双生产位时可调整同批顺序以缩短工期。关闭后按备货水位从短到长补库存。联盟募兵、红船的独立备料开关仍各自生效。' }),
     configField('factory.demandPriority', '需求优先级', 'sortableOrder', { wide: true, catalog: 'demandSources', help: '开启按需优先生产后，智能排产按列表顺序分配原料和生产位。「工厂补料」排在某项需求前时，优先补至备货水位。海兽进阶、培育喂养和博物馆也按相对顺序使用材料。勾选“工厂加速”后，会加速该来源仍缺少的在产物品。移除的来源不会自动补回。' }),
     configField('factory.speedUp', '自动加速生产', 'switch', { help: '与按来源加速独立；两种方式都遵守加速器保留量。' }),
     configField('factory.speedUpItems', '加速物品', 'multi', { parent: 'factory.speedUp', catalog: 'materials', empty: '未选择，允许全部在产物品', when: d => d.factory.speedUp }),
@@ -317,11 +324,13 @@ const configGroups = [
     configField('gather.targetLevel', '目标等级', 'number', { unit: '级', help: '达到目标后停止强化和升级；仍需满足游戏建筑数量与等级条件。' }),
   ] },
   { id: 'resident', title: '居民需求', category: 'base', fields: [
-    configField('resident.enabled', '自动满足'), configField('resident.skipCrops', '跳过农作物订单'), configField('resident.skipProduction', '跳过需生产的订单'),
-    configField('resident.blockedMaterials', '不准消耗', 'multi', { catalog: 'materials', empty: '未选择，允许消耗所有材料', help: '订单包含所选材料时，不自动交付。' }),
+    configField('resident.enabled', '自动满足'),
+    configField('resident.skipCrops', '跳过农作物订单', 'switch', { help: '订单含农作物，或任一材料的上游配方用到农作物（如小麦做的面包），就整单跳过备料。即使已有现货也会跳过。开启自动满足且角色达到12级后直接换单。' }),
+    configField('resident.skipProduction', '跳过需生产的订单', 'switch', { help: '现有可用库存凑不齐整单就跳过备料。开启自动满足且角色达到12级后直接换单，在产和待收材料不计入现货。' }),
+    configField('resident.blockedMaterials', '不准消耗', 'multi', { catalog: 'materials', empty: '未选择，允许消耗所有材料', help: '订单含任一所选材料就整单跳过备料。开启自动满足且角色达到12级后直接换单。' }),
     configField('resident.minExp', '最低经验', 'number', { help: '奖励低于此值或无法确认奖励时跳过，0 表示不限制。' }),
     configField('resident.minGold', '最低金币', 'number', { unit: '金币', help: '0 表示不限制。' }),
-    configField('resident.reroll', '不达最低经验或金币时自动换单', 'switch', { help: '任一最低奖励不满足时自动换单，也用于跳过农作物、需生产及禁用材料等不符合条件的订单；达到每日上限不会换单。角色12级起可用，关闭时只跳过并保留原订单。' }),
+    configField('resident.reroll', '不达最低经验或金币时自动换单', 'switch', { help: '角色12级起，经验或金币低于门槛时自动换单。材料规则独立生效。达到每日满足上限后停止自动换单。' }),
     configField('resident.dailyCap', '每日满足上限', 'number', { unit: '单', help: '同时参考游戏今日完成数和本工具记录，0 表示不限。' }),
     configField('resident.rewards', '自动领取进度奖励'),
   ] },
@@ -367,7 +376,7 @@ const configGroups = [
     configField('museum.factorMode', '探宝倍数模式', 'choice', { parent: 'museum.enabled', options: [['materials', '材料筛选模式'], ['recommended', '按推荐英雄选择']], help: '按推荐英雄选择时，优先选择符合地图推荐条件的英雄，分别设置满队、不足满队和无推荐英雄时的处理方式。探险时长按游戏地图配置计算。' }),
     configField('museum.factor', '常规探宝倍数', 'choice', { parent: 'museum.enabled', when: d => d.museum.factorMode === 'materials', numeric: true, options: museumFactorOptions, help: '未解锁时按当前最高可用倍数执行，保留已选设置。' }),
     configField('museum.fullRecommendedFactor', '推荐英雄满队倍数', 'choice', { parent: 'museum.enabled', when: d => d.museum.factorMode === 'recommended', numeric: true, options: museumFactorOptions, help: '推荐英雄足以组成完整队伍时使用；未解锁时按当前最高可用倍数执行。' }),
-    configField('museum.partialRecommendedFactor', '推荐英雄不足满队倍数', 'choice', { parent: 'museum.enabled', when: d => d.museum.factorMode === 'recommended', numeric: true, options: museumFactorOptions, help: '有推荐英雄但不足一队时使用，其余位置由可用英雄补齐；未解锁时按当前最高可用倍数执行。' }),
+    configField('museum.partialRecommendedFactor', '推荐英雄不足满队倍数', 'choice', { parent: 'museum.enabled', when: d => d.museum.factorMode === 'recommended', numeric: true, options: museumFactorOptions, help: '推荐英雄不足一队时，空位优先用低品质英雄补齐。同品质优先选本体与专武合计星级较低的英雄。倍数未解锁时按当前最高可用倍数执行。' }),
     configField('museum.noRecommendedFallback', '无推荐英雄时兜底', 'switch', { parent: 'museum.enabled', when: d => d.museum.factorMode === 'recommended', help: '没有可用推荐英雄时，按兜底倍率派遣其他可用英雄；关闭则跳过该地图的新派遣。' }),
     configField('museum.noRecommendedFactor', '无推荐英雄兜底倍率', 'choice', { parent: 'museum.noRecommendedFallback', when: d => d.museum.factorMode === 'recommended' && d.museum.noRecommendedFallback, numeric: true, options: museumFactorOptions, help: '未解锁时按当前最高可用倍数执行，保留已选设置。' }),
     configField('museum.maxDispatches', '每轮最多派遣队伍', 'number', { parent: 'museum.enabled', unit: '队', help: '0 表示不限，仍需有空闲队伍、英雄和足够材料。' }),
@@ -383,8 +392,8 @@ const configGroups = [
   { id: 'resources', title: '加速与钻石', category: 'base', fields: [
     configField('resources.keepAccelerators', '保留加速器数量', 'number', { unit: '个', help: '所有自动加速共用保留量，消耗后不得低于此值。' }),
     configField('resources.allowDiamonds', '自动钻石消耗总开关', 'switch', { editChildrenWhenOff:true,
-      help:'折扣商店由「日常 → 折扣商店」独立控制，按实际余额购买。这里的开关、每日钻石使用量和钻石保留阈值均不适用于折扣商店。海商王升船和指南针补购也按实际余额独立执行。指南针补购另有每日预算。' }),
-    configField('resources.diamondThreshold', '钻石保留阈值', 'number', { parent: 'resources.allowDiamonds', unit: '钻石', help: '由全局钻石开关控制的自动消费，扣款后至少要剩余这么多钻石。' }),
+      help:'折扣商店由「日常 → 折扣商店」独立控制，按实际余额购买。这里的开关、每日钻石使用量和钻石保留阈值均不适用于折扣商店。海商王升船和指南针补购也按实际余额独立执行。指南针补购另有每日预算。联盟商船补货的开关和每日预算在「联盟商船 → 货舱补给」单独设置。' }),
+    configField('resources.diamondThreshold', '钻石保留阈值', 'number', { parent: 'resources.allowDiamonds', unit: '钻石', help: '由全局钻石开关控制的自动消费及联盟商船补货，扣款后至少要剩余这么多钻石。' }),
     configField('resources.diamondDailyLimit', '每日钻石使用量', 'number', { parent: 'resources.allowDiamonds', unit: '钻石', help: '填 0 会停用由全局钻石开关控制的自动消费。额度按北京时间零点重置，已发送且结果待确认的消费仍占用额度。' }),
   ] },
   { id: 'gold', title: '每日点金', category: 'base', fields: [
@@ -463,7 +472,7 @@ const configGroups = [
   ] },
   { id: 'pirate-hunt', title: '海盗', category: 'world', fields: [
     configField('pirate.enabled','开启挂机'),
-    configField('schedule.pirate','每日免费扫荡'),
+    configField('schedule.pirate','每日免费扫荡','switch',{help:'同时开启自动挑战时，先检查首杀。已派出舰队的种类等战果确认后再扫荡。没有可派舰队时，按已首杀的最高等级扫荡。'}),
     configField('pirateSweep.types','免费扫荡目标','multi',{options:[['1','海盗先锋'],['2','海盗精锐'],['3','海盗头目']],selectAll:true,empty:'未选择扫荡目标',help:'三类共享每日免费次数。固定次数按先锋、精锐、头目的顺序分配，每类扫荡已首杀的最高等级。'}),
     ...['海盗先锋','海盗精锐','海盗头目'].map((name,index)=>configField('pirateSweep.times'+(index+1),name+'每日扫荡次数','number',{
       unit:'次',when:d=>d.pirateSweep.types.includes(String(index+1)),help:'填正整数指定每日次数，0 表示跳过，-1 表示使用固定次数分配后的余额。多个种类填 -1 时优先扫荡今天刷得较少的种类。',
@@ -513,6 +522,7 @@ const configGroups = [
     configField('heroes.level', '自动升级', 'switch', { help: '优先补齐等级最低的所选英雄，同级按勾选顺序各升一级。重启后按实际等级接续。' }), configField('heroes.star', '自动升星'),
     configField('heroes.skill', '技能升级'), configField('heroes.skillAdvance', '技能进阶'),
     configField('heroes.exclusiveLevel', '专武升级'), configField('heroes.exclusiveStar', '专武升星'),
+    configField('heroes.badge', '徽章强化', 'switch', { help: '消耗徽章经验和金币，强化指定英雄已佩戴的徽章。' }),
     configField('heroes.showSkillReward', '领取技能展示奖励', 'switch', { help: '领取所有已拥有英雄的技能展示奖励，不受指定英雄名单限制；已领取的英雄自动跳过。' }),
     configField('heroes.universal', '英雄升星允许使用万能碎片', 'switch', { section: '高级设置', startCollapsed: true }),
     configField('heroes.keepExp', '保留英雄经验', 'number', { section: '高级设置' }),
@@ -1204,10 +1214,14 @@ function configRenderField(spec) {
   } else if (spec.kind === 'discountRules') {
     control = configDiscountRules(spec, id, name); box.append(control);
   } else if (spec.kind === 'number') {
-    const line = el('div', 'config-number'); control = el('input'); control.type = 'number'; control.required = true; control.step = '1';
+    const line = el('div', 'config-number'); control = el('input'); control.type = 'number'; control.required = !spec.emptyAsZero; control.step = '1';
     const rule = configEditor.data.rules?.numbers?.[spec.key] ?? { min: 0, max: 1000000000 };
     control.min = String(rule.min); control.max = String(rule.max); control.id = id; control.value = String(configGet(spec.key)); control.dataset.configNumber = spec.key;
-    control.oninput = () => { configSet(spec.key, control.value === '' ? null : Number(control.value)); };
+    if (spec.emptyAsZero) {
+      control.placeholder = spec.emptyAsZero;
+      if (configGet(spec.key) === 0) control.value = '';
+    }
+    control.oninput = () => { configSet(spec.key, control.value === '' && !spec.emptyAsZero ? null : Number(control.value)); };
     line.append(control); if (spec.unit) line.append(el('span', '', spec.unit)); box.append(line);
 
   } else if (spec.kind === 'time') {
@@ -1246,6 +1260,8 @@ function configRenderField(spec) {
     control = configPriorityEditor(spec, id); box.append(control);
   } else if (spec.kind === 'crops') {
     control = configCropEditor(spec, id); box.append(control);
+  } else if (spec.kind === 'refillRules') {
+    control = configRefillRules(spec, id); box.append(control);
   }
   if (control) {
     control.dataset.configKey = spec.key;
@@ -1253,7 +1269,7 @@ function configRenderField(spec) {
   }
   box.append(error); row.append(name, box);
   const widget = { row, node: row, control, error, spec, clearError() { error.hidden = true; error.textContent = ''; control?.removeAttribute('aria-invalid'); } };
-  if (spec.nameList) widget.nameHistory = configListNameHistory(widget, box);
+  if (spec.kind === 'players') widget.nameHistory = control.nameHistory;
   if (spec.moduleControl) {
     widget.moduleNote = el('span', 'config-help'); widget.moduleNote.hidden = true;
     widget.moduleNote.id = id + '-note'; widget.moduleNote.setAttribute('role', 'status');
@@ -1262,6 +1278,134 @@ function configRenderField(spec) {
   }
   configEditor.widgets.set(spec.key, widget);
   return row;
+}
+
+function configRefillRules(spec, id) {
+  const root = component('ui-refill'); root.id = id; root.tabIndex = -1;
+  root.setAttribute('role', 'group'); root.setAttribute('aria-labelledby', id + '-label');
+  const list = root.querySelector('[data-refill-rules]');
+  const [factoryPicker, itemPicker] = root.querySelectorAll('select');
+  const itemControl = itemPicker.closest('[data-slot=native-select-wrapper]');
+  const add = root.querySelector('button');
+  const catalog = configEditor.data.catalog ?? {};
+  const factories = catalog.refillFactories ?? [], products = catalog.factoryProducts ?? [];
+  const items = new Map((catalog.materials ?? []).map(row => [row.value, row.label]));
+  function availableProducts(factory, currentProduct) {
+    if (!factory) return [];
+    const rules = configGet(spec.key) ?? [];
+    return products.filter(p => p.factoryType === factory.factoryType && (p.value === currentProduct
+      || !rules.some(r => r.buildingId === factory.value && r.productId === p.value)));
+  }
+  function fillProducts(select, options) {
+    clear(select);
+    for (const p of options) select.add(new Option(items.get(p.value) ?? p.value, p.value));
+  }
+  function updateAdd(preferredProduct) {
+    const options = availableProducts(factories.find(f => f.value === factoryPicker.value));
+    fillProducts(itemPicker, options);
+    if (options.some(p => p.value === preferredProduct)) itemPicker.value = preferredProduct;
+    else if (options.some(p => p.value === '淡水')) itemPicker.value = '淡水';
+    itemControl.hidden = !factoryPicker.value;
+    add.disabled = !itemPicker.value;
+  }
+  function title(factory) {
+    if (!factories.some(f => f.value !== factory.value && f.label === factory.label)) return factory.label;
+    const number = factory.value.match(/^\d+/)?.[0];
+    return number ? factory.label + '（' + number + ' 号）' : factory.value;
+  }
+  const rowAt = index => list.querySelector('[data-rule-index="' + index + '"]');
+  const owner = configEditor.owner;
+  const editable = () => owner === current && owner === configEditor.owner && !configEditor.loading
+    && (!configEditor.busy || configEditor.saving) && root.isConnected && root.getClientRects().length > 0;
+  const drag = configOrderDrag(editable, () => configGet(spec.key));
+  const status = el('span', 'sr-only'); status.setAttribute('role', 'status'); root.append(status);
+  function paint() {
+    drag.cancel();
+    const selectedFactory = factoryPicker.value, selectedItem = itemPicker.value;
+    clear(list); clear(factoryPicker); factoryPicker.add(new Option('选择工厂', ''));
+    const rules = configGet(spec.key) ?? [];
+    for (const f of factories.filter(f => availableProducts(f).length)) factoryPicker.add(new Option(title(f), f.value));
+    if ([...factoryPicker.options].some(o => o.value === selectedFactory)) factoryPicker.value = selectedFactory;
+    updateAdd(selectedItem);
+    const byFactory = new Map();
+    for (const [index, rule] of rules.entries()) {
+      if (!byFactory.has(rule.buildingId)) byFactory.set(rule.buildingId, []);
+      byFactory.get(rule.buildingId).push(index);
+    }
+    for (const [buildingId, peers] of byFactory) {
+      const factory = factories.find(f => f.value === buildingId);
+      const group = component('ui-refill-factory');
+      const heading = group.querySelector('[data-refill-factory-name]');
+      heading.textContent = factory ? title(factory) : buildingId;
+      heading.id = id + '-factory-' + peers[0]; group.setAttribute('aria-labelledby', heading.id);
+      group.querySelector('[data-refill-order-hint]').hidden = peers.length < 2;
+      const products = group.querySelector('[data-refill-products]');
+      for (const [rank, index] of peers.entries()) products.append(renderRule(factory, index, peers, rank));
+      list.append(group);
+    }
+    function renderRule(factory, index, peers, rank) {
+      const rule = rules[index];
+      const productName = items.get(rule.productId) ?? rule.productId;
+      const row = component('ui-refill-rule');
+      row.dataset.ruleIndex = index;
+      row.setAttribute('aria-label', productName);
+      if (peers.length > 1) {
+        const priority = row.querySelector('[data-refill-rank]');
+        priority.id = id + '-rank-' + index; priority.textContent = '优先级 ' + (rank + 1);
+        const handle = row.querySelector('[data-refill-handle]');
+        handle.hidden = false; handle.setAttribute('aria-label', '拖动排序：' + productName);
+        handle.setAttribute('aria-describedby', priority.id); handle.title = '拖动排序，或按上下方向键移动';
+        const move = (to, direction) => {
+          if (!editable() || to < 0 || to >= peers.length || to === rank) return;
+          const next = [...configGet(spec.key)], ordered = peers.map(i => next[i]);
+          ordered.splice(rank, 1); ordered.splice(to, 0, next[index]);
+          peers.forEach((slot, i) => { next[slot] = ordered[i]; });
+          configSet(spec.key, next); paint();
+          const moved = rowAt(peers[to]);
+          const focus = direction
+            ? moved.querySelector('[data-refill-move="' + direction + '"]:enabled') ?? moved.querySelector('[data-refill-move]:enabled')
+            : moved.querySelector('[data-refill-handle]');
+          focus.focus({preventScroll:true}); status.textContent = productName + '已移至优先级 ' + (to + 1);
+        };
+        handle.onpointerdown = event => drag.start(event, handle, row, peers.map(rowAt), move, true);
+        handle.onkeydown = event => {
+          if (event.altKey || event.ctrlKey || event.metaKey || !['ArrowUp','ArrowDown'].includes(event.key)) return;
+          event.preventDefault(); drag.cancel(); move(rank + (event.key === 'ArrowUp' ? -1 : 1));
+        };
+        for (const button of row.querySelectorAll('[data-refill-move]')) {
+          const direction = Number(button.dataset.refillMove), to = rank + direction;
+          button.hidden = false; button.disabled = to < 0 || to >= peers.length;
+          button.setAttribute('aria-describedby', priority.id);
+          button.onclick = () => { drag.cancel(); move(to, direction); };
+        }
+      }
+      const change = patch => configSet(spec.key, configGet(spec.key).map((r, i) => i === index ? { ...r, ...patch } : r));
+      const product = row.querySelector('select'); fillProducts(product, availableProducts(factory, rule.productId));
+      if (![...product.options].some(o => o.value === rule.productId)) product.add(new Option(items.get(rule.productId) ?? rule.productId, rule.productId));
+      product.value = rule.productId;
+      product.onchange = () => {
+        change({ productId:product.value }); paint(); rowAt(index).querySelector('select').focus();
+      };
+      for (const input of row.querySelectorAll('[data-quantity]')) {
+        const key = input.dataset.quantity;
+        input.value = rule[key] ?? '';
+        input.oninput = () => change({ [key]: input.value === '' ? null : input.valueAsNumber });
+      }
+      row.querySelector('[data-refill-remove]').onclick = () => {
+        configSet(spec.key, configGet(spec.key).filter((r, i) => i !== index)); paint(); factoryPicker.focus();
+      };
+      return row;
+    }
+  }
+  factoryPicker.onchange = () => updateAdd();
+  add.onclick = () => {
+    if (!factoryPicker.value || !itemPicker.value) return;
+    configSet(spec.key, [...configGet(spec.key), {buildingId:factoryPicker.value, productId:itemPicker.value, trigger:0, target:null}]);
+    paint();
+    if (factoryPicker.value) itemPicker.focus();
+    else rowAt(configGet(spec.key).length - 1).querySelector('select').focus();
+  };
+  paint(); return root;
 }
 
 function configSortableOrder(spec, id) {
@@ -1274,24 +1418,14 @@ function configSortableOrder(spec, id) {
   const add = factory ? el('div', 'config-add') : null;
   const labels = new Map(spec.options ?? (configEditor.data.catalog?.[spec.catalog] ?? []).map(item => [item.value, item.label]));
   const owner = configEditor.owner;
-  let drag = null;
   const editable = () => owner === current && configEditor.owner === owner && (!configEditor.busy || factory && configEditor.saving) && !configEditor.loading
     && root.isConnected && root.getClientRects().length > 0;
+  const drag = configOrderDrag(editable, () => configGet(spec.key));
   const commit = (values, focusValue) => {
     configSet(spec.key, values);
     paint(focusValue);
     if (factory) void configFlush();
   };
-  const clearDrop = () => { for (const row of list.children) delete row.dataset.drop; };
-  const cancelDrag = () => {
-    const previous = drag; drag = null; clearDrop();
-    window.removeEventListener('blur', cancelDrag);
-    document.removeEventListener('keydown', escapeDrag);
-    if (!previous) return;
-    delete previous.row.dataset.dragging;
-    if (previous.handle.hasPointerCapture(previous.pointerId)) previous.handle.releasePointerCapture(previous.pointerId);
-  };
-  const escapeDrag = event => { if (event.key === 'Escape' && drag) { event.preventDefault(); cancelDrag(); } };
   const move = (value, to) => {
     if (!editable()) return;
     const values = [...configGet(spec.key)], from = values.indexOf(value);
@@ -1300,39 +1434,8 @@ function configSortableOrder(spec, id) {
     commit(values, value);
     status.textContent = (labels.get(value) || value) + '已移至第' + (to + 1) + '位';
   };
-  const startDrag = (event, value, row, handle) => {
-    if (event.button !== 0 || event.isPrimary === false || handle.disabled || !editable()) return;
-    cancelDrag();
-    drag = { value, row, handle, pointerId: event.pointerId, startY: event.clientY, moved: false,
-      order: JSON.stringify(configGet(spec.key)), to: configGet(spec.key).indexOf(value) };
-    handle.focus({ preventScroll: true });
-    handle.setPointerCapture(event.pointerId);
-    window.addEventListener('blur', cancelDrag); document.addEventListener('keydown', escapeDrag);
-    handle.onpointermove = event => {
-      if (!drag || event.pointerId !== drag.pointerId) return;
-      if (!editable() || JSON.stringify(configGet(spec.key)) !== drag.order) { cancelDrag(); return; }
-      if (!drag.moved && Math.abs(event.clientY - drag.startY) < 5) return;
-      drag.moved = true; row.dataset.dragging = 'true';
-      const others = [...list.children].filter(item => item !== row);
-      const before = others.findIndex(item => { const rect = item.getBoundingClientRect(); return event.clientY < rect.top + rect.height / 2; });
-      drag.to = before < 0 ? others.length : before;
-      clearDrop();
-      if (others[drag.to]) others[drag.to].dataset.drop = 'before';
-      else if (others.length) others.at(-1).dataset.drop = 'after';
-      if (event.clientY < 48) window.scrollBy(0, -16);
-      else if (event.clientY > window.innerHeight - 48) window.scrollBy(0, 16);
-    };
-    handle.onpointerup = event => {
-      if (!drag || event.pointerId !== drag.pointerId) return;
-      const completed = drag;
-      const valid = editable() && JSON.stringify(configGet(spec.key)) === completed.order;
-      cancelDrag();
-      if (valid && completed.moved) move(value, completed.to);
-    };
-    handle.onpointercancel = handle.onlostpointercapture = cancelDrag;
-  };
   function paint(focusValue) {
-    cancelDrag(); clear(list);
+    drag.cancel(); clear(list);
     const values = configGet(spec.key);
     values.forEach((value, index) => {
       const row = el('div', (factory ? 'config-demand-row' : 'config-dispatch-row') + ' config-dispatch-sortable');
@@ -1342,11 +1445,11 @@ function configSortableOrder(spec, id) {
       const label = labels.get(value) || value;
       const handle = configButton('⠿', () => {}); handle.classList.add('config-dispatch-handle');
       handle.setAttribute('aria-label', '拖动排序：' + label); handle.title = '拖动排序，或按上下方向键移动';
-      handle.onpointerdown = event => startDrag(event, value, row, handle);
+      handle.onpointerdown = event => drag.start(event, handle, row, [...list.children], to => move(value, to));
       handle.onkeydown = event => {
         if (event.altKey || event.ctrlKey || event.metaKey) return;
         const to = event.key === 'ArrowUp' ? index - 1 : event.key === 'ArrowDown' ? index + 1 : null;
-        if (to !== null) { event.preventDefault(); cancelDrag(); move(value, to); }
+        if (to !== null) { event.preventDefault(); drag.cancel(); move(value, to); }
       };
       const actions = el('div', 'config-order-tools');
       if (factory) {
@@ -1360,7 +1463,7 @@ function configSortableOrder(spec, id) {
         speed.append(check, el('span', '', '工厂加速')); actions.append(speed);
       }
       for (const [offset, text] of [[-1, '上移'], [1, '下移']]) {
-        const button = configButton(text, () => { cancelDrag(); move(value, index + offset); });
+        const button = configButton(text, () => { drag.cancel(); move(value, index + offset); });
         button.disabled = index + offset < 0 || index + offset >= values.length;
         button.setAttribute('aria-label', label + text); actions.append(button);
       }
@@ -1387,6 +1490,76 @@ function configSortableOrder(spec, id) {
   if (add) root.append(add);
   paint();
   return root;
+}
+
+// Capture only the handle. Keep form controls and the row DOM intact until drop.
+function configOrderDrag(editable, readOrder) {
+  let stop;
+  const cancel = () => stop?.();
+  function start(event, handle, row, rows, move, withinGroup = false) {
+    if (event.button !== 0 || event.isPrimary === false || handle.disabled || !editable()) return;
+    cancel();
+    const pointer = event.pointerId, startY = event.clientY, order = JSON.stringify(readOrder());
+    const others = rows.filter(item => item !== row);
+    const valid = () => editable() && JSON.stringify(readOrder()) === order;
+    let x = event.clientX, y = startY, moved = false, marker, frame = 0;
+    function position() {
+      if (withinGroup) {
+        const first = rows[0].getBoundingClientRect(), last = rows.at(-1).getBoundingClientRect();
+        if (x < first.left || x > first.right || y < first.top || y > last.bottom) return -1;
+      }
+      const index = others.findIndex(item => { const box = item.getBoundingClientRect(); return y < box.top + box.height / 2; });
+      return index < 0 ? others.length : index;
+    }
+    function preview() {
+      if (marker) delete marker.dataset.drop;
+      const to = position();
+      marker = to < 0 ? null : others[to] ?? others.at(-1);
+      if (marker) marker.dataset.drop = others[to] ? 'before' : 'after';
+    }
+    function scroll() {
+      frame = 0;
+      if (!valid()) { cancel(); return; }
+      if (!marker) return;
+      const dy = y < 48 ? -12 : y > window.innerHeight - 48 ? 12 : 0;
+      if (!dy) return;
+      const before = window.scrollY;
+      window.scrollBy(0, dy);
+      if (window.scrollY !== before) { preview(); frame = window.requestAnimationFrame(scroll); }
+    }
+    const escape = e => { if (e.key === 'Escape') { e.preventDefault(); cancel(); } };
+    function finish() {
+      stop = null;
+      if (frame) window.cancelAnimationFrame(frame);
+      if (marker) delete marker.dataset.drop;
+      delete row.dataset.dragging;
+      window.removeEventListener('blur', finish); document.removeEventListener('keydown', escape);
+      document.removeEventListener('lostpointercapture', lost);
+      if (handle.hasPointerCapture(pointer)) handle.releasePointerCapture(pointer);
+    }
+    const lost = e => { if (stop === finish && e.pointerId === pointer && (e.target === handle || !handle.isConnected)) finish(); };
+    stop = finish;
+    handle.focus({ preventScroll: true }); handle.setPointerCapture(pointer);
+    window.addEventListener('blur', finish); document.addEventListener('keydown', escape);
+    document.addEventListener('lostpointercapture', lost);
+    handle.onpointermove = e => {
+      if (stop !== finish || e.pointerId !== pointer) return;
+      if (!valid()) { finish(); return; }
+      if (!moved && Math.abs(e.clientY - startY) < 5) return;
+      moved = true; row.dataset.dragging = 'true'; x = e.clientX; y = e.clientY;
+      preview(); if (!frame) scroll();
+    };
+    handle.onpointerup = e => {
+      if (stop !== finish || e.pointerId !== pointer) return;
+      x = e.clientX ?? x; y = e.clientY ?? y;
+      const to = moved && valid() ? position() : -1;
+      finish(); if (to >= 0) move(to);
+    };
+    handle.onpointercancel = handle.onlostpointercapture = e => {
+      if (stop === finish && (!e || e.pointerId === pointer)) finish();
+    };
+  }
+  return { start, cancel };
 }
 
 function configLineupPicker(spec, id) {
@@ -1789,16 +1962,62 @@ async function configRefreshPlayers(world = false, rankPage) {
   return job.promise;
 }
 
-function configListNameHistory(widget, box) {
-  const { spec } = widget, namesKey = spec.nameList, idKey = spec.key;
-  const root = el('div', 'config-list-history'), list = el('div', 'config-player-tags'), status = el('small', 'config-help');
-  const refresh = configButton('刷新昵称', () => { void sync(true); });
-  refresh.setAttribute('aria-label', '刷新' + spec.label + '昵称');
-  root.append(list, refresh, status); box.append(root);
-  let visible = false, pending = false, disposed = false, painted = '', checked = new Set();
+function configCompactPower(value) {
+  const digits = String(value ?? '');
+  if (!/^(0|[1-9]\d*)$/.test(digits)) return '';
+  // 游戏中文版从十万起缩写，截取两位小数，含小数点的数字部分最多六个字符。
+  if (digits.length < 6) return digits;
+  const [places, unit] = digits.length >= 14 ? [13, '兆'] : digits.length >= 9 ? [8, '亿'] : [4, '万'];
+  const whole = digits.slice(0, -places), fraction = digits.slice(-places, 2 - places);
+  const compact = fraction === '00' ? whole : (whole + '.' + fraction).slice(0, 6).replace(/\.$/, '');
+  return compact + unit;
+}
+
+function configPlayerHeadline(name, power) {
+  const line = el('span', 'config-player-headline'), compact = configCompactPower(power);
+  line.append(el('span', 'config-player-name', name));
+  if (compact) line.append(el('span', 'config-player-power', '战力 ' + compact));
+  return line;
+}
+
+function configListNameHistory(spec, control) {
+  const namesKey = spec.nameList, idKey = spec.key;
+  const state = spec.worldPlayers ? configEditor.worldPlayers : configEditor;
+  const root = el('div', 'config-list-history'), list = el('ul', 'config-player-list'), status = el('small', 'config-player-status');
+  const footer = el('div', 'config-player-footer');
+  const previewLimit = 2;
+  let expanded = false;
+  const more = configButton('查看全部', event => {
+    expanded = !expanded; paint();
+    if (expanded && !event.detail) list.focus({ preventScroll: true });
+  }, 'config-player-action');
+  const edit = configButton('编辑', event => {
+    setEditing(!editing);
+    paint();
+    if (editing && !event.detail) list.querySelector('button:not(:disabled)')?.focus();
+  }, 'config-player-action');
+  const refresh = configButton('刷新资料', () => { void sync(true); }, 'config-player-action');
+  status.setAttribute('role', 'status');
+  list.id = control.id + '-list';
+  list.setAttribute('role', 'list');
+  list.setAttribute('aria-label', spec.label + '角色');
+  more.setAttribute('aria-controls', list.id);
+  edit.setAttribute('aria-controls', list.id);
+  refresh.setAttribute('aria-label', '刷新' + spec.label + '资料');
+  footer.append(more, refresh, status, edit); root.append(list, footer); control.append(root);
+  let visible = false, pending = false, disposed = false, painted = '', checked = new Set(), editing = false;
+  let paintedMembers;
+  function setEditing(value) {
+    editing = value;
+    root.classList.toggle('is-editing', value);
+    edit.textContent = value ? '完成' : '编辑';
+    edit.setAttribute('aria-label', (value ? '完成编辑' : '编辑') + spec.label);
+  }
+  setEditing(false);
   const fold = value => idKey.startsWith('treasure.') ? value : value.toLocaleLowerCase();
+  const configuredNames = () => namesKey ? configGet(namesKey) ?? [] : [];
   function entries() {
-    const ids = configGet(idKey) ?? [], names = configGet(namesKey) ?? [], history = configEditor.data?.playerNames ?? {};
+    const ids = configGet(idKey) ?? [], names = configuredNames(), history = configEditor.data?.playerNames ?? {};
     const relevant = name => names.some(value => fold(value) === fold(name));
     return [...new Set([...ids, ...Object.keys(history).filter(id => [history[id].name, ...history[id].previous].some(relevant))])];
   }
@@ -1806,10 +2025,9 @@ function configListNameHistory(widget, box) {
     configSet(key, values);
     const control = configEditor.widgets.get(key)?.control;
     if (control?.tagName === 'TEXTAREA') control.value = values.join('\n');
-    for (const repaint of configEditor.playerWidgets) repaint();
   }
   function lastGate(key) {
-    const ids = configGet(idKey) ?? [], names = configGet(namesKey) ?? [];
+    const ids = configGet(idKey) ?? [], names = configuredNames();
     const last = (key === idKey ? ids.length === 1 && !names.length : names.length === 1 && !ids.length);
     let gate = '';
     if (last && idKey.endsWith('.huntPlayerIds')) gate = idKey.replace(/huntPlayerIds$/, 'huntEnabled');
@@ -1826,39 +2044,59 @@ function configListNameHistory(widget, box) {
       if (gate) configSet(gate, false);
       if (closeModule) configSet('treasure.enabled', false);
       change(key, configGet(key).filter(item => item !== value));
+      if (gate) configEditor.widgets.get(closeModule ? 'treasure.enabled' : gate)?.control.focus();
+      else (root.hidden ? control.querySelector('summary') : edit).focus({ preventScroll: true });
     }, 'remove');
   }
   function paint() {
     if (disposed || !configEditor.draft) return;
-    const ids = configGet(idKey) ?? [], names = configGet(namesKey) ?? [], history = configEditor.data?.playerNames ?? {};
+    const ids = configGet(idKey) ?? [], names = configuredNames(), history = configEditor.data?.playerNames ?? {};
     const rows = entries();
-    const signature = JSON.stringify([ids, names, lastGate(idKey), lastGate(namesKey), configGet('treasure.autoJoin'), configGet('treasure.chase'), configGet('treasure.follow'), configGet('treasure.enabled'), rows.map(id => [id, history[id]])]);
-    if (signature !== painted) {
-      painted = signature; clear(list);
-      widget.control?.refreshPlayerNames?.();
-      for (const id of rows) {
+    if (rows.length <= previewLimit) expanded = false;
+    const showAll = expanded || editing;
+    const shown = showAll ? rows : rows.slice(0, previewLimit);
+    const members = state.playerData?.members;
+    const signature = JSON.stringify([ids, names, rows.length, expanded, editing, lastGate(idKey), lastGate(namesKey), configGet('treasure.autoJoin'), configGet('treasure.chase'), configGet('treasure.follow'), configGet('treasure.enabled'), shown.map(id => [id, history[id]])]);
+    const changed = signature !== painted || members !== paintedMembers;
+    if (changed) {
+      const scrollTop = list.scrollTop;
+      painted = signature; paintedMembers = members; clear(list);
+      more.hidden = rows.length <= previewLimit || editing;
+      more.textContent = expanded ? '收起名单' : '查看全部';
+      more.setAttribute('aria-expanded', String(showAll));
+      if (showAll && rows.length > previewLimit) list.tabIndex = 0;
+      else list.removeAttribute('tabindex');
+      const roster = rows.length && members ? new Map(members.map(member => [member.id, member])) : null;
+      for (const id of shown) {
         const record = history[id], aliases = record?.previous ?? [];
-        const tag = el('div', 'config-player-tag');
-        const caption = record ? record.name + ' · ID ' + id + (ids.includes(id) ? '' : '（昵称匹配）') : 'ID ' + id + ' · 尚未同步昵称';
-        tag.append(el('span', '', caption));
-        if (aliases.length) tag.append(el('strong', 'config-name-changed', '已改名 · 曾用名 ' + aliases.join('、')));
+        const member = roster?.get(id), name = record?.name || member?.name;
+        const row = el('li', 'config-player-row'), identity = el('div', 'config-player-identity');
+        identity.append(configPlayerHeadline(name || '昵称待同步', record?.power ?? member?.power), el('small', '', 'ID ' + id + (ids.includes(id) ? '' : ' · 昵称匹配')));
+        if (aliases.length) identity.append(el('small', '', '已改名 · 曾用名 ' + aliases.join('、')));
+        const actions = el('div', 'config-player-row-actions');
         if (ids.includes(id)) {
-          const button = removeButton('移除 ID', idKey, id);
-          button.setAttribute('aria-label', button.textContent + '（' + id + '）'); tag.append(button);
+          const button = removeButton('移除', idKey, id);
+          button.setAttribute('aria-label', button.textContent + '（' + (name ? name + '，' : '') + 'ID ' + id + '）');
+          actions.append(button);
         }
         for (const value of names.filter(name => record && [record.name, ...aliases].some(alias => fold(alias) === fold(name)))) {
           if (!ids.includes(id)) {
-            const bind = configButton('绑定此 ID 并保留“' + value + '”', () => change(idKey, [...new Set([...configGet(idKey), id])]));
+            const bind = configButton('绑定此 ID 并保留“' + value + '”', () => {
+              change(idKey, [...new Set([...configGet(idKey), id])]); edit.focus({ preventScroll: true });
+            });
             bind.disabled = ids.length >= (idKey === 'treasure.avoidPlayerIds' || idKey === 'alliance.memberIds' ? 100 : 30);
-            tag.append(bind);
+            actions.append(bind);
           }
-          if (record.name !== value && aliases.some(alias => fold(alias) === fold(value))) tag.append(removeButton('删除旧昵称“' + value + '”', namesKey, value));
+          if (record.name !== value && aliases.some(alias => fold(alias) === fold(value))) actions.append(removeButton('删除旧昵称“' + value + '”', namesKey, value));
         }
-        list.append(tag);
+        row.append(identity, actions); list.append(row);
       }
+      list.scrollTop = showAll ? scrollTop : 0;
       root.hidden = !rows.length;
+      if (root.hidden) setEditing(false);
     }
     if (visible && !pending) void sync(false);
+    return changed;
   }
   async function sync(force) {
     if (disposed || pending || !configEditor.draft || configEditor.owner !== current) return;
@@ -1879,7 +2117,7 @@ function configListNameHistory(widget, box) {
         for (const id of batch) if (data.playerNames[id]) history[id] = data.playerNames[id];
         configEditor.data.playerNames = history;
         count += data.synced.length;
-        status.textContent = !data.online ? '账号离线，显示上次记录' : count < Math.min(i + 100, ids.length) ? '部分昵称未同步，显示上次记录' : '';
+        status.textContent = !data.online ? '离线 · 上次记录' : count < Math.min(i + 100, ids.length) ? '部分资料未同步，显示上次记录' : '';
       }
     } catch (error) { if (active()) status.textContent = error.message; }
     finally {
@@ -1894,8 +2132,7 @@ function configListNameHistory(widget, box) {
     visible = entry.isIntersecting;
     if (visible) paint();
   }) : null;
-  observer?.observe(widget.row);
-  paint();
+  observer?.observe(control);
   return { paint, dispose() { disposed = true; observer?.disconnect(); } };
 }
 
@@ -1903,10 +2140,10 @@ function configPlayerPicker(spec, id) {
   const world = !!spec.worldPlayers, noun = world ? '玩家' : '盟友';
   const state = world ? configEditor.worldPlayers : configEditor;
   const root = el('div', 'config-player-picker'); root.id = id; root.tabIndex = -1; root.setAttribute('role', 'group'); root.setAttribute('aria-label', spec.label);
-  const selected = el('div', 'config-player-tags');
   // 点击姓名标签时，焦点须留在下拉框内，避免落到外层分组触发失焦关闭。
   const details = el('details', 'config-multi'); details.tabIndex = -1;
-  const summary = el('summary', '', '选择' + noun); summary.setAttribute('aria-label', '选择' + spec.label); details.append(summary);
+  const summary = el('summary'), count = el('span', 'config-player-count');
+  summary.append(el('span', '', '选择' + noun), count); details.append(summary);
   const panel = el('div', 'config-multi-panel'); const search = el('input', 'config-input'); search.type = 'search'; search.placeholder = '搜索已载入的昵称或 ID'; search.setAttribute('aria-label', '搜索' + spec.label);
   const status = el('p', 'config-help'); status.setAttribute('role', 'status');
   const list = el('div', 'config-option-list');
@@ -1917,7 +2154,7 @@ function configPlayerPicker(spec, id) {
   const limit = spec.key === 'treasure.avoidPlayerIds' || spec.key === 'alliance.memberIds' ? 100 : 30;
   function change(value, checked) {
     const values = configGet(spec.key);
-    if (checked && !values.includes(value) && values.length >= limit) { manualError.textContent = '最多选择' + limit + '位玩家'; manualError.hidden = false; paint(); return; }
+    if (checked && !values.includes(value) && values.length >= limit) { manualError.textContent = '最多选择' + limit + '位玩家'; manualError.hidden = false; paintList(); return; }
     configSet(spec.key, checked ? [...new Set([...values, value])] : values.filter(item => item !== value)); manualError.hidden = true; paint();
   }
   const add = configButton('添加 ID', () => {
@@ -1934,7 +2171,9 @@ function configPlayerPicker(spec, id) {
     const matches = (state.playerData?.members ?? []).filter(member => (member.name + ' ' + member.id).toLocaleLowerCase().includes(query));
     for (const member of matches) {
       const option = el('label', 'config-option'); const check = el('input'); check.type = 'checkbox'; check.value = member.id; check.checked = values.includes(member.id); check.onchange = () => change(member.id, check.checked);
-      const label = el('span'); label.append(el('span', 'config-player-name', member.name), el('small', 'config-help', [member.source, member.guildIdx ? '联盟 ' + member.guildIdx : '', 'ID ' + member.id, member.online ? '在线' : ''].filter(Boolean).join(' · ')));
+      const label = el('span');
+      label.append(configPlayerHeadline(member.name, configEditor.data?.playerNames?.[member.id]?.power ?? member.power),
+        el('small', 'config-help', [member.source, member.guildIdx ? '联盟 ' + member.guildIdx : '', 'ID ' + member.id, member.online ? '在线' : ''].filter(Boolean).join(' · ')));
       option.append(check, label); list.append(option);
       if (member.id === focusId) check.focus({ preventScroll: true });
     }
@@ -1946,21 +2185,12 @@ function configPlayerPicker(spec, id) {
     }
     list.scrollTop = scrollTop;
   }
-  function paint() {
+  function paint(force = false) {
     const values = configGet(spec.key), members = state.playerData?.members ?? [];
     if (!values) return;
-    clear(selected);
-    for (const value of values) {
-      const member = members.find(row => row.id === value);
-      const duplicateName = member && members.filter(row => row.name === member.name).length > 1;
-      const displayName = configEditor.data?.playerNames?.[value]?.name || member?.name;
-      const name = displayName ? displayName + (duplicateName ? '（' + value + '）' : '') : '角色 ' + value;
-      const tag = el('span', 'config-player-tag'); const text = el('span', '', name); text.title = '角色 ID：' + value;
-      const remove = configButton('移除', () => { change(value, false); summary.focus(); }, 'remove'); remove.setAttribute('aria-label', '从' + spec.label + '移除' + name);
-      tag.append(text, remove); selected.append(tag);
-    }
-    selected.hidden = !values.length;
-    summary.textContent = values.length ? '选择' + noun + ' · 已选 ' + values.length + ' 位' : '选择' + noun;
+    if (!history.paint() && !force) return;
+    count.textContent = values.length ? '已选 ' + values.length + ' 位' : '';
+    summary.setAttribute('aria-label', '选择' + spec.label + (values.length ? '，' + count.textContent : ''));
     refresh.disabled = !!state.playerRequest; refresh.textContent = state.playerRequest ? '正在读取…' : '刷新' + noun + '名单';
     const data = state.playerData;
     if (more) {
@@ -1985,9 +2215,10 @@ function configPlayerPicker(spec, id) {
   details.onkeydown = event => { if (event.key === 'Escape') { details.open = false; summary.focus(); event.stopPropagation(); } };
   panel.append(search, status, list);
   if (more) panel.append(more);
-  panel.append(refresh, manual, manualError); details.append(panel); root.append(selected, details);
-  root.refreshPlayerNames = paint;
-  configEditor.playerWidgets.push(paint); paint(); return root;
+  panel.append(refresh, manual, manualError); details.append(panel); root.append(details);
+  const history = configListNameHistory(spec, root);
+  root.nameHistory = { paint, dispose: history.dispose };
+  configEditor.playerWidgets.push(() => paint(true)); paint(); return root;
 }
 
 function configCityWarRoles(spec, id) {

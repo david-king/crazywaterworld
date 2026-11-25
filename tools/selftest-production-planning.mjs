@@ -38,6 +38,66 @@ function fixture() {
 let passed = 0;
 function test(name, run) { run(); passed++; console.log('通过：' + name); }
 
+test('居民材料规则逐单过滤，共享现货只够一单，待收成品不计入现货', () => {
+  const { snapshot, settings, plan } = fixture();
+  Object.assign(settings.resident, { enabled: true, skipCrops: true, skipProduction: true, blockedMaterials: ['酒精'] });
+  snapshot.inventory.push({ id: '面包', num: 1 }, { id: '酒精', num: 1 }, { id: '食盐', num: 1 });
+  snapshot.factories[0].finished.push({ id: '食盐', num: 3 });
+  snapshot.orders = [['小麦', '食盐'], ['酒精', '食盐'], ['面包', '食盐'], ['食盐'], ['食盐']].map((ids, i) => ({
+    id: 'resident:' + i, source: 'resident', kind: 'order', metadata: { enabled: true },
+    requirements: ids.map(id => ({ id, num: 1 })),
+  }));
+  const result = plan();
+  assert.deepEqual(result.orders.map(order => order.skipped), [true, true, true, false, true]);
+  assert.deepEqual(result.timeline.filter(job => job.kind === 'production'), []);
+});
+
+{
+  const {snapshot,settings} = fixture();
+  const recipes = ['爆米花','酒精'].map((id,i) => ({itemId:id,buildType:'食品厂',unlockLevel:1,produceTime:i ? 15 : 50,costItem:[['小麦',1]]}));
+  const local = {...config,tables:{...config.tables,BuildingProduceCfg:table(recipes)}};
+  settings.factory.demandPriority = ['cargo','museum'];
+  settings.factory.gain = true;
+  snapshot.inventory.push({id:'爆米花',num:1});
+  snapshot.recipes = recipes.map(r => ({...snapshot.recipes[0],id:r.itemId,productId:r.itemId,durationSeconds:r.produceTime}));
+  snapshot.factories[0].queue = ['爆米花','爆米花','爆米花','酒精','酒精','爆米花'].map((productId,i) =>
+    ({id:'q'+i, index:40+i, productId, num:1, finishTime:i ? null : 1010}));
+  snapshot.orders = [['cargo:1','cargo','爆米花',4],['cargo:2','cargo','爆米花',2],['museum','museum','酒精',1]]
+    .map(([id,source,item,num]) => ({id,source,kind:source==='cargo'?'order':'consumption',metadata:{enabled:true},requirements:[{id:item,num}]}));
+  const result = planProduction(snapshot,local,settings);
+  const day = await forecastProductionDay(snapshot,local,settings,result.orders);
+  const at = id => day.completions.find(o=>o.id===id)?.at;
+  assert.deepEqual(day.initialQueueChanges,[{buildingId:'1食品厂',indices:[44,43]}]);
+  assert.equal(at('cargo:2'),1010);
+  assert.equal(at('cargo:1'),1210);
+  assert(at('museum') > at('cargo:1'));
+  assert.equal(snapshot.factories[0].queue.length,6,'预览不得修改实际队列');
+}
+
+{
+  const { snapshot, settings, plan } = fixture();
+  settings.factory.demandPriority = ['cargo'];
+  settings.cargo.enabled = true;
+  snapshot.orders = [
+    { id: 'cargo:1', requirements: [{ id: '小麦', num: 4 }, { id: '面包', num: 1 }] },
+    { id: 'cargo:2', requirements: [{ id: '小麦', num: 4 }] },
+  ].map(order => ({ ...order, source: 'cargo', kind: 'order', metadata: { enabled: true } }));
+  snapshot.inventory[0].num = 4;
+  const result = plan();
+  assert.equal(result.orders.find(row => row.id === 'cargo:2').completionAt, snapshot.serverNow);
+  const forecast = await forecastProductionDay(snapshot, config, settings, result.orders);
+  assert.equal(forecast.completions.find(row => row.id === 'cargo:2')?.at, snapshot.serverNow);
+  assert(!forecast.completions.some(row => row.id === 'cargo:1' && row.at === snapshot.serverNow));
+  settings.factory.demandPriority.unshift('merchant');
+  snapshot.orders.unshift({ id: 'merchant:1', source: 'merchant', kind: 'order', requirements: [{ id: '小麦', num: 4 }] });
+  const protectedPlan = plan();
+  assert.equal(protectedPlan.orders.find(row => row.source === 'merchant').completionAt, snapshot.serverNow);
+  assert(protectedPlan.orders.find(row => row.id === 'cargo:2').completionAt > snapshot.serverNow);
+  const protectedDay = await forecastProductionDay(snapshot, config, settings, protectedPlan.orders);
+  assert(!protectedDay.completions.some(row => row.id === 'cargo:2' && row.at === snapshot.serverNow));
+  passed++; console.log('通过：一船还缺面包时，同批小麦可立即发出另一船');
+}
+
 {
   const {snapshot,settings} = fixture(), start = snapshot.serverNow;
   const jobs = { '1食品厂':{jobs:[{id:'面包',quantity:2,pinned:true,at:start+90000},{id:'面包',at:start+90001}]},

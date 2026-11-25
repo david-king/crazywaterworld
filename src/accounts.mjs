@@ -1,7 +1,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { createHash } from 'node:crypto';
-import { worldName } from './world-name.mjs';
+import { worldName, worldNumber } from './world-name.mjs';
 
 // 账号身份按渠道与 openId 区分；历史抖音凭证与电脑采集沿用同一身份空间。
 // 一条记录 = 一份能登录的凭证 + 一点人类可读的标记（昵称、等级、区服）。
@@ -33,16 +33,16 @@ export function loginProfiles(store, credential) {
 
 // 合服后的实际区服可能相同，登录入口（出生服）仍能区分两个角色。
 export function worldProfileId(credential) {
-  const world = Number(credential.login?.worldId);
+  const world = worldNumber(credential.login?.worldId);
   if (!Number.isSafeInteger(world) || world <= 0) return null;
   return 'role:' + createHash('sha256').update(JSON.stringify([accountId(credential), world])).digest('hex');
 }
 
 export function matchingProfile(store, credential, world = credential.login?.worldId) {
   const profiles = loginProfiles(store, credential);
-  if (!Number(world)) return profiles.find(row => row.id === store.activeId) ?? profiles[0];
-  return profiles.find(row => Number(row.login.worldId) === Number(world))
-    ?? profiles.find(row => !Number(row.login.worldId));
+  if (!worldNumber(world)) return profiles.find(row => row.id === store.activeId) ?? profiles[0];
+  return profiles.find(row => worldNumber(row.login.worldId) === worldNumber(world))
+    ?? profiles.find(row => !worldNumber(row.login.worldId));
 }
 
 // 网页和 CLI 要的都是这一小块，凭证本体不往外散。
@@ -111,7 +111,7 @@ export function refreshProfileLogin(profile, credential, worldId = profile.login
   profile.url = credential.url;
   profile.source = credential.source;
   profile.capturedAt = credential.capturedAt;
-  profile.loginFrameHex = Number(worldId || 0) === Number(credential.login.worldId || 0) ? credential.loginFrameHex : null;
+  profile.loginFrameHex = worldNumber(worldId || 0) === worldNumber(credential.login.worldId || 0) ? credential.loginFrameHex : null;
 }
 
 // 抓到同一账号的新凭证就地刷新，各角色保留自己的登录入口、人工备注和配置。
@@ -122,7 +122,7 @@ export function upsertAccount(store, credential, { label = null, now = new Date(
   // 同一登录身份刷新一次凭据，所有入口使用新票据，各自保留登录区服。
   for (const profile of profiles) {
     if (!refreshCredentials && profile !== existing) continue;
-    const worldId = profile === existing && Number(fresh.login.worldId) ? fresh.login.worldId : profile.login.worldId;
+    const worldId = profile === existing && worldNumber(fresh.login.worldId) ? fresh.login.worldId : profile.login.worldId;
     refreshProfileLogin(profile, fresh, worldId);
   }
   if (!existing) {

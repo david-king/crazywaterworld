@@ -8,6 +8,8 @@ export const WEEKLY_ACTIVITY_DEFAULTS = {
   ])),
   farmRecruitTimes: 10,
   farmSpeedUp: false,
+  antiqueRecruitTickets: false,
+  antiqueTicketLimit: 0,
   petQualityOrder: 'asc',
   forgeQualityOrder: 'asc',
 };
@@ -18,6 +20,7 @@ export const WEEKLY_ACTIVITY_CONSTRAINTS = {
     ['weeklyActivity.' + kind + 'Score', { kind: 'number', min: 0, max: 1000000000 }],
   ])),
   'weeklyActivity.farmRecruitTimes': { kind: 'number', min: 0, max: 1000 },
+  'weeklyActivity.antiqueTicketLimit': { kind: 'number', min: 0, max: Number.MAX_SAFE_INTEGER },
   'weeklyActivity.petQualityOrder': { kind: 'choice', values: ['asc', 'desc'] },
   'weeklyActivity.forgeQualityOrder': { kind: 'choice', values: ['asc', 'desc'] },
 };
@@ -35,7 +38,7 @@ export function validateWeeklyActivitySettings(settings, errors) {
 // Accept previously saved/imported windows, but never let them restrict the
 // all-day schedule or survive the next save/export.
 export function migrateWeeklyActivitySettings(settings) {
-  const next = { ...settings };
+  const next = { antiqueRecruitTickets: false, antiqueTicketLimit: 0, ...settings };
   for (const kind of WEEKLY_ACTIVITY_KINDS) {
     delete next[kind + 'Start'];
     delete next[kind + 'End'];

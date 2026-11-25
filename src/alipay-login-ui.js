@@ -4,32 +4,12 @@ let alipayBusy = false;
 let alipayGeneration = 0;
 let alipayTimer = null;
 let alipayPollFailures = 0;
-let alipayChoiceId = '';
-let alipaySelectedRole = null;
+const alipaySelection = createRoleSelection();
 const alipayLoginPath = '/api/accounts/alipay-login';
 
-function selectedAlipayRole() {
-  return alipayState?.choices?.find(choice => choice.id === alipayChoiceId);
-}
-
-function alipayRoleWorld(role) {
-  return role.roleWorldName || role.worldName || '区服 ' + role.worldId;
-}
-
 function receiveAlipayState(state) {
-  if (state.id !== alipayState?.id) alipaySelectedRole = null;
   alipayState = state;
-  if (state.phase !== 'captured') return;
-  const choices = state.choices || [];
-  if (!choices.length && state.roleError) {
-    alipayChoiceId = '';
-    return;
-  }
-  const previous = alipaySelectedRole;
-  const selected = choices.find(choice => choice.accountId === previous?.accountId && choice.worldId === previous?.worldId)
-    || (choices.length === 1 ? choices[0] : null);
-  alipaySelectedRole = selected;
-  alipayChoiceId = selected?.id || '';
+  if (state.phase === 'captured') alipaySelection.receive(state.id, state.choices || [], true);
 }
 
 function renderAlipayRoles() {
@@ -43,35 +23,35 @@ function renderAlipayRoles() {
     return;
   }
   const list = el('fieldset', 'phone-roles');
-  list.appendChild(el('legend', null, '选择区服和游戏角色'));
+  list.appendChild(el('legend', null, '选择区服和游戏角色（可多选）'));
   for (const choice of choices) {
     const row = el('label', 'phone-role');
     const input = el('input');
-    input.type = 'radio';
+    input.type = 'checkbox';
     input.name = 'alipay-role';
     input.value = choice.id;
-    input.checked = choice.id === alipayChoiceId;
+    input.checked = alipaySelection.has(choice);
     input.disabled = alipayBusy || Boolean(alipayState.roleError) || alipayState.expiresAt <= Date.now();
     input.onchange = () => {
-      if (!input.checked || input.disabled || alipayBusy || alipayState?.phase !== 'captured'
+      if (input.disabled || alipayBusy || alipayState?.phase !== 'captured'
         || alipayState.roleError || alipayState.expiresAt <= Date.now()) return;
       const selected = alipayState.choices.find(role => role.id === input.value);
       if (!selected) return;
-      alipayChoiceId = selected.id;
-      alipaySelectedRole = selected;
-      $('alipay-save').disabled = false;
-      $('alipay-result').textContent = '已选择 ' + (selected.nickname || '未命名角色') + ' · ' + alipayRoleWorld(selected);
+      alipaySelection.set(selected, input.checked);
+      const roles = alipaySelection.selected(alipayState.choices);
+      $('alipay-save').disabled = !roles.length;
+      $('alipay-result').textContent = roles.length ? '已选择 ' + selectedRoleNames(roles) : '请选择要保存的角色。';
     };
     const info = el('div', 'phone-role-info');
     const heading = el('div', 'phone-role-heading');
-    heading.append(el('strong', null, choice.nickname || '未命名角色'), el('span', null, alipayRoleWorld(choice)));
+    heading.append(el('strong', null, choice.nickname || '未命名角色'), el('span', null, (choice.roleWorldName || choice.worldName || '区服 ' + choice.worldId)));
     info.appendChild(heading);
     const stats = [];
     if (choice.level != null) stats.push('等级 ' + choice.level);
     if (choice.power != null) stats.push('战力 ' + Number(choice.power).toLocaleString('zh-CN'));
     if (stats.length) info.appendChild(el('p', 'dim', stats.join(' · ')));
     if (choice.roleWorldId && String(choice.roleWorldId) !== String(choice.worldId)) {
-      info.appendChild(el('p', 'dim', '原区服 ' + (choice.worldName || choice.worldId) + '，合服后位于 ' + alipayRoleWorld(choice)));
+      info.appendChild(el('p', 'dim', '原区服 ' + (choice.worldName || choice.worldId) + '，合服后位于 ' + (choice.roleWorldName || choice.worldName || '区服 ' + choice.worldId)));
     }
     if (choice.matched) info.appendChild(el('p', 'dim', '本角色已添加，再次保存会刷新角色资料和登录凭据。'));
     row.append(input, info);
@@ -96,7 +76,7 @@ function renderAlipayLogin() {
     saved: '账号已保存并切换，尚未开始挂机。可先在「挂机配置」设置任务，再点击账号卡片或页头的「开始挂机」。',
   };
   if (state.account?.hasSiblingRoles && state.account.status?.paused) {
-    messages.saved = '角色已添加。配置好本角色的任务后，点击「切换并托管」即可从同账号的其他角色接手。';
+    messages.saved = '角色已添加。可在各角色卡片分别配置任务并开始托管。';
   } else if (state.account?.status?.paused || state.account?.status?.loginBlocked) {
     messages.saved = '账号已保存并切换。点击页面顶部的「恢复托管」，连接后核对角色和区服。';
   } else if (state.account?.status?.looping) {
@@ -117,18 +97,16 @@ function renderAlipayLogin() {
   $('alipay-cancel').hidden = !state.id || ['cancelled', 'saved'].includes(state.phase);
   $('alipay-cancel').disabled = alipayBusy;
   $('alipay-save').hidden = !captured;
-  const selected = selectedAlipayRole();
-  $('alipay-save').disabled = alipayBusy || !captured || !selected?.accountId || Boolean(state.roleError) || state.expiresAt <= Date.now();
+  const selected = alipaySelection.selected(state.choices);
+  $('alipay-save').disabled = alipayBusy || !captured || !selected.length || Boolean(state.roleError) || state.expiresAt <= Date.now();
   $('alipay-roles-retry').hidden = !captured || (!state.roleError && Boolean(state.choices?.length));
   $('alipay-roles-retry').disabled = alipayBusy || state.expiresAt <= Date.now();
   $('alipay-result').hidden = !captured && state.phase !== 'saved';
-  $('alipay-result').textContent = selected
-    ? '已选择 ' + (selected.nickname || '未命名角色') + ' · ' + alipayRoleWorld(selected)
+  $('alipay-result').textContent = selected.length ? '已选择 ' + selectedRoleNames(selected)
     : captured && state.choices?.length ? '请选择要保存的角色。' : '';
-  if (state.phase === 'saved' && state.selectedRole) {
-    $('alipay-result').textContent = (state.selectedRole.nickname || '未命名角色') + ' · ' + alipayRoleWorld(state.selectedRole);
-  }
+  if (state.phase === 'saved') $('alipay-result').textContent = selectedRoleNames(state.selectedRoles);
   $('alipay-expiry').textContent = captured ? '请在本次登录结果过期前保存。' : '';
+
   $('alipay-flow').setAttribute('aria-busy', String(alipayBusy || ['starting', 'authorizing', 'reading-roles'].includes(state.phase)));
   renderAlipayRoles();
   if (typeof accountAddChanged === 'function') {
@@ -153,8 +131,7 @@ async function resetAlipayLogin() {
     }
     if (id) await call(alipayLoginPath + '/cancel', { method: 'POST', body: JSON.stringify({ id }) });
     alipayState = null;
-    alipayChoiceId = '';
-    alipaySelectedRole = null;
+    alipaySelection.reset();
     alipayPollFailures = 0;
     return true;
   } catch {
@@ -207,8 +184,7 @@ $('alipay-start').onclick = async () => {
   clearTimeout(alipayTimer);
   alipayBusy = true;
   alipayPollFailures = 0;
-  alipayChoiceId = '';
-  alipaySelectedRole = null;
+  alipaySelection.reset();
   alipayState = { phase: 'starting' };
   renderAlipayLogin();
   try {
@@ -275,8 +251,8 @@ $('alipay-roles-retry').onclick = async () => {
 
 $('alipay-save').onclick = async () => {
   if (alipayBusy || alipayState?.phase !== 'captured' || alipayState.roleError) return;
-  const choice = selectedAlipayRole();
-  if (!choice?.accountId) return;
+  const choices = alipaySelection.selected(alipayState.choices);
+  if (!choices.length) return;
   if (alipayState.expiresAt <= Date.now()) {
     alipayState = { ...alipayState, phase: 'expired', error: null };
     renderAlipayLogin();
@@ -287,7 +263,7 @@ $('alipay-save').onclick = async () => {
   renderAlipayLogin();
   $('alipay-save').textContent = '正在保存…';
   try {
-    if (!await configMayChangeAccount(choice.accountId)) {
+    if (!await configMayChangeAccount(choices[0].profileId || choices[0].accountId)) {
       alipayState = { ...pending, error: '当前账号的配置尚未保存，请处理配置后再次保存此账号。' };
       return;
     }
@@ -295,12 +271,11 @@ $('alipay-save').onclick = async () => {
       alipayState = { ...pending, phase: 'expired', error: null };
       return;
     }
-    const data = await call(alipayLoginPath + '/save', { method: 'POST', body: JSON.stringify({ confirm: true, id: pending.id, choiceId: choice.id }) });
+    const data = await call(alipayLoginPath + '/save', { method: 'POST', body: JSON.stringify({ confirm: true, id: pending.id, ...roleSavePayload(choices) }) });
     ++alipayGeneration;
     clearTimeout(alipayTimer);
-    alipayState = { phase: 'saved', account: data.account, selectedRole: data.selectedRole || choice };
-    stateActions.upsertAccount({ ...accounts.find(account => account.id === data.account.id), ...data.account });
-    if (!data.account.status?.connected) stateActions.setFlag('disconnected', data.account.id, true);
+    alipayState = { phase: 'saved', account: data.account, selectedRoles: data.selectedRoles || [data.selectedRole || choices[0]] };
+    showSavedRoleAccounts(data);
     accountDetailsOwner = null;
     selectLoadedAccount(data.account.id);
     renderAccounts();

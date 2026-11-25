@@ -822,6 +822,70 @@ button.factory-empty:disabled { cursor:wait; opacity:.6 }
 }
 .activity-task { display:grid; grid-template-columns:minmax(0,1fr) auto; column-gap:24px; align-items:center; padding:16px 0; border-top:1px solid var(--border) }
 .activity-task:first-child { border-top:0; padding-top:0 }
+.week-chip-panel {
+  --chip-paper:#fff; --chip-fill:#f4f5f7; --chip-ink:#1d1d1f;
+  --chip-secondary:#595e68; --chip-line:#dce0e6; --chip-blue:#0067cd;
+  container:week-chip / inline-size; min-width:0; display:grid; gap:22px; padding:clamp(16px,2.5vw,28px);
+  color:var(--chip-ink); background:var(--chip-paper);
+  border:1px solid var(--chip-line); border-radius:22px; box-shadow:0 3px 14px #10182808;
+  font-family:-apple-system,BlinkMacSystemFont,"SF Pro Text","Segoe UI","PingFang SC","Microsoft YaHei UI",sans-serif;
+  font-variant-numeric:tabular-nums;
+}
+[data-theme=dark] .week-chip-panel {
+  --chip-paper:#1c1c1e; --chip-fill:#28282b; --chip-ink:#f5f5f7;
+  --chip-secondary:#adb2bd; --chip-line:#3b3d43; --chip-blue:#64adff;
+}
+.week-chip-panel :is(h3,h4,p,dl,dd) { margin:0 }
+.week-chip-heading,.week-chip-footer { display:flex; align-items:center; justify-content:space-between; gap:10px 18px }
+.week-chip-heading h3 { font-size:clamp(20px,3cqi,25px); font-weight:650; line-height:1.2; letter-spacing:-.035em }
+.week-chip-round { padding:4px 10px; color:var(--chip-secondary); background:var(--chip-fill); border-radius:99px; font-size:12px; font-weight:600 }
+.week-chip-metrics { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:14px 20px; align-items:center }
+.week-chip-metrics:has(.week-chip-score) { grid-template-columns:minmax(0,1.55fr) repeat(2,minmax(0,1fr)) }
+.week-chip-metrics>div+div { padding-inline-start:clamp(14px,3cqi,28px); border-inline-start:1px solid var(--chip-line) }
+.week-chip-metrics dt,.week-chip-inventory dt { color:var(--chip-secondary); font-size:13px; line-height:1.4 }
+.week-chip-metrics dd { margin-top:5px; font-size:clamp(20px,3.2cqi,28px); font-weight:600; line-height:1.12; letter-spacing:-.035em; overflow-wrap:anywhere }
+.week-chip-unit { color:var(--chip-secondary); font-size:.61em; font-weight:450; letter-spacing:0; white-space:nowrap }
+.week-chip-score dd { font-size:clamp(34px,5.5cqi,48px); letter-spacing:-.055em }
+.week-chip-score .week-chip-unit { font-size:.43em }
+.week-chip-score progress { appearance:none; display:block; width:100%; height:5px; margin-top:12px; border:0; border-radius:99px; overflow:hidden; background:var(--chip-line); color:var(--chip-blue) }
+.week-chip-score progress::-webkit-progress-bar { background:var(--chip-line) }
+.week-chip-score progress::-webkit-progress-value { background:var(--chip-blue); border-radius:99px }
+.week-chip-score progress::-moz-progress-bar { background:var(--chip-blue); border-radius:99px }
+.week-chip-stock { min-width:0 }
+.week-chip-stock h4 { margin-bottom:9px; font-size:14px; line-height:1.4; font-weight:600 }
+.week-chip-inventory { display:grid; grid-template-columns:repeat(5,minmax(0,1fr)); background:var(--chip-fill); border-radius:14px; padding:12px 0 }
+.week-chip-inventory>div { min-width:0; text-align:center; padding:0 6px }
+.week-chip-inventory>div+div { border-inline-start:1px solid var(--chip-line) }
+.week-chip-inventory dt { display:grid; justify-items:center; gap:4px }
+.week-chip-inventory dd { margin-top:3px; font-size:clamp(16px,2.4cqi,20px); line-height:1.25; font-weight:600; overflow-wrap:anywhere }
+.week-chip-crystal { --grade:#a8b6c6; display:grid; width:44px; height:44px; place-items:center }
+.week-chip-crystal[data-points="10"] { --grade:#47ac86 }
+.week-chip-crystal[data-points="20"] { --grade:#4b98e4 }
+.week-chip-crystal[data-points="50"] { --grade:#a083da }
+.week-chip-crystal[data-points="0"] { --grade:#df9545 }
+.week-chip-crystal img { width:100%; height:100%; object-fit:contain }
+.week-chip-crystal:not(:has(img))::before {
+  content:""; width:59%; height:66%; clip-path:polygon(50% 0,94% 33%,86% 66%,50% 100%,14% 66%,6% 33%);
+  background:var(--grade);
+}
+.week-chip-footer { flex-wrap:wrap }
+.week-chip-notice,.week-chip-result { color:var(--chip-secondary); font-size:13px; line-height:1.55 }
+.week-chip-notice { flex:1 1 14rem }
+.week-chip-footer>button { margin-inline-start:auto }
+.week-chip-result { padding-top:12px; border-top:1px solid var(--chip-line) }
+@container week-chip (max-width:510px) {
+  .week-chip-metrics:has(.week-chip-score) { grid-template-columns:repeat(2,minmax(0,1fr)) }
+  .week-chip-score { grid-column:1/-1 }
+  .week-chip-metrics .week-chip-score+div { border:0; padding:0 }
+  .week-chip-inventory { grid-template-columns:1fr; padding:0 14px }
+  .week-chip-inventory>div { display:flex; align-items:center; justify-content:space-between; gap:8px; min-height:48px; padding:4px 0 }
+  .week-chip-inventory>div+div { border-inline-start:0; border-top:1px solid var(--chip-line) }
+  .week-chip-inventory dt { display:flex; align-items:center; gap:8px }
+  .week-chip-inventory dd { margin:0; text-align:end }
+  .week-chip-crystal { width:34px; height:34px; flex:none }
+  .week-chip-notice { flex-basis:100% }
+  .week-chip-footer>button { width:100% }
+}
 .activity-task>strong,.activity-task>.dim { grid-column:1 }
 .activity-task>strong { font-weight:500 }
 .activity-task>.dim { margin-top:2px }

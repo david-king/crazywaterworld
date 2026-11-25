@@ -151,6 +151,8 @@ test('军备竞赛主项平铺且参数可展开收起，全天参与与积分�
   assert(!f.editor.groups.has('military-week'));
   assert.deepEqual(new Set(group.fields.map(field => field.key)),
     new Set([...Object.keys(defaultSettings().weeklyActivity).filter(key => !/(?:Start|End)$/.test(key)).map(key => 'weeklyActivity.' + key), 'schedule.armsRaceRewards']));
+  assert.equal(f.widget('weeklyActivity.antiqueRecruitTickets').parentKey, 'weeklyActivity.antiqueEnabled');
+  assert.equal(f.widget('weeklyActivity.antiqueTicketLimit').parentKey, 'weeklyActivity.antiqueRecruitTickets');
   assert.equal(group.description, undefined);
   assert(!group.fields.some(field => /(?:Start|End)$/.test(field.key) || field.kind === 'time'));
   assert.deepEqual(f.widget('weeklyActivity.petStop').spec.options, [['allDay','全天参与'],['score','达到积分值时']]);

@@ -51,7 +51,10 @@ function assets(value, name) {
   return map;
 }
 
-function orderLimit(config, season, level) {
+export function guildOrderQuota(config, player) {
+  const world = amount(player?.worldId, '账号区服', true);
+  const season = Math.floor(world / 1e6) % 1000;
+  if (!season) throw new Error('无法确认当前赛季');
   // The offline client's SeasonUtil.seasonCfgList falls back to the highest
   // season that does not exceed the current one when the config pack has no
   // rows for the current season yet (e.g. new S8+ servers on an old pack);
@@ -68,9 +71,13 @@ function orderLimit(config, season, level) {
   if (available.some(row => !Number.isSafeInteger(row.playerLevel) || row.playerLevel < 1
     || !Number.isSafeInteger(row.maxNum) || row.maxNum < -1)
     || new Set(available.map(row => row.playerLevel)).size !== available.length) throw invalid();
-  const best = available.sort((a, b) => b.playerLevel - a.playerLevel).find(row => row.playerLevel <= level);
+  const best = available.sort((a, b) => b.playerLevel - a.playerLevel).find(row => row.playerLevel <= player.level);
   if (!best) throw invalid();
-  return best.maxNum;
+  return { season, maxNum: best.maxNum };
+}
+
+export function guildOrderCounterChanged(name, body) {
+  return name === 'SCCounterUpdate' && body?.info?.type === counterType;
 }
 
 function countOf(reply) {
@@ -80,6 +87,19 @@ function countOf(reply) {
   // Verified in the offline client: counterNum(type) returns zero when the
   // type is absent from a successfully received complete counters snapshot.
   return found.length ? amount(found[0].num, '今日联盟募兵次数') : 0;
+}
+
+function configuredLimitReason(doneToday, dailyLimit, recorded) {
+  return dailyLimit > 0 && Math.max(doneToday ?? 0, recorded) >= dailyLimit
+    ? '已达到设置的今日募兵上限 ' + dailyLimit + ' 次' : '';
+}
+
+export function guildOrderProgress(reply, maxNum, dailyLimit = 0, recorded = 0) {
+  const doneToday = countOf(reply);
+  const limitReason = maxNum !== -1 && doneToday >= maxNum
+    ? '已达到游戏每日募兵上限 ' + maxNum + ' 次'
+    : configuredLimitReason(doneToday, dailyLimit, recorded);
+  return { doneToday, limitReason };
 }
 
 async function request(client, protocol, name, enabled) {
@@ -99,10 +119,7 @@ export async function readGuildOrderView(client, protocol, config, { player, set
   const guildId = idText(player.guildId);
   if (guildId === '0') return { ...view, reason: '当前账号未加入联盟' };
   if (!guildId || BigInt(guildId) <= 0n || !idText(player.playerId) || BigInt(idText(player.playerId)) <= 0n) return { ...view, reason: '无法确认账号或联盟身份' };
-  const world = amount(player.worldId, '账号区服', true);
-  const season = Math.floor(world / 1e6) % 1000;
-  if (!season) throw new Error('无法确认当前赛季');
-  const maxNum = orderLimit(config, season, player.level);
+  const { season, maxNum } = guildOrderQuota(config, player);
   const stamp = identity(player);
   const guild = (await request(client, protocol, 'GuildInfoRequest', enabled))?.guild;
   if (idText(guild?.guildId) !== guildId || stamp !== identity(player)) throw new Error('账号或联盟身份已变化');
@@ -117,14 +134,14 @@ export async function readGuildOrderView(client, protocol, config, { player, set
   if ([...requirements.keys()].some(id => !known.has(id))) throw new Error('联盟募兵包含未识别的材料配置');
   const cities = list(cityReply?.cities, '联盟城市').map(city => ({ cityId: amount(city?.cityId, '联盟城市编号', true), recommended: city.recommended === true }));
   if (new Set(cities.map(city => city.cityId)).size !== cities.length) throw new Error('联盟城市记录重复');
-  const doneToday = countOf(counterReply);
+  const { doneToday, limitReason } = guildOrderProgress(counterReply, maxNum);
   const city = cities.find(city => city.recommended) ?? cities[0];
   Object.assign(view, { season, maxNum, doneToday, cityId: city?.cityId ?? null, cities, nextRefreshTime,
     identity: stamp, accountKey: accountKey(player), day: dayOf(now(client)),
     orderKey: JSON.stringify([nextRefreshTime, [...requirements].sort(([a], [b]) => a.localeCompare(b))]) });
   if (stamp !== identity(player) || !enabled()) throw new Error('账号或联盟状态已变化');
   if (nextRefreshTime <= now(client)) return { ...view, reason: '联盟募兵正在刷新，稍后重新检查' };
-  if (maxNum !== -1 && doneToday >= maxNum) return { ...view, reason: '今日联盟募兵已完成 ' + doneToday + ' 次，达到本赛季上限 ' + maxNum };
+  if (limitReason) return { ...view, reason: limitReason };
   if (!requirements.size) return { ...view, reason: '当前没有可提交的联盟募兵物资需求' };
   if (!city) return { ...view, reason: '联盟当前没有可募兵的城市' };
   const { stock, reservations } = await readOrderReservedStock(client, protocol, config, { player, settings, enabled, itemIds:[...requirements.keys()] });
@@ -166,7 +183,10 @@ export async function serviceGuildOrders(client, protocol, config, { player, get
         }
       }
     }
-    if (dailyLimit > 0 && Math.max(initial.doneToday ?? 0, ledger?.snapshot().counters.guildRecruit ?? 0) >= dailyLimit) { delay(300); return skip('已达到设置的今日募兵上限 ' + dailyLimit + ' 次'); }
+    if (dailyLimit > 0) {
+      const reason = configuredLimitReason(initial.doneToday, dailyLimit, ledger?.snapshot().counters.guildRecruit ?? 0);
+      if (reason) { delay(300); return skip(reason); }
+    }
     if (!initial.canFinish) { delay(180); return skip(initial.reason); }
     const saved = pending.get(initial.accountKey);
     if (saved) {

@@ -34,6 +34,168 @@ function fixture() {
 }
 const products = plan => plan.actions.filter(step => step.request === 'StartFactoryProduceRequest').map(step => step.body.productId);
 
+test('低优先级等待项和急件可同时开工时保留排队项，另一座空厂也可接急单', () => {
+  const f = fixture();
+  Object.assign(f.settings.factory,{demandFirst:true, demandPriority:['cargo'], keepStock:0});
+  f.config.tables.MonthCardCfg = table([{id:'普通月卡', effectList:[['第二生产位',1]]}]);
+  f.survey.productionTiming = {monthCards:{cardItem:[{type:1,endTime:-1}]}};
+  f.stock.set('短时品',0);
+  f.survey.cargoOrder.set('短时品',1);
+  const queue = f.factory.factory.factoryQ;
+  queue.push({idx:1,productId:'长时品',finishTime:200},{idx:2,productId:'长时品',finishTime:200},
+    {idx:3,productId:'长时品'},{idx:4,productId:'短时品'});
+  assert(!f.plan().actions.some(step=>step.queueReplan),'双生产位同时释放，急件不会延迟');
+  f.survey.productionTiming.monthCards.cardItem = [];
+  queue.splice(1,1);
+  assert(f.plan().actions.some(step=>step.queueReplan && step.body.index===3));
+  queue.pop();
+  const second = structuredClone(f.factory);
+  second.buildingId = '2食品厂'; second.factory.factoryQ = [];
+  f.survey.buildings = f.survey.factories = [f.factory,second];
+  const actions = f.plan().actions;
+  assert(!actions.some(step=>step.queueReplan));
+  assert(actions.some(step=>step.body.buildingId==='2食品厂' && step.body.productId==='短时品'));
+});
+
+test('每座工厂独立触发补库，仓容限制派单数，其他工厂继续普通生产', () => {
+  const {settings,survey,config,factory,stock} = fixture();
+  const second = structuredClone(factory); second.buildingId = '2食品厂';
+  survey.factories = survey.buildings = [factory,second];
+  survey.stockCap = 3;
+  settings.factory.refillRules = [{buildingId:'1食品厂', productId:'长时品', trigger:0, target:null}];
+  const plan = () => planWorld(survey,{settings,config,enabled:kind=>kind === 'startProduce'}).actions;
+  assert.deepEqual(plan().filter(s=>s.refillRule).map(s=>s.body.productId),Array(3).fill('长时品'));
+  assert(plan().some(s=>s.body.buildingId === '2食品厂' && s.body.productId === '短时品'));
+  stock.set('加速器',1); settings.resources.keepAccelerators = 1;
+  factory.factory.factoryQ = [{idx:0,productId:'短时品',finishTime:1000}, {idx:1,productId:'长时品'}];
+  settings.factory.refillRules[0].target = 1;
+  settings.factory.refillSpeedUp = true;
+  assert.equal(plan().filter(s=>s.refillRule).length,0,'保留量内的加速器不能花');
+  stock.set('加速器',3);
+  assert.deepEqual(plan().filter(s=>s.refillRule).map(s=>s.request),['SpeedUpFactoryProduceRequest'],'补库品虽已排足，仍应加速阻塞它的产品');
+  settings.factory.refillSpeedUp = false;
+  assert.equal(plan().filter(s=>s.refillRule).length,0,'关闭后即使加速器充足，也等在产品自然完工');
+  factory.factory.factoryQ = [];
+  assert.deepEqual(plan().filter(s=>s.refillRule).map(s=>s.body.productId),['长时品'],'生产位空出后继续补库');
+  survey.stockKnown = false;
+  assert(!plan().some(s=>s.body.buildingId === '1食品厂'));
+  survey.stockKnown = true; factory.factory.autoProductId = '短时品'; survey.autoProduceForever = true;
+  assert(!plan().some(s=>s.refillRule));
+});
+
+test('补库先等原料并撤下等待项，单生产位加速一件、双生产位分别加速', () => {
+  const {settings,stock,factory,plan} = fixture();
+  settings.factory.refillRules = [{buildingId:factory.buildingId, productId:'长时品', trigger:0, target:1}];
+  settings.factory.refillSpeedUp = true;
+  stock.set('加速器',30);
+  const queue = factory.factory.factoryQ;
+  for (let i = 0; i < 5; i++) queue.push({idx:i + 10, productId:'短时品',finishTime:i === 0 ? 300 : 0});
+  const changes = () => plan().actions.filter(s => s.refillRule && s.request !== 'StartFactoryProduceRequest')
+    .map(s => [s.request,s.body.index]);
+  stock.set('木材',0);
+  assert.deepEqual(changes(), [], '缺少一件产品的原料时保留原队列');
+  stock.set('木材',1);
+  assert.deepEqual(changes(), [14,13,12,11].map(i => ['CancelFactoryProduceRequest',i]));
+  queue.splice(1,3);
+  assert.deepEqual(changes(), [['CancelFactoryProduceRequest',14]], '撤单未全部生效时仍不加速');
+  queue[1].finishTime = 200;
+  assert.deepEqual(changes(), [['SpeedUpFactoryProduceRequest',10],['SpeedUpFactoryProduceRequest',14]]);
+  queue[0].productId = '长时品';
+  settings.factory.refillRules[0].target = 2;
+  assert.deepEqual(changes(), [['SpeedUpFactoryProduceRequest',14]], '一个生产位已做补库品时只加速另一个旧品');
+  queue[0].productId = '短时品';
+  stock.set('加速器',4); settings.resources.keepAccelerators = 1;
+  assert.deepEqual(changes(), [['SpeedUpFactoryProduceRequest',10]], '第一个生产位用尽可花余额后不再加速第二个');
+  queue.pop();
+  assert.deepEqual(changes(), [['SpeedUpFactoryProduceRequest',10]], '按服务端队首任务编号加速');
+  queue[0].productId = '长时品';
+  assert.deepEqual(changes(), [], '补库品开工后不再为腾位使用加速器');
+});
+
+test('强制补库按多级配方补缺口，上游先做自己的强制物品，原料在途不重复生产', () => {
+  const {settings,survey,config,factory,stock,plan} = fixture();
+  const mill = {...factory,buildingId:'1磨坊',type:'磨坊',factory:{factoryQ:[],finishedProducts:[]}};
+  const workshop = {...mill,buildingId:'1加工厂',type:'加工厂',factory:{factoryQ:[],finishedProducts:[]}};
+  survey.factories = survey.buildings = [workshop,mill,factory];
+  const recipe = (buildType,itemId,costItem) => ({buildType,itemId,costItem,unlockLevel:1,produceTime:10});
+  config.tables.BuildingProduceCfg.data = [recipe(factory.type,'面包',[['面粉',2]]),recipe(mill.type,'面粉',[['谷粒',1]]),
+    recipe(mill.type,'自选品',[]),recipe(workshop.type,'谷粒',[['木材',1]])];
+  const bread = {buildingId:factory.buildingId,productId:'面包',trigger:0,target:2};
+  const custom = {buildingId:mill.buildingId,productId:'自选品',trigger:0,target:1};
+  settings.factory.refillRules = [bread,custom];
+  settings.factory.refillSpeedUp = true;
+  stock.set('加速器',50); stock.set('面粉',1); stock.set('谷粒',1);
+  const forced = () => plan().actions.filter(a => a.refillRule && a.request === 'StartFactoryProduceRequest');
+  assert.deepEqual(forced().map(s => s.body.productId),['自选品','谷粒','谷粒']);
+  stock.set('自选品',1);
+  assert.deepEqual(forced().map(s => s.body.productId),['谷粒','谷粒','面粉']);
+  settings.factory.refillRules.push({buildingId:mill.buildingId,productId:'面粉',trigger:1,target:4});
+  assert.equal(forced().filter(s => s.body.productId === '谷粒').length,2,'显式面粉目标和面包所需面粉共用同一笔谷粒');
+  settings.factory.refillRules.pop();
+  workshop.factory.finishedProducts = [{id:'谷粒',num:1}];
+  workshop.factory.factoryQ = [{idx:1,productId:'谷粒',finishTime:150}];
+  assert.deepEqual(forced().map(s => s.body.productId),['面粉']);
+  stock.set('谷粒',3);
+  workshop.factory.finishedProducts = []; workshop.factory.factoryQ = [];
+  mill.factory.factoryQ = [{idx:1,productId:'旧品',finishTime:150}];
+  assert(!plan().actions.some(s => s.refillSupply && s.request === 'SpeedUpFactoryProduceRequest'));
+  assert.deepEqual(forced().map(s => s.body.productId),['面粉','面粉','面粉']);
+  stock.set('面包',2);
+  assert.equal(forced().length,0,'下游达标后取消临时的上游需求');
+  stock.set('面包',0); stock.set('面粉',0); stock.set('谷粒',0);
+  config.tables.BuildingProduceCfg.data.find(r => r.itemId === '谷粒').costItem = [['面粉',1]];
+  assert.equal(forced().length,0,'配方循环不会反复派单');
+});
+
+test('同厂也能逐级自供原料，可以开工的显式规则优先于临时补料', () => {
+  const {settings,config,factory,stock,plan} = fixture(), type = factory.type;
+  config.tables.BuildingProduceCfg.data = [['成品','半成品'],['半成品','木材'],['自选品','木材']].map(([id,input]) =>
+    ({itemId:id,buildType:type,unlockLevel:1,produceTime:5,costItem:[[input,1]]}));
+  settings.factory.refillRules = ['成品','自选品'].map(productId => ({buildingId:factory.buildingId,productId,trigger:0,target:1}));
+  const next = () => plan().actions.filter(s => s.refillRule).map(s => [s.body.productId,!!s.refillSupply]);
+  assert.deepEqual(next(),[['自选品',false]]);
+  stock.set('自选品',1);
+  assert.deepEqual(next(),[['半成品',true]]);
+  stock.set('半成品',1);
+  assert.deepEqual(next(),[['成品',false]]);
+});
+
+test('同时缺货时各厂按本厂物品顺序生产，规则跨厂排列不决定谁先分配原料', () => {
+  const {settings,survey,config,factory,stock} = fixture();
+  const other = {...factory, buildingId:'2食品厂'};
+  survey.factories = survey.buildings = [factory,other];
+  survey.factorySlots = 1; stock.set('短时品',0);
+  const makeRule = (buildingId, productId) => ({buildingId,productId,trigger:0,target:5});
+  const a = ['长时品','短时品'].map(id => makeRule(factory.buildingId,id));
+  const b = ['短时品','长时品'].map(id => makeRule(other.buildingId,id));
+  const starts = rules => {
+    settings.factory.refillRules = rules;
+    return planWorld(survey, {config,settings,enabled:kind => kind === 'startProduce'}).actions
+      .filter(step => step.refillRule).map(step => [step.body.buildingId,step.body.productId]);
+  };
+  assert.deepEqual(starts([...b,...a]), [['1食品厂','长时品'],['2食品厂','短时品']]);
+  assert.deepEqual(starts([...b,...a.toReversed()]), [['1食品厂','短时品'],['2食品厂','短时品']]);
+  stock.set('木材',1);
+  assert.deepEqual(starts([...a,...b]), [['1食品厂','长时品']]);
+  assert.deepEqual(starts([...b,...a]), starts([...a,...b]));
+});
+
+function materialFixture() {
+  const f = fixture();
+  Object.assign(f.factory, { buildingId: '1材料厂', type: '材料厂' });
+  const recipes = [['布匹', 3], ['长绳', 4], ['粗纸', 5], ['颜料', 1]].map(([itemId, produceTime]) => ({
+    itemId, produceTime, buildType: '材料厂', unlockLevel: 1, costItem: [['木材', 1]],
+  }));
+  f.config.tables.BuildingProduceCfg.data = recipes;
+  Object.assign(f.settings.factory, { demandFirst: true, demandPriority: ['cargo', 'factory'], keepStock: 3 });
+  const materialRestock = {};
+  const factoryWaitHistory = new Map();
+  const schedule = (state = materialRestock) => products(planWorld(f.survey, {
+    config: f.config, settings: f.settings, materialRestock: state, factoryWaitHistory, enabled: kind => kind === 'startProduce',
+  }));
+  return { ...f, recipes, schedule };
+}
+
 test('模拟原生先做主产物，实际耗时 5 秒的候补归入短件档，同档按库存选品', () => {
   const f = fixture(), rows = f.config.tables.BuildingProduceCfg.data;
   const [short, long] = rows;

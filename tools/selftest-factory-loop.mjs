@@ -26,6 +26,8 @@ try {
     'MyFleetsRequest', 'MyFleetsResponse', 'WeekInfoRequest', 'WeekInfoResponse',
     'GuildInfoRequest', 'GuildInfoResponse', 'GainFactoryProduceRequest', 'GainFactoryProduceResponse',
     'StartFactoryProduceRequest', 'GameEffectRequest', 'GameEffectResponse',
+    'CargoShipsRequest', 'CargoShipsResponse', 'FillCargoShipRequest', 'FillCargoShipResponse',
+    'WeekOrderInfoRequest', 'WeekOrderInfoResponse', 'DenyOrderRequest',
   ]) : loadProtocol();
 
   function integration({ rounds = 2, mainEveryMs = 3600000, cli = false, offset = 0, finishAfterMs = 5000, fallbackSeconds = 30 } = {}) {
@@ -94,17 +96,28 @@ try {
     };
     const leave = write => { if (write) writesInFlight--; else readsInFlight--; };
     client.request = async (name, body = {}, response = name.replace(/Request$/, 'Response')) => {
-      const write = name === 'GainFactoryProduceRequest'; enter('request', name, body, write);
+      const write = ['GainFactoryProduceRequest', 'FillCargoShipRequest'].includes(name); enter('request', name, body, write);
       try {
         codec(name, body); await beforeRead?.(name); mature();
         let result;
-        if (name === 'OnWaterRequest') result = { building: [state.building], workerOrder: [] };
+        if (name === 'OnWaterRequest') result = { building: [state.building], workerOrder: state.orders ?? [] };
         else if (name === 'AllItemRequest') result = { items: [...state.stock].map(([itemId, num]) => ({ itemId, num })) };
         else if (name === 'AllResourceRequest') result = { list: [] };
         else if (name === 'GameEffectRequest') result = { effects: [{ id: 1, value: 0 }, { id: 2, value: 0 }] };
         else if (name === 'MyResFieldsRequest') result = { fields: [] };
         else if (name === 'MyFleetsRequest') result = { fleets: [] };
         else if (name === 'WeekInfoRequest') result = { activityTime: [] };
+        else if (name === 'CargoShipsRequest') result = { ship: state.ships ?? [] };
+        else if (name === 'FillCargoShipRequest') {
+          const ship = state.ships.find(row => row.index === body.shipIndex);
+          assert.deepEqual(body.cargoIndex, [1]);
+          assert.equal(ship.status, 0);
+          assert.equal(state.stock.get('产品甲'), 1);
+          state.stock.set('产品甲', 0);
+          ship.orderItem[0].filled = true;
+          ship.status = 1;
+          result = {};
+        }
         else if (name === 'GuildInfoRequest') result = { guild: { guildId: 1, welfarePack: [], gotWelfareTime: 0 }, gotTitle: 0, gotTitleTime: 0 };
         else if (name === 'GainFactoryProduceRequest') {
           const assets = state.building.factory.finishedProducts;
@@ -120,7 +133,12 @@ try {
     client.sendWatch = async (name, body) => {
       enter('sendWatch', name, body, true);
       try {
-        const request = codec(name, body); assert.equal(name, 'StartFactoryProduceRequest');
+        const request = codec(name, body);
+        if (name === 'DenyOrderRequest') {
+          assert(state.orders.some(order => order.index === request.index));
+          return { seq: protocolCalls.length };
+        }
+        assert.equal(name, 'StartFactoryProduceRequest');
         assert.deepEqual(Object.keys(request).sort(), ['buildingId', 'productId']);
         assert.equal(state.building.factory.factoryQ.length, 0, '不能重复占用生产槽位');
         state.stock.set('木材', state.stock.get('木材') - 1);
@@ -176,6 +194,41 @@ try {
     assert(writes(f)[0].at >= base + 5000 && writes(f)[0].at <= base + 6000, '应在五秒完工附近收货，不能等待主轮或三十秒兜底');
     assert.equal(f.roundsDone.length, 1, '辅助生产检查不能推进主轮计数');
     assert(f.scheduled() >= 2); await f.clean();
+  });
+  await test('轮间收取最后一件货时立即装船', async () => {
+    const f = integration();
+    f.settings.cargo.enabled = true; f.flags.add('cargo');
+    f.state.ships = [{ index: 1, status: 0, orderItem: [{ filled: false, asset: { type: 0, id: '产品甲', num: 1 } }] }];
+    f.sleepHook(ms => { if (wall >= base + 5000) f.abort(); else wall += ms; });
+    await f.run();
+    const loads = f.protocolCalls.filter(row => row.name === 'FillCargoShipRequest');
+    assert.equal(loads.length, 1);
+    const gain = f.protocolCalls.find(row => row.name === 'GainFactoryProduceRequest');
+    assert.equal(loads[0].job, gain.job, '收取成品和装船应在同一次账号调度中完成');
+    assert(loads[0].at >= base + 5000 && loads[0].at <= base + 6000);
+    assert.equal(f.roundsDone.length, 1);
+    await f.clean();
+  });
+  for (const factoryEnabled of [true, false]) await test('订单推送唤醒巡检并按材料规则换单，工厂' + (factoryEnabled ? '在产' : '关闭'), async () => {
+    const f = integration({ finishAfterMs: 600000, fallbackSeconds: 300 });
+    f.settings.resident.enabled = f.settings.resident.skipProduction = true;
+    f.settings.factory.enabled = factoryEnabled;
+    f.settings.factory.keepStock = 0;
+    f.flags.add('finishOrder'); f.flags.add('denyOrder');
+    f.sleepHook((ms, i) => {
+      if (i === 1) {
+        wall += 1000;
+        f.state.orders = [{ index: 1, workerId: 8, requirements: [{ id: '产品甲', num: 1 }] }];
+        f.client.emit('message', { name: 'SCWorkerOrder', body: { order: f.state.orders } });
+      } else wall += ms;
+    });
+    f.reportHook(entry => { if (entry.step?.kind === 'denyOrder' && entry.ok) f.abort(); });
+    await f.run();
+    const denials = f.protocolCalls.filter(row => row.name === 'DenyOrderRequest');
+    assert.equal(denials.length, 1);
+    assert(denials[0].at <= base + 3000);
+    assert.equal(writes(f).length, 0, '等待中的居民订单不能催生额外排产');
+    await f.clean();
   });
   await test('模拟原生在首轮和完工补产时只需生产数据，即使设置保留了按订单优先', async () => {
     const f = integration();

@@ -113,6 +113,9 @@ function fixture() {
       return card;
     }, iconEl = () => el('img');
     const renderInventory = () => {}, fmt = value => String(value);
+    const reportError = error => { env.error = error; };
+    const productionAccountReady = () => true;
+    const refreshProductionPlan = () => { env.planStarted = true; };
     const resetInventory = () => {};
     const call = (...args) => env.call ? env.call(...args) : new Promise(() => {});
     const openConfirm = (title, body, confirm, label) => { env.dialog = { title, body, confirm, label }; };
@@ -127,12 +130,14 @@ function fixture() {
     ${script.slice(end, refreshEnd)}
     env.render = renderWorld;
     env.refresh = refreshManualWorld;
+    env.worldUpdate = refreshWorldUpdate;
+    env.openPlan = () => { stateActions.setView({ page: 'manual' }); return loadManualProductionPlan(); };
     env.updateTimers = updateWorldProductionTimers;
     env.refreshUnavailable = mode => {
       if (mode === 'account') current = 'account-b';
       if (mode === 'paused') snapshot.paused = true;
       if (mode === 'disconnected') disconnected.add(current);
-      refreshManualWorld(true);
+      return refreshManualWorld(true);
     };
   `)(env);
   return env;
@@ -303,7 +308,7 @@ test('居民订单逐单显示经验和金币，区分零奖励、未知奖励�
   assert.match(button.title, /还缺淡水 ×15/);
   const requests = [];
   env.call = async (path, options) => {
-    if (path === '/api/world') return worldData(env);
+    if (path === '/api/world?view=buildings') return worldData(env);
     assert.equal(path, '/api/world/order/submit');
     const payload = JSON.parse(options.body);
     requests.push(payload);
@@ -462,6 +467,35 @@ test('切换账号、暂停或断开后清理旧账号的展开状态', () => {
   }
 });
 
+{
+  const env = fixture(), reads = [];
+  env.call = () => new Promise(resolve => reads.push(resolve));
+  const data = name => worldData(env, { factories: [factory([], { displayName: name })] });
+  const opening = env.openPlan();
+  const updated = env.worldUpdate(1);
+  assert.equal(env.worldUpdate(2), updated);
+  assert.equal(reads.length, 1);
+  reads[0](data('旧队列'));
+  await Promise.resolve();
+  assert.equal(reads.length, 2, '读取期间的多次变更合并为一次补读');
+  assert.equal(env.node('world-factories').textContent, '');
+  assert(!env.planStarted, '排产计算应等建筑先显示');
+  reads[1](data('新队列'));
+  await opening;
+  assert.equal(await updated, true);
+  assert.match(env.node('world-factories').textContent, /新队列/);
+  assert(env.planStarted);
+  const oldAccount = env.refresh();
+  const newAccount = env.refreshUnavailable('account');
+  reads[3](data('乙账号'));
+  await newAccount;
+  reads[2](data('甲账号'));
+  assert.equal(await oldAccount, false);
+  assert.match(env.node('world-factories').textContent, /乙账号/);
+  passed++;
+  console.log('通过：建筑先于排产显示，读取中变更合并补读，迟到的旧账号快照不会覆盖新账号');
+}
+
 test('当前产物区分等待开工、已完成和空闲，缺少队列显示未同步', () => {
   const env = fixture();
   const now = env.now / 1000 + 5;
@@ -581,7 +615,7 @@ test('未同步队列和缺少成熟时间明确显示未知状态', () => {
   const writes = [];
   let finish;
   env.call = (url, options) => {
-    if (url === '/api/world') return Promise.resolve(data);
+    if (url === '/api/world?view=buildings') return Promise.resolve(data);
     assert.equal(url, '/api/world/production-start');
     writes.push(JSON.parse(options.body));
     return new Promise(resolve => { finish = resolve; });
@@ -623,7 +657,8 @@ test('未同步队列和缺少成熟时间明确显示未知状态', () => {
     { plot: '1农田', productId: '小麦', ripeTime: now + 75, state: 'growing' },
     { plot: '2农田', productId: '小麦', ripeTime: now - 2, state: 'ready' },
   ] });
-  env.render(data);
+  env.call = async () => data;
+  await env.refresh();
   productionButton(env).onclick();
   const speeds = () => env.document.querySelectorAll('[data-production-speed-until]');
   const [bread, biscuit, farm] = speeds();
@@ -632,9 +667,12 @@ test('未同步队列和缺少成熟时间明确显示未知状态', () => {
   env.updateTimers();
   assert.equal(bread.textContent, '加速 ×1');
   const writes = [];
-  let reply;
+  let reply, finishRead, reads = 0;
   env.call = (url, options) => {
-    if (url === '/api/world') return Promise.resolve({ ...data, accelerators: 0 });
+    if (url === '/api/world?view=buildings') {
+      reads++;
+      return new Promise(resolve => { finishRead = resolve; });
+    }
     assert.equal(url, '/api/world/production-speed');
     writes.push(JSON.parse(options.body));
     return new Promise(resolve => { reply = resolve; });
@@ -644,8 +682,16 @@ test('未同步队列和缺少成熟时间明确显示未知状态', () => {
   assert.equal(biscuit.disabled, true);
   assert.deepEqual(writes, [{ kind: 'factory', buildingId: '1食品厂', index: 0, productId: '饼干',
     finishTime: now + 601, maxUse: 2, confirm: true }]);
-  reply({ label: '已加速' });
+  const synced = env.worldUpdate(82);
+  reply({ confirmed: true, worldUpdateId: 82 });
   await click;
+  assert.equal(biscuit.textContent, '已加速 · 同步中');
+  assert(!bread.disabled, '其他生产格仍可操作');
+  await biscuit.onclick();
+  assert.equal(writes.length, 1, '旧队列同步前不能重复扣费');
+  assert.equal(reads, 1, '回执与先到的推送只读一次');
+  finishRead({ ...data, accelerators: 0 });
+  await synced;
   assert(speeds().every(button => button.disabled && button.textContent === '加速器不足'));
   env.render(data);
   const cropButton = speeds().at(-1);
@@ -653,8 +699,13 @@ test('未同步队列和缺少成熟时间明确显示未知状态', () => {
   assert.equal(writes[1].kind, 'farm');
   assert.equal(writes[1].buildingId, '1农田');
   assert.equal(writes[1].finishTime, farm.dataset.productionSpeedUntil * 1);
-  reply({ label: '已催熟' });
+  reply({ confirmed: false, worldUpdateId: 83 });
   await cropClick;
+  assert.equal(cropButton.textContent, '结果待核对');
+  const cropSynced = env.worldUpdate(83);
+  assert.equal(reads, 2, '后到的推送复用回执已发起的刷新');
+  finishRead({ ...data, accelerators: 0 });
+  await cropSynced;
   env.now += 80000;
   env.updateTimers();
   assert(speeds().at(-1).hidden && speeds().at(-1).disabled);

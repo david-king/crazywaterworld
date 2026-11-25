@@ -429,16 +429,16 @@ try {
   await accountApi('settings', { settings: secondSettings.settings, revision: secondSettings.revision, baseRevision: secondSettings.baseRevision }, secondRoleId);
   await accountApi('accounts/pause', { paused: false, start: true }, secondRoleId);
   await waitForLoop(secondRoleId, 3000000002);
-  assert.equal(oldRunningClient.connected, false);
-  assert.equal(initialSession.paused, true);
-  assert.equal(initialSession.loop.running, false);
-  assert.equal(liveClients.size, 1);
+  assert.equal(oldRunningClient.connected, true);
+  assert.equal(initialSession.paused, false);
+  assert.equal(initialSession.loop.running, true);
+  assert.equal(liveClients.size, 2);
   const connectedRoles = await accountApi('worlds', undefined, secondRoleId);
   assert.equal(connectedRoles.recentWorlds.filter(row => row.saved).length, 2);
   assert.equal((await accountApi('worlds/save-role', { worldId: 3000000001 }, secondRoleId)).id, initialSession.id);
-  assert.equal(liveClients.size, 1);
+  assert.equal(liveClients.size, 2);
   await Promise.all([accountApi('accounts/pause', { paused: false, start: true }, secondRoleId),
-    accountApi('accounts/pause', { paused: false, start: true }, initialSession.id)]);
+    accountApi('accounts/pause', { paused: false, start: true, exclusive: true }, initialSession.id)]);
   await waitForLoop(initialSession.id, 3000000001);
   assert.equal(liveClients.size, 1);
   assert.equal(loadStore().accounts.find(row => row.id === secondRoleId).automation.paused, true);
@@ -496,7 +496,14 @@ try {
   assert.equal(smsPreview.data.choices[2].userName, '测试账号二');
   assert.equal(smsPreview.data.choices[2].nickname, '灯塔守望');
   assert.equal(smsPreview.data.choices[2].worldName, '海灯8服');
-  const savedSecond = await request('/save', { confirm: true, id: smsPreview.data.id, choiceId: smsPreview.data.choices[2].id });
+  const choices = smsPreview.data.choices;
+  const beforeBatch = loadStore();
+  const invalid = await request('/save', { confirm: true, id: smsPreview.data.id, choiceIds: [choices[2].id, 'unknown'] });
+  assert.equal(invalid.status, 400);
+  assert.deepEqual(loadStore(), beforeBatch);
+  const savedSecond = await request('/save', { confirm: true, id: smsPreview.data.id, choiceIds: [choices[2].id, choices[1].id] });
+  assert.equal(savedSecond.status, 200);
+  assert.deepEqual(savedSecond.data.accounts.map(row => row.id), ['fixture-game-id-2', secondRoleId]);
   assert.equal(savedSecond.data.account.id, 'fixture-game-id-2');
   assert.equal(loadStore().accounts.find(row => row.id === 'fixture-game-id-2').login.worldId, 4000000008);
   assert.equal((await accountApi('loop', undefined, 'fixture-game-id-2')).running, false);

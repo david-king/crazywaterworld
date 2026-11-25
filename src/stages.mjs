@@ -13,26 +13,26 @@ export async function runStages(client, player, config, {
   executeBattle = work => work(), enabled = () => true, onLineupPhase,
 } = {}) {
   maxFailures = stageFailureLimit(maxFailures);
-  let stage = player?.mainlineStage;
-  if (!Number.isInteger(stage) || stage < 1 || !Number.isInteger(player?.level) || player.level < 1) {
-    throw new Error('登录响应缺少有效的主线关卡或角色等级');
-  }
   const rows = config?.tables?.StageCfg?.data;
   if (!Array.isArray(rows) || !rows.length) throw new Error('缺少 StageCfg，无法核对关卡等级要求');
+  let stage;
   let wins = 0;
   let failures = 0;
   for (;;) {
     signal?.throwIfAborted();
-    if (!enabled() || client.connected === false) throw new Error('账号状态已变化，主线推关已停止');
     if (wins >= maxWins) return { wins, reachedLimit: true, reason: `本次已通过 ${wins} 关` };
-    const row = rows.find((entry) => entry.stage === stage);
-    if (!row || !Number.isInteger(row.playerLevel)) return { wins, reason: `配置表中没有第 ${stage} 关的等级要求` };
-    if (player.level < row.playerLevel) return { wins, reason: `第 ${stage} 关需要角色等级 ${row.playerLevel}，本次登录等级 ${player.level}` };
-    if (!allowMutate) return { wins, reason: `可从第 ${stage} 关开始，同一关连续失败 ${maxFailures} 次停止。预览结束` };
-    signal?.throwIfAborted();
-    const won = await schedule(async () => {
+    const result = await schedule(async () => {
       signal?.throwIfAborted();
       if (!enabled() || client.connected === false) throw new Error('账号状态已变化，主线推关已停止');
+      // 排到首场时，前面已发送的挂机战斗才完成结算并更新主线进度。
+      stage ??= player?.mainlineStage;
+      if (!Number.isInteger(stage) || stage < 1 || !Number.isInteger(player?.level) || player.level < 1) {
+        throw new Error('登录响应缺少有效的主线关卡或角色等级');
+      }
+      const row = rows.find((entry) => entry.stage === stage);
+      if (!row || !Number.isInteger(row.playerLevel)) return { reason: `配置表中没有第 ${stage} 关的等级要求` };
+      if (player.level < row.playerLevel) return { reason: `第 ${stage} 关需要角色等级 ${row.playerLevel}，本次登录等级 ${player.level}` };
+      if (!allowMutate) return { reason: `可从第 ${stage} 关开始，同一关连续失败 ${maxFailures} 次停止。预览结束` };
       return executeBattle(async () => {
         try {
           await waitForChallenge(client, { signal, wait, beforeSend: async () => {
@@ -59,10 +59,11 @@ export async function runStages(client, player, config, {
         } else failures++;
         // 战果在恢复阵容前确认，恢复失败仍保留实际进度和连败计数。
         onBattle({ stage, won, wins, failures });
-        return won;
+        return { won };
       }, { mode: 'mainline', stage, signal, enabled, onLineupPhase });
     });
-    if (!won) {
+    if (result.reason) return { wins, reason: result.reason };
+    if (!result.won) {
       if (failures >= maxFailures) return { wins, reason: `第 ${stage} 关连续战败 ${failures} 次，已停止` };
       continue;
     }

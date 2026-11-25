@@ -611,6 +611,16 @@ try {
     assert.deepEqual(saveAutomationSettings('old', old, { file, revision: 1 }).settings, expected);
     assert(!Object.hasOwn(nativeTaskValues(expected, old.schedule), 'ticketRecruit'));
   });
+  test('版本 67 的商船设置补齐检查间隔，保留显式值并校验范围', () => {
+    const settings = defaultSettings(), version = 67;
+    const document = { format: SETTINGS_FORMAT, version, settings };
+    delete settings.guildShip.checkEverySeconds;
+    assert.equal(importAutomationSettings(document).guildShip.checkEverySeconds, 60);
+    settings.guildShip.checkEverySeconds = 8;
+    assert.equal(importAutomationSettings(document).guildShip.checkEverySeconds, 8);
+    settings.guildShip.checkEverySeconds = 301;
+    assert.throws(() => importAutomationSettings(document), error => !!error.fields['guildShip.checkEverySeconds']);
+  });
   test('旧商船配置只补齐缺失的钻石选项，原文件、显式值和校验保持有效', () => {
     const settings = defaultSettings();
     settings.guildShip.enabled = true;
@@ -778,6 +788,31 @@ try {
     updated.factory.strategy='invalid';
     assert.throws(()=>validateSettings(updated),error=>!!error.fields?.['factory.strategy']);
   });
+  test('64版默认不强制补库，每座工厂的物品和上下限独立往返校验', () => {
+    const old = defaultSettings(); delete old.factory.refillRules;
+    const settings = importAutomationSettings({format:SETTINGS_FORMAT,version:64,settings:old});
+    assert.deepEqual(settings.factory.refillRules, []);
+    const rule = {buildingId:'1海水厂', productId:'淡水', trigger:0, target:null};
+    settings.factory.refillRules = [rule];
+    assert.deepEqual(importAutomationSettings(exportAutomationSettings(settings)).factory.refillRules, [rule]);
+    const multiple = [rule, {...rule, productId:'食盐', trigger:2, target:10}, {...rule, buildingId:'2海水厂'}];
+    settings.factory.refillRules = multiple;
+    assert.deepEqual(importAutomationSettings(exportAutomationSettings(settings)).factory.refillRules, multiple);
+    for (const rules of [[rule, rule], [{...rule, trigger:-1}], [{...rule, trigger:2, target:2}]]) {
+      settings.factory.refillRules = rules;
+      assert.throws(() => validateSettings(settings),error => !!error.fields['factory.refillRules']);
+    }
+  });
+  test('65版补库规则迁移后默认自然等待，开启补库加速可往返保存', () => {
+    const old = defaultSettings();
+    old.factory.refillRules = [{buildingId:'1海水厂', productId:'淡水', trigger:0, target:null}];
+    delete old.factory.refillSpeedUp;
+    const migrated = importAutomationSettings({format:SETTINGS_FORMAT,version:65,settings:old});
+    assert.equal(migrated.factory.refillSpeedUp,false);
+    assert.deepEqual(migrated.factory.refillRules,old.factory.refillRules);
+    migrated.factory.refillSpeedUp = true;
+    assert.equal(importAutomationSettings(exportAutomationSettings(migrated)).factory.refillSpeedUp,true);
+  });
   test('第50版旧存档可读取、导入和保存，满舱航线只在缺项时补齐', () => {
     // 固定旧版导出样本。用当前默认值构造旧存档会掩盖下次新增必填项时遗漏的迁移。
     const legacy = JSON.parse(fs.readFileSync(new URL('./fixtures/automation-settings-v50.json', import.meta.url), 'utf8'));
@@ -791,15 +826,17 @@ try {
       expected.merchant.speedUpMode = 'deadline';
       expected.merchant.fullCargoRoutes = value ?? defaultSettings().merchant.fullCargoRoutes;
       expected.merchant.periodPointerLimit = document.settings.merchant.periodPointerLimit ?? -1;
+      expected.guildShip.checkEverySeconds = 60;
       expected.afk = { claimIntervalHours: 0 };
       expected.seasonMerit = { enabled: false, targetRank: 0, leadMinutes: 0 };
       expected.schedule.afkUpgrade = false;
+      Object.assign(expected.weeklyActivity, { antiqueRecruitTickets: false, antiqueTicketLimit: 0 });
       expected.museum.targetFragments = [];
       expected.museum.unlockCases = false;
       Object.assign(expected.pet, { levelUp: false, levelUids: [] });
       expected.treasure.chasePlayerIds = [];
       expected.alliance.memberIds = [];
-      Object.assign(expected.factory,{strategy:'smart',simulatedTargets:[]});
+      Object.assign(expected.factory,{strategy:'smart',simulatedTargets:[],refillRules:[],refillSpeedUp:false});
       for (const fleet of expected.silicon.fleets) Object.assign(fleet, { huntPlayerIds: [], safePlayerIds: [] });
       const entry = { settingsVersion: document.version, revision: 7, settings: document.settings };
       fs.writeFileSync(file, JSON.stringify({ version: document.version, accounts: { merchant: entry, other: entry } }));
@@ -893,7 +930,7 @@ try {
     assert.throws(() => validateSettings(settings), error => !!error.fields['alliance.memberIds']);
   });
   test('版本1升级后重复迁移保持一致，保留有效的用户值', () => {
-    assert.equal(SETTINGS_SCHEMA_VERSION, 64);
+    assert.equal(SETTINGS_SCHEMA_VERSION, 68);
     const settings = legacySettings();
     settings.factory.checkEverySeconds = 270;
     settings.resources.diamondDailyLimit = 1234;

@@ -23,7 +23,9 @@ for (const [index, rewards] of [
   [['白芯片宝箱', 5], ['绿芯片宝箱', 1], ['蓝芯片宝箱', 1]],
   [['白芯片宝箱', 5], ['绿芯片宝箱', 1], ['蓝芯片宝箱', 1], ['紫芯片宝箱', 1]],
 ].entries()) f.config.tables.ChipMineCfg.data[index].reward = rewards;
-const fixtureView = await readSiliconOverview(f.client, f.protocol, f.config, f.player);
+const oldDispatch = { confirmed: true, details: { kind: 'siliconDispatch', worldId: String(f.player.worldId),
+  gridId: 4000, index: 2, buildingId: '1远征船', active: true } };
+const fixtureView = await readSiliconOverview(f.client, f.protocol, f.config, f.player, { ledger: { keyRecords: () => ({ oldDispatch }) } });
 const css = PAGE.match(/<style>([\s\S]*?)<\/style>/)[1];
 const script = fs.readFileSync('src/silicon-overview-ui.js', 'utf8');
 const storeScript = fs.readFileSync('src/ui/dist/console-store.js', 'utf8');
@@ -103,6 +105,8 @@ try {
     const initial = await measure();
     assert.equal(await slot(0).getAttribute('aria-pressed'), 'true');
     if (width <= 600) await slot(2).tap(); else await slot(2).click();
+    assert.equal(await slot(2).locator('small').textContent(), '占领');
+    assert.equal(await detail.locator('.silicon-detail-heading .dim').textContent(), '其他玩家');
     assert.match(await detail.textContent(), /<img src=x onerror=alert\(1\)>/); assert.match(await detail.textContent(), /深海联盟/);
     assert.equal(await detail.locator('img').count(), 0);
     assert.equal(await detail.getByRole('button', { name: '抢占矿位' }).count(), 1);

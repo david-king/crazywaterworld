@@ -18,15 +18,17 @@ fs.writeFileSync(process.env.CW_CONFIG_PACK, JSON.stringify([[1, 'HeroCfg', { da
 ] }], [2, 'BuildingUnlockCfg', { data: [
   ...[1, 2, 3].map(id => ({ buildingType: '远征船', buildingId: id + '远征船' })),
   ...[1, 2].map(id => ({ buildingType: '精铁厂', buildingId: id + '精铁厂' })),
+  { buildingType: '海水厂', buildingId: '1海水厂' },
 ] }],
   [3, 'ItemCfg', { data: items }],
   [10, 'MuseumExpeditionStageCfg', { data: [{ stageId: 1, name: '旧灯塔瞭望台', exploreTime: 14400 }] }],
   [11, 'MuseumStageStarCfg', { data: [{ star: 1, exploreValue: 250 }] }],
   [12, 'MuseumExpeditionRewardCfg', { data: [{ stageId: 1, star: 1, randomRewards: [['望远镜碎片',1]], randomRewardWeights: [1] }] }],
-  [4, 'BuildingCfg', { data: [{ buildingType: '精铁厂', name: '冶炼厂' }] }],
+  [4, 'BuildingCfg', { data: [{ buildingType: '精铁厂', name: '冶炼厂' }, { buildingType: '海水厂', name: '海水提取厂' }] }],
   [5, 'BuildingUpgradeCfg', { data: [{ buildingType: '精铁厂', product: [['精铁', 1]] }] }],
   [6, 'ItemJumpCfg', { data: [{ id: '耐火砖', accessList: ['折扣商店'] }] }],
-  [9, 'BuildingProduceCfg', { data: ['耐火砖','高温合金'].map(itemId => ({ itemId,buildType:'精铁厂',unlockLevel:1,produceTime:20,costItem:[] })) }],
+  [9, 'BuildingProduceCfg', { data: [...['耐火砖','高温合金','精铁'].map(itemId => ({ itemId,buildType:'精铁厂',unlockLevel:1,produceTime:20,costItem:[] })),
+    {itemId:'淡水',buildType:'海水厂',unlockLevel:1,produceTime:5,costItem:[]}] }],
   [7, 'TrialRaidCfg', { data: ['英雄经验副本', '强化石副本', '海兽经验副本'].map((title, i) => ({ raidId: i + 1, title })) }],
   [8, 'TrialRaidStageCfg', { data: [1, 2, 3].flatMap(raidId => Array.from({ length: 15 }, (_, i) => ({
     raidId, stageId: raidId * 1000 + i + 1, stageLevel: i + 1, openLevel: raidId === 3 ? 25 : 14,
@@ -290,8 +292,15 @@ try {
     assert.equal(await panel.getByLabel('最高折数', { exact: true }).isVisible(), false);
     assert.equal(await panel.getByRole('button', { name: '读取当前货架' }).count(), 0);
     const picker = panel.getByRole('listbox', { name: '可选折扣商品' }), search = panel.getByRole('combobox', { name: '搜索折扣商品' });
+    const assertEditorAlignment = async () => {
+      const controls = panel.locator('.config-discount-picker:visible, .config-discount-item-field > strong:visible, .config-discount-limit input, .config-discount-form button');
+      const tops = await controls.evaluateAll(nodes => nodes.map(node => node.getBoundingClientRect().top));
+      assert.equal(tops.length, 5);
+      assert(Math.max(...tops) - Math.min(...tops) <= 1, '物品、上限输入框和操作按钮应在同一行：' + tops.join(', '));
+    };
     await add.click(); await search.waitFor();
     assert(await search.evaluate(node => node === document.activeElement));
+    await assertEditorAlignment();
     const known = picker.getByRole('group', { name: '已知折扣商品' });
     for (const id of ['原料自选包', '玉米', '耐火砖']) assert.equal(await known.getByRole('option', { name: id }).count(), 1);
     await search.fill('不存在的折扣商品');
@@ -301,6 +310,7 @@ try {
     await search.press('ArrowDown'); await search.press('Enter');
     await panel.locator('summary').filter({ hasText: '材料礼包（礼包B）' }).waitFor();
     assert.equal(await picker.isVisible(), false);
+    await assertEditorAlignment();
     await panel.getByLabel('最高折数').fill('4.5');
     await panel.getByLabel('整份最高钻石价').fill('25');
     const save = panel.getByRole('button', { name: '保存', exact: true });
@@ -366,6 +376,7 @@ try {
     assert.equal(stored().rules.length, 1);
     await page.setViewportSize({ width: 1440, height: 1000 });
     await panel.getByRole('button', { name: '编辑', exact: true }).click();
+    await assertEditorAlignment();
     await panel.getByLabel('最高折数').fill('');
     await save.click(); await saved();
     assert.equal(stored().rules[0].maxPercent, null);
@@ -705,6 +716,145 @@ try {
   await page.locator('[data-config-family=production]').click();
   const factory = page.locator('#config-field-factory-enabled');
   const strategy = page.locator('#config-field-factory-strategy');
+  const expandProduction = page.getByRole('button', {name:'自动生产，展开下级设置'});
+  assert(await strategy.isHidden()); await expandProduction.click();
+  const refill = page.locator('#config-field-factory-refillRules');
+  const refillSpeedUp = page.getByRole('switch',{name:'强制补库时使用加速器',exact:true});
+  assert.equal(await refillSpeedUp.getAttribute('aria-checked'), 'false');
+  await refillSpeedUp.click(); await saved();
+  assert.equal(loadAutomationSettings('config-a').settings.factory.refillSpeedUp, true);
+  assert.equal(loadAutomationSettings('config-b').settings.factory.refillSpeedUp, false);
+  const addRefill = refill.getByRole('button', {name:'添加补库规则'});
+  const factoryPicker = refill.getByLabel('选择补库工厂');
+  await factoryPicker.selectOption('1海水厂');
+  assert.equal(await refill.getByLabel('选择要添加的物品').inputValue(), '淡水');
+  await addRefill.click(); await saved();
+  const waterFactory = refill.getByRole('group', {name:'海水提取厂',exact:true});
+  const waterRule = waterFactory.getByRole('group', {name:'淡水',exact:true});
+  assert.equal(await refill.getAttribute('data-slot'), 'card');
+  assert.equal(await waterRule.getByLabel('补库物品').getAttribute('data-slot'), 'native-select');
+  assert.equal(await waterRule.getByLabel('库存 ≤').getAttribute('data-slot'), 'input');
+  assert.equal(await addRefill.getAttribute('data-slot'), 'button');
+  assert.equal(await waterRule.getByLabel('库存 ≤').inputValue(), '0');
+  assert.equal(await waterRule.getByPlaceholder('仓容上限').inputValue(), '');
+  await factoryPicker.selectOption('2精铁厂'); await addRefill.click();
+  const smelter = refill.getByRole('group', {name:'冶炼厂（2 号）',exact:true});
+  await smelter.getByLabel('补库物品').selectOption('高温合金');
+  const alloyRule = smelter.getByRole('group',{name:'高温合金',exact:true});
+  await alloyRule.getByLabel('库存 ≤').fill('2'); await alloyRule.getByLabel('补至库存').fill('8'); await saved();
+  assert.equal(await factoryPicker.inputValue(), '2精铁厂');
+  const itemPicker = refill.getByLabel('选择要添加的物品');
+  assert.deepEqual(await itemPicker.locator('option').evaluateAll(options => options.map(o => o.value)), ['耐火砖','精铁']);
+  await factoryPicker.selectOption('1精铁厂'); await addRefill.click();
+  await factoryPicker.selectOption('2精铁厂');
+  await addRefill.click(); await saved();
+  const brickRule = smelter.getByRole('group', {name:'耐火砖',exact:true});
+  await brickRule.getByLabel('库存 ≤').fill('1'); await brickRule.getByLabel('补至库存').fill('4'); await saved();
+  const sameFactory = () => loadAutomationSettings('config-a').settings.factory.refillRules.filter(r => r.buildingId === '2精铁厂');
+  assert.deepEqual(sameFactory().map(r => [r.productId,r.trigger,r.target]), [['高温合金',2,8],['耐火砖',1,4]]);
+  await addRefill.click(); await saved();
+  assert.equal(await factoryPicker.locator('option[value="2精铁厂"]').count(), 0);
+  const ironRule = smelter.getByRole('group',{name:'精铁',exact:true});
+  const ironHandle = ironRule.getByRole('button',{name:'拖动排序：精铁'});
+  assert.equal(await smelter.getByRole('heading',{name:'冶炼厂（2 号）',exact:true}).count(), 1);
+  assert.equal(await smelter.locator('fieldset').count(), 3);
+  assert(await smelter.getByText('同时缺货时，从上到下生产').isVisible());
+  const productsByPosition = smelter.getByLabel('补库物品');
+  assert.equal(await smelter.getByText(/^优先级 \d+$/).filter({visible:true}).count(), 0);
+  assert.equal(await ironHandle.evaluate(handle => document.getElementById(handle.getAttribute('aria-describedby'))?.textContent), '优先级 3');
+  const desktopControls = brickRule.locator('button, select, label span, input');
+  for (const width of [880,1440]) {
+    await page.setViewportSize({width,height:1000});
+    assert(await desktopControls.evaluateAll(controls => {
+      const boxes = controls.map(el => el.getBoundingClientRect());
+      const center = boxes[0].top + boxes[0].height / 2;
+      return boxes.every((box,i) => box.width > 0 && Math.abs(box.top + box.height / 2 - center) <= 1
+        && (i === 0 || boxes[i - 1].right <= box.left));
+    }), width + 'px 补库规则的物品、库存和操作从左到右排在同一行');
+    assert((await brickRule.getByLabel('补至库存').boundingBox()).width >= 96, width + 'px 为仓容上限占位文字保留空间');
+  }
+  await ironHandle.dragTo(alloyRule,{targetPosition:{x:25,y:12}});
+  await saved();
+  assert.deepEqual(sameFactory().map(r => r.productId), ['精铁','高温合金','耐火砖']);
+  assert.deepEqual(await productsByPosition.evaluateAll(inputs => inputs.map(input => input.value)), ['精铁','高温合金','耐火砖']);
+  assert(await ironHandle.evaluate(handle => document.activeElement === handle));
+  const beforeOutside = loadAutomationSettings('config-a').revision;
+  await brickRule.getByRole('button',{name:'拖动排序：耐火砖'}).dragTo(waterRule,{targetPosition:{x:25,y:12}});
+  assert.equal(await productsByPosition.first().inputValue(), '精铁');
+  assert.equal(loadAutomationSettings('config-a').revision, beforeOutside);
+  await page.reload(); await openConfig(); await page.locator('[data-config-family=production]').click(); await expandProduction.click();
+  assert.equal(await refillSpeedUp.getAttribute('aria-checked'), 'true');
+  await refillSpeedUp.click(); await saved();
+  assert.equal(loadAutomationSettings('config-a').settings.factory.refillSpeedUp, false);
+  assert.equal(await productsByPosition.first().inputValue(), '精铁');
+  await page.setViewportSize({width:390,height:844});
+  const touchSession = await page.context().newCDPSession(page);
+  try {
+    await touchSession.send('Emulation.setTouchEmulationEnabled',{enabled:true,maxTouchPoints:1});
+    await ironHandle.evaluate(node => window.scrollBy(0, node.getBoundingClientRect().top - innerHeight / 3));
+    const start = await ironHandle.boundingBox(), end = await alloyRule.boundingBox();
+    const x = start.x + start.width / 2, y = start.y + start.height / 2, dropY = end.y + end.height * .8;
+    for (const finish of ['touchCancel','touchEnd']) {
+      await touchSession.send('Input.dispatchTouchEvent',{type:'touchStart',touchPoints:[{x,y}]});
+      await touchSession.send('Input.dispatchTouchEvent',{type:'touchMove',touchPoints:[{x,y:dropY}]});
+      assert(await ironRule.evaluate(row => row.dataset.dragging === 'true'));
+      await touchSession.send('Input.dispatchTouchEvent',{type:finish,touchPoints:[]});
+      if (finish === 'touchCancel') assert.equal(await productsByPosition.first().inputValue(), '精铁');
+    }
+    await saved(); assert.deepEqual(sameFactory().map(r => r.productId), ['高温合金','精铁','耐火砖']);
+  } finally {
+    await touchSession.send('Emulation.setTouchEmulationEnabled',{enabled:false});
+    await touchSession.detach();
+  }
+  await page.setViewportSize({width:1440,height:1000});
+  await ironRule.getByRole('button',{name:'移除'}).click(); await saved();
+  console.log('通过：补库规则支持鼠标跨多项拖放、触屏排序与取消，跨厂放手不改顺序');
+  const up = brickRule.getByRole('button',{name:'上移'}), down = brickRule.getByRole('button',{name:'下移'});
+  assert(await down.isDisabled()); assert(await waterRule.getByRole('button',{name:'上移'}).isHidden());
+  await up.click(); await saved();
+  assert(await up.isDisabled()); assert(await down.evaluate(button => document.activeElement === button));
+  assert.deepEqual(loadAutomationSettings('config-a').settings.factory.refillRules.map(r => [r.buildingId,r.productId]),
+    [['1海水厂','淡水'],['2精铁厂','耐火砖'],['1精铁厂','耐火砖'],['2精铁厂','高温合金']]);
+  await page.reload(); await openConfig(); await page.locator('[data-config-family=production]').click(); await expandProduction.click();
+  assert.equal(await productsByPosition.first().inputValue(), '耐火砖');
+  assert.equal(await brickRule.getByLabel('补至库存').inputValue(), '4');
+  await page.setViewportSize({width:320,height:844});
+  assert(await brickRule.evaluate(row => [...row.querySelectorAll('button')].every(b => {
+    const box = b.getBoundingClientRect(); return box.width > 0 && box.left >= 0 && box.right <= innerWidth;
+  })));
+  await down.focus(); await page.keyboard.press('Enter'); await saved();
+  assert.equal(await productsByPosition.nth(1).inputValue(), '耐火砖');
+  assert.deepEqual(sameFactory().map(r => [r.productId,r.trigger,r.target]), [['高温合金',2,8],['耐火砖',1,4]]);
+  await page.setViewportSize({width:1440,height:1000});
+  await refill.getByRole('group',{name:'冶炼厂（1 号）',exact:true}).getByRole('button',{name:'移除'}).click();
+  await brickRule.getByRole('button',{name:'移除'}).click(); await saved();
+  assert.deepEqual(sameFactory().map(r => [r.productId,r.trigger,r.target]), [['高温合金',2,8]]);
+  const refillRow = page.locator('.config-row[data-kind=refillRules]');
+  await refillRow.screenshot({path:path.join(museumOutput,'refill-desktop.png'), animations:'disabled'});
+  for (const width of [320,390]) {
+    await page.setViewportSize({width,height:844});
+    await factoryPicker.selectOption('1精铁厂');
+    assert(await refill.evaluate(node => [...node.querySelectorAll('input,select,button')].filter(el => !el.hidden).every(el => {
+      const rect = el.getBoundingClientRect(); return rect.left >= 0 && rect.right <= innerWidth && rect.width > 0;
+    })), width + 'px 行内编辑和添加控件均在视口内');
+    assert(await waterRule.getByRole('spinbutton').evaluateAll(controls => {
+      const [trigger,target] = controls.map(el => el.getBoundingClientRect());
+      return Math.abs(trigger.top - target.top) <= 1 && trigger.right < target.left
+        && trigger.width >= 76 && target.width >= 76;
+    }), width + 'px 两个库存输入框并排显示且留有编辑空间');
+    await factoryPicker.selectOption('');
+    if (width === 390) {
+      await refillRow.evaluate(node => node.scrollIntoView({block:'center',behavior:'instant'}));
+      await refillRow.screenshot({path:path.join(museumOutput,'refill-mobile.png'), animations:'disabled'});
+    }
+  }
+  await page.setViewportSize({width:1440,height:1000});
+  await waterRule.getByRole('button',{name:'移除'}).click(); await saved();
+  assert.deepEqual(loadAutomationSettings('config-a').settings.factory.refillRules, [{buildingId:'2精铁厂',productId:'高温合金',trigger:2,target:8}]);
+  assert.deepEqual(loadAutomationSettings('config-b').settings.factory.refillRules, []);
+  await page.getByRole('button', {name:'自动生产，收起下级设置'}).click();
+  assert(await refill.isHidden()); assert(!(await page.locator('#config-field-factory-produce').isChecked()));
+  await expandProduction.click();
   assert.equal(await strategy.inputValue(),'smart');
   await strategy.selectOption('nativeSimulation');
   const targets = page.locator('#config-field-factory-simulatedTargets');
@@ -719,7 +869,7 @@ try {
   const exclusions = page.locator('#config-field-factory-blockedCollectionTypes');
   await exclusions.locator('summary').click();
   await exclusions.getByRole('checkbox', { name: '冶炼厂', exact: true }).check();
-  assert.equal(await exclusions.getByRole('checkbox').count(), 1);
+  assert.equal(await exclusions.getByRole('checkbox').count(), 2);
   await exclusions.locator('summary').click(); await saved();
   assert.deepEqual(loadAutomationSettings('config-a').settings.factory.blockedCollectionTypes, ['精铁厂']);
   await factory.click(); await page.locator('#config-field-factory-keepStock').fill('432'); await saved();
@@ -730,6 +880,8 @@ try {
   assert.equal(loadAutomationSettings('config-a').settings.factory.produce, false);
   await page.screenshot({ path: path.join(output, 'factory-desktop.png'), animations: 'disabled' });
   await page.reload(); await openConfig(); await page.locator('[data-config-family=production]').click();
+  assert(await strategy.isHidden()); await expandProduction.click();
+  assert.equal(await alloyRule.getByLabel('补至库存').inputValue(), '8');
   assert.equal(await factory.getAttribute('aria-checked'), 'false');
   assert.equal(await page.locator('#config-field-factory-keepStock').inputValue(), '432');
   assert.equal(await exclusions.locator('summary').textContent(), '冶炼厂');
@@ -737,6 +889,7 @@ try {
   assert.equal(loadAutomationSettings('config-a').settings.factory.enabled, true);
   assert.equal(loadAutomationSettings('config-a').settings.factory.produce, false);
   console.log('通过：模块暂停与参数一同保存，刷新、键盘启用不改细项');
+  console.log('通过：补库规则按工厂行内编辑、自动保存和移除，320px 与 390px 宽度均可操作');
 
   await page.locator('#tabs [data-tab=resources]').click();
   await page.locator('[data-resource-tab=heroes]').click();
@@ -776,7 +929,7 @@ try {
   await advanced.locator('summary').click();
   await advanced.getByLabel('目标等级', { exact: true }).fill('35');
   await advanced.locator('summary').click();
-  const newActions = ['skillAdvance', 'exclusiveLevel', 'exclusiveStar', 'showSkillReward'];
+  const newActions = ['skillAdvance', 'exclusiveLevel', 'exclusiveStar', 'badge', 'showSkillReward'];
   for (const action of newActions) {
     const toggle = page.locator('#config-field-heroes-' + action);
     assert.equal(await toggle.getAttribute('aria-checked'), 'false');
@@ -797,6 +950,10 @@ try {
   await picker.waitFor();
   const growth = loadAutomationSettings('config-a').settings.heroes;
   assert(newActions.every(action => growth[action])); assert.equal(growth.targetLevel, 35);
+  const badgeSwitch = page.locator('#config-group-heroes').getByRole('switch', { name: '徽章强化', exact: true });
+  assert.equal(await badgeSwitch.getAttribute('aria-checked'), 'true');
+  await badgeSwitch.click(); await saved();
+  assert.equal(loadAutomationSettings('config-a').settings.heroes.badge, false);
   await picker.locator('summary').click(); await picker.getByRole('button', { name: '清空选择' }).click();
   await picker.locator('summary').click(); await saved();
   assert.equal(await picker.locator('summary').textContent(), '留空则暂停培养，不影响技能展示领奖');

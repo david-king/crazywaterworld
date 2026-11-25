@@ -155,8 +155,9 @@ try {
     for (const id of ['蓝藏1碎片', '蓝藏2碎片', '红藏1碎片', '蓝藏品经验']) f.client.setItem(id, 100);
     const player = { playerId: '9007199254747991', worldId: 2000001, level: 40 };
     const request = f.client.request;
+    const settleTime = Math.floor(Date.now() / 1000) + 3600;
     f.client.request = async (name, ...args) => name === 'CrossRankInfoRequest'
-      ? { subjectId: 4, roomLevel: 1, grouping: false, settleTime: Math.floor(Date.now() / 1000) + 3600, rankList: [] }
+      ? { subjectId: 4, roomLevel: 1, grouping: false, settleTime, rankList: [] }
       : request(name, ...args);
     const before = structuredClone(settings);
     await runWeeklyActivity(f.client, f.protocol, f.config, player, { getSettings: () => settings, ledger: ledger() });
@@ -165,6 +166,71 @@ try {
     assert(f.client.writes.every(row => ['AntiqueStarUpRequest', 'AntiqueSuitLevelUpRequest'].includes(row.name)));
     assert.equal(f.state.antiques.find(row => row.id === '红藏1').star, 0);
     assert.deepEqual(settings, before);
+  });
+
+  function ticketFixture(stock, limit = 0) {
+    const { client, protocol, config } = antiqueFixture();
+    const settings = defaultSettings();
+    Object.assign(settings.weeklyActivity, { enabled: true, antiqueEnabled: true, antiqueRecruitTickets: true, antiqueTicketLimit: limit });
+    Object.assign(settings.antique, { starQualities: [], suitQualities: [] });
+    config.tables.ModuleOpenCfg.data.push({ moduleId: '每日跨服比拼', playerLevel: 20 });
+    const player = { playerId: '9988', worldId: 2000001, level: 40 };
+    const state = { stock, times: 0, subjectId: 4, ways: [], loseReply: false };
+    const settleTime = Math.floor(Date.now() / 1000) + 3600;
+    client.request = async (name, body, response, timeout, beforeSend) => {
+      if (name === 'CrossRankInfoRequest') return { grouping: false, subjectId: state.subjectId, roomLevel: 1, settleTime, rankList: [{ playerId: player.playerId, score: state.times }] };
+      if (name === 'OnWaterRequest') return { building: [{ buildingId: '1广播站', level: 1 }] };
+      if (name === 'RecruitInfoRequest') return { antique: { recruitTimes: state.times } };
+      if (name === 'AllItemRequest') return { items: [{ itemId: '藏品券', num: state.stock }] };
+      assert.equal(name, 'AntiqueRecruitRequest');
+      beforeSend();
+      const wire = protocol[name].decode(protocol[name].encode(body).finish());
+      assert.equal(wire.type, protocol.AntiqueRecruitType.RECRUIT_ANTIQUE);
+      const count = ({ 2: 1, 3: 10, 4: 50 })[wire.way];
+      assert(count && count <= state.stock); state.ways.push(count);
+      if (state.loseReply) throw Error('模拟断线');
+      state.stock -= count; state.times += count;
+      return protocol[response].decode(protocol[response].encode({ recruitData: { recruitTimes: state.times } }).finish());
+    };
+    const file = path.join(directory, 'tickets-' + ++serial + '.json');
+    return { state, settings, protocol: { ...protocol }, run() {
+      return runWeeklyActivity(client, this.protocol, config, player, { getSettings: () => settings,
+        ledger: createUsageLedger('weekly-tickets', { file }) });
+    } };
+  }
+
+  await check('藏品日按库存与当日限额优先五十连、十连和单抽，重启保留已用额度', async () => {
+    const f = ticketFixture(100, 63);
+    await f.run(); await f.run();
+    assert.deepEqual(f.state.ways, [50, 10, 1, 1, 1]); assert.equal(f.state.stock, 37);
+    f.settings.weeklyActivity.antiqueTicketLimit = 0;
+    await f.run();
+    assert.equal(f.state.stock, 0); assert.equal(f.state.times, 100);
+    const older = ticketFixture(52);
+    const { RECRUIT_BATCH_50, ...ways } = older.protocol.RecruitWay;
+    older.protocol.RecruitWay = ways;
+    await older.run(); assert.deepEqual(older.state.ways, [10, 10, 10, 10, 10, 1, 1]);
+  });
+
+  await check('用券开关独立，仅在藏品日抽取，单批达标后保留余券', async () => {
+    const f = ticketFixture(90);
+    f.settings.weeklyActivity.antiqueRecruitTickets = false;
+    await f.run(); assert.equal(f.state.ways.length, 0);
+    f.settings.weeklyActivity.antiqueRecruitTickets = true;
+    f.state.subjectId = 3; await f.run(); assert.equal(f.state.ways.length, 0);
+    f.state.subjectId = 4;
+    Object.assign(f.settings.weeklyActivity, { antiqueStop: 'score', antiqueScore: 5 });
+    await f.run(); await f.run();
+    assert.deepEqual(f.state.ways, [50]); assert.equal(f.state.stock, 40);
+  });
+
+  await check('藏品券回包丢失暂停重抽，重启后核实扣券和招募次数才续抽', async () => {
+    const f = ticketFixture(80, 60);
+    f.state.loseReply = true; await f.run();
+    f.state.loseReply = false; await f.run(); assert.deepEqual(f.state.ways, [50]);
+    f.state.stock = 30; f.state.times = 50;
+    await f.run(); await f.run();
+    assert.deepEqual(f.state.ways, [50, 10]); assert.equal(f.state.stock, 20);
   });
 
   await check('普通英雄总控和升星关闭时，活动只对名单内英雄升星', async () => {

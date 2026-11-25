@@ -9,6 +9,7 @@ import { museumMaterialDetails, readMuseumMaterialState, settleMuseumMaterialSta
 import { captureSpendOperation } from './spend-evidence.mjs';
 import { createOperationLog } from './operation-log.mjs';
 import { activityTaskEnabled, activityProductionEnabled } from './activity-automation.mjs';
+import { residentMaterialReasons, residentMaterialRule, hasResidentMaterialRules } from './resident-materials.mjs';
 
 export class AutomationSkip extends Error {
   constructor(message) { super(message); this.code = 'AUTOMATION_SKIP'; }
@@ -50,7 +51,7 @@ export function worldPreferenceEnabled(settings, kind) {
     case 'buildSupply': return b.enabled && b.supply && (b.build || b.upgrade) && f.enabled && f.produce;
     case 'upgrade': case 'weekFactory': return b.enabled && b.upgrade;
     case 'finishOrder': return r.enabled;
-    case 'denyOrder': return r.enabled && r.reroll;
+    case 'denyOrder': return r.enabled && (r.reroll || hasResidentMaterialRules(r));
     case 'startProduce': return f.enabled && (f.produce || f.cooperateNative && f.strategy !== 'nativeSimulation');
     case 'farm': return settings.farm.enabled;
     case 'speedUpUpgrade': return b.enabled && b.speedUp;
@@ -118,8 +119,12 @@ export function factoryItemSpeedEnabled(factory, productId) {
 }
 
 export function worldActionAllowed(settings, step, config) {
-  if (!settings) return true;
+  if (!settings) return !step.refillRule && !step.queueReplan && !step.materialRule;
   if (!worldPreferenceEnabled(settings, step.kind)) return false;
+  if (step.kind === 'denyOrder') {
+    if (step.materialRule === 'blockedMaterials') return step.requirements.some(item => settings.resident.blockedMaterials.includes(item.id));
+    return step.materialRule ? settings.resident[step.materialRule] === true : settings.resident.reroll;
+  }
   if (step.kind === 'speedUpProduce' && step.verify?.productId) {
     if (!factoryItemSpeedEnabled(settings.factory, step.verify.productId) && !step.demandSources?.some(source =>
       settings.factory.speedUpSources.includes(source) && activityProductionEnabled(settings, source))) return false;
@@ -128,6 +133,16 @@ export function worldActionAllowed(settings, step, config) {
   const type = typeof id === 'string' ? (config?.tables?.BuildingCfg?.data ?? []).map(row => row.buildingType).sort((a, b) => b.length - a.length).find(t => id.endsWith(t)) : null;
   if (['build', 'upgrade', 'weekFactory'].includes(step.kind) && settings.building.disabledTypes.some(value => value === id || value === type)) return false;
   if (['startProduce', 'speedUpProduce'].includes(step.kind) && settings.factory.disabledTypes.some(value => value === id || value === type)) return false;
+  if (step.refillRule) {
+    if (step.refillSupply) return settings.factory.produce && !!settings.factory.refillRules?.length
+      && ['StartFactoryProduceRequest','CancelFactoryProduceRequest'].includes(step.request);
+    if (step.request === 'SpeedUpFactoryProduceRequest' && !settings.factory.refillSpeedUp) return false;
+    return settings.factory.produce && !!settings.factory.refillRules?.some(r => r.buildingId === id
+      && r.productId === step.refillRule.productId && r.trigger === step.refillRule.trigger && r.target === step.refillRule.target);
+  }
+  if (step.queueReplan) return settings.factory.produce && settings.factory.demandFirst && settings.factory.strategy !== 'nativeSimulation'
+    && JSON.stringify(settings.factory.demandPriority) === step.verify.priority;
+
   if (step.request === 'SetFactoryAutoProduceRequest' && (!settings.factory.cooperateNative || settings.factory.strategy === 'nativeSimulation')) return false;
   if (step.request === 'StartFactoryProduceRequest') {
     if (!settings.factory.produce || (step.factoryStrategy ?? 'smart') !== (settings.factory.strategy ?? 'smart')) return false;
@@ -152,15 +167,14 @@ export function residentOrderStockWarning(stock, requirements, config) {
 export function residentFilter(order, survey, settings, usage = {}) {
   if (!settings) return null;
   const r = settings.resident;
-  if (!r.enabled) return '居民需求总开关已关闭';
+  if (!r.enabled) return { reason: '居民需求总开关已关闭' };
   const count = Math.max(Number(survey.orderOfTheDay?.orderNum ?? 0), Number(usage.counters?.residentOrders ?? 0));
-  if (r.dailyCap > 0 && count >= r.dailyCap) return `今日满足次数 ${count}，已达上限 ${r.dailyCap}`;
-  if (r.blockedMaterials.some(id => order.requirements.some(item => item.id === id))) return '包含不准消耗的材料';
-  if (r.skipCrops && order.requirements.some(item => survey.cropIds?.has(item.id))) return '已设置跳过农作物订单';
+  if (r.dailyCap > 0 && count >= r.dailyCap) return { reason: `今日满足次数 ${count}，已达上限 ${r.dailyCap}` };
   const available = survey.available ?? (id => survey.have(id) - resourceReserve(settings, id));
-  if (r.skipProduction && order.requirements.some(item => available(item.id) < item.num)) return '可用库存不足，已设置跳过需生产的订单';
-  if (r.minExp > 0 && (order.rewardExp == null || order.rewardExp < r.minExp)) return `经验奖励未达到 ${r.minExp}`;
-  if (r.minGold > 0 && (order.rewardGold == null || order.rewardGold < r.minGold)) return `金币奖励未达到 ${r.minGold}`;
+  const materialRule = residentMaterialRule(r, order.requirements, survey.cropRelatedIds ?? survey.cropIds, available);
+  if (materialRule) return { reason: residentMaterialReasons[materialRule], materialRule, reroll: true };
+  if (r.minExp > 0 && (order.rewardExp == null || order.rewardExp < r.minExp)) return { reason: `经验奖励未达到 ${r.minExp}`, reroll: r.reroll };
+  if (r.minGold > 0 && (order.rewardGold == null || order.rewardGold < r.minGold)) return { reason: `金币奖励未达到 ${r.minGold}`, reroll: r.reroll };
   return null;
 }
 

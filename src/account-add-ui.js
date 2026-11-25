@@ -23,7 +23,7 @@ function renderAccountAdd() {
   const locked = state.busy || state.cleaning;
   $('account-add-title').textContent = channel ? names[channel] : '添加账号';
   $('account-add-step').textContent = !channel ? '选择登录渠道' : completed ? '添加完成'
-    : (channel === 'phone' && state.phase === 'selecting') || (['alipay', 'wechat-qr'].includes(channel) && state.phase === 'captured') ? '选择区服和角色'
+    : state.phase === 'selecting' || (['alipay', 'wechat-qr'].includes(channel) && state.phase === 'captured') ? '选择区服和角色'
       : capture && state.phase === 'captured' ? '验证账号并完成清理'
         : capture ? '采集游戏登录信息' : '登录验证';
   $('account-add-channels').hidden = Boolean(channel);

@@ -222,9 +222,9 @@ export async function weekHeroStarState(client, config, row) {
   return { period, gotStage, next, ready, stars: period ? [star(period.showHero1), star(period.showHero2)] : [] };
 }
 
-export async function weekFreePackState(client, config, type) {
+export async function weekFreePackState(client, config, type, chipInfo) {
   if (type === 6) {
-    const info = normalize(await client.request('WeekChipInfoRequest', {}, 'WeekChipInfoResponse'));
+    const info = chipInfo ?? normalize(await client.request('WeekChipInfoRequest', {}, 'WeekChipInfoResponse'));
     const pack = freePacks(tableRows(config, 'WeekChipPackCfg'))[0];
     return { pack, name: pack?.giftName, reward: pack?.reward, done: !pack || (info.gifts?.find(item => item.giftId === pack.packId)?.paidTimes ?? 0) > 0 };
   }

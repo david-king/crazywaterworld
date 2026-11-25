@@ -169,9 +169,9 @@ try {
     const summaries = page.locator('#config-group-' + id + ' details.config-multi > summary:visible');
     for (let i = 0; i < await summaries.count(); i++) {
       const summary = summaries.nth(i);
-      const menuId = await summary.evaluate(node => node.parentElement.id);
       await summary.click();
-      await assertPanel(page, '#' + menuId + ' .config-multi-panel');
+      assert.equal(await summary.evaluate(node => node.parentElement.open), true);
+      await assertPanel(page, '#config-group-' + id + ' details.config-multi[open] > .config-multi-panel');
       await page.keyboard.press('Escape');
       inspected++;
     }
@@ -212,7 +212,9 @@ try {
     if (i === 0) {
       await page.locator(selector + ' input[type=checkbox]').first().check();
       await assertPanel(page, selector);
-      assert.equal(await page.locator('#player-fixture .config-player-tag').count(), 1);
+      const selected = page.locator('#player-fixture').getByRole('listitem');
+      assert.equal(await selected.count(), 1);
+      assert.match(await selected.textContent(), /验收盟友0/);
     }
     await page.screenshot({ path: path.join(output, 'shared-' + i + '.png'), animations: 'disabled' });
     await page.keyboard.press('Escape');
@@ -265,7 +267,8 @@ try {
   assert.equal(await mobile.locator(heroes + ' input[type=search]').evaluate(node => node === document.activeElement), false, '一次轻触展开指定英雄时不应聚焦搜索框');
   await mobile.locator('[data-config-tab=daily]').tap();
   await mobile.locator('[data-config-group=arena]').tap();
-  const strategy = mobile.getByRole('combobox', { name: '选对手策略' });
+  await mobile.locator('button.config-disclosure[aria-controls="config-field-arena-challengeHigher-children"]').tap();
+  const strategy = mobile.getByRole('combobox', { name: '挑战选人策略' });
   await strategy.tap();
   const strategies = mobile.getByRole('listbox');
   await strategies.waitFor();

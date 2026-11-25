@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import vm from 'node:vm';
 import { createConsoleRuntime } from '../src/ui/console-store.mjs';
+import { activitiesPage } from '../src/ui/dist/console.mjs';
 import { defaultSettings, settingsUiRules } from '../src/automation-settings.mjs';
 import { merchantPresets, merchantPresetOptions } from '../src/merchant-presets.mjs';
 import { activityAutomationFields, activityAutomationSettingFields } from '../src/activity-automation.mjs';
@@ -10,6 +11,7 @@ import { activityAutomationFields, activityAutomationSettingFields } from '../sr
 const script = fs.readFileSync(new URL('../src/ui/activities.js', import.meta.url), 'utf8');
 const configScript = fs.readFileSync(new URL('../src/settings-ui.js', import.meta.url), 'utf8');
 const { merchantActivityFields, guildShipActivityFields } = newStateFunction(configScript.slice(0, configScript.indexOf('function configGet(')) + '\nreturn { merchantActivityFields, guildShipActivityFields };')();
+const shipFieldGroups = [...activitiesPage().matchAll(/data-ship-fields="([^"]+)"/g)].map(match => match[1]);
 const clone = value => JSON.parse(JSON.stringify(value));
 const deferred = () => {
   let resolve, reject;
@@ -148,7 +150,23 @@ function fixture() {
     configOpenSearchPanel() {},
     $: node, el: element,
     clear: item => { item.textContent = ''; return item; },
-    component: name => element(name === 'ui-number' ? 'input' : 'button'),
+    component: name => {
+      if (name === 'ui-guild-ship-settings') {
+        const section = element('div', 'activity-settings guild-ship-settings');
+        for (const keys of shipFieldGroups) {
+          const group = element('div');
+          group.dataset.shipFields = keys;
+          section.append(group);
+        }
+        return section;
+      }
+      if (name === 'ui-select') {
+        const wrapper = element('div');
+        wrapper.append(element('select'));
+        return wrapper;
+      }
+      return element(name === 'ui-number' ? 'input' : 'button');
+    },
     smallButton: text => element('button', '', text),
     makeHelpTip: (label, help) => element('span', 'help-tip', help),
     setTaskSwitch: (input, enabled) => input.setAttribute('aria-checked', enabled),
@@ -1431,6 +1449,8 @@ await test('风采大赛随期次展示三个开关，历史与离线可改细�
 });
 
 await test('联盟商船在活动页独立配置，离线及暂停可编辑且不出现挂机开关跳转', async () => {
+  assert.deepEqual(shipFieldGroups.flatMap(group => group.split(' ').map(key => 'guildShip.' + key)).sort(),
+    guildShipActivityFields.map(field => field.key).sort(), '每个配置项应恰好属于一个商船分组');
   for (const state of ['connected', 'paused', 'offline']) {
     const f = fixture();
     if (state === 'paused') f.context.snapshot.paused = true;
@@ -1444,6 +1464,10 @@ await test('联盟商船在活动页独立配置，离线及暂停可编辑且�
     assert.doesNotMatch(f.node('activities-list').textContent, /当前活动暂未接入/);
     assert.doesNotMatch(f.node('activities-list').textContent, /红船缺料备料需开启工厂生产/);
     await f.shipInput('guildShip.crew').onclick();
+    const interval = f.shipInput('guildShip.checkEverySeconds');
+    interval.value = '9'; await interval.onchange();
+    assert.equal(f.shipSaved.get('merchant-a').settings.guildShip.checkEverySeconds, 9);
+    assert.equal(f.shipSaved.get('merchant-b').settings.guildShip.checkEverySeconds, 60);
     await f.api.saveShip('guildShip.enabled', true);
     await f.api.saveShip('guildShip.enabled', false);
     assert.equal(f.shipSaved.get('merchant-a').settings.guildShip.crew, true);
@@ -1531,6 +1555,85 @@ await test('联盟商船配置读取晚到或保存前切号，不覆盖或误�
   f.context.current = 'merchant-a'; await f.api.refresh();
   flush.resolve(true); await save;
   assert(!f.state.calls.some(call => call.method === 'POST'));
+});
+
+await test('硅晶达标在周期活动内预览本轮消耗，确认后执行一次，库存不足时禁用', async () => {
+  const f = fixture(), id = 'weekly:6:3001:1';
+  f.activities.activities.push({ ...f.activities.activities[0], id, name: '硅晶达标', weekType: 6, taskKeys: [] });
+  const plan = { score: 7997, target: 8000, round: 2, roundLimit: 5, total: 15997, gap: 3, available: 10, gain: 10, key: 'preview',
+    statistics: { completed: 1, qualified: 1, cap: 8000, forecast: 8000, weekly: 0, gift: 0, factory: null,
+      inventory: ['初级','中级','高级','优质','特级'].map((grade,i) => ({ name: grade+'硅晶', count: i === 1 ? 1 : 0 })) },
+    items: [{ name: '中级硅晶', count: 1 }] };
+  f.activities.status[id] = { chip: plan };
+  const button = () => f.node('activities-list').querySelector('[data-activity-run=weekChipOpen]');
+  const writes = () => f.state.calls.filter(call => call.route === '/api/activities/week-chip/open');
+  await f.api.refresh();
+  f.api.select(id);
+  const stats = f.node('activities-list');
+  assert.match(stats.querySelector('.week-chip-metrics').textContent, /当前积分 \/ 本轮积分上限7,997 \/ 8,000.*已完成轮次1 \/ 5.*当前累计积分15,997/);
+  assert.equal(stats.querySelector('progress').max, 8000);
+  assert.equal(stats.querySelector('progress').value, 7997);
+  assert.match(stats.querySelector('.week-chip-inventory').textContent, /初级硅晶0 个中级硅晶1 个高级硅晶0 个优质硅晶0 个特级硅晶0 个/);
+  assert.match(stats.textContent, /第 2 轮/);
+  assert.doesNotMatch(stats.textContent, /中级硅晶 ×1|超出目标/);
+  assert.equal(button().disabled, false);
+  button().onclick();
+  assert.equal(writes().length, 0);
+  const modal = f.state.confirmations.at(-1);
+  assert.match(modal.details[0].textContent, /中级硅晶 ×1/);
+  assert.match(modal.details[1].textContent, /超出目标 7 分/);
+  f.context.snapshot.paused = true;
+  await assert.rejects(modal.accept(), /变化/);
+  f.context.snapshot.paused = false;
+  f.state.respond = request => {
+    if (request.route !== '/api/activities/week-chip/open') return;
+    assert.equal(request.account, 'merchant-a');
+    assert.deepEqual(request.body, { confirm: true, activityId: id, planKey: 'preview' });
+    Object.assign(plan, { score: 8007, gap: 0, items: [], key: null });
+    return { message: '本轮加工完成' };
+  };
+  await modal.accept();
+  assert.equal(writes().length, 1);
+  assert.equal(button().disabled, true);
+  assert.match(f.node('activities-list').textContent, /本轮已达标.*本轮加工完成/);
+  assert.equal(stats.querySelector('progress').value, 8000);
+  assert.match(stats.querySelector('progress').getAttribute('aria-valuetext'), /8,007 分/);
+  Object.assign(plan, { round: 3, score: 7, gap: 7993, available: 15 });
+  Object.assign(plan.statistics, { completed: 2, qualified: 2, forecast: 22 });
+  await f.api.refresh();
+  assert.equal(button().disabled, true);
+  assert.match(f.node('activities-list').textContent, /还缺 7978 分/);
+  Object.assign(plan, { round: 2, total: 8000, score: 0, gap: 8000, available: 7594, gain: 8000, key: 'rebates',
+    actions: [{ kind: 'weekly' }, { kind: 'gift' }, { kind: 'factoryRewards' }], items: [{ name: '中级硅晶', count: 50 }] });
+  Object.assign(plan.statistics, { completed: 1, qualified: 1, forecast: 8000, weekly: 500 });
+  await f.api.refresh();
+  const rebatePanel = stats.querySelector('.week-chip-panel').textContent;
+  assert.match(rebatePanel, /当前积分 \/ 本轮积分上限0 \/ 8,000/);
+  assert.equal(stats.querySelector('progress').value, 0);
+  assert.doesNotMatch(rebatePanel, /库存可得|周活动返晶|免费礼包|芯片厂|预计积分计入|分批加工|返晶到账|将开启|本轮档位奖励|中级硅晶 ×50|还缺 406/);
+  assert.equal(button().disabled, false);
+  button().onclick();
+  const rebateConfirm = f.state.confirmations.at(-1);
+  assert.equal(rebateConfirm.details[0].textContent, '中级硅晶 ×50');
+  assert.equal(rebateConfirm.details[1].textContent, '领取本轮档位奖励、免费礼包、芯片厂可领积分奖励');
+  Object.assign(plan, { key: null, blockedReason: '当前角色 28 级，51 级可建造芯片厂，建成后可加工硅晶。' });
+  await f.api.refresh();
+  assert.equal(button().disabled, true);
+  assert.match(stats.querySelector('.week-chip-panel').textContent, /28 级，51 级可建造芯片厂/);
+  const confirmations = f.state.confirmations.length;
+  button().onclick();
+  assert.equal(f.state.confirmations.length, confirmations);
+  delete plan.blockedReason;
+  Object.assign(plan, { score: 8000, gap: 0, gain: 0, items: [], key: 'claim' });
+  await f.api.refresh();
+  assert.equal(button().textContent, '领取本轮达标奖励');
+  assert.equal(button().disabled, false);
+  assert.match(stats.querySelector('.week-chip-metrics').textContent, /当前积分 \/ 本轮积分上限8,000 \/ 8,000/);
+  Object.assign(plan, { round: 6, score: 0, total: 40000, key: null });
+  Object.assign(plan.statistics, { completed: 5, qualified: 5 });
+  await f.api.refresh();
+  assert.match(stats.textContent, /本期全部轮次已完成/);
+  assert.doesNotMatch(stats.querySelector('.week-chip-metrics').textContent, /本轮积分上限/);
 });
 
 console.log('活动分组与集中配置专项 ' + passed + '/' + passed + ' 通过');

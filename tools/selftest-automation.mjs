@@ -22,7 +22,11 @@ process.env.CW_CONFIG_PACK = path.join(dir, 'config.json');
 fs.writeFileSync(process.env.CW_CONFIG_PACK, JSON.stringify([
   [1, 'ItemCfg', { data: [{ id: '烤鱼', show_name: '烤鱼' }] }],
   [2, 'ResourceCfg', { data: [{ id: 'GOLD', show_name: '金币' }] }],
-  [3, 'WorkerBaseCfg', { data: [{ id: 1, showName: '居民甲' }, { id: 2, showName: '居民乙' }] }],
+  [3, 'WorkerBaseCfg', { data: [
+    { id: '18', showName: '活塞哥', icon: 'worker_014' },
+    { id: '2', showName: '防水鞋', icon: 'worker_013' },
+    { id: '1', showName: '小胖', icon: 'worker_001' },
+  ] }],
   [4, 'BuildingCfg', { data: [
     { buildingType: '食品厂', name: '食品厂' },
     { buildingType: '活动工厂', name: '活动工坊' },

@@ -1,4 +1,4 @@
-import { readProtocolSource, protocolSourceInfo } from './protocol-source.mjs';
+import { cachePackageProtocol, readProtocolSource, protocolSourceInfo } from './protocol-source.mjs';
 export { PROTO_BUNDLE } from './protocol-source.mjs';
 import { createRequire } from 'node:module';
 
@@ -38,7 +38,10 @@ function moduleRequire(name) {
 }
 
 export function loadProtocol(bundlePath) {
-  const src = readProtocolSource(bundlePath);
+  return evaluateProtocol(readProtocolSource(bundlePath));
+}
+
+function evaluateProtocol(src) {
   const collector = { outer: null, target: null };
 
   const System = makeSystem(collector);
@@ -70,13 +73,15 @@ export function loadProtocol(bundlePath) {
   );
 
   const entry = [...defined.keys()].find((k) => /^src\/chunks\/bundle\..*\.js$/.test(k));
-  if (!entry) throw new Error('bundle entry module not found');
-  req(entry);
+  if (entry) req(entry);
 
-  if (!collector.outer) throw new Error('outer System.register not found');
-
-  const outerApi = collector.outer.declare(() => {}, { id: '', meta: { url: '' } });
-  outerApi.execute();
+  // WeChat's game.js wraps the Cocos output in a define() entry. APP channel
+  // builds ship the Cocos System.register tree directly, so there is no
+  // bundle.* entry; executing the outer module registers the protocol module.
+  if (collector.outer) {
+    const outerApi = collector.outer.declare(() => {}, { id: '', meta: { url: '' } });
+    outerApi.execute();
+  }
 
   if (!collector.target) throw new Error(`module not captured: ${TARGET}`);
   if (collector.target.deps.length !== 2) {
@@ -109,8 +114,10 @@ export function getProtocol(bundlePath) {
   let source;
   try {
     source = protocolSourceInfo(bundlePath);
-    if (latestProtocol?.source.signature === source.signature) return latestProtocol.protocol;
-    const protocol = loadProtocol(source.file);
+    if (latestProtocol?.source.signature === source.signature && latestProtocol.source.kind === source.kind
+      && latestProtocol.oneOff === Boolean(bundlePath)) return latestProtocol.protocol;
+    const code = readProtocolSource(source.file);
+    const protocol = evaluateProtocol(code);
     for (const name of REQUIRED_MESSAGES) {
       const message = protocol[name];
       if (typeof message?.encode !== 'function' || typeof message?.decode !== 'function')
@@ -123,8 +130,12 @@ export function getProtocol(bundlePath) {
     }
     if (protocolSourceInfo(bundlePath).signature !== source.signature)
       throw new Error('协议文件在加载期间发生变化，请重试连接');
+    if (!bundlePath && /\.wxapkg$/i.test(source.file)) {
+      try { cachePackageProtocol(code); }
+      catch (error) { process.emitWarning('协议已加载，无法保存本地更新副本：' + error.message); }
+    }
     sourceByProtocol.set(protocol, source);
-    latestProtocol = { protocol, source };
+    latestProtocol = { protocol, source, oneOff: Boolean(bundlePath) };
     return protocol;
   } catch (cause) {
     const error = new Error('无法加载当前协议，已阻止建立新连接：' + cause.message, { cause });

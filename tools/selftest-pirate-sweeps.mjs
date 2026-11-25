@@ -46,6 +46,39 @@ await test('海盗扫荡只按海盗开关和扫荡选择执行',async()=>{
 await test('旧配置补默认先锋，保留连败上限及原扫荡开关',()=>{const s=defaultSettings();delete s.pirateSweep;s.schedule.pirate=false;s.pirateHunt.maxFailures=2;const next=importAutomationSettings({format:SETTINGS_FORMAT,version:1,settings:s});assert.deepEqual(next.pirateSweep,defaultSettings().pirateSweep);assert.equal(next.schedule.pirate,false);assert.deepEqual(next.pirateHunt,s.pirateHunt);});
 const targets=f=>f.calls.filter(c=>c.n==='PirateSweepRequest').map(c=>c.b.uid);
 const sweep=f=>runPirateSweeps(f.client,f.config,f.player,f.options);
+await test('首杀未结算时为本类保留固定次数或应分余额，其他类型仍可扫荡',async()=>{
+ for (const times1 of [2, -1]) {
+  const f = setup();
+  f.settings.pirate.enabled = f.settings.pirateHunt.enabled = true;
+  Object.assign(f.settings.pirateSweep, { types: ['1','2'], times1, times2: -1 });
+  f.ledger.reserve({piratePetrol:300}, {}, {}, {uniqueKey:'pirate-first:1001001:1:6:106',
+   details:{kind:'pirateFirst', world:'1001001', type:1, level:6, sentAt:Date.now(), outcome:'started'}});
+  await sweep(f);
+  assert.deepEqual(targets(f), [205]);
+  assert.match(f.events.at(-1).reason, /等待海盗先锋 6级首杀战果/);
+  f.state.records[0].maxKilledLevel = 6;
+  await sweep(f);
+  assert.deepEqual(targets(f), [205,106,106]);
+ }
+});
+await test('首杀已推送胜利时等待个人记录同步，超时或关闭首杀后按当前等级扫荡',async()=>{
+ const f = setup();
+ f.settings.pirate.enabled = f.settings.pirateHunt.enabled = true;
+ const key = 'pirate-first:1001001:1:6:106';
+ const details = {kind:'pirateFirst', world:'1001001', type:1, level:6, sentAt:Date.now(), outcome:'won'};
+ const records = {[key]: {confirmed:true, details}};
+ const preview = () => readPirateSweeps(f.client,f.config,f.player,f.settings,records);
+ assert.equal((await preview()).pending,true);
+ f.state.records[0].maxKilledLevel = 6;
+ assert.equal((await preview()).target.uid,106);
+ f.state.records[0].maxKilledLevel = 5;
+ details.outcome = 'unknown';
+ f.client.serverClockOffsetMs = 16*60000;
+ assert.equal((await preview()).target.uid,105);
+ f.client.serverClockOffsetMs = 0;
+ f.settings.pirateHunt.enabled = false;
+ assert.equal((await preview()).target.uid,105);
+});
 await test('固定次数优先，外部扫荡只扣共享次数，全部配完后保留余额',async()=>{
  for(const [settings,used,expected] of [
   [{types:['3','2','1'],times1:1,times2:1,times3:-1},1,[105,205]],

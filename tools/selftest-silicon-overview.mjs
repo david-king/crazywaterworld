@@ -152,6 +152,35 @@ try {
     f.returnFleet('2远征船'); assert.deepEqual((await read(f, options)).dispatches, [pending]);
     assert.deepEqual(f.client.writes, []);
   });
+  await test('舰队已在中等矿2号位采矿时，高等矿6号位显示实际占领者', async () => {
+    const f = siliconFixture(), fleetId = '1远征船';
+    f.state.mines[2].positionNum = 7;
+    f.occupy(fleetId, 4000, 1); f.enemy(5, '高等矿守方');
+    const record = { confirmed: true, details: { kind: 'siliconDispatch', worldId: String(f.player.worldId),
+      gridId: 5000, index: 5, buildingId: fleetId, active: true } };
+    for (const confirmed of [true, false]) {
+      const data = await read(f, { ledger: { keyRecords: () => ({ old: { ...record, confirmed } }) } });
+      assert.deepEqual(data.dispatches, []);
+      assert.equal(data.fleets[0].mineId, 4000); assert.equal(data.fleets[0].slot, 2);
+      assert.equal(data.mines[1].positions[0].player.relation, 'self');
+      assert.equal(data.mines[2].positions[0].player.relation, 'other');
+    }
+    assert.deepEqual(f.client.writes, []);
+  });
+  await test('已确认派遣只标记对应航程，舰队读取失败时保留待确认矿位', async () => {
+    const f = siliconFixture(), fleet = f.state.fleets[0];
+    const record = { confirmed: true, details: { kind: 'siliconDispatch', worldId: String(f.player.worldId),
+      gridId: 5000, index: 1, buildingId: fleet.buildingId, outboundStartTs: 100 } };
+    const options = { ledger: { keyRecords: () => ({ order: record }) } };
+    Object.assign(fleet, { state: 2, targetGridIdx: 5000, moveStartTs: 100 });
+    assert.equal((await read(f, options)).dispatches[0].pending, false);
+    fleet.targetGridIdx = 4000;
+    assert.deepEqual((await read(f, options)).dispatches, []);
+    Object.assign(fleet, { targetGridIdx: 5000, moveStartTs: 200 });
+    assert.deepEqual((await read(f, options)).dispatches, []);
+    f.beforeRead = name => { if (name === 'MyFleetsRequest') throw Error('舰队未同步'); };
+    assert.equal((await read(f, options)).dispatches[0].pending, true);
+  });
   const f = siliconFixture();
   fs.writeFileSync(process.env.CW_CONFIG_PACK, JSON.stringify(Object.entries(f.config.tables).map(([name, table], index) => [index, name, table])));
   saveStore({ activeId: 'silicon-view', accounts: [{ id: 'silicon-view', label: '硅矿概览隔离测试', url: 'wss://invalid.invalid', login: {}, automation: { paused: true, enabled: false } }] });

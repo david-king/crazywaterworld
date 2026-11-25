@@ -1,6 +1,6 @@
 import { normalize } from './worlds.mjs';
 import { displayMaterial } from './config.mjs';
-import { confirmedFactoryIncoming, confirmFactoryProductionBeforeHarvest, factoryStockCapacity, readInsertionAlternativeStock } from './factory-production.mjs';
+import { confirmedFactoryIncoming, confirmFactoryProductionBeforeHarvest, factoryStockCapacity, liveFactoryRefill, readInsertionAlternativeStock } from './factory-production.mjs';
 import { insertionRecipeReady } from './production-eligibility.mjs';
 import { consumeInsertionUnit, nextInsertionIndex } from './factory-insertion-queue.mjs';
 import { farmInventory } from './farm-planting.mjs';
@@ -10,10 +10,10 @@ import { factoryProductionSnapshot } from './spend-evidence.mjs';
 import { factoryInsertions, saveFactoryInsertion } from './factory-insert-store.mjs';
 import { factoryProductionKey, factoryRecipeAvailability, factoryRecipeCosts, runWorld, startManualFactoryProduction } from './world.mjs';
 import { insertionSupplyPlanner } from './factory-insertion-supply.mjs';
+import { queueStamp as stamp } from './factory-replanning.mjs';
 
 const rows = (config, table) => config?.tables?.[table]?.data ?? [];
 const clock = client => Math.floor((Date.now() + (client.serverClockOffsetMs || 0)) / 1000);
-const stamp = queue => JSON.stringify(queue.map(j => [j.idx ?? 0, j.productId, j.finishTime ?? 0]));
 const nativeOn = (water, building, now) => building.factory.autoProductId && (water.autoProduceForever || water.autoProduceEndTime > now);
 const stale = () => new Error('工厂队列或所选任务已变化，请重新生成排产计划');
 
@@ -249,6 +249,13 @@ export async function advanceFactoryInsertion(client, protocol, ctx, buildingId)
     const stock = farmInventory(normalize(await client.request('AllItemRequest', {}, 'AllItemResponse')));
     if (!enabled()) return;
     const incoming = confirmedFactoryIncoming(water), cap = factoryStockCapacity(config, player);
+    const prefs = ctx.settings?.factory;
+    if (prefs?.enabled && prefs.produce && prefs.refillRules?.length) {
+      const active = liveFactoryRefill(buildingId,{water,stock,incoming,cap,settings:ctx.settings,config,client,player});
+      if (active) {
+        note('优先补' + displayMaterial(config, active.rule.productId) + '，入库达标后继续插单'); return;
+      }
+    }
     const isFull = id => (stock.get(id) ?? 0) + (incoming.get(id) ?? 0) >= cap;
     const recipes = rows(config,'BuildingProduceCfg');
     const head = e.jobs[0];

@@ -10,9 +10,13 @@ process.env.CW_CONFIG_PACK = path.join(directory, 'config.json');
 process.env.CW_RESOURCE_DIR = path.join(directory, 'resources');
 const ids = ['甲', '乙', '丙', '丁', '戊'];
 const tables = {
-  ModuleOpenCfg: [{ moduleId: '英雄装备', playerLevel: 16 }],
+  ModuleOpenCfg: [{ moduleId: '英雄装备', playerLevel: 16 }, { moduleId: '英雄徽章', playerLevel: 12 }],
   EquipCfg: [{ id: '刀' }], EquipAttrCfg: [{ id: '刀', star: 0, maxLv: 3 }],
   EquipUpDecomposeCfg: [{ level: 2, upgradeCost: 50 }],
+  HeroBadgeAttrCfg: [{ id: '盾徽', star: 0, maxLevel: 3 }],
+  HeroBadgeLevelCfg: [{ level: 2, exp: 5, goldExpRadio: 2 }],
+  ItemCfg: [{ id: '徽章经验', show_name: '徽章经验' }],
+  ResourceCfg: [{ id: 'GOLD', show_name: '金币' }],
   HeroCfg: ids.map(id => ({ id, name: id, quality: 'BLUE' })),
   HeroAbilityShowCfg: ids.map(id => ({ id, reward: ['RUBY', 20] })),
 };
@@ -57,9 +61,13 @@ try {
     connected: true, serverClockOffsetMs: 0,
     stop() { this.connected = false; },
     async request(name, body) {
-      if (name === 'AllHeroRequest') return { heroes: owned.map((heroId, index) => ({ heroId, level: 1, equips: [{ uid: index + 1, equipId: '刀' }] })), showSkillHeroes: [...claimed] };
-      if (name === 'AllItemRequest') return { items: [{ itemId: '精铁', num: 100 }] };
+      if (name === 'AllHeroRequest') return { heroes: owned.map((heroId, index) => ({
+        heroId, level: 1, equips: [{ uid: index + 1, equipId: '刀' }], badges: [{ uid: 10 + index, badgeId: '盾徽' }],
+      })), showSkillHeroes: [...claimed] };
+      if (name === 'AllItemRequest') return { items: [{ itemId: '精铁', num: 100 }, { itemId: '徽章经验', num: 5 }] };
       if (name === 'EquipsRequest') return { equip: ids.map((_, i) => ({ uid: i + 1, equipId: '刀', level: 1 })) };
+      if (name === 'BadgesRequest') return { badge: owned.map((_, i) => ({ uid: 10 + i, badgeId: '盾徽', level: 1 })) };
+      if (name === 'AllResourceRequest') return { list: [{ res: 3, amount: 10 }] };
       if (name === 'GotHeroShowSkillRequest') {
         writes.push(body.heroId);
         assert(owned.includes(body.heroId), '未拥有英雄不能领取展示奖励');
@@ -100,6 +108,13 @@ try {
   const draft = await api('settings/preview', { category: 'heroes', settings: mixed });
   assert.deepEqual(draft.actions.map(step => step.kind), ['showSkillReward', 'showSkillReward']);
   assert(draft.actions.every((step, i) => step.label.includes(owned[i])), '英雄预览中的奖励不受草稿培养名单限制');
+  const badgeDraft = await api('settings/preview', {
+    category: 'heroes', settings: { ...mixed, heroes: { ...mixed.heroes, badge: true } },
+  });
+  assert.deepEqual(badgeDraft.actions.map(step => step.kind), ['showSkillReward', 'showSkillReward', 'badge']);
+  const badge = badgeDraft.actions.find(step => step.kind === 'badge');
+  assert.match(badge.label, /乙.*徽章强化/);
+  assert.deepEqual(badge.costs, [{ name: '徽章经验', num: 5 }, { name: '金币', num: 10 }]);
   assert.deepEqual((await api('settings')).settings.heroes.heroIds, ['甲']);
   assert.deepEqual((await api('heroes')).steps.map(step => step.heroId), owned);
   assert.deepEqual(writes, [], '读取计划和预览草稿不能执行写入');

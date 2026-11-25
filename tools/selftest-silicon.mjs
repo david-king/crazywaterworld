@@ -59,6 +59,19 @@ try {
     const f = siliconFixture(), s = siliconSettings(), ledger = usage(f); s.silicon.fleets[1].enabled = true; f.unknown = true;
     await run(f, s, ledger); assert.deepEqual(f.client.writes.map(row => row.body.index), [0, 1]); assert.equal(pendingPetrol(ledger), 1000);
   });
+  await test('1号舰队已在其他矿位采矿时，2号舰队可选原目标并避开实际占位', async () => {
+    const f = siliconFixture(), settings = siliconSettings(), ledger = usage(f);
+    await run(f, settings, ledger);
+    assert.equal(f.client.writes[0].body.gridId, 5000); assert.equal(f.client.writes[0].body.index, 0);
+    f.occupy('1远征船', 3000, 125);
+    const second = settings.silicon.fleets[1]; second.enabled = true;
+    for (const [tier, gridId, index] of [['ORANGE', 5000, 0], ['BLUE', 3000, 1]]) {
+      second.tiers = [tier];
+      const actions = (await plan(f, settings, ledger)).actions;
+      assert.deepEqual(actions.map(action => action.body), [{ gridId, index, fleetId: '2远征船' }]);
+    }
+    assert.equal(f.client.writes.length, 1);
+  });
   await test('发送前关闭或切换设置取消；明确拒绝取消预算', async () => {
     const f = siliconFixture(), s = siliconSettings(), ledger = usage(f); let count = 0;
     f.beforeRead = name => { if (name === 'ChipMineListRequest' && ++count === 2) s.silicon.enabled = false; };

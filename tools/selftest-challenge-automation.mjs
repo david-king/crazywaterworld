@@ -24,6 +24,27 @@ let count = 0, ledgerId = 0;
 const ledger = () => createUsageLedger('simulated', { file: path.join(root, 'usage-' + ++ledgerId + '.json') });
 const test = async (name, fn) => { await fn(); count++; console.log('通过：' + name); };
 
+function enablePirateHuntAndSweeps(f, type) {
+  f.settings.pirate.enabled = f.settings.pirateHunt.enabled = f.settings.schedule.pirate = true;
+  Object.assign(f.settings.pirateSweep, { types: [String(type)], ['times' + type]: -1 });
+  f.player.vip = { vipLevel: 0 };
+  f.config.tables.PirateParamCfg = { data: [{ paramName: '每日野怪扫荡次数', paramValue: 2 }] };
+  f.config.tables.VipLevelCfg = { data: [{ level: 0, effects: [] }] };
+  let used = 0;
+  const request = f.client.request;
+  f.client.request = async (name, body, response) => {
+    if (name === 'PirateSweepRequest') {
+      f.client.writes.push({ name, body });
+      used++;
+      return { reward: { asset: [{ id: '木材', num: 1 }] } };
+    }
+    if (name === 'MonthCardRequest') return { cardItem: [] };
+    const data = await request(name, body, response);
+    if (name === 'AllPirateRequest') data.sweepTimes = used;
+    return data;
+  };
+}
+
 function fixture() {
   const settings = defaultSettings(), client = new EventEmitter(), state = createChallengeRun();
   client.connected = true;
@@ -485,29 +506,34 @@ try {
     await round();
     assert.deepEqual(f.client.writes.map(write => write.body.uid), [202]);
   });
+  await test('同开首杀与扫荡时先挑战，战果延迟或重新启动时保留次数，舰队忙时直接扫荡', async () => {
+    for (const mode of ['win', 'wait', 'busy', 'lose']) {
+      const f = pirateAdvanceFixture({ mode }), l = ledger();
+      enablePirateHuntAndSweeps(f, 1);
+      f.state.level = 1;
+      f.config.tables['1_SeasonTaskCfg'].data[0].maxPirateLevel = 2;
+      if (mode === 'busy') f.fleet.state = 2;
+      const round = () => runLoop(f.client, protocol, { config: f.config, player: f.player, rounds: 1,
+        allowMutate: true, getSettings: () => f.settings, isEnabled: key => key === 'pirate', usageLedger: l });
+      await round();
+      if (mode === 'wait') {
+        await round();
+        assert.deepEqual(f.client.writes.map(w => w.name), ['ChallengePirateRequest']);
+        f.state.level = 2;
+        await round();
+      }
+      const cleared = mode === 'busy' || mode === 'lose' ? 201 : 202;
+      const expected = mode === 'busy' ? [] : [['ChallengePirateRequest', 202]];
+      expected.push(['PirateSweepRequest', cleared], ['PirateSweepRequest', cleared]);
+      assert.deepEqual(f.client.writes.map(w => [w.name, w.body.uid]), expected, mode);
+    }
+  });
   await test('首杀到顶或连败停止后，挂机仍扫荡所选种类的最高已首杀等级', async () => {
     for (const stop of ['到顶', '连败']) {
       const f = pirateAdvanceFixture({ types: [1, 2, 3] }), state = createChallengeRun(), l = ledger();
-      f.settings.pirate.enabled = f.settings.pirateHunt.enabled = f.settings.schedule.pirate = true;
-      Object.assign(f.settings.pirateSweep,{types:['3'],times3:-1});
+      enablePirateHuntAndSweeps(f, 3);
       f.state.levels[3] = 1;
       f.config.tables['1_SeasonTaskCfg'].data[0].maxPirateLevel = stop === '到顶' ? 1 : 3;
-      f.player.vip = { vipLevel: 0 };
-      f.config.tables.PirateParamCfg = { data: [{ paramName: '每日野怪扫荡次数', paramValue: 2 }] };
-      f.config.tables.VipLevelCfg = { data: [{ level: 0, effects: [] }] };
-      let sweeps = 0;
-      const request = f.client.request;
-      f.client.request = async (name, body, response) => {
-        if (name === 'PirateSweepRequest') {
-          assert.equal(body.uid, 401);
-          sweeps++;
-          return { reward: { asset: [{ id: '木材', num: 1 }] } };
-        }
-        if (name === 'MonthCardRequest') return { cardItem: [] };
-        const data = await request(name, body, response);
-        if (name === 'AllPirateRequest') data.sweepTimes = sweeps;
-        return data;
-      };
       const round = () => runChallengeRound(f.client, f.config, { player: f.player, state,
         getSettings: () => f.settings, ledger: l, mode: 'pirate' });
       f.state.mode = stop === '到顶' ? 'win' : 'lose';
@@ -517,8 +543,8 @@ try {
       const battles = f.client.writes.length;
       await runLoop(f.client, protocol, { config: f.config, player: f.player, rounds: 1, allowMutate: true,
         getSettings: () => f.settings, isEnabled: key => key === 'pirate', usageLedger: l, challengeRun: state });
-      assert.equal(sweeps, 2);
-      assert.equal(f.client.writes.length, battles);
+      assert.deepEqual(f.client.writes.slice(battles).map(w => [w.name, w.body.uid]),
+        [['PirateSweepRequest', 401], ['PirateSweepRequest', 401]]);
     }
   });
   await test('海盗自动派遣进入挂机串行队列，每轮最多一次，不需手动启动', async () => {
@@ -571,7 +597,7 @@ try {
       for (const [, script] of page.matchAll(/<script[^>]*>([\s\S]*?)<\/script>/g)) new Function(script);
     } finally { app.server.closeAllConnections(); await app.close(); }
   });
-  await test('手动主线和试炼使用本次参数，不继承或修改挂机失败上限', async () => {
+  await test('挂机开启时手动主线和试炼可直接接管，结束后保留挂机及其配置', async () => {
     const f = fixture(); f.client.stop = () => { f.client.connected = false; };
     const { createConsole } = await import('../src/server.mjs'), app = createConsole({ port: 0 });
     try {
@@ -583,20 +609,49 @@ try {
         const response = await fetch(url + route + '?account=a', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ confirm: true, ...payload }) });
         const result = await response.json(); assert.equal(response.status, 200, result.error); return result;
       };
+      const saved = await (await fetch(url + '/api/settings?account=a')).json();
+      Object.assign(saved.settings.progression, { enabled: true, mainline: true, trials: true, raidIds: ['1'] });
+      await post('/api/settings', { settings: saved.settings, revision: saved.revision, baseRevision: saved.baseRevision });
+      session.loop.running = true;
       for (const [route, payload] of [['/api/stages', {}], ['/api/trials', { raidId: 1 }]]) {
+        const mainline = route === '/api/stages';
         for (const maxFailures of [undefined, 1]) {
           const started = await post(route + '/start', { ...payload, ...(maxFailures ? { maxFailures } : {}) });
+          assert.equal(started.running, true);
           assert.equal(started.maxFailures, maxFailures ?? 3);
           await post(route + '/stop', payload);
-          const task = route.endsWith('stages') ? session.stages : session.trials.get(1);
+          const task = mainline ? session.stages : session.trials.get(1);
           for (let i = 0; task.view().running && i < 100; i++) await new Promise(resolve => setTimeout(resolve, 10));
           assert.equal(task.view().running, false);
         }
+        Object.assign(f.settings.progression, { mainline, trials: !mainline, raidIds: ['1'] });
+        session.loop.challengeRun = f.state;
+        let markSent, release;
+        const sent = new Promise(resolve => { markSent = resolve; });
+        const reply = new Promise(resolve => { release = resolve; });
+        f.hook = async name => {
+          if (!name.includes('Challenge')) return;
+          markSent();
+          await reply;
+          throw new Error('模拟挂机战报超时');
+        };
+        session.queueTail = f.once();
+        await sent;
+        const writes = f.writes.length;
+        try { assert.equal((await post(route + '/start', payload)).running, true); }
+        finally { release(); }
+        await session.queueTail?.catch(() => {});
+        await new Promise(resolve => setImmediate(resolve));
+        const task = mainline ? session.stages : session.trials.get(1);
+        assert.equal(task.view().running, false);
+        assert.match(task.view().reason, /战果未确认/);
+        assert.equal(f.writes.length, writes, '排队中的手动任务不能重发结果未知的挑战');
+        f.hook = null;
       }
-      assert.equal(session.loop.running, false);
+      assert.equal(session.loop.running, true);
       const settings = await (await fetch(url + '/api/settings?account=a')).json();
       assert.equal(settings.settings.progression.maxFailures, 7);
-      assert.equal(settings.settings.progression.mainline, false);
+      assert.deepEqual(settings.settings.progression, saved.settings.progression);
     } finally { app.server.closeAllConnections(); await app.close(); }
   });
   await test('手动海盗失败上限独立，默认一次战败停止，显式参数可覆盖', async () => {

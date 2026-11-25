@@ -168,6 +168,19 @@ try {
     f.returnFleet('1远征船'); const quote = await preview(f, dispatch(5000, 1)); assert(quote.fleets[0].step);
     assert.equal((await run(f, quote)).status, 'confirmed'); assert.equal(f.client.writes.length, 2);
   });
+  await test('舰队在其他公共矿位采矿时，旧矿位可选空闲舰队，并保留原派遣的耗油记录', async () => {
+    for (const gridId of [4000, 5000]) {
+      const f = fixture();
+      assert.equal((await run(f, await preview(f))).status, 'confirmed');
+      f.occupy('1远征船', gridId, 1, 2);
+      f.enemy(0);
+      const target = await preview(f, attack());
+      assert.ok(target.fleets.find(row => row.id === '2远征船').step);
+      assert.ok(!target.fleets.find(row => row.id === '1远征船').step);
+      assert.equal(f.ledger.confirmedCounters().siliconPetrol, 500);
+      assert.equal(f.client.writes.length, 1);
+    }
+  });
   await test('撤回前矿位或产奖周期发生变化必须重新确认', async () => {
     const f = fixture(); f.occupy('1远征船', 5000, 0, 2); const quote = await preview(f, retreat());
     f.state.fleets[0].chipWar.rewardTs += 900;

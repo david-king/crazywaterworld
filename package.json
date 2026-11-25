@@ -33,7 +33,7 @@
     "test:production": "node tools/run-tests.mjs production",
     "test:core-subset": "node tools/run-tests.mjs core-subset",
     "test:capture": "node tools/selftest-raw-capture.mjs && node tools/selftest-douyin-cli.mjs && npm run test:douyin-capture",
-    "test:startup": "node tools/selftest-start-console.mjs && node tools/selftest-protocol-dropin.mjs && node tools/selftest-console-address.mjs && node tools/selftest-console-output.mjs",
+    "test:startup": "node tools/selftest-start-console.mjs && node tools/selftest-protocol-dropin.mjs && node tools/selftest-cocos-protocol.mjs && node tools/selftest-console-address.mjs && node tools/selftest-console-output.mjs",
     "test:macos": "node tools/run-tests.mjs macos",
     "test:config": "node tools/run-tests.mjs config",
     "test:world-boss": "node tools/run-tests.mjs world-boss",

@@ -114,7 +114,7 @@ async function testOrderQuotas() {
     { season: 5, playerLevel: 1, maxNum: 50 },
   ], { season: 10, done: 10 });
   assert.equal((await latest.read()).maxNum, 10, 'use the highest older season regardless of row order');
-  assert.match((await latest.run()).reason, /本赛季上限 10/);
+  assert.match((await latest.run()).reason, /每日募兵上限 10 次/);
   assert.equal(latest.writes().length, 0, 'neither a future nor a lower season may lift the selected limit');
 
   const tiers = [
@@ -131,14 +131,14 @@ async function testOrderQuotas() {
     assert.equal(available.bodies.AllItemRequest.items[0].num, 25, 'one permitted order consumes its materials');
     if (maxNum !== -1) {
       const exhausted = quotaFixture(tiers, { season: 10, level, done: maxNum });
-      assert.match((await exhausted.run()).reason, /本赛季上限/);
+      assert.match((await exhausted.run()).reason, /每日募兵上限/);
       assert.equal(exhausted.writes().length, 0, 'quota reached at player level ' + level);
       assert.equal(exhausted.bodies.AllItemRequest.items[0].num, 30);
     }
   }
   const zero = quotaFixture([{ season: 2, playerLevel: 1, maxNum: 0 }]);
   assert.equal((await zero.read()).maxNum, 0);
-  assert.match((await zero.run()).reason, /本赛季上限 0/);
+  assert.match((await zero.run()).reason, /每日募兵上限 0 次/);
   assert.equal(zero.writes().length, 0, 'zero quota is a valid prohibition, not unlimited');
 }
 
@@ -255,7 +255,7 @@ export async function testGuildOrders() {
 
   const cap = fixture();
   cap.bodies.CounterInfoRequest.counters = [{ type: 'DAILY_FINISH_GUILD_ORDER', num: 10 }];
-  assert.match((await cap.run()).reason, /本赛季上限 10/);
+  assert.match((await cap.run()).reason, /每日募兵上限 10 次/);
   assert.equal(cap.writes().length, 0);
   const high = fixture(); high.player.level = 25;
   high.bodies.CounterInfoRequest.counters = [{ type: 'DAILY_FINISH_GUILD_ORDER', num: 20 }];

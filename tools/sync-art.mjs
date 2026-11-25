@@ -176,7 +176,9 @@ async function main() {
   const cacheDir = findCacheDir();
   const { versions, fallback } = bundleVersions(cacheDir);
   if (!cacheDir && !(allowFetch && Object.keys(versions).length)) {
-    console.error('没找到微信小游戏缓存目录，先在电脑上打开过一次游戏再试');
+    console.error(allowFetch
+      ? '缺少图集版本清单。请在启用资源自动更新的环境中先运行 npm run sync-resources'
+      : '本地同步未找到微信素材缓存。可先运行 npm run sync-resources，再用 npm run sync-art -- --fetch 从 CDN 下载');
     process.exit(1);
   }
   const byUrl = cacheDir ? readCacheList(cacheDir) : new Map();

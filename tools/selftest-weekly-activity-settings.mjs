@@ -66,6 +66,12 @@ test('启用积分停止必须填写正数，关闭保留未完成参数', () =>
   invalid({ farmRecruitTimes: -1 }, 'farmRecruitTimes');
   invalid({ farmRecruitTimes: 0.5 }, 'farmRecruitTimes');
   invalid({ farmSpeedUp: 'true' }, 'farmSpeedUp');
+  invalid({ antiqueTicketLimit: -1 }, 'antiqueTicketLimit');
+  invalid({ antiqueTicketLimit: 1.5 }, 'antiqueTicketLimit');
+  const old = defaultSettings();
+  delete old.weeklyActivity.antiqueTicketLimit; delete old.weeklyActivity.antiqueRecruitTickets;
+  assert.equal(validateSettings(old).weeklyActivity.antiqueRecruitTickets, false);
+  assert.equal(validateSettings(old).weeklyActivity.antiqueTicketLimit, 0);
   assert.equal(settingsUiRules().numbers['weeklyActivity.farmRecruitTimes'].min, 0);
 });
 
@@ -75,7 +81,7 @@ test('活动参数按账号持久保存，关闭和导入导出保留各目标',
   try {
     const settings = defaultSettings();
     Object.assign(settings.weeklyActivity, { enabled: true, farmEnabled: true, farmSpeedUp: true, farmRecruitTimes: 5,
-      petEnabled: true, petStop: 'score', petScore: 10000, petQualityOrder: 'desc', forgeQualityOrder: 'desc' });
+      antiqueRecruitTickets: true, antiqueTicketLimit: 63, petEnabled: true, petStop: 'score', petScore: 10000, petQualityOrder: 'desc', forgeQualityOrder: 'desc' });
     saveAutomationSettings('one', settings, { file, revision: 0 });
     assert.deepEqual(loadAutomationSettings('one', { file }).settings.weeklyActivity, settings.weeklyActivity);
     assert.equal(loadAutomationSettings('two', { file }).settings.weeklyActivity.enabled, false);

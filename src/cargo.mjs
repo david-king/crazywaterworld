@@ -1,6 +1,7 @@
 import { readWeekOrder } from './activities.mjs';
 import { displayMaterial } from './config.mjs';
 import { linkOperationResult } from './operation-log.mjs';
+import { readyCargoOrdersFirst } from './production-eligibility.mjs';
 import { normalize } from './worlds.mjs';
 import { SPEED_UP_ITEM, SPEED_UP_ITEM_TYPE } from './world.mjs';
 
@@ -32,29 +33,33 @@ export async function serviceCargo(client, config, { enabled, log, testSpeedUp =
     }
   };
   const ships = async () => normalize(await client.request('CargoShipsRequest', {})).ship ?? [];
-  const initial = await ships();
+  let pending = await ships();
   let available;
   let speedUsed = false;
   let plannedLoads = 0;
-  for (const ship of initial) {
-    if (!active()) break;
+  while (pending.length && active()) {
+    const pref = getSettings?.();
+    const limit = pref?.cargo.dailyLoadLimit;
+    const limitReached = limit > 0 && (pending[0].status ?? 0) === 0
+      && (ledger?.snapshot().counters?.cargoLoads ?? 0) + plannedLoads >= limit;
+    if (!available && !limitReached && (pending[0].status ?? 0) === 0) {
+      const [inventory, order] = await Promise.all([
+        client.request('AllItemRequest', {}).then(normalize), readWeekOrder(client, undefined, config),
+      ]);
+      available = new Map((inventory.items ?? []).map(item => [item.itemId, Number(item.num)]));
+      if (!order.finished) for (const [id, num] of order.needed) available.set(id, (available.get(id) ?? 0) - num);
+      for (const [id, limit] of cargoLoadLimits ?? []) available.set(id, Math.min(available.get(id) ?? 0, limit));
+      pending = readyCargoOrdersFirst(pending, id => available.get(id) ?? 0, ship => (ship.status ?? 0) === 0
+        ? (ship.orderItem ?? []).filter(slot => !slot.filled).map(slot => slot.asset) : []);
+    }
+    const ship = pending.shift();
     const index = ship.index;
     const label = '贸易港 ' + index + ' 号船';
     let state = ship;
     if ((state.status ?? 0) === 0) {
-      const pref = getSettings?.();
-      const used = (ledger?.snapshot().counters?.cargoLoads ?? 0) + plannedLoads;
-      if (pref?.cargo.dailyLoadLimit > 0 && used >= pref.cargo.dailyLoadLimit) {
+      if (limitReached) {
         log(label + '今日装货已达上限 ' + pref.cargo.dailyLoadLimit, { skipped: true, reason: '达到每日装货上限' });
         continue;
-      }
-      if (!available) {
-        const [inventory, order] = await Promise.all([
-          client.request('AllItemRequest', {}).then(normalize), readWeekOrder(client, undefined, config),
-        ]);
-        available = new Map((inventory.items ?? []).map(item => [item.itemId, Number(item.num)]));
-        if (!order.finished) for (const [id, num] of order.needed) available.set(id, (available.get(id) ?? 0) - num);
-        for (const [id, limit] of cargoLoadLimits ?? []) available.set(id, Math.min(available.get(id) ?? 0, limit));
       }
       const slots = [], labels = [];
       for (const [i, slot] of (state.orderItem ?? []).entries()) {
@@ -74,7 +79,7 @@ export async function serviceCargo(client, config, { enabled, log, testSpeedUp =
           return { ok: true, body: reply };
         });
         if (!outcome) break;
-        log(label + '交货：' + labels.join('、'), { operationId: outcome.operationId });
+        log(label + (state?.status === 1 ? '已发船：' : '交货：') + labels.join('、'), { operationId: outcome.operationId });
       }
     }
     if (state?.status === 1 && testSpeedUp && !speedUsed && active()) {

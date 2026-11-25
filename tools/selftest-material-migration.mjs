@@ -128,6 +128,23 @@ export async function testMaterialMigration() {
     assert.deepEqual(priority.ships[0].orderItem.map(item => item.filled), [true, false, true]);
     await priority.read();
 
+    const readyShip = fixture(directory);
+    readyShip.settings.cargo.dailyLoadLimit = 1;
+    readyShip.ships = [
+      { index: 1, status: 0, orderItem: [asset('fish', 2), asset('fish', 3)] },
+      { index: 2, status: 0, orderItem: [asset('fish', 2), asset('fish', 2)] },
+    ];
+    for (const ship of readyShip.ships) ship.orderItem = ship.orderItem.map(item => ({ asset: item, filled: false }));
+    readyShip.ships[1].orderItem.unshift({ asset: asset('wood', 50), filled: true });
+    const budget = { cargoLoadLimits: new Map([['fish', 4]]) };
+    await readyShip.cargo({ ...budget, dryRun: true });
+    assert.deepEqual(readyShip.reports.filter(row => row.planned).map(row => row.action.body),
+      [{ shipIndex: 2, cargoIndex: [2, 3] }], 'one remaining batch goes to the ship that can depart');
+    await readyShip.cargo(budget);
+    assert.deepEqual(readyShip.ships.map(ship => ship.status), [0, 1]);
+    assert.equal(readyShip.actual.get('fish'), 16);
+    assert.equal(readyShip.ledger.snapshot().counters.cargoLoads, 1);
+
     const cargoFirst = fixture(directory);
     cargoFirst.ships[0].orderItem = [2, 3].map(num => ({ filled: false, asset: asset('fish', num) }));
     cargoFirst.inventory = items => { if (cargoFirst.writes.length) throw new Error('消费后库存暂不可读'); return items; };

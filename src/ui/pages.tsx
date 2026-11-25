@@ -1,13 +1,13 @@
 import * as React from "react"
 import { renderToStaticMarkup } from "react-dom/server"
 import { Button } from "./button"
-import { Card, CardAction, CardHeader, CardTitle, CardContent } from "./card"
+import { Card, CardAction, CardDescription, CardHeader, CardTitle, CardContent } from "./card"
 import { Input } from "./input"
 import { Switch } from "./switch"
 import { HelpTip } from "./help-tip"
 import { Badge } from "./badge"
 import { DialogFooter, DialogHeader, DialogTitle } from "./dialog"
-import { Backpack, Factory, Gem, Gift, LayoutGrid, MessageCircle, Music2, Plus, QrCode, Search, Shirt, Smartphone, Sprout, X } from "lucide-react"
+import { Backpack, Factory, Gem, Gift, LayoutGrid, type LucideIcon, MessageCircle, Music2, Package, Plus, QrCode, Search, ShipWheel, Shirt, Smartphone, Sprout, Timer, X } from "lucide-react"
 
 function Panel({title, help, titleAfter, children}: {title: string; help?: string; titleAfter?: React.ReactNode; children: React.ReactNode}) {
   return <Card><CardHeader><CardTitle className="title-with-help">{title}{help && <HelpTip title={title}>{help}</HelpTip>}</CardTitle>{titleAfter && <CardAction className="row-span-1 self-center max-md:col-span-2 max-md:col-start-1 max-md:row-start-2 max-md:justify-self-start">{titleAfter}</CardAction>}</CardHeader><CardContent>{children}</CardContent></Card>
@@ -190,6 +190,16 @@ export function overviewPage() {
   </div>)
 }
 
+function ShipSettingsGroup({ title, icon: Icon, fields, note }: {
+  title: string; icon: LucideIcon; fields: string; note?: string
+}) {
+  return <Card className="ship-group" role="group" aria-label={title}>
+    <CardHeader><CardTitle><h3><Icon aria-hidden="true" />{title}</h3></CardTitle></CardHeader>
+    <CardContent data-ship-fields={fields} />
+    {note && <CardDescription className="mb-2 text-xs">{note}</CardDescription>}
+  </Card>
+}
+
 export function activitiesPage() {
   return renderToStaticMarkup(<div className="grid gap-3">
     <div className="activity-toolbar"><Button id="activities-refresh" className="ml-auto" variant="outline" size="sm">刷新活动</Button></div>
@@ -205,6 +215,19 @@ export function activitiesPage() {
       </section>
     </div>
     <template id="ui-event-switch"><Switch className="p-0" /></template>
+    <template id="ui-guild-ship-settings">
+      <div className="activity-settings guild-ship-settings">
+        <div className="ship-column">
+          <ShipSettingsGroup title="登船安排" icon={ShipWheel} fields="enabled crew captain checkEverySeconds mode" />
+          <ShipSettingsGroup title="奖励筛选" icon={Gift} fields="coinFilter minCoinsSmall minCoinsMedium minCoinsLarge rewardFilter rewardItems" />
+        </div>
+        <div className="ship-column">
+          <ShipSettingsGroup title="货舱补给" icon={Package} fields="disabledMaterials allowDiamonds diamondDailyLimit"
+            note="开启后按商船每日上限补货。上限为 0 时只使用库存。" />
+          <ShipSettingsGroup title="红船调度" icon={Timer} fields="produceMissing redStartEnabled redStartTime" />
+        </div>
+      </div>
+    </template>
   </div>)
 }
 

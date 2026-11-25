@@ -10,12 +10,13 @@ import { claimReportRewards } from './missing-rewards.mjs';
 import { beginOrderMaterialSpend, cancelOrderMaterialSpend, confirmOrderMaterialSpends, confirmOrderMaterialOperation, readOrderMaterialState, settleOrderMaterialState } from './order-reservations.mjs';
 import { riverActivity, edictPassActivity } from './seasonal-activities.mjs';
 import { activityTimestamp, catalogEntry, pushedActivityEntries } from './activity-catalog.mjs';
+import { weekChipPlan, checkWeekChipFactory, openWeekChipRound } from './week-chip.mjs';
 import { festivalTaskWindow } from './activity-availability.mjs';
 import { watchHeroRaidPushes } from './hero-raid-automation.mjs';
 import { claimFestivalRewards, claimWeeklyRewards, claimVipDaily, festivalRewardKeys, weeklyRewardKeys, festivalRewardState, snowballState,
   compassState, weekChargeState, weekHeroStarState, weekFreePackState, syncFestivalDay } from './free-rewards.mjs';
 
-const weekNames = { 1: '勇士战令', 2: '累计充值', 3: '英雄升星', 4: '幸运转盘', 5: '不差钱商人', 6: '芯片活动', 7: '周翻牌' };
+const weekNames = { 1: '勇士战令', 2: '累计充值', 3: '英雄升星', 4: '幸运转盘', 5: '不差钱商人', 6: '硅晶达标', 7: '周翻牌' };
 const serverNow = client => (Date.now() + (client.serverClockOffsetMs || 0)) / 1000;
 const open = (activity, now) => activity.startTime <= now && now < activity.endTime;
 const linkageNames = { 28: '龙王罗盘', 29: '酆都法旨', 30: '驱邪除祟' };
@@ -291,7 +292,7 @@ export async function runActivity(client, config, { activityId, taskKey, enabled
 const text = (config, rows = []) => rows.map(([id, num]) => displayMaterial(config, id) + ' ×' + num).join('、');
 
 // One line per reward so each tab says what can be collected before anything is clicked.
-async function rewardStatus(client, config, activities, week, player, { readOrder, readInventory }) {
+async function rewardStatus(client, config, activities, week, player, { readOrder, readInventory }, owner) {
   const status = {};
   const put = (id, lines, ready, badge = '可领') => { status[id] = { lines, ready, badge }; };
   const safely = async (id, work) => {
@@ -344,8 +345,17 @@ async function rewardStatus(client, config, activities, week, player, { readOrde
       put(id, [view.finalReady ? '最终奖励可领取' : view.finished ? '最终奖励已领取' : '完成全部档位后可领最终奖励'], Boolean(view.finalReady));
     });
     if (row.type === 6 || row.type === 7) await safely(id, async () => {
-      const view = await weekFreePackState(client, config, row.type);
+      const info = row.type === 6 ? await client.request('WeekChipInfoRequest', {}, 'WeekChipInfoResponse') : undefined;
+      const view = await weekFreePackState(client, config, row.type, info);
       put(id, [(view.name ?? '免费礼包') + '：' + (view.done ? '已领' : '可领 ' + text(config, view.reward))], !view.done);
+      if (row.type === 6) {
+        try {
+          const stock = await readInventory();
+          const plan = weekChipPlan(config, row, id, owner, info, stock, player, view);
+          status[id].chip = await checkWeekChipFactory(client, config, player, plan);
+        }
+        catch (error) { status[id].chipError = error.message; }
+      }
     });
   }
   await safely('openrank', async () => {
@@ -361,7 +371,7 @@ async function rewardStatus(client, config, activities, week, player, { readOrde
   return status;
 }
 
-export async function activityView(client, festivals = [], config = null, player = null) {
+export async function activityView(client, festivals = [], config = null, player = null, owner = null) {
   const schedule = await weekSchedule(client), time = serverNow(client);
   const week = schedule.filter(row => open(row, time));
   const activities = activityEntries(client, schedule, festivals, { includeInactive: true });
@@ -373,7 +383,7 @@ export async function activityView(client, festivals = [], config = null, player
     readOrder: () => orderRead ??= readWeekOrder(client, week, config),
     readInventory: () => inventoryRead ??= readWeekOrderInventory(client),
   };
-  const status = await rewardStatus(client, config, active, week, player, reads);
+  const status = await rewardStatus(client, config, active, week, player, reads, owner);
   const heroActivities = active.filter(row => row.id.startsWith('hero-raid:'));
   if (heroActivities.length) {
     const state = watchHeroRaidPushes(client);
@@ -390,6 +400,23 @@ export async function activityView(client, festivals = [], config = null, player
   }
   for (const row of active) if (!activities.some(item => item.id === row.id)) activities.push(catalogEntry(row, time));
   return { status, ...(await activityDetails(client, config, week, activities, reads)) };
+}
+
+export async function runWeekChip(client, config, { activityId, planKey, owner, player, enabled, ledger }) {
+  if (typeof planKey !== 'string' || !/^[a-f0-9]{64}$/.test(planKey)) throw Error('请先刷新本轮开晶方案');
+  async function read({ checkFactory = false } = {}) {
+    if (!enabled()) throw Error('账号连接已变化');
+    const events = (await weekly(client)).filter(row => row.type === 6);
+    const event = events[0];
+    if (events.length !== 1 || weeklyId(event) !== activityId) throw Error('硅晶达标期次已变化或活动未开放');
+    const info = await client.request('WeekChipInfoRequest', {}, 'WeekChipInfoResponse');
+    const stock = await readWeekOrderInventory(client);
+    const freePack = await weekFreePackState(client, config, 6, info);
+    const plan = weekChipPlan(config, event, activityId, owner, info, stock, player, freePack);
+    return { event, stock, info, freePack, chipStage: player?.chipStage, chipScore: player?.chipScore,
+      plan: checkFactory ? await checkWeekChipFactory(client, config, player, plan) : plan };
+  }
+  return openWeekChipRound(client, { read, enabled, ledger, activityId, planKey, factoryTiers: config.tables.ChestScoreCfg?.data });
 }
 
 async function activityDetails(client, config, week, activities, {

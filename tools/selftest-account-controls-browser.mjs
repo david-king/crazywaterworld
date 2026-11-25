@@ -49,6 +49,7 @@ GameClient.prototype.request = async function (name) {
   if (name === 'GameWorldListRequest') return { recentWorlds: [
     { worldId: 9001, roleInfo: { id: 1, worldId: 9001, nickname: '海风船长' } },
     { worldId: 9002, roleInfo: { id: 3, worldId: 9002, nickname: '二区船长' } },
+    { worldId: 9003, roleInfo: { id: 4, worldId: 9003, nickname: '三区船长' } },
   ] };
   if (name === 'EmailBoxRequest') { mailReads++; return { email: [] }; }
   return name === 'OnWaterRequest' ? { building: [] } : name === 'AllItemRequest' ? { items: [] } : {};
@@ -289,15 +290,18 @@ try {
       const oldClient = app.sessions.get('first').client;
       await cards.nth(0).getByRole('button', {name:'区服管理'}).click();
       await page.locator('#load-worlds').click();
-      await page.locator('#worlds').getByRole('button', { name: '添加角色' }).click();
-      await page.locator('#worlds .acct').filter({ hasText: '二区船长' }).getByRole('button', { name: '已添加' }).waitFor();
+      await page.locator('#worlds').getByRole('checkbox', { name: '选择 二区船长' }).check();
+      await page.locator('#worlds').getByRole('checkbox', { name: '选择 三区船长' }).check();
+      await page.locator('#worlds').getByRole('button', { name: '添加所选角色' }).click();
+      await page.locator('#worlds .acct').filter({ hasText: '二区船长' }).getByText('已添加', { exact: true }).waitFor();
       await page.getByRole('button', {name:'关闭区服管理'}).click();
       const nextRole = cards.filter({ hasText: '二区船长' });
-      const switchRole = nextRole.getByRole('button', { name: '切换并托管' });
+      const switchRole = nextRole.getByRole('button', { name: '同时托管此角色' });
       await switchRole.waitFor();
       assert.equal(oldClient.connected, true);
       const store = loadStore();
       assert.equal(store.accounts.find(row => row.id === 'first').login.worldId, 9001, '旧记录固定为原角色');
+      assert.equal(store.accounts.find(row => row.login.worldId === 9003)?.roleId, '4');
       const added = store.accounts.find(row => row.login.worldId === 9002);
       const endpoint = root + '/api/settings?account=' + encodeURIComponent(added.id);
       const current = await (await fetch(endpoint)).json();
@@ -307,6 +311,11 @@ try {
       }) })).status, 200);
       await switchRole.click();
       await nextRole.getByRole('button', { name: '暂停挂机' }).waitFor();
+      assert.equal(oldClient.connected, true);
+      await nextRole.locator('summary').click();
+      await nextRole.getByRole('button', { name: '切换并托管' }).click();
+      await page.waitForFunction(() => !document.querySelector('.account-card details[open]'));
+      await first.filter({ hasText: '同时托管此角色' }).waitFor();
       assert.equal(oldClient.connected, false);
       assert.equal(app.sessions.get('first').paused, true);
       assert.equal(app.sessions.get('second').client.connected, true, '其他登录账号继续在线');

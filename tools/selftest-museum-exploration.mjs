@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { matchesMuseumRecommendation, selectMuseumHeroes, availableMuseumFactors, museumExploreFactor } from '../src/museum-exploration.mjs';
+import { allocateMuseumTeams, matchesMuseumRecommendation, selectMuseumHeroes, availableMuseumFactors, museumExploreFactor } from '../src/museum-exploration.mjs';
 
 const condition = { conditionId: 7, heroCount: 2, heroStar: 10, heroQualityIndex: 2, careerLimit: '战士', factionLimit: '阵营A' };
 const heroConfig = { id: '推荐甲', quality: 'PURPLE', qualityIndex: 2, career: '战士', faction: '阵营A' };
@@ -32,13 +32,34 @@ test('推荐条件使用本体加专武星级，并分别核对品质、职业�
     { ...condition, careerLimit: '', factionLimit: '' }));
 });
 
-test('选队优先低战力推荐英雄，同类按战力排，并允许非推荐英雄补齐', () => {
+test('推荐英雄优先于高战力的非推荐英雄，推荐者按战力排序', () => {
   const f = fixture(), first = selectMuseumHeroes(f.stage, f.heroes, f.config);
   assert.deepEqual(first.heroIds, ['推荐甲', '推荐乙']); assert.equal(first.allRecommended, true);
   const busy = new Set(['推荐甲']), next = selectMuseumHeroes(f.stage, f.heroes, f.config, busy);
   assert.deepEqual(next.heroIds, ['推荐乙', '普通甲']); assert.equal(next.recommendedCount, 1);
   assert.equal(next.ready, true); assert.equal(next.allRecommended, false);
   assert.deepEqual([...busy], ['推荐甲'], '选队不得修改调用者的占用集合');
+});
+
+test('单图和多图补位都先用低品质、同品质低总星的英雄，保留另一图的推荐人选', () => {
+  const f = fixture(), busy = new Set(['推荐甲']);
+  for (const [id, quality, star, exclusiveStar, power] of [
+    ['橙零星', 'ORANGE', 0, 0, 9000], ['绿三星', 'GREEN', 0, 3, 8000], ['绿一星', 'GREEN', 1, 0, 10],
+  ]) {
+    f.heroes.push({ heroId: id, power, star, exclusive: { star: exclusiveStar } });
+    f.config.tables.HeroCfg.data.push({ ...heroConfig, id, quality, career: '法师' });
+  }
+  const single = selectMuseumHeroes(f.stage, f.heroes, f.config, busy);
+  assert.deepEqual(single.heroIds, ['推荐乙', '绿一星']);
+  assert.equal(single.recommendedCount, 1);
+
+  f.settings.museum.factorMode = 'recommended';
+  f.config.tables.MuseumExpeditionConditionCfg.data.push({ ...condition, conditionId: 8, careerLimit: '法师', heroCount: 1 });
+  const other = structuredClone(f.stage);
+  other.stageId = 2; other.expedition.conditionId = 8;
+  const teams = allocateMuseumTeams([f.stage, other], f.snapshot, f.config, f.settings, busy, 2, () => 50);
+  assert.deepEqual(teams.get(1).heroIds, single.heroIds);
+  assert.deepEqual(teams.get(2).heroIds, ['普通甲']);
 });
 
 test('人数由条件配置决定，缺条件、空闲不足或重复英雄不能组成可派队伍', () => {

@@ -209,7 +209,11 @@ export function createUsageLedger(accountId, { file = usageFile(), now = Date.no
     pendingCounters() {
       /** @type {Counters} */
       const totals = {};
-      for (const reservation of Object.values(read().pending)) for (const [name, amount] of Object.entries(reservation.counters)) totals[name] = (totals[name] ?? 0) + amount;
+      for (const { counters } of Object.values(read().pending)) {
+        for (const [name, amount] of Object.entries(counters)) totals[name] = (totals[name] ?? 0) + amount;
+        // 商船日预算独立，但待确认的货款仍占用实际余额。旧商船记录已含 diamonds。
+        if (counters.guildShipDiamonds && counters.diamonds == null) totals.diamonds = (totals.diamonds ?? 0) + counters.guildShipDiamonds;
+      }
       return totals;
     },
     resolveKey(uniqueKey, confirmed, details) {

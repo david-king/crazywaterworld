@@ -1,13 +1,28 @@
 // 每日免费海盗扫荡：仅使用扫荡次数，不读取舰队或汽油，也不参与派遣调度。
 import {exactAutomationId} from './automation-policy.mjs';
 import {loadProtocol} from './proto.mjs';
+import { recordsInWorld } from './fleet-settlement.mjs';
+import { pirateConfirmationStart, pirateConfirmationTimedOut, pirateHuntEnabled } from './pirates.mjs';
 const rows=(c,n)=>c?.tables?.[n]?.data??[];
 const valid=n=>Number.isSafeInteger(n)&&n>=0;
 const now=c=>Math.floor((Date.now()+(c.serverClockOffsetMs||0))/1000);
 const day=t=>Math.floor((t+28800)/86400);
 const active=new WeakSet(),rejections=new WeakMap();
 const reward=r=>r?.reward?.asset?.some(a=>Number(a.num)>0)||['hero','antique','equipIds','badge','supply'].some(k=>r?.[k]?.length>0);
-export async function readPirateSweeps(client,config,player,settings,keyRecords={}){
+function pendingHuntLevels(keyRecords, world, serverNow, ledger) {
+ const levels = new Map();
+ for (const [key, record] of Object.entries(recordsInWorld(keyRecords, world))) {
+  const hunt = record.details;
+  if (hunt?.kind !== 'pirateFirst' || String(hunt.world) !== world || record.expired
+    || hunt.outcome === 'lost' || hunt.outcome === 'timedOut') continue;
+  const sentAt = pirateConfirmationStart(ledger, key, hunt);
+  if (pirateConfirmationTimedOut(sentAt, serverNow) || (!sentAt && hunt.outcome === 'won')) continue;
+  levels.set(hunt.type, Math.max(levels.get(hunt.type) ?? 0, hunt.level));
+ }
+ return levels;
+}
+
+export async function readPirateSweeps(client,config,player,settings,usage={}){
  const time=now(client),state={day:day(time),used:null,limit:null,left:null,allocations:[],target:null,reason:''};
  const world=exactAutomationId(player?.worldId),level=rows(config,'ModuleOpenCfg').find(r=>r.moduleId==='世界')?.playerLevel;
  state.world=world;
@@ -35,8 +50,12 @@ export async function readPirateSweeps(client,config,player,settings,keyRecords=
  const season=Math.floor(Number(world)/1e6)%1000;
  const configs=rows(config,'WorldPirateCfg').filter(row=>Number(row.season)===season);
  const prefix='pirate-sweep:'+world+':';
+ // Refresh dispatch records after the network reads; offline previews can pass a snapshot.
+ const keyRecords = usage.keyRecords?.() ?? usage;
  const records=Object.entries(keyRecords).filter(([key,r])=>key.startsWith(prefix)&&!r.expired);
  const today=records.filter(([,r])=>r.details?.day===state.day);
+ const huntLevels = pirateHuntEnabled(settings)
+  ? pendingHuntLevels(keyRecords, world, Date.now() + (client.serverClockOffsetMs || 0), usage) : new Map();
  const uidCounts=new Map();
  for(const p of all.pirates)uidCounts.set(p.uid,(uidCounts.get(p.uid)??0)+1);
  for(const type of [1,2,3].filter(type=>sweep.types.includes(String(type)))){
@@ -45,6 +64,10 @@ export async function readPirateSweeps(client,config,player,settings,keyRecords=
   const killed=record.records.filter(r=>r.type===type),level=killed[0]?.maxKilledLevel??0;
   const row={type,name,times,used,level,target:null,reason:''};
   if(killed.length>1||!valid(level))row.reason=name+'首杀等级未确认';
+  else if (huntLevels.get(type) > level) {
+   row.waitingForHunt = true;
+   row.reason = '等待' + name + ' ' + huntLevels.get(type) + '级首杀战果，再按个人首杀记录扫荡';
+  }
   else if(!level)row.reason=name+'尚未完成首杀';
   else if(!configs.some(r=>r.type===type&&r.level===level))row.reason=name+'最高已首杀等级配置未确认';
   else {
@@ -62,7 +85,27 @@ export async function readPirateSweeps(client,config,player,settings,keyRecords=
  // 暂缺地图目标时保留该类固定次数，只有超出预留的次数才能用于其余目标。
  const eligible=state.left>reserved ? [...fixed,...remaining] : fixed;
  const next=eligible.find(row=>row.target);
- if(next)return {...state,type:next.type,name:next.name,level:next.level,target:next.target};
+ if (next) {
+  // 固定次数按配置顺序预留。分配余额时，也为等待首杀的种类留出轮到它的次数。
+  let available = state.left;
+  if (next.times === -1) {
+   available -= reserved;
+   for (const row of remaining.filter(row => row.waitingForHunt)) {
+    // 刷得少的先补到相同次数，持平时种类编号小的先刷一次。
+    const turnsToCatchUp = next.used - row.used;
+    const goesFirstOnTie = row.type < next.type ? 1 : 0;
+    available -= Math.max(0, turnsToCatchUp + goesFirstOnTie);
+   }
+  } else {
+   for (const row of fixed) {
+    if (row === next) break;
+    if (row.waitingForHunt) available -= row.times - row.used;
+   }
+  }
+  if (available > 0) return {...state,type:next.type,name:next.name,level:next.level,target:next.target};
+ }
+ const waiting = eligible.find(row => row.waitingForHunt);
+ if (waiting) return {...state, pending:true, reason:waiting.reason};
  return {...state,reason:eligible.map(row=>row.reason).join('，')||'今日所选海盗的扫荡次数已完成'};
 }
 export async function runPirateSweeps(client,config,player,{getSettings,ledger,enabled,report,scheduler}){
@@ -71,15 +114,15 @@ export async function runPirateSweeps(client,config,player,{getSettings,ledger,e
  const title='海盗日常扫荡',emit=e=>report({...e,label:e.label??title,taskKey:'pirate'});
  try{
   for(let attempts=0;attempts<100&&enabled();attempts++){
-   const settings=getSettings(),records=ledger.keyRecords(),state=await readPirateSweeps(client,config,player,settings,records);
+   const settings=getSettings(),state=await readPirateSweeps(client,config,player,settings,ledger);
    const prefix='pirate-sweep:'+state.world+':';
-   for(const [key,r]of Object.entries(records))if(key.startsWith(prefix)&&!r.confirmed&&r.details?.day===state.day&&valid(state.used)&&state.used>r.details.used)ledger.resolveKey(key,true);
+   for(const [key,r]of Object.entries(ledger.keyRecords()))if(key.startsWith(prefix)&&!r.confirmed&&r.details?.day===state.day&&valid(state.used)&&state.used>r.details.used)ledger.resolveKey(key,true);
    if(state.reason){emit({skipped:true,...(state.pending?{status:'pending'}:{}),reason:state.reason});if(state.left===0)scheduler?.defer('pirate',scheduler.nextDay());return;}
    const key=prefix+state.day+':'+state.used;
    if(ledger.hasKey(key)){emit({skipped:true,reason:'本次扫荡次数已记录，等待服务器计数更新'});return;}
    const signature=key+':'+state.target.uid,rejected=rejections.get(client);
    if(rejected?.signature===signature&&rejected.until>Date.now()){emit({skipped:true,reason:'服务器此前拒绝此目标，稍后核对再试'});return;}
-   const fresh=await readPirateSweeps(client,config,player,getSettings(),ledger.keyRecords());
+   const fresh=await readPirateSweeps(client,config,player,getSettings(),ledger);
    if(!enabled()||getSettings()!==settings||day(now(client))!==state.day||exactAutomationId(player.worldId)!==state.world)return;
    if(fresh.reason||fresh.day!==state.day||fresh.world!==state.world||fresh.used!==state.used||fresh.target?.uid!==state.target.uid||fresh.target.cityId!==state.target.cityId||fresh.type!==state.type||fresh.level!==state.level){emit({skipped:true,reason:fresh.reason||'扫荡前目标或剩余次数已变化，等待重新核对'});return;}
    const ticket=ledger.reserve({pirateSweeps:1},{},{},{uniqueKey:key,details:{kind:'pirateSweep',day:state.day,used:state.used,type:state.type,level:state.level}});

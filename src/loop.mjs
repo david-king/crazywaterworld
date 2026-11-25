@@ -4,13 +4,14 @@ import { militaryRewards, riverActivity, edictPassActivity, compassActivity, bea
 import { claimComicDrama, claimTournamentDaily, openSeasonChests } from './side-rewards.mjs';
 import { merchantActivity } from './merchant-activity.mjs';
 import { runAllianceAutomation } from './alliance-automation.mjs';
-import { serviceGuildShips, watchGuildShipPushes } from './guild-ships.mjs';
+import { isGuildShipPush, serviceGuildShips, watchGuildShipPushes } from './guild-ships.mjs';
 import { serviceGuildForts } from './guild-forts.mjs';
 import { recallSiliconForEvent, runSiliconMining, siliconRecallOpensAt, settleSiliconEventRecalls, watchSiliconMining, siliconInterval } from './silicon-mining.mjs';
 import { runResourceFields } from './resource-field-automation.mjs';
 import { runHeroRaidAutomation } from './hero-raid-automation.mjs';
 import { merchantMonitorSeconds, watchMerchant } from './merchant-monitor.mjs';
 import {runPirateSweeps} from './pirate-sweeps.mjs';
+import { pirateHuntEnabled } from './pirates.mjs';
 import { runLeagueChallenge } from './league-challenge.mjs';
 import { recoverLeagueOrder } from './league-order.mjs';
 import {claimGuildTitleReward} from './guild-title-rewards.mjs';
@@ -51,6 +52,7 @@ import { createFactorySchedule } from './factory-schedule.mjs';
 import { createLoopScheduler } from './loop-scheduler.mjs';
 import { checkSeasonMerit } from './season-merit.mjs';
 import { createActionGuard, nativePreferenceEnabled, needsCargoDemand, exactAutomationId } from './automation-policy.mjs';
+import { hasResidentMaterialRules } from './resident-materials.mjs';
 import { surveyBaseAutomation, planBaseAutomation, observeBaseAutomationPlan, runBaseAutomation, baseDemands } from './base-automation.mjs';
 import { hasBaseWork } from './automation-settings.mjs';
 import { runMuseumDisplay } from './museum-display.mjs';
@@ -141,6 +143,10 @@ export async function runLoop(client, protocol, {
   const rejected = { tasks: new Set(), world: new Set() };
   const history = [];
   const rewards = isEnabled ? rewardSchedule(client) : null;
+  const guildShipSchedule = rewards ?? rewardSchedule(client);
+  const guildShipNext = () => getSettings()?.guildShip?.enabled
+    ? (guildShipSchedule.scheduledAt('guildShip') ?? 0) * 1000 - (client.serverClockOffsetMs || 0) : Infinity;
+  guildShipSchedule.clearTask('guildShip');
   bridgeFleetReservations(client, getSettings, usageLedger, exactAutomationId(player?.worldId));
   let lastRecruitWait;
   const dailyWaitReasons = new Map();
@@ -166,7 +172,7 @@ export async function runLoop(client, protocol, {
   };
   const extendedNext = () => {
     const settings = getSettings();
-    if (!settings?.alliance?.enabled && !settings?.guildShip?.enabled && !settings?.heroRaid?.enabled) return Infinity;
+    if (!settings?.alliance?.enabled && !settings?.heroRaid?.enabled) return Infinity;
     return extendedPreference === settings ? extendedAt : 0;
   };
   let appointmentAt = 0, appointmentPreference = null;
@@ -328,15 +334,16 @@ export async function runLoop(client, protocol, {
       }
       scanOptions.set(key, options);
     }
-    rewards?.clearTask('guildShip'); rewards?.clearTask('guildFort'); wakeActivities(); scheduler.wake(); };
+    guildShipSchedule.clearTask('guildShip'); rewards?.clearTask('guildFort'); wakeActivities(); scheduler.wake(); };
   const extendedPush = ({ name }) => {
-    if (/^SCGuildShip|^SCFort|^SCHeroRaid/.test(name) || ['SCAllActivity','SCGuildOrder','SCNewGuildAidAsk','SCGuildAidHelp','SCGuildAidRemove','SCNewGuildWelfarePack'].includes(name)) {
+    if (isGuildShipPush(name) && getSettings()?.guildShip?.enabled) scheduler.wake();
+    if (/^SCFort|^SCHeroRaid/.test(name) || ['SCAllActivity','SCGuildOrder','SCNewGuildAidAsk','SCGuildAidHelp','SCGuildAidRemove','SCNewGuildWelfarePack'].includes(name)) {
       extendedAt = 0; scheduler.wake();
     }
   };
   scheduler.listen(client, 'automationSettingsChanged', settingsWake);
   scheduler.listen(client, 'message', extendedPush);
-  watchGuildShipPushes(client, rewards);
+  watchGuildShipPushes(client, guildShipSchedule);
   scheduler.addCleanup(travel.subscribe(fleet=>{
     const preferences=getSettings()?.treasure;
     if(stop.aborted||!client.connected||!treasureAutomationEnabled(getSettings()))return;
@@ -499,6 +506,34 @@ export async function runLoop(client, protocol, {
         : reasons.join('；') || '本轮没有需要调整的原生生产目标';
       stepLog('world')({ taskKey: 'nativeProduce', title: '原生自动生产目标', skipped: true, reason });
     }
+    async function checkCargo(cargoLoadLimits, actionGuard, current = () => true) {
+      const active = () => current() && enabled('cargo');
+      if (!isEnabled || !active()) return;
+      const unlockLevel = config?.tables?.CargoUnlockCfg?.data?.[0]?.playerLevel ?? 9;
+      try {
+        let waitReason;
+        if (player?.level >= unlockLevel) {
+          waitReason = '已检查贸易港，暂无可交付或领取的货物';
+          await serviceCargo(client, config, {
+            enabled: active, getSettings, ledger: usageLedger, cargoLoadLimits,
+            beforeAction: actionGuard.before, afterAction: actionGuard.after, cancelAction: actionGuard.cancel,
+            log(title, details) {
+              waitReason = details?.reason;
+              const entry = { taskKey: 'cargo', title, note: title, ok: !details?.skipped, ...details };
+              summary.world.planned++;
+              summary.world.results.push(entry);
+              stepLog('world')(entry);
+            },
+          });
+        } else {
+          waitReason = player?.level ? '贸易港需要角色达到 ' + unlockLevel + ' 级' : '角色等级尚未同步';
+        }
+        if (waitReason && active()) {
+          rewards.observe('cargo', waitReason);
+          rewards.expect('cargo', rewards.now() + Math.ceil(getEveryMs() / 1000));
+        }
+      } catch (error) { phaseFailure('world', '贸易港', error); }
+    }
     // 主轮内已持有账号队列，直接调用；轮间由 schedule 调用。推送回调不执行协议。
     async function checkFactoryDue({ checkUpgrade = false, checkpoint = false } = {}) {
       if (stop.aborted || client.connected === false || checkpoint && !factorySchedule.hasChecked()) return;
@@ -512,11 +547,13 @@ export async function runLoop(client, protocol, {
         const simulateNative = currentSettings?.factory?.strategy === 'nativeSimulation';
         const holdForOrders = (!simulateNative && canFactory('startProduce')) || enabled('finishOrder') || checkUpgrade;
         const cargoDemand = (!simulateNative || holdForOrders) && needsCargoDemand(currentSettings);
+        const readCargo = (enabled('cargo') && holdForOrders) || cargoDemand;
         let version = factorySchedule.version();
+        const demandVersion = factorySchedule.demandVersion();
         const survey = await surveyWorld(client, protocol, { config, player,
           includeProductionTiming: canFactory('startProduce') && currentSettings?.factory?.produce !== false,
           includeWeekOrder: holdForOrders || cargoDemand,
-          includeCargo: (enabled('cargo') && holdForOrders) || cargoDemand });
+          includeCargo: readCargo });
         // 募兵、上船和订单可能已改变需求，不能沿用主轮的备料快照。
         let demand = [];
         if (currentSettings && canFactory('startProduce') && (!simulateNative || checkUpgrade)) {
@@ -525,17 +562,22 @@ export async function runLoop(client, protocol, {
           if (current()) demand = baseDemands(extra, config, currentSettings);
         }
         const orderRead = !survey.notes.some(note => note.startsWith('本轮未能读取商人订单'));
+        const checkMaterialOrders = factoryDue && hasResidentMaterialRules(currentSettings?.resident);
         const allow = kind => {
           if (!current()) return false;
+          if (kind === 'finishOrder' || kind === 'denyOrder') return checkMaterialOrders && enabled(kind);
           if (kind === 'gainFactory') return canFactory('collect');
           if (kind === 'finishUpgrade') return checkUpgrade && enabled('finishUpgrade');
           if (kind === 'upgrade') return checkUpgrade && enabled('upgrade') && orderRead;
           return ['startProduce', 'nativeProduce'].includes(kind) && canFactory('startProduce') && (simulateNative || orderRead);
         };
-        const plan = planWorld(survey, { config, enabled: allow, settings: currentSettings, blockedCollectionTypes: getBlockedCollectionTypes?.(), usage: usage(), extraDemand: demand, factoryWaitHistory });
+        const plan = planWorld(survey, { config, enabled: allow, settings: currentSettings, blockedCollectionTypes: getBlockedCollectionTypes?.(), usage: usage(), extraDemand: demand, factoryWaitHistory, trackRefills:true });
+        // 工厂巡检只处理材料规则换单；奖励筛选留给常规订单检查。
+        plan.actions = plan.actions.filter(step => step.kind !== 'denyOrder' || step.materialRule);
         if (currentSettings?.factory?.cooperateNative && allow('startProduce')) observeNativePlan(survey, plan);
         const freshGuard = runtimeGuard(createActionGuard(client, getSettings, usageLedger, { player, enabled: current }));
         const result = await runWorldRound(client, protocol, plan, { ...harvestOptions, allowMutate, enabled: allow, onStep: stepLog('world'),
+          factoryPlanCurrent: step => demandVersion === factorySchedule.demandVersion() && (!step.queueReplan || version === factorySchedule.version()),
           beforeStep: freshGuard.before, afterStep: freshGuard.after, cancelStep: freshGuard.cancel });
         summary.world.planned += result.results.length;
         summary.world.results.push(...result.results);
@@ -545,9 +587,16 @@ export async function runLoop(client, protocol, {
           state = normalize(await client.request('OnWaterRequest', {}, 'OnWaterResponse')).building;
         }
         // 升级检查不能把尚未到期的工厂兜底时钟一再向后推迟。
-        if (current() && factoryDue) factorySchedule.checked(state, { version, slots: survey.factorySlots,
+        if (current() && factoryDue) factorySchedule.checked(state, { version, demandVersion, slots: survey.factorySlots,
+          replan: result.results.some(entry => entry.step.queueReplan && entry.ok),
           progressed: factoryProgress(result.results) });
         publishFactoryDeadline();
+        const cargoHarvest = result.results.some(({ ok, step, body }) => ok && step?.kind === 'gainFactory'
+          && (!readCargo || survey.orderCheckError || !Array.isArray(body?.products?.asset)
+            || body.products.asset.some(item => survey.cargoOrder.has(item.id))));
+        if (cargoHarvest) {
+          await checkCargo(plan.cargoLoadLimits, freshGuard, current);
+        }
       } catch (error) {
         if (stop.aborted) return;
         if (factoryDue) factorySchedule.failed();
@@ -603,6 +652,19 @@ export async function runLoop(client, protocol, {
       prepareDispatch: () => refreshCityWarReservations(client, protocol, config, player, getSettings),
       wait: (ms, _value, { signal } = {}) => sleep(ms, signal),
       signal: typeof stop.throwIfAborted === 'function' ? stop : undefined };
+    async function checkPirateSweeps() {
+      if (!isEnabled || !getSettings() || !enabled('pirate')) return;
+      try {
+        await runPirateSweeps(client, config, player, {
+          getSettings, ledger: usageLedger, enabled: () => enabled('pirate'), scheduler: rewards,
+          report(entry) {
+            summary.dailies.results.push(entry);
+            if (!entry.skipped) summary.dailies.planned++;
+            stepLog('dailies')({ ...entry, title: entry.label, taskKey: 'pirate' });
+          },
+        });
+      } catch (error) { phaseFailure('dailies', '海盗日常扫荡', error, 'pirate'); }
+    }
     async function checkDispatch() {
       if (!scheduler.active()) return;
       dispatchSettingsPending = false;
@@ -618,7 +680,7 @@ export async function runLoop(client, protocol, {
       // 城战时间窗先核实；其余任务按配置检查，空闲且无预留的舰队可共享。
       if(getSettings()?.cityWar.reserveDuringWar)await checkCityWar();
       for (const task of dispatchOrder(getSettings())) {
-        if (task === 'pirateHunt' && !pirateChecked) {
+        if (task === 'pirateHunt' && !pirateChecked && pirateHuntEnabled(getSettings())) {
           pirateChecked = true;
           await runChallengeRound(client, config, { ...challengeOptions, mode: 'pirate', report: serviceReport('world', '海盗首杀') });
         }
@@ -654,6 +716,12 @@ export async function runLoop(client, protocol, {
       catch (error) { phaseFailure('world', '硅矿检查', error, 'silicon.enabled'); }
       finally { siliconAt = version === siliconVersion ? Date.now() + siliconInterval(getSettings()) : 0; }
     }
+    async function checkGuildShip() {
+      if (!scheduler.active() || guildShipNext() > Date.now()) return;
+      await serviceGuildShips(client, protocol, config, { player, getSettings, ledger: usageLedger, scheduler: guildShipSchedule,
+        enabled: () => scheduler.active() && runtimeActive(),
+        report: entry => serviceReport('world', 'guildShip.enabled')({ ...entry, taskKey: 'guildShip.enabled' }) });
+    }
     async function checkExtended() {
       if (stop.aborted || extendedNext() > Date.now()) return;
       extendedPreference = getSettings();
@@ -669,16 +737,10 @@ export async function runLoop(client, protocol, {
             enabled: () => active() && getSettings()?.alliance?.enabled };
           if (getSettings()?.guildFort?.enabled) await serviceGuildForts(client, protocol, config, { ...options, report: report('guildFort.enabled') });
         }
-        if (getSettings()?.guildShip?.enabled) await serviceGuildShips(client, protocol, config,
-          { player, getSettings, ledger: usageLedger, scheduler: rewards, enabled: active, report: report('guildShip.enabled') });
         if (getSettings()?.heroRaid?.enabled) await runHeroRaidAutomation(client, protocol, config, player,
           { getSettings, ledger: usageLedger, enabled: active, report: report('heroRaid.enabled') });
       } catch (error) { phaseFailure('world', '联盟与活动自动化', error); }
-      finally {
-        const startsAt = getSettings()?.guildShip?.enabled
-          ? watchGuildShipPushes(client).period?.startTime * 1000 - (client.serverClockOffsetMs || 0) : 0;
-        extendedAt = startsAt > Date.now() ? Math.min(Date.now() + 60000, startsAt) : Date.now() + 60000;
-      }
+      finally { extendedAt = Date.now() + 60000; }
     }
     async function checkAppointments() {
       if (!scheduler.active() || appointmentNext() > Date.now()) return;
@@ -957,10 +1019,8 @@ export async function runLoop(client, protocol, {
         } catch (error) { phaseFailure('dailies', '折扣商店', error, 'shop'); }
       }
       yield;
-      if(isEnabled&&settings&&enabled('pirate')){
-        try{await runPirateSweeps(client,config,player,{getSettings,ledger:usageLedger,enabled:()=>enabled('pirate'),scheduler:rewards,report:entry=>{summary.dailies.results.push(entry);if(!entry.skipped)summary.dailies.planned++;stepLog('dailies')({...entry,title:entry.label,taskKey:'pirate'});}});}
-        catch(error){const entry={title:'海盗日常扫荡',taskKey:'pirate',ok:false,error:error.message};summary.dailies.results.push(entry);stepLog('dailies')(entry);}
-      }
+      const sweepAfterDispatch = !pirateChecked && pirateHuntEnabled(getSettings());
+      if (!sweepAfterDispatch) await checkPirateSweeps();
       if (settings?.schedule?.leagueChallenge && enabled('leagueChallenge')) {
         const taskKey = 'leagueChallenge';
         try {
@@ -1245,6 +1305,7 @@ export async function runLoop(client, protocol, {
         const cargoDemand = needsCargoDemand(settings) && (!simulateNative || readsOrders
           || allowWorld('speedUpProduce') && settings.factory.speedUpSources.includes('cargo'));
         const factoryReadVersion = factorySchedule.version();
+        const demandVersion = factorySchedule.demandVersion();
         const survey = await surveyWorld(client, protocol, { config, player,
           includeProductionTiming: allowWorld('startProduce') && settings?.factory?.produce !== false,
           includeCargo: cargoDemand || (!!isEnabled && enabled('cargo') && (factoryOrders || usesOrders)),
@@ -1254,9 +1315,9 @@ export async function runLoop(client, protocol, {
           const extra = await surveyBaseAutomation(client, protocol, config, player, settings, survey, { ledger: usageLedger, enabled: () => !stop.aborted && runtimeActive() && client.connected !== false });
           extraDemand = baseDemands(extra, config, settings);
         }
-        if (factorySchedule.active())
-          factorySchedule.checked(survey.factories, { version: factoryReadVersion, slots: survey.factorySlots, progressed: true });
-        const plan = planWorld(survey, { config, enabled: allowWorld, factoryWaitHistory,
+        if (factorySchedule.active() || factorySchedule.due())
+          factorySchedule.checked(survey.factories, { version: factoryReadVersion, demandVersion, slots: survey.factorySlots, progressed: true });
+        const plan = planWorld(survey, { config, enabled: allowWorld, factoryWaitHistory, trackRefills:true,
           settings, blockedCollectionTypes: getBlockedCollectionTypes?.(), usage: usage(), extraDemand,
           allowSpeedUp: isEnabled ? enabled('speedUp') : allowSpeedUp,
           allowReroll: isEnabled ? enabled('denyOrder') : allowReroll,
@@ -1311,6 +1372,7 @@ export async function runLoop(client, protocol, {
         if (plan.actions.length) {
           const result = await runWorldRound(client, protocol, plan, { ...harvestOptions,
             allowMutate, enabled: allowWorld, rejected: rejected.world, onStep: stepLog('world'),
+            factoryPlanCurrent: step => demandVersion === factorySchedule.demandVersion() && (!step.queueReplan || factoryReadVersion === factorySchedule.version()),
           });
           summary.world.planned += result.followupCount;
           summary.world.results.push(...result.results);
@@ -1319,7 +1381,8 @@ export async function runLoop(client, protocol, {
           try {
             const factoryVersion = factorySchedule.version();
             const after = normalize(await client.request('OnWaterRequest', {}));
-            if (factorySchedule.active()) factorySchedule.checked(after.building, { version: factoryVersion,
+            if (factorySchedule.active()) factorySchedule.checked(after.building, { version: factoryVersion, demandVersion,
+              replan: summary.world.results.some(entry => entry.step?.queueReplan && entry.ok),
               slots: survey.factorySlots, progressed: factoryProgress(summary.world.results) });
             if (enabled('upgrade')) {
               summary.world.upgrades = [];
@@ -1367,32 +1430,7 @@ export async function runLoop(client, protocol, {
             publishFactoryDeadline();
           } catch (error) { factorySchedule.failed(); publishFactoryDeadline(); phaseFailure('world', '核对海面建筑状态', error); }
         }
-        if (isEnabled && enabled('cargo')) {
-          const unlockLevel = config?.tables?.CargoUnlockCfg?.data?.[0]?.playerLevel ?? 9;
-          try {
-            let waitReason;
-            if (player?.level >= unlockLevel) {
-              waitReason = '已检查贸易港，暂无可交付或领取的货物';
-              await serviceCargo(client, config, {
-                enabled: () => enabled('cargo'), getSettings, ledger: usageLedger, cargoLoadLimits: plan.cargoLoadLimits,
-                beforeAction: guard.before, afterAction: guard.after, cancelAction: guard.cancel,
-                log(title, details) {
-                  waitReason = details?.reason;
-                  const entry = { taskKey: 'cargo', title, note: title, ok: !details?.skipped, ...details };
-                  summary.world.planned++;
-                  summary.world.results.push(entry);
-                  stepLog('world')(entry);
-                },
-              });
-            } else {
-              waitReason = player?.level ? '贸易港需要角色达到 ' + unlockLevel + ' 级' : '角色等级尚未同步';
-            }
-            if (waitReason && enabled('cargo')) {
-              rewards.observe('cargo', waitReason);
-              rewards.expect('cargo', rewards.now() + Math.ceil(getEveryMs() / 1000));
-            }
-          } catch (error) { phaseFailure('world', '贸易港', error); }
-        }
+        await checkCargo(plan.cargoLoadLimits, guard);
       }
       yield;
       const latest = getSettings();
@@ -1450,10 +1488,12 @@ export async function runLoop(client, protocol, {
       await checkExtended();
       yield;
       await checkDispatch();
+      if (sweepAfterDispatch) await checkPirateSweeps();
     }
     await scheduler.runSteps(mainSteps(), {
-      nextAt: () => Math.min(mainScanNext(), worldOnlineNext(), meritNext()),
+      nextAt: () => Math.min(guildShipNext(), mainScanNext(), worldOnlineNext(), meritNext()),
       runPending: async () => {
+        await checkGuildShip();
         await checkMeritDue();
         if (mainScanNext() <= Date.now()) await checkDispatch();
         await checkWorldOnline();
@@ -1476,7 +1516,7 @@ export async function runLoop(client, protocol, {
           const weeklyAt = nextWeeklyActivityBoundary(client, getWeeklySettings(), roundStartedMs);
           const activityAt = activityVersion !== roundActivityVersion ? 0
             : nextActivityBoundary(client, activityConfigured, roundStartedMs);
-          const wakeAt = Math.min(nextRound, activityAt, weeklyAt, factorySchedule.nextAt(), dispatchNext(), extendedNext(), merchantNext(), appointmentNext(), worldOnlineNext(), meritNext(),
+          const wakeAt = Math.min(nextRound, activityAt, weeklyAt, factorySchedule.nextAt(), dispatchNext(), guildShipNext(), extendedNext(), merchantNext(), appointmentNext(), worldOnlineNext(), meritNext(),
             isEnabled && enabled('upgrade') ? upgradeAt : Infinity,
             antiqueEnabled(getSettings()) ? antiqueAt : Infinity, nextAfkCheck());
           if (wakeAt > Date.now()) await scheduler.waitUntil(wakeAt);
@@ -1486,6 +1526,7 @@ export async function runLoop(client, protocol, {
             break;
           }
           // 推送或保存设置可能早于原定时间唤醒；必须重读当前到期时间与开关。
+          await scheduler.runDue('guildShip', guildShipNext, checkGuildShip);
           await scheduler.runDue('dispatch', dispatchNext, checkDispatch);
           await scheduler.runDue('worldOnlineRewards', worldOnlineNext, checkWorldOnline);
           await scheduler.runDue('seasonMerit', meritNext, checkMeritDue);

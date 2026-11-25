@@ -1,5 +1,7 @@
 import { displayMaterial } from './config.mjs';
 import { normalize } from './worlds.mjs';
+import { exactAutomationId } from './automation-policy.mjs';
+import { toNumber } from './client.mjs';
 
 const drawKey = 'freeAntiqueRecruit';
 const rewardKey = 'antiqueRecruitRewards';
@@ -91,19 +93,95 @@ async function claimRewards(client, state, config, player, enabled, report, sche
   }
 }
 
+async function recruitUnavailable(client, config, player) {
+  const required = config?.tables?.ModuleOpenCfg?.data?.find(row => row.moduleId === '藏品')?.playerLevel;
+  if (!(required > 0 && player?.level > 0)) return '无法确认藏品开放等级';
+  if (player.level < required) return '角色 ' + required + ' 级开放，当前 ' + player.level + ' 级';
+  const water = await client.request('OnWaterRequest', {}, 'OnWaterResponse');
+  if (!Array.isArray(water?.building)) return '无法确认广播站状态';
+  const station = water.building.find(row => row.buildingId === '1广播站');
+  if (!(station?.level > 0)) return station?.buildFinishTime > 0 || station?.buildStartTime > 0 ? '广播站正在建造' : '广播站尚未建成';
+  return null;
+}
+
+async function readTicketStock(client) {
+  const bag = await client.request('AllItemRequest', {}, 'AllItemResponse');
+  if (!Array.isArray(bag?.items)) throw Error('无法确认藏品券库存');
+  const tickets = bag.items.filter(row => row.itemId === '藏品券');
+  if (!tickets.length) return 0;
+  const count = tickets[0].num == null ? NaN : toNumber(tickets[0].num);
+  if (tickets.length !== 1 || !Number.isSafeInteger(count) || count < 0) throw Error('藏品券库存数据异常');
+  return count;
+}
+
+export async function recruitWithWeeklyTickets(client, protocol, config, { player, limit, enabled, ledger, report }) {
+  const label = '藏品日用券招募';
+  const wait = reason => report({ label, skipped: true, reason });
+  const ways = protocol.RecruitWay, type = protocol.AntiqueRecruitType?.RECRUIT_ANTIQUE;
+  const batches = [[50, ways?.RECRUIT_BATCH_50], [10, ways?.RECRUIT_BATCH_10], [1, ways?.RECRUIT_SINGLE]]
+    .filter(([, way]) => Number.isInteger(way));
+  if (!batches.length || !Number.isInteger(type)) return wait('当前协议缺少藏品券招募方式');
+  const uniqueKey = 'weeklyAntiqueTickets:' + exactAutomationId(player.worldId) + ':' + exactAutomationId(player.playerId);
+  const unavailable = await recruitUnavailable(client, config, player);
+  if (unavailable) return wait(unavailable);
+  let remainingThisRound = Infinity;
+  while (enabled() && remainingThisRound > 0) {
+    const { counters, day } = ledger.snapshot();
+    const used = counters.weeklyAntiqueTickets ?? 0;
+    const previous = ledger.keyRecords()[uniqueKey];
+    if (!previous && limit > 0 && used >= limit) return wait('已达到当日用券上限 ' + limit + ' 张');
+    const [stock, recruit] = await Promise.all([readTicketStock(client), readRecruit(client)]);
+    if (!Number.isSafeInteger(recruit?.recruitTimes) || recruit.recruitTimes < 0) return wait('无法确认藏品招募次数');
+    if (previous) {
+      const prior = previous.details;
+      if (previous.confirmed) ledger.releaseCompletedKey(uniqueKey, previous);
+      else if (stock <= prior.stockAfter && recruit.recruitTimes >= prior.timesAfter) {
+        ledger.confirm({ id: previous.id, day: prior.day });
+        continue;
+      } else if (prior.day !== day) {
+        // A previous day's unknown spend cannot use today's tickets or daily allowance.
+        ledger.cancel({ id: previous.id, day: prior.day });
+      } else return wait('上批用券结果待确认，等待库存和招募次数同步');
+    }
+    if (stock === 0) return wait('藏品券已用完');
+    if (limit > 0 && used >= limit) return wait('已达到当日用券上限 ' + limit + ' 张');
+    const available = Math.min(stock, remainingThisRound, limit > 0 ? limit - used : Infinity);
+    const batch = batches.find(([count]) => count <= available);
+    if (!batch) return wait('余券不足以使用当前支持的连抽方式');
+    if (!enabled()) return;
+    const [count, way] = batch;
+    const timesAfter = recruit.recruitTimes + count;
+    const ticket = ledger.reserve({ weeklyAntiqueTickets: count }, limit > 0 ? { weeklyAntiqueTickets: limit } : {}, {},
+      { uniqueKey, details: { day, timesAfter, stockAfter: stock - count } });
+    let reply;
+    try {
+      // A read gate may delay the real send beyond the weekly score check.
+      reply = await client.request('AntiqueRecruitRequest', { type, way }, 'AntiqueRecruitResponse', 15000, () => {
+        if (!enabled() || ticket.day !== day) throw Object.assign(Error('活动或用券配置已变化'), { notSent: true });
+      });
+    } catch (error) {
+      if (error.notSent || (error.prompt && error.request === 'AntiqueRecruitRequest')) ledger.cancel(ticket);
+      else return wait('上批用券结果待确认：' + error.message);
+      return wait(error.message);
+    }
+    if (!reply?.recruitData || !(reply.recruitData.recruitTimes >= timesAfter || reply.reward?.length === count)) {
+      return wait('上批用券结果待确认，等待服务器同步');
+    }
+    ledger.confirm(ticket);
+    ledger.releaseCompletedKey(uniqueKey);
+    report({ label: '藏品招募 ' + count + ' 次，消耗 ' + count + ' 张藏品券', ok: true });
+    remainingThisRound = available - count;
+  }
+}
+
 export async function serviceAntiqueRecruit(client, config, { player, enabled, report, scheduler }) {
   const due = key => enabled(key) && (!scheduler || scheduler.due(key));
   if (!due(drawKey) && !due(rewardKey)) return;
   const skipBoth = reason => {
     for (const key of [drawKey, rewardKey]) if (due(key)) report(skip(key, reason));
   };
-  const required = config?.tables?.ModuleOpenCfg?.data?.find(row => row.moduleId === '藏品')?.playerLevel;
-  if (!(required > 0 && player?.level > 0)) return skipBoth('无法确认藏品开放等级');
-  if (player.level < required) return skipBoth('角色 ' + required + ' 级开放，当前 ' + player.level + ' 级');
-  const water = await client.request('OnWaterRequest', {}, 'OnWaterResponse');
-  if (!Array.isArray(water?.building)) return skipBoth('无法确认广播站状态');
-  const station = water.building.find(row => row.buildingId === '1广播站');
-  if (!(station?.level > 0)) return skipBoth(station?.buildFinishTime > 0 || station?.buildStartTime > 0 ? '广播站正在建造' : '广播站尚未建成');
+  const unavailable = await recruitUnavailable(client, config, player);
+  if (unavailable) return skipBoth(unavailable);
   let state = await readRecruit(client);
   if (!state) return skipBoth('暂无藏品招募数据');
   if (due(drawKey)) {

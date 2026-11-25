@@ -25,6 +25,7 @@ const app = createConsole({ port: 0, protocol: {} });
 const output = path.resolve('output/playwright/player-picker');
 fs.mkdirSync(output, { recursive: true });
 const errors = [];
+const extraMembers = Array.from({ length: 28 }, (_, i) => ({ id: String(11000 + i), name: '盟友' + (i + 3) }));
 let browser;
 try {
   const base = await app.listen();
@@ -49,11 +50,14 @@ try {
         return route.fulfill({ json: { members, rankPage, rankPages: 2 } });
       }
       return route.fulfill({ json: { guildName: '测试联盟', members: [
-        { id: '9007199254740993', name: '测试盟友甲', online: true },
-        { id: '9007199254740994', name: '测试盟友乙', online: false },
+        { id: '9007199254740993', name: '测试盟友甲', online: true, power: '1234567' },
+        { id: '9007199254740994', name: '测试盟友乙', online: false, power: '234567890' },
+        ...extraMembers,
       ] } });
     });
     await page.goto(base + '/#config-group-treasure');
+    assert.deepEqual(await page.evaluate(() => [null, '0', '99999', '100000', '99999999', '100000000', '10000000000000', '9223372036854775807'].map(configCompactPower)),
+      ['', '0', '99999', '10万', '9999.9万', '1亿', '1兆', '922337兆']);
     await page.locator('#config-field-treasure-follow').waitFor();
     if (await page.locator('#config-field-treasure-follow').getAttribute('aria-checked') !== 'true') await activate(page.locator('#config-field-treasure-follow'));
     const disclosure = page.getByRole('button', { name: '跟随指定玩家，展开下级设置', exact: true });
@@ -64,6 +68,7 @@ try {
     const search = root.locator('input[type=search]');
     const first = root.locator('input[type=checkbox]').first();
     await first.waitFor();
+    assert.deepEqual(await root.locator('.config-option .config-player-power').allTextContents(), ['战力 123.45万', '战力 2.34亿']);
     assert.equal(await search.evaluate(node => node === document.activeElement), !mobile, '仅桌面展开时自动聚焦盟友搜索框');
     await activate(root.locator('.config-player-name').first());
     assert.equal(await first.isChecked(), true, '点击盟友名字应勾选');
@@ -97,8 +102,68 @@ try {
     await search.press('Shift+Tab');
     await summary.press('Shift+Tab');
     assert.equal(await root.locator('details').getAttribute('open'), null, '键盘移出下拉框仍关闭列表');
-    await activate(root.getByRole('button', { name: '从跟随名单移除测试盟友乙', exact: true }));
-    await activate(page.locator('#config-field-treasure-follow'));
+    await activate(summary);
+    await search.fill('');
+    await activate(root.getByText('测试盟友甲', { exact: true }));
+    await activate(summary);
+    const selected = root.getByRole('list');
+    const firstId = '9007199254740993', secondId = '9007199254740994';
+    assert.deepEqual(await selected.locator('.config-player-identity small').allTextContents(), ['ID ' + secondId, 'ID ' + firstId]);
+    assert.deepEqual(await selected.locator('.config-player-power').allTextContents(), ['战力 2.34亿', '战力 123.45万']);
+    for (const label of ['测试盟友甲', '测试盟友乙']) {
+      assert.equal(await root.getByText(label, { exact: true }).filter({ visible: true }).count(), 1, '每位已选盟友只显示一次');
+    }
+    assert.equal(await root.getByRole('button', { name: /^移除/ }).count(), 0);
+    assert.equal(await summary.getByText('已选 2 位', { exact: true }).isVisible(), true);
+    await root.screenshot({ path: path.join(output, mobile ? 'roster-mobile.png' : 'roster-desktop.png'), animations: 'disabled' });
+    const morePlayers = root.getByRole('button', { name: '查看全部', exact: true });
+    assert.equal(await morePlayers.count(), 0);
+    const setRoster = ids => page.evaluate(ids => configSet('treasure.followPlayerIds', ids), ids);
+    const ordered = [secondId, firstId, ...extraMembers.map(member => member.id)];
+    await setRoster(ordered.slice(0, 3));
+    await morePlayers.waitFor();
+    const compactHeight = await selected.evaluate(node => node.clientHeight);
+    await setRoster(ordered);
+    await page.locator('#config-state').filter({ hasText: '配置已同步' }).waitFor();
+    assert.equal(await selected.getByRole('listitem').count(), 2);
+    assert.equal(await selected.evaluate(node => node.clientHeight), compactHeight);
+    assert.equal(await summary.getByText('已选 30 位', { exact: true }).isVisible(), true);
+    await root.screenshot({ path: path.join(output, mobile ? 'roster-compact-mobile.png' : 'roster-compact-desktop.png'), animations: 'disabled' });
+    if (mobile) {
+      const viewport = page.viewportSize();
+      await page.setViewportSize({ ...viewport, width: 320 });
+      const footer = root.locator('.config-player-footer');
+      const buttonTops = await footer.getByRole('button').evaluateAll(buttons => buttons.map(button => button.getBoundingClientRect().top));
+      assert.equal(new Set(buttonTops).size, 1, '窄屏操作按钮保持同一行');
+      await page.setViewportSize(viewport);
+    }
+    if (mobile) await activate(morePlayers);
+    else {
+      await morePlayers.press('Enter');
+      assert.equal(await selected.evaluate(node => node === document.activeElement), true);
+    }
+    assert.equal(await selected.getByRole('listitem').count(), 30);
+    assert.equal(await selected.evaluate(node => node.scrollHeight > node.clientHeight && node.clientHeight <= innerHeight * 0.42 + 1), true);
+    await selected.getByRole('listitem').last().scrollIntoViewIfNeeded();
+    assert(await selected.evaluate(node => node.scrollTop > 0));
+    await activate(root.getByRole('button', { name: '收起名单', exact: true }));
+    assert.equal(await selected.getByRole('listitem').count(), 2);
+    assert.equal(await selected.evaluate(node => node.scrollTop), 0);
+    await activate(root.getByRole('button', { name: '编辑跟随名单', exact: true }));
+    await activate(selected.getByRole('listitem').last().getByRole('button', { name: /^移除/ }));
+    await activate(root.getByRole('button', { name: '完成编辑跟随名单', exact: true }));
+    assert.equal(await selected.getByRole('listitem').count(), 2);
+    await page.locator('#config-state').filter({ hasText: '配置已同步' }).waitFor();
+    assert.deepEqual(loadAutomationSettings('player-picker').settings.treasure.followPlayerIds, ordered.slice(0, -1));
+    await setRoster([secondId, firstId]);
+    await activate(root.getByRole('button', { name: '编辑跟随名单', exact: true }));
+    await activate(root.getByRole('button', { name: '移除（测试盟友甲，ID ' + firstId + '）', exact: true }));
+    await activate(root.getByRole('button', { name: '完成编辑跟随名单', exact: true }));
+    assert.equal(await selected.getByRole('listitem').count(), 1);
+    assert.equal(await root.getByRole('button', { name: /^移除/ }).count(), 0);
+    await activate(root.getByRole('button', { name: '编辑跟随名单', exact: true }));
+    await activate(root.getByRole('button', { name: /^移除并关闭.*测试盟友乙/ }));
+    assert.equal(await page.locator('#config-field-treasure-follow').getAttribute('aria-checked'), 'false');
     await page.locator('#config-state').filter({ hasText: '配置已同步' }).waitFor();
     assert.deepEqual(loadAutomationSettings('player-picker').settings.treasure.followPlayerIds, []);
     const chase = page.locator('#config-field-treasure-chase');
@@ -138,32 +203,35 @@ try {
     await page.locator('#config-state').filter({ hasText: '配置已同步' }).waitFor();
     const settings = loadAutomationSettings('player-picker').settings;
     rememberPlayerNames('player-picker', settings, [{ id, name: old }]);
-    rememberPlayerNames('player-picker', settings, [{ id, name }]);
+    rememberPlayerNames('player-picker', settings, [{ id, name, power: '876543210' }]);
     // 迟到的行军快照不能把已核实的新昵称改回去。
     rememberPlayerNames('player-picker', settings, [{ id, name: old }], { initialOnly: true });
     assert.deepEqual(listedPlayerNames('另一个账号', settings), {});
-    const history = chaseIds.locator('..').locator('.config-list-history');
-    await activate(history.getByRole('button', { name: /刷新.*昵称/ }));
+    const history = chaseIds.locator('.config-list-history');
+    await activate(history.getByRole('button', { name: /刷新.*资料/ }));
     await history.getByText('已改名 · 曾用名 ' + old, { exact: true }).waitFor();
+    await history.getByText('战力 8.76亿', { exact: true }).waitFor();
+    await activate(history.getByRole('button', { name: '编辑追杀玩家', exact: true }));
     await activate(history.getByRole('button', { name: '删除旧昵称“' + old + '”', exact: true }));
     assert.equal(await aliases.inputValue(), '');
     await page.locator('#config-state').filter({ hasText: '配置已同步' }).waitFor();
     assert.deepEqual(loadAutomationSettings('player-picker').settings.treasure.chasePlayerIds, [id]);
     // 绑定后 ID 和手填昵称均应保存。仅删除 ID 时追杀仍能按昵称运行。
     await aliases.fill(old);
-    await activate(history.getByRole('button', { name: '移除 ID（' + id + '）', exact: true }));
+    await activate(history.getByRole('button', { name: '移除（' + name + '，ID ' + id + '）', exact: true }));
     await activate(history.getByRole('button', { name: '绑定此 ID 并保留“' + old + '”', exact: true }));
-    assert.equal(await chaseIds.locator('.config-player-tags .config-player-tag').count(), 1);
+    assert.equal(await history.getByRole('listitem').count(), 1);
     assert.equal(await aliases.inputValue(), old);
     await page.locator('#config-state').filter({ hasText: '配置已同步' }).waitFor();
     const bound = loadAutomationSettings('player-picker').settings.treasure;
     assert.deepEqual(bound.chasePlayerIds, [id]);
     assert.deepEqual(bound.chaseNames, [old]);
-    await activate(history.getByRole('button', { name: '移除 ID（' + id + '）', exact: true }));
+    await activate(history.getByRole('button', { name: '移除（' + name + '，ID ' + id + '）', exact: true }));
     assert.equal(await chase.getAttribute('aria-checked'), 'true');
     await activate(history.getByRole('button', { name: /删除旧昵称.*并关闭/ }));
     assert.equal(await chase.getAttribute('aria-checked'), 'false');
-    await activate(avoidIds.getByRole('button', { name: /从避战玩家移除/ }));
+    await activate(avoidIds.getByRole('button', { name: '编辑避战玩家', exact: true }));
+    await activate(avoidIds.getByRole('button', { name: /^移除（/ }));
     await page.locator('#config-state').filter({ hasText: '配置已同步' }).waitFor();
     assert.deepEqual(loadAutomationSettings('player-picker').settings.treasure.chasePlayerIds, []);
     assert.deepEqual(listedPlayerNames('player-picker', settings), {});
@@ -187,8 +255,10 @@ try {
     assert.deepEqual(policy.huntPlayerIds, ['9007199254740995']);
     assert.deepEqual(policy.safePlayerIds, ['9007199254740994']);
     // 下一种屏幕尺寸从空名单开始。
-    await activate(hunted.locator('..').getByRole('button', { name: /移除 ID并关闭追杀/ }));
-    await activate(safe.getByRole('button', { name: /从舰队1 · 安全玩家移除/ }));
+    await activate(hunted.getByRole('button', { name: '编辑舰队1 · 追杀玩家', exact: true }));
+    await activate(hunted.getByRole('button', { name: /^移除并关闭追杀/ }));
+    await activate(safe.getByRole('button', { name: '编辑舰队1 · 安全玩家', exact: true }));
+    await activate(safe.getByRole('button', { name: /^移除（/ }));
     await page.locator('#config-state').filter({ hasText: '配置已同步' }).waitFor();
     await page.close();
     console.log('通过：' + (mobile ? '手机触屏' : '桌面鼠标') + '盟友选择、改名标记、绑定 ID 保留昵称兜底及移除均可保存');

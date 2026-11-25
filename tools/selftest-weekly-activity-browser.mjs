@@ -161,6 +161,17 @@ try {
     assert.equal(await field(page, kind + 'Stop').isVisible(), true, kind + ' 点击展开后显示参数');
   }
   await field(page, 'enabled').click();
+  const antiqueOptions = branch(page, 'antique');
+  assert(await field(page, 'antiqueStop').isVisible());
+  const ticketSwitch = field(antiqueOptions, 'antiqueRecruitTickets'), ticketLimit = field(antiqueOptions, 'antiqueTicketLimit');
+  assert.equal(await ticketSwitch.getAttribute('aria-checked'), 'false');
+  assert.equal(await ticketLimit.isVisible(), false);
+  await ticketSwitch.click();
+  assert.equal(await ticketLimit.inputValue(), ''); assert.equal(await ticketLimit.getAttribute('placeholder'), '用完为止');
+  await ticketLimit.fill('63'); await saved(page);
+  assert.equal(loadAutomationSettings('weekly-a').settings.weeklyActivity.antiqueTicketLimit, 63);
+  await ticketLimit.fill(''); await saved(page);
+  assert.equal(loadAutomationSettings('weekly-a').settings.weeklyActivity.antiqueTicketLimit, 0);
   for (const name of ['farmRecruitTimes','farmSpeedUp','petQualityOrder','forgeQualityOrder']) assert(await field(page, name).isVisible());
   assert(await field(page, 'farmStop').getByLabel('全天参与', { exact: true }).isChecked());
   await field(page, 'farmRecruitTimes').fill('15'); await field(page, 'farmSpeedUp').click();

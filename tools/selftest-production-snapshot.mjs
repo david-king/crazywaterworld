@@ -582,6 +582,7 @@ await test('跨请求期间发生游戏写入或相关推送时拒绝混合快�
   for (const event of [
     ['frame', { dir: 'out', name: 'GainFactoryProductsRequest' }],
     ['frame', { dir: 'out', name: 'FillCargoShipRequest' }],
+    ['message', { name: 'SCCounterUpdate', body: { info: { type: 'DAILY_FINISH_GUILD_ORDER' } } }],
     ...['SCUpdateItem', 'SCUpdateResource', 'SCUpdateWaterBuilding', 'SCWorkerOrder', 'SCGuildOrder', 'SCAllActivity', 'SCHeroRaidOpen']
       .map(name => ['message', { name, body: {} }]),
   ]) {

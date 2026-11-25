@@ -5,6 +5,7 @@ import { atomicJson, readJson, withFileLock } from './json-store.mjs';
 import { accountKey, dataDirectory } from './usage-ledger.mjs';
 import { validPlayerIdText } from './extended-settings.mjs';
 import { exactAutomationId } from './automation-policy.mjs';
+import { playerPowerText } from './opponent-power.mjs';
 
 const historyFile = account => path.join(dataDirectory(), 'player-names', createHash('sha256').update(accountKey(account)).digest('hex') + '.json');
 
@@ -13,11 +14,16 @@ export async function readWorldListPlayers(client, player, check, rankType, prev
   const members = new Map(previous?.members.map(row => [row.id, row]));
   const unavailable = [];
   if (!ownId) throw Error('当前角色身份未同步');
-  function add(source, rows) {
+  function add(source, rows, powerKey = 'power') {
     for (const row of rows) {
       const id = exactAutomationId(row?.playerId), name = row?.nickname;
-      if (!id || id === ownId || members.has(id) || typeof name !== 'string' || !name.trim() || name.length > 120) continue;
-      members.set(id, { id, name, source, guildIdx: row.guildIdx > 0 ? row.guildIdx : null });
+      if (!id || id === ownId || typeof name !== 'string' || !name.trim() || name.length > 120) continue;
+      const power = playerPowerText(row, powerKey), known = members.get(id);
+      if (known) {
+        if (known.power == null && power != null) members.set(id, { ...known, power });
+      } else {
+        members.set(id, { id, name, source, power, guildIdx: row.guildIdx > 0 ? row.guildIdx : null });
+      }
     }
   }
   async function read(source, request, args, rows) {
@@ -35,7 +41,7 @@ export async function readWorldListPlayers(client, player, check, rankType, prev
     if (!Number.isInteger(rankType)) throw Error('当前版本缺少战力榜');
     const rank = await client.request('RankRequest', { rankType, page }, 'RankResponse', 8000, check);
     if (!Array.isArray(rank?.rankData)) throw Error('服务器未返回战力榜名单');
-    add('战力榜', rank.rankData);
+    add('战力榜', rank.rankData, 'rankValue');
     if (Number.isInteger(rank.maxPage) && rank.maxPage > 0) rankPages = rank.maxPage;
     else if (rank.rankData.length) rankPages = page;
   } catch {
@@ -83,26 +89,36 @@ export function listedPlayerNames(account, settings) {
 export function rememberPlayerNames(account, settings, observations, { initialOnly = false } = {}) {
   const rules = listRules(settings);
   if (!rules.ids.size && !rules.hasNames) return;
-  const names = new Map();
-  for (const { id, name } of observations) {
+  const profiles = new Map();
+  for (const row of observations) {
+    const { id, name } = row;
     if (!validPlayerIdText(id) || typeof name !== 'string' || !name.trim() || name.length > 120) continue;
     if (initialOnly && !rules.ids.has(id) && !rules.matches(name)) continue;
-    names.set(id, !names.has(id) || names.get(id) === name ? name : null);
+    const prior = profiles.get(id);
+    profiles.set(id, profiles.has(id) && prior?.name !== name ? null : { name, power: playerPowerText(row) ?? prior?.power });
   }
-  if (!names.size) return;
+  if (!profiles.size) return;
   const file = historyFile(account);
-  const changes = history => [...names].filter(([id, name]) => name && history[id]?.name !== name && !(initialOnly && history[id])
-    && (rules.matches(name) || listed(rules, id, history[id])));
+  function changes(history) {
+    const updates = [];
+    for (const [id, profile] of profiles) {
+      const old = history[id];
+      if (!profile || !(rules.matches(profile.name) || listed(rules, id, old))) continue;
+      if (initialOnly && old && (old.name !== profile.name || old.power != null)) continue;
+      const { name } = profile, power = profile.power ?? old?.power;
+      if (name === old?.name && power === old.power) continue;
+      const previous = old && old.name !== name ? [...new Set([old.name, ...old.previous])].filter(alias => alias !== name) : old?.previous ?? [];
+      updates.push([id, { name, previous, ...(power == null ? {} : { power }) }]);
+    }
+    return updates;
+  }
   if (!changes(readJson(file, {})).length) return;
   return withFileLock(file, () => {
     const history = readJson(file, {}), updates = changes(history);
-    for (const [id, name] of updates) {
-      const old = history[id];
-      history[id] = { name, previous: old ? [...new Set([old.name, ...old.previous])].filter(alias => alias !== name) : [] };
-    }
     if (!updates.length) return;
-    atomicJson(file, history);
-    return Object.fromEntries(updates.map(([id]) => [id, history[id]]));
+    const changed = Object.fromEntries(updates);
+    atomicJson(file, { ...history, ...changed });
+    return changed;
   });
 }
 

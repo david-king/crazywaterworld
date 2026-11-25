@@ -4,7 +4,8 @@ import os from 'node:os';
 import path from 'node:path';
 const root = fs.mkdtempSync(path.join(os.tmpdir(), 'cw-alliance-auto-'));
 process.env.CW_DATA_DIR = root;
-const { createUsageLedger } = await import('../src/automation-settings.mjs');
+const { createUsageLedger, defaultSettings } = await import('../src/automation-settings.mjs');
+const { surveyBaseAutomation, baseDemands } = await import('../src/base-automation.mjs');
 const { runAllianceAutomation, allianceRecruitDemand, readAllianceRecruitDemand, allianceExchangeMaterial } = await import('../src/alliance-automation.mjs');
 const { guildMutualFixture } = await import('./fixtures/guild-mutual.mjs');
 const { runGuildMutual } = await import('../src/guild-mutual.mjs');
@@ -288,6 +289,28 @@ try {
     assert.deepEqual(allianceRecruitDemand(view, s, { counters: { guildRecruit: 2 } }), []);
     s.alliance.recruitDailyLimit = 0; assert.equal(allianceRecruitDemand(view, s).length, 1);
     assert.deepEqual(allianceRecruitDemand({ ...view, nextRefreshTime: 50 }, s), []);
+  });
+  await test('工厂独立按需备料也检查游戏每日募兵次数，次数恢复后读取新单', async () => {
+    const f = newSeasonRecruitFixture({ doneToday: 1 });
+    const s = defaultSettings();
+    Object.assign(s.factory, { demandFirst: true, demandPriority: ['guildRecruit'], keepStock: 0 });
+    const world = { serverNow: Math.floor(Date.now() / 1000), buildings: [], factories: [] };
+    const demand = async () => baseDemands(await surveyBaseAutomation(f.client, f.protocol, f.config, f.player, s, world), f.config, s);
+    assert.deepEqual(await demand(), [{ source: 'guildRecruit', requirements: [{ id: '木材', num: 2 }] }]);
+    f.state.recruitCount = 2;
+    assert.deepEqual(await demand(), []);
+    const request = f.client.request;
+    let counters = {};
+    let nextRefreshTime = world.serverNow + 3600;
+    f.client.request = (name, ...args) => name === 'CounterInfoRequest' ? counters : name === 'GuildOrderRequest'
+      ? { order: { requirements: [{ id: '粗铁', num: 3 }], nextRefreshTime } } : request(name, ...args);
+    assert.deepEqual(await demand(), []);
+    world.serverNow += 86400;
+    f.client.serverClockOffsetMs = 86400_000;
+    counters = { counters: [] };
+    assert.deepEqual(await demand(), [], '次数已恢复，仍需等待过期订单刷新');
+    nextRefreshTime = world.serverNow + 3600;
+    assert.deepEqual(await demand(), [{ source: 'guildRecruit', requirements: [{ id: '粗铁', num: 3 }] }]);
   });
   await test('S10缺少专属配置时自动募兵、备料和默认缺料求助共用旧赛季额度', async () => {
     const ready = newSeasonRecruitFixture();

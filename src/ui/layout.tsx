@@ -1,6 +1,6 @@
 import * as React from "react"
 import { renderToStaticMarkup } from "react-dom/server"
-import { Boxes, Building2, CalendarDays, Check, ChevronDown, CircleUserRound, Download, LayoutDashboard, Monitor, Moon, MoreHorizontal, RefreshCw, ScrollText, Search, Settings2, Ship, Sun, Swords, UsersRound, X } from "lucide-react"
+import { Boxes, Building2, CalendarDays, Check, ChevronDown, CircleUserRound, Download, GripVertical, LayoutDashboard, Monitor, Moon, MoreHorizontal, RefreshCw, ScrollText, Search, Settings2, Ship, Sun, Swords, UsersRound, X } from "lucide-react"
 import { Button } from "./button"
 import { Badge } from "./badge"
 import { Card, CardHeader, CardTitle, CardContent, CardFooter } from "./card"
@@ -177,6 +177,45 @@ export function templates() {
     <template id="ui-confirm"><Button size="sm" /></template>
     <template id="ui-select"><NativeSelect size="sm" /></template>
     <template id="ui-number"><Input type="number" /></template>
+    <template id="ui-refill">
+      <Card className="gap-0 overflow-hidden py-0 max-md:gap-0 max-md:py-0">
+        <div data-refill-rules="" className="divide-y empty:hidden" />
+        <div className="config-refill-add bg-muted/30">
+          <NativeSelect size="sm" aria-label="选择补库工厂" />
+          <NativeSelect size="sm" aria-label="选择要添加的物品" />
+          <Button type="button" variant="outline" size="sm" disabled>添加补库规则</Button>
+        </div>
+      </Card>
+    </template>
+    <template id="ui-refill-factory">
+      <section role="group">
+        <div className="flex flex-wrap items-baseline gap-x-3 bg-muted/30 px-3 py-2 sm:px-4">
+          <h4 data-refill-factory-name="" className="text-sm" />
+          <span data-refill-order-hint="" className="text-xs text-muted-foreground" hidden>同时缺货时，从上到下生产</span>
+        </div>
+        <div data-refill-products="" className="divide-y" />
+      </section>
+    </template>
+    <template id="ui-refill-rule">
+      <fieldset className="config-dispatch-sortable min-w-0 px-3 py-2 sm:px-4">
+        <div className="config-refill-line">
+          <div className="config-refill-product flex min-w-0 max-w-full items-center gap-2">
+            <Button type="button" variant="ghost" size="icon-sm" className="config-dispatch-handle text-muted-foreground pointer-coarse:size-11" data-refill-handle="" hidden><GripVertical aria-hidden="true" /></Button>
+            <NativeSelect size="sm" aria-label="补库物品" />
+            <span data-refill-rank="" hidden />
+          </div>
+          <div className="config-refill-fields">
+            <label><span className="text-xs text-muted-foreground">库存 ≤</span><Input type="number" inputMode="numeric" min="0" step="1" required data-quantity="trigger" /></label>
+            <label><span className="text-xs text-muted-foreground">补至库存</span><Input type="number" inputMode="numeric" min="1" step="1" placeholder="仓容上限" data-quantity="target" /></label>
+          </div>
+          <div className="flex items-center justify-self-end gap-1">
+            <Button type="button" variant="outline" size="sm" data-refill-move="-1" hidden>上移</Button>
+            <Button type="button" variant="outline" size="sm" data-refill-move="1" hidden>下移</Button>
+            <Button type="button" variant="ghost" size="sm" data-refill-remove="" className="text-muted-foreground hover:text-destructive">移除</Button>
+          </div>
+        </div>
+      </fieldset>
+    </template>
     <template id="ui-delete"><Button variant="destructive" size="sm" /></template>
     <template id="ui-badge"><Badge variant="outline" /></template>
     <template id="ui-log-badge"><Badge variant="outline" className="log-tag max-w-full justify-start text-left" /></template>
@@ -200,6 +239,7 @@ export function templates() {
           <details className="account-card-menu col-start-2 row-span-2 row-start-1">
             <summary aria-label="更多账号操作"><MoreHorizontal aria-hidden="true" /></summary>
             <div className="account-menu-content">
+              <Button type="button" variant="ghost" size="sm" className="h-7 w-full justify-start px-2.5" data-account-action="exclusive" title="暂停同账号其他角色并托管此角色" hidden>切换并托管</Button>
               <Button type="button" variant="ghost" size="sm" className="h-7 w-full justify-start px-2.5" data-account-action="rename">修改备注</Button>
               <Button type="button" variant="ghost" size="sm" className="h-7 w-full justify-start px-2.5" data-account-action="export">导出账号</Button>
               <Button type="button" variant="ghost" size="sm" className="h-7 w-full justify-start px-2.5 text-destructive" data-account-action="remove">移除账号</Button>

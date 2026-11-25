@@ -2,6 +2,7 @@ import { newStateFunction } from './fixtures/console-state.mjs';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 
+const selectionScript = fs.readFileSync(new URL('../src/role-selection-ui.js', import.meta.url), 'utf8');
 const script = fs.readFileSync(new URL('../src/alipay-login-ui.js', import.meta.url), 'utf8');
 const prefix = '/api/accounts/alipay-login';
 const fixedNow = 1_794_830_400_000;
@@ -109,6 +110,7 @@ function fixture({ wizard = false } = {}) {
       env.detailsAtSelection.push(accountDetailsOwner);
       env.selections.push(id);
     }
+    ${selectionScript}
     ${script}
     env.reset = resetAlipayLogin;
   `)(env);
@@ -119,12 +121,11 @@ function fixture({ wizard = false } = {}) {
     env, node, state, choices, timers,
     click(id) { return node(id).onclick(); },
     calls(suffix) { return env.calls.filter(entry => entry.route.startsWith(prefix + suffix)); },
-    roles() { return descendants(node('alipay-roles')).filter(element => element.type === 'radio'); },
+    roles() { return descendants(node('alipay-roles')).filter(element => element.type === 'checkbox'); },
     chooseRole(index) {
       const roles = this.roles();
       assert.ok(roles[index]);
-      for (const role of roles) role.checked = false;
-      roles[index].checked = true;
+      roles[index].checked = !roles[index].checked;
       roles[index].onchange();
     },
     async captured(selectedChoices = choices) {
@@ -461,6 +462,25 @@ await test('自动读取角色时继续轮询，单个角色自动选中并展�
   assert.match(f.node('alipay-roles').textContent, /支付宝角色.*海港123服.*等级 35.*战力 123,456/);
   assert.doesNotMatch(f.node('alipay-result').textContent, /abcdef/);
   assert.equal(f.node('alipay-save').disabled, false);
+});
+
+await test('同一预览可勾选多个角色并取消其中一个，一次保存剩余角色', async () => {
+  const f = fixture();
+  await f.click('alipay-start');
+  const choices = [1, 2, 3].map(i => ({ ...f.choices[0], id: 'pick-' + i, worldId: 1000 + i, nickname: '船长' + i }));
+  await f.captured(choices);
+  for (const index of [0, 1, 2, 1]) f.chooseRole(index);
+  assert.deepEqual(f.roles().map(role => role.checked), [true, false, true]);
+  const original = f.env.respond;
+  f.env.respond = (route, payload) => {
+    if (!route.endsWith('/save')) return original(route, payload);
+    const accounts = payload.choiceIds.map(id => ({ id, status: { connected: false } }));
+    return { account: accounts[0], accounts, selectedRoles: [choices[0], choices[2]] };
+  };
+  await f.click('alipay-save');
+  assert.deepEqual(f.calls('/save').map(call => call.payload.choiceIds), [['pick-1', 'pick-3']]);
+  assert.match(f.node('alipay-result').textContent, /船长1.*船长3/);
+  assert(f.env.accounts.some(account => account.id === 'pick-3'));
 });
 
 for (const selected of [1, 2]) {

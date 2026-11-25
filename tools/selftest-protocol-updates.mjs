@@ -2,6 +2,7 @@
 // server or evaluate an installed client's code.
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
+import { execFileSync } from 'node:child_process';
 import os from 'node:os';
 import path from 'node:path';
 import { getProtocol, getProtocolSource, loadProtocol } from '../src/proto.mjs';
@@ -50,13 +51,14 @@ function archive(code) {
 
 const root = fs.realpathSync(os.tmpdir());
 const directory = fs.mkdtempSync(path.join(root, 'cw-protocol-updates-'));
-const previous = { APPDATA: process.env.APPDATA, CW_PROTO_BUNDLE: process.env.CW_PROTO_BUNDLE };
+const previous = { APPDATA: process.env.APPDATA, CW_PROTO_BUNDLE: process.env.CW_PROTO_BUNDLE, CW_DATA_DIR: process.env.CW_DATA_DIR };
 process.env.APPDATA = directory;
+process.env.CW_DATA_DIR = path.join(directory, 'data');
 delete process.env.CW_PROTO_BUNDLE;
 const packageRoot = path.join(directory, 'Tencent/xwechat/radium/users/fixture/applet/packages/wx2ea52a972ea18e5e');
 let passed = 0;
 const test = (name, run) => { run(); passed++; console.log('通过：' + name); };
-const version = protocol => protocol.PingResponse.decode(protocol.PingResponse.encode({}).finish()).version;
+const version = ({ PingResponse }) => PingResponse.decode(PingResponse.encode(new PingResponse()).finish()).version;
 const writePackage = (number, code = source(number)) => {
   const file = path.join(packageRoot, String(number), '_src_chunks_.wxapkg');
   fs.mkdirSync(path.dirname(file), { recursive: true });
@@ -118,13 +120,14 @@ try {
     assert.equal(String(decoded.sequence), '0');
     assert.equal(getProtocolSource(protocol).packageVersion, '78');
   });
-  test('空版本目录不遮蔽现有协议，两个读取入口均拒绝缺分包后的旧版回退', () => {
+  test('新版主包等待协议分包时沿用已验证副本，分包到齐即更新', () => {
     const next = path.join(packageRoot, '79');
     fs.mkdirSync(next);
     assert.equal(protocolSourceInfo().packageVersion, '78');
     fs.writeFileSync(path.join(next, '__APP__.wxapkg'), 'synthetic installed main package');
-    assert.throws(() => getProtocol(), error => error.code === 'PROTOCOL_UPDATE_FAILED' && /79.*协议分包尚未下载/.test(error.message));
-    assert.throws(() => readProtocolSource(), /79.*协议分包尚未下载/, '直接读取与连接入口使用同一协议选择规则');
+    assert.equal(protocolSourceInfo().kind, 'cached');
+    assert.equal(version(getProtocol()), 78);
+    assert.equal(readProtocolSource(), source(78, '', true));
     assert.equal(version(getProtocol(firstFile)), 74, '显式选择仍优先');
     writePackage(79);
     assert.equal(version(getProtocol()), 79);
@@ -143,6 +146,17 @@ try {
     assert.throws(() => getProtocol(path.join(directory, 'missing.js')), error => error.name === 'ProtocolUpdateError');
     assert.equal(version(loadProtocol(firstFile)), 74);
     assert.equal(getProtocolSource({}), null);
+  });
+  test('移走包并重启后仍能使用最后一次通过验证的更新，损坏的更新不会写入缓存', () => {
+    writePackage(81, source(81, 'Ack'));
+    assert.throws(() => getProtocol(), /缺少基础消息编解码：Ack/);
+    fs.renameSync(path.join(directory, 'Tencent'), path.join(directory, 'removed-packages'));
+    assert.equal(protocolSourceInfo().kind, 'cached');
+    assert.equal(version(getProtocol()), 80);
+    const output = execFileSync(process.execPath, ['--input-type=module', '-e',
+      `import { getProtocol } from ${JSON.stringify(new URL('../src/proto.mjs', import.meta.url).href)};
+       const t = getProtocol().PingResponse; console.log(t.decode(t.encode({}).finish()).version);`], { encoding: 'utf8' });
+    assert.equal(output.trim(), '80');
   });
   console.log('协议更新验证通过 ' + passed + ' 项。');
 } finally {

@@ -439,6 +439,33 @@ html[data-theme="dark"] {
 
 }
 
+/* 商船分组随面板宽度换列，控件沿用控制台主题。 */
+.guild-ship-panel { container:ship-panel / inline-size; min-width:0; }
+.guild-ship-settings { grid-template-columns:repeat(2,minmax(0,1fr)); gap:14px; align-items:start; }
+.guild-ship-settings > [role=status] { grid-column:1 / -1; }
+.guild-ship-settings > [role=status]:empty { display:none; }
+.ship-column { display:grid; gap:14px; min-width:0; }
+.ship-group { gap:0; padding:16px 16px 4px; }
+.ship-group > :is([data-slot=card-header],[data-slot=card-content]) { padding:0; }
+.ship-group h3 { display:flex; align-items:center; gap:8px; margin:0 0 8px; }
+.ship-group h3 svg { width:1em; height:1em; }
+.ship-group .config-row { grid-template-columns:minmax(0,1fr) auto; gap:8px; min-height:46px; padding:8px 0; }
+.ship-group .config-row:is([data-kind=choice],[data-kind=multi]) { grid-template-columns:minmax(0,1fr); padding-block:10px 12px; }
+.config-control > [data-slot=native-select-wrapper] { display:block; width:100%; }
+.ship-group [data-kind=number] > .config-control { display:flex; justify-content:end; }
+.ship-group input[type=number] { width:5rem; max-width:100%; text-align:end; }
+.ship-group input[type=time] { width:8.5rem; }
+.ship-group .config-multi summary { overflow-wrap:anywhere; }
+@container ship-panel (max-width:620px) {
+  .guild-ship-settings { grid-template-columns:minmax(0,1fr); }
+  .guild-ship-settings,.ship-column { gap:10px; }
+  .ship-group { padding-inline:15px; }
+}
+@media (pointer:coarse) {
+  .ship-group .config-row { min-height:50px; }
+  .ship-group :is([data-slot=input],[data-slot=native-select],.config-multi summary) { min-height:44px; font-size:16px; }
+}
+
 /* 建筑、订单与排产共用的小表。 */
 .config-discount-table { border:1px solid var(--border); border-radius:8px; }
 .config-discount-table table { table-layout:fixed; }

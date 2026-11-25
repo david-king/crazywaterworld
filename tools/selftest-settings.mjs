@@ -14,7 +14,7 @@ import { planHeroes } from '../src/heroes.mjs';
 import { DAILY_DRIVERS, runDailies } from '../src/dailies.mjs';
 import { serviceCargo } from '../src/cargo.mjs';
 import { runLoop } from '../src/loop.mjs';
-import { retiredAutomationTasks, removedScheduleKeys, taskSettings } from '../src/automation.mjs';
+import { retiredAutomationTasks, removedScheduleKeys, taskSettings, worldTaskKey } from '../src/automation.mjs';
 
 const parent = path.join(os.tmpdir(),'cw-parameter-test-runs');
 fs.mkdirSync(parent, { recursive: true });
@@ -570,9 +570,16 @@ try {
     const state = survey({ 产品甲: 2 }, [], [order(0, [{ id: '产品甲', num: 2 }]), order(1, [{ id: '产品甲', num: 2 }])]);
     assert.equal(planWorld(state, { config, settings }).actions.filter(a => a.kind === 'finishOrder').length, 1);
     settings.resident.skipProduction = true;
-    assert.equal(planWorld(state, { config, settings }).orderDecisions[1].status, 'filtered');
+    assert.equal(planWorld(state, { config, settings }).orderDecisions[1].status, 'reroll');
     settings.resident.skipProduction = false;
-    settings.resident.blockedMaterials = ['产品甲']; assert.equal(planWorld(state, { config, settings }).actions.length, 0);
+    settings.resident.blockedMaterials = ['产品甲'];
+    const flags = nativeTaskValues(settings, {});
+    assert.equal(flags.denyOrder, true);
+    const blocked = planWorld(state, { config, settings, enabled: kind => flags[worldTaskKey(kind)] });
+    assert.deepEqual(blocked.actions.map(step => step.materialRule), ['blockedMaterials', 'blockedMaterials']);
+    settings.resident.blockedMaterials = ['无关物品']; settings.resident.minExp = 800;
+    assert.equal(planWorld(state, { config, settings }).actions.length, 0, '启用材料规则不会连带开启低奖励换单');
+    settings.resident.minExp = 0; settings.resident.blockedMaterials = ['产品甲'];
     settings.resident.reroll = true; assert.equal(planWorld(state, { config, settings }).actions.filter(a => a.kind === 'denyOrder').length, 2);
     settings.resident.blockedMaterials = []; settings.resident.reroll = false; settings.resident.minExp = 800;
     assert.equal(planWorld(state, { config, settings }).actions.length, 0);
@@ -580,6 +587,13 @@ try {
     settings.resident.minGold = 0; settings.resident.dailyCap = 1;
     assert.equal(planWorld(state, { config, settings, usage: { counters: { residentOrders: 1 } } }).actions.length, 0);
     state.orderOfTheDay.orderNum = 1; assert.equal(planWorld(state, { config, settings }).actions.length, 0);
+    state.orderOfTheDay.orderNum = 0;
+    state.orders[0] = order(0, [{ id: '缺料', num: 1 }]);
+    settings.resident.skipProduction = settings.resident.reroll = true;
+    const lastSlot = planWorld(state, { config, settings });
+    assert.deepEqual(lastSlot.actions.map(a => [a.kind, a.body.index]), [['finishOrder', 1]],
+      '最后一个交付名额给材料齐全的订单，达到上限后保留前面的缺料单');
+    assert.match(lastSlot.orderDecisions[0].reason, /上限/);
   });
 
   await check('活动总开关关闭后停止不差钱与超凡英雄备料，重新开启沿用需求选择', () => {

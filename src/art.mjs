@@ -144,6 +144,15 @@ export function workerIcon(workerId) {
   return iconEntry(indexes().worker.get(String(workerId))?.icon);
 }
 
+// WorkerOrderPop 显示 WorkerBaseCfg.showName，头像则由 WorkerOrderUtil 按居民 ID 循环选取。
+const ORDER_WORKER_ICONS = ['worker_001', 'worker_002', 'worker_019'];
+
+export function residentOrderIcon(workerId) {
+  const id = typeof workerId === 'string' ? Number(workerId) : workerId;
+  if (!Number.isSafeInteger(id) || id <= 0) return null;
+  return iconEntry(ORDER_WORKER_ICONS[id % ORDER_WORKER_ICONS.length]);
+}
+
 export function fortIcon(fortId) {
   return iconEntry(indexes().fort.get(fortId)?.icon);
 }

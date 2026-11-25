@@ -1,6 +1,23 @@
 const rows = (config, name) => config?.tables?.[name]?.data ?? [];
 const quantity = value => Number.isSafeInteger(value) && value >= 0;
 
+// Allocate whole ships first. Each accepted ship spends its stock once, even
+// when several unfilled slots require the same item.
+export function readyCargoOrdersFirst(orders, have, requirementsOf = order => order.requirements) {
+  const allocated = new Map(), ready = [], waiting = [];
+  for (const order of orders) {
+    const needs = new Map();
+    for (const item of requirementsOf(order)) {
+      needs.set(item?.id, (needs.get(item?.id) ?? 0) + item?.num);
+    }
+    if (needs.size && [...needs].every(([id, num]) => num > 0 && num <= have(id) - (allocated.get(id) ?? 0))) {
+      for (const [id, num] of needs) allocated.set(id, (allocated.get(id) ?? 0) + num);
+      ready.push(order);
+    } else waiting.push(order);
+  }
+  return ready.concat(waiting);
+}
+
 // 与客户端FactoryUtil一致：活动工坊只使用服务器limitTimeItem开放窗口。
 export function factoryRecipeAvailability(recipe, festivals, now) {
   if (!recipe) return {allowed:false,reason:'配方未确认',signature:'missing'};

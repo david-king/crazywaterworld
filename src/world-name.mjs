@@ -8,7 +8,7 @@ const AREA_PREFIX = new Map([
   [4, '海灯'],
 ]);
 
-function worldNumber(value) {
+export function worldNumber(value) {
   if (typeof value === 'number') return value;
   if (value && typeof value === 'object' && typeof value.low === 'number') {
     return value.high * 4294967296 + (value.low >>> 0);

@@ -3,3 +3,5 @@
 *.cmd -text whitespace=blank-at-eol,blank-at-eof,space-before-tab,cr-at-eol
 *.png binary
 *.bin binary
+# Keep the generated client bundle byte-for-byte identical to the supplied file.
+protocol/game.js binary

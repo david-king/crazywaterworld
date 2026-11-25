@@ -3,6 +3,7 @@ import { newStateFunction } from './fixtures/console-state.mjs';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 
+const selectionScript = fs.readFileSync(new URL('../src/role-selection-ui.js', import.meta.url), 'utf8');
 const script = fs.readFileSync(new URL('../src/phone-login-ui.js', import.meta.url), 'utf8');
 const prefix = '/api/accounts/phone-login';
 const fixedNow = 1_794_830_400_000;
@@ -160,6 +161,7 @@ function fixture({ detailOwner = 'previous-account', savedChannel = null, storag
       env.select(next);
       snapshot = accounts.find(account => account.id === next)?.status ?? {};
     }
+    ${selectionScript}
     ${script}
     env.reset = resetPhoneLogin;
   `)(env);
@@ -172,12 +174,11 @@ function fixture({ detailOwner = 'previous-account', savedChannel = null, storag
     calls(suffix = '') { return env.calls.filter(entry => entry.route === prefix + suffix); },
     input(id, value) { node(id).value = value; node(id).oninput?.(); },
     click(id) { return node(id).onclick(); },
-    roles() { return descendants(node('phone-result')).filter(element => element.type === 'radio'); },
+    roles() { return descendants(node('phone-result')).filter(element => element.type === 'checkbox'); },
     chooseRole(index = 0) {
       const choices = this.roles();
       assert.ok(choices[index], '角色选项必须存在');
-      for (const choice of choices) choice.checked = false;
-      choices[index].checked = true;
+      choices[index].checked = !choices[index].checked;
       choices[index].onchange();
     },
     submit(mode = 'password') {
@@ -436,6 +437,24 @@ await test('登录预览到期后阻止保存，返回后清理服务端预览',
   assert.equal(f.node('phone-result').textContent, '');
   await f.click('phone-save');
   assert.equal(f.calls('/save').length, 0);
+});
+
+await test('APP 一次保存多个勾选的角色', async () => {
+  const f = fixture();
+  addMultipleRoles(f);
+  f.input('phone-account', '测试账号');
+  f.input('phone-password', 'test-password');
+  await f.submit();
+  f.chooseRole(0); f.chooseRole(2);
+  const original = f.env.respond;
+  f.env.respond = (route, payload) => {
+    if (!route.endsWith('/save')) return original(route, payload);
+    const accounts = payload.choiceIds.map(id => ({ id, status: { connected: false } }));
+    return { account: accounts[0], accounts };
+  };
+  await f.click('phone-save');
+  assert.deepEqual(f.calls('/save').map(call => call.payload.choiceIds), [['choice-1', 'choice-3']]);
+  assert(f.env.accounts.some(account => account.id === 'choice-3'));
 });
 
 for (const index of [1, 2]) {

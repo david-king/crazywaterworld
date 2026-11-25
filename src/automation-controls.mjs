@@ -13,7 +13,7 @@ add('resources.allowDiamonds', '自动钻石消耗总开关', '总控制', { hel
 for (const [key,label] of [
  ['building.enabled','建筑总开关'],['building.collect','收取建筑产出'],['building.build','自动建造'],['building.upgrade','自动升级建筑'],['building.finish','自动完工'],['building.supply','缺料时为建筑备料'],['building.speedUp','建筑自动加速'],
  ['factory.enabled','工厂总开关'],['factory.gain','领取工厂产品'],['factory.produce','工厂自动生产'],['factory.cooperateNative','按需调整原生自动生产'],['factory.speedUp','工厂自动加速'],
- ['farm.enabled','农田总开关'],['resident.enabled','自动交居民订单'],['resident.reroll','刷新不符合条件的订单'],['resident.rewards','领取居民订单进度奖励'],['cargo.enabled','贸易港自动交货与收货'],['events.enabled','处理已支持的随机事件'],
+ ['farm.enabled','农田总开关'],['resident.enabled','自动交居民订单'],['resident.reroll','不达最低经验或金币时自动换单'],['resident.rewards','领取居民订单进度奖励'],['cargo.enabled','贸易港自动交货与收货'],['events.enabled','处理已支持的随机事件'],
  ['pet.enabled','海兽培育总开关'],['museum.runEnabled','博物馆探宝总开关'],['museum.unlockCases','自动解锁展位'],['museum.upgrade','升级博物馆技能与展区'],['museum.revenue','自动领取人气币'],['museum.achievements','自动领取人气奖励'],['museum.display','自动上架藏品'],['museum.enabled','自动探宝'],['gold.enabled','每日钻石点金'],
 ]) {
  const base = key.split('.')[0], gates = key === 'gold.enabled' ? ['loop.dailies'] : ['loop.world'];

@@ -1,4 +1,6 @@
 import assert from 'node:assert/strict';
+import { createUsageLedger, defaultSettings } from '../src/automation-settings.mjs';
+import { createActionGuard } from '../src/automation-policy.mjs';
 import { runLoop } from '../src/loop.mjs';
 import { orderSlotsAfterHarvest, planWorld, runWorld, runWorldRound, submitResidentOrder, surveyWorld } from '../src/world.mjs';
 
@@ -77,6 +79,8 @@ export async function testResidentOrders() {
   assert.equal(finishes().length, 0);
   assert.equal(checks, 2, '下一轮规划必须重新读取动作开关');
   await testManualResidentOrder();
+  await testDeliveryBeforeReroll();
+  await testMaterialRerolls();
   await testActualShortages();
   await testWeeklyPriority();
   const client = mock();
@@ -122,6 +126,79 @@ export async function testResidentOrders() {
   assert(!noAck.results[0].ok);
   assert.match(noAck.results[0].error, /未返回.*奖励/);
   await testHarvestOrders();
+}
+
+async function testDeliveryBeforeReroll() {
+  const client = mock();
+  client.weekly = 0;
+  client.stock = 3;
+  client.onWater = ['面包', '烤鱼', '酒精', '卷纸'].map((id, i) => ({
+    index: i + 1, requirements: [{ id, num: 1 }],
+  }));
+  const initial = await plan(client);
+  assert.deepEqual(initial.orderDecisions.map(d => d.status), ['reroll', 'ready', 'reroll', 'reroll']);
+  assert.deepEqual(initial.actions.map(step => step.body.index), [2, 1, 3, 4], '可交单优先于列表前面的缺料单');
+
+  client.otherStock = [{ itemId: '酒精', num: 1 }];
+  client.onWater[3].workerId = 99; // 同槽换成了另一张订单。
+  const writes = [];
+  const request = client.request.bind(client);
+  client.request = async (name, body, response) => {
+    if (name === 'FinishWorkerOrderRequest') writes.push(['交', body.index]);
+    return request(name, body, response);
+  };
+  client.sendWatch = async (name, { index }) => {
+    assert.equal(name, 'DenyOrderRequest');
+    writes.push(['换', index]);
+  };
+  const result = await runWorldRound(client, { ...protocol, DenyOrderRequest: true }, initial,
+    { config, player: client.player, allowMutate: true });
+  assert.deepEqual(writes, [['交', 2], ['交', 3], ['换', 1]], '换单前新到货的也先提交，已换人的槽位留待下次判断');
+  assert(result.results.every(entry => entry.ok));
+}
+
+async function testMaterialRerolls() {
+  const client = mock();
+  client.weekly = client.stock = 0;
+  client.otherStock = ['面包', '电线', '酒精', '卷纸'].map(itemId => ({ itemId, num: 1 }));
+  client.onWater = [['面包', '食盐', '电线'], ['酒精', '烤鱼'], ['烤鱼'], ['卷纸']].map((ids, i) => ({
+    index: i + 1, requirements: ids.map(id => ({ id, num: 1 })),
+  }));
+  client.buildings = [{ buildingId: '1食品厂', level: 1, factory: { factoryQ: [], finishedProducts: [] } }];
+  const cfg = { ...config, tables: { ...config.tables, FarmlandPlantCfg: { data: [{ id: '小麦' }] },
+    BuildingProduceCfg: { data: [...config.tables.BuildingProduceCfg.data,
+      { itemId: '面包', buildType: '食品厂', unlockLevel: 1, produceTime: 60, costItem: [['小麦', 5]] }] } } };
+  const settings = defaultSettings();
+  settings.loop.world = settings.resident.enabled = true;
+  settings.resident.skipCrops = true;
+  Object.assign(settings.factory, { enabled: true, produce: true, keepStock: 0, demandFirst: true, demandPriority: ['resident'] });
+  const player = client.player;
+  const proto = { ...protocol, DenyOrderRequest: true };
+  const read = async () => planWorld(await surveyWorld(client, proto, { config: cfg, player }), { config: cfg, settings });
+  assert.equal((await read()).actions.find(step => step.body.index === 1)?.materialRule, 'skipCrops',
+    '面包有现货、只缺食盐，单开农作物规则也会换掉整单');
+  settings.resident.skipCrops = false;
+  assert.equal((await read()).orderDecisions[0].status, 'missing');
+  Object.assign(settings.resident, { skipCrops: true, skipProduction: true, blockedMaterials: ['酒精'] });
+  client.itemReply = Error('仓库暂未同步');
+  assert.deepEqual((await read()).orderDecisions.map(row => row.status), ['reroll', 'reroll', 'unknown', 'unknown'],
+    '已知的材料规则独立于库存读取；库存未知时不能按缺料换单');
+  delete client.itemReply;
+  const plan = await read();
+  assert.deepEqual(plan.actions.map(step => [step.materialRule ?? step.kind, step.body.index]),
+    [['finishOrder', 4], ['skipCrops', 1], ['blockedMaterials', 2], ['skipProduction', 3]]);
+  assert.deepEqual(plan.demands, [], '含禁用材料或农作物时，整单的其他缺料也不排产');
+  const writes = [];
+  client.sendWatch = async (name, { index }) => { assert.equal(name, 'DenyOrderRequest'); writes.push(index); };
+  const guard = createActionGuard(client, () => settings, createUsageLedger(player.playerId), { config: cfg, player });
+  const result = await runWorldRound(client, proto, plan, { config: cfg, settings, player, allowMutate: true,
+    beforeStep: guard.before, afterStep: guard.after, cancelStep: guard.cancel });
+  assert(result.results.every(entry => entry.ok));
+  assert.deepEqual(writes, [1, 2, 3]);
+  assert((await read()).orderDecisions.slice(0, 3).every(row => row.status === 'unknown'), '旧需求尚未刷新时不会再次换同一单');
+  client.onWater[0] = { index: 1, workerId: 88, requirements: [{ id: '卷纸', num: 1 }] };
+  client.otherStock.find(item => item.itemId === '卷纸').num = 1;
+  assert.equal((await read()).orderDecisions[0].status, 'ready', '服务器换出新订单后立即重新判断');
 }
 
 async function testManualResidentOrder() {
@@ -427,6 +504,26 @@ async function testHarvestOrders() {
     await runWorldRound(client, available, manual, { config, player, allowMutate: true, cargoEnabled: () => true });
     assert.equal(client.calls.includes('FinishWorkerOrderRequest'), confirmed,
       '收货后按实时库存再评估周单缺口和货轮，居民可交才发写请求');
+  }
+  {
+    const { client } = scenario();
+    const settings = defaultSettings();
+    settings.loop.world = settings.factory.enabled = settings.factory.gain = true;
+    settings.resident.enabled = settings.resident.skipProduction = true;
+    const player = client.player;
+    const survey = await surveyWorld(client, available, { config, player });
+    const plan = planWorld(survey, { config, settings, allowReroll: true, minOrderExp: null });
+    assert.equal(plan.orderDecisions[0].status, 'reroll', '跳过需生产的订单只核对现货，已完工待收也不会让换单延后');
+    client.sendWatch = async (name, body) => {
+      assert.deepEqual([name, body.index], ['DenyOrderRequest', 1]);
+      client.calls.push(name);
+    };
+    const ledger = createUsageLedger(player.playerId);
+    const guard = createActionGuard(client, () => settings, ledger, { config, player });
+    await runWorldRound(client, { ...available, DenyOrderRequest: true }, plan, { config, settings, player, allowMutate: true,
+      getUsage: () => ledger.snapshot(), beforeStep: guard.before, afterStep: guard.after, cancelStep: guard.cancel });
+    assert.deepEqual(client.calls.filter(name => ['DenyOrderRequest','FinishWorkerOrderRequest','GainFactoryProduceRequest'].includes(name)),
+      ['DenyOrderRequest', 'GainFactoryProduceRequest'], '检测到现货不足就换单，之后收货也不补交旧槽位');
   }
   const run = (s, options = {}) => runLoop(s.client, available, { rounds: 1, allowMutate: true, config,
     player: s.client.player, isEnabled: s.enabled, ...options });

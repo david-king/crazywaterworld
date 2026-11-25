@@ -1,4 +1,13 @@
 import { toNumber } from './client.mjs';
+import { uidText } from './hero-equipment.mjs';
+
+// 未下发的 protobuf 数值也会从原型读到 0；仅展示实际返回的角色战力。
+export function playerPowerText(row, key = 'power') {
+  if (!row || !Object.hasOwn(row, key)) return undefined;
+  const value = row[key];
+  if (value === 0 || value === '0' || value?.low === 0 && value.high === 0) return '0';
+  return uidText(value) ?? undefined;
+}
 
 export function filterOpponentsByPower(candidates, ownPower, maxPowerRatio = 0) {
   if (maxPowerRatio === 0) return { candidates, note: '' };

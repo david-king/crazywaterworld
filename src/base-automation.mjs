@@ -17,6 +17,7 @@ import { petSpendSnapshot, confirmPetSpend, petAdvanceFeedCount } from './spend-
 import { planPetLevels, petLevelStage, readPetLevelRoster, petLevelConfirmed } from './pet-leveling.mjs';
 import { goldAccountKey } from './gold-reservations.mjs';
 import { readAllianceRecruitDemand } from './alliance-automation.mjs';
+import { guildOrderProgress, guildOrderQuota } from './guild-orders.mjs';
 import { readGuildShips, guildShipDemands } from './guild-ships.mjs';
 import { watchHeroRaidPushes, heroRaidDemands } from './hero-raid-automation.mjs';
 import { allocateMuseumTeams, museumExploreFactor, museumStar, museumTargetDrops, selectMuseumHeroes } from './museum-exploration.mjs';
@@ -44,6 +45,7 @@ function petQueue(room, config) {
   return { jobs: data.breedQ.length, mature: data.maturePets.length, capacity: Math.min(room.level, data.maxQLength, configured ?? room.level) };
 }
 function normalizeBaseReply(request, raw) {
+  if (request === 'CounterInfoRequest') return raw;
   const value = normalize(raw);
   if (request === 'AllPetRequest') for (const [index, pet] of (value.pets ?? []).entries()) pet.uid = exactAutomationId(raw.pets[index].uid);
   if (request === 'GuildShipRequest') for (const list of ['ship', 'ownRun']) for (const [index, ship] of (value[list] ?? []).entries()) {
@@ -88,6 +90,21 @@ export async function surveyBaseAutomation(client, protocol, config, player, set
     try { return normalizeBaseReply(request, await client.request(request, {}, response, 8000)); }
     catch { note(setting, `${request} 本轮未取得状态`); return null; }
   };
+  const readFactoryGuildOrder = async () => {
+    const reply = await get('GuildOrderRequest', 'factory');
+    if (!reply?.order?.requirements?.length) return null;
+    const counters = await get('CounterInfoRequest', 'factory');
+    if (!counters) return null;
+    const now = Math.floor((Date.now() + (client.serverClockOffsetMs || 0)) / 1000);
+    if (!(reply.order.nextRefreshTime > now)) return null;
+    try {
+      const { maxNum } = guildOrderQuota(config, player);
+      return guildOrderProgress(counters, maxNum).limitReason ? null : reply;
+    } catch (error) {
+      note('factory', '联盟募兵补产：' + error.message);
+      return null;
+    }
+  };
   const member = !!exactAutomationId(player?.guildId);
   const [museum, heroes, pets, gold, guildOrder, guildShip, radar] = await Promise.all([
     settings.museum.runEnabled !== false && (['enabled', 'upgrade', 'revenue', 'achievements', 'display', 'unlockCases'].some(key => settings.museum[key]) || needs.has('museum')) ? get('MuseumInfoRequest', 'museum') : null,
@@ -95,7 +112,7 @@ export async function surveyBaseAutomation(client, protocol, config, player, set
     settings.pet.enabled && (settings.pet.advance || settings.pet.levelUp && settings.pet.levelUids.length)
       ? get('AllPetRequest', 'pet') : null,
     settings.gold.enabled ? get('ClickGoldInfoRequest', 'gold.enabled') : null,
-    member && needs.has('guildRecruit') && !settings.alliance?.enabled ? get('GuildOrderRequest', 'factory') : null,
+    member && needs.has('guildRecruit') && !settings.alliance?.enabled ? readFactoryGuildOrder() : null,
     member && needs.has('guildShip') && !settings.guildShip?.enabled ? get('GuildShipRequest', 'factory') : null,
     needs.has('refugee') ? get('RadarInfoRequest', 'factory') : null,
   ]);

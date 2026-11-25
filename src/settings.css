@@ -96,13 +96,33 @@
 .config-radio .config-option { padding:4px; white-space:nowrap }
 .config-radio .config-option:hover { background:transparent }
 
-.config-player-tags { display:flex; flex-wrap:wrap; gap:6px; margin-bottom:8px }
-.config-player-tag { display:inline-flex; align-items:center; gap:4px; max-width:100%; border:1px solid var(--border); border-radius:8px; padding:2px 4px 2px 8px; background:var(--muted) }
-.config-player-tag>span { min-width:0; overflow-wrap:anywhere }
-.config-list-history .config-player-tag { flex-wrap:wrap; overflow-wrap:anywhere }
-.config-list-history .config-name-changed { color:var(--foreground); font-weight:600 }
-.config-list-history>small { margin-inline-start:6px }
-.config-player-name { display:block }
+.config-player-picker { min-width:0; border:1px solid var(--border); border-radius:12px; background:var(--card) }
+.config-player-picker>.config-multi { border:0; border-radius:inherit; box-shadow:none }
+.config-player-picker>.config-multi>summary { min-height:44px; gap:8px; padding:8px 14px; border:0; border-radius:inherit }
+.config-player-count { margin-inline-start:auto; color:var(--muted-foreground); font-size:13px; font-variant-numeric:tabular-nums }
+.config-player-list { margin:0; padding:0 14px; max-height:min(18rem,42dvh); overflow-y:auto; scrollbar-width:thin; list-style:none }
+.config-player-list[tabindex] { overscroll-behavior-y:contain }
+.config-player-row { display:flex; align-items:center; flex-wrap:wrap; gap:4px 8px; padding:9px 0; border-top:1px solid var(--border) }
+.config-player-identity { display:grid; flex:1 1 9rem; gap:2px; min-width:0; overflow-wrap:anywhere; line-height:1.4 }
+.config-player-identity small,.config-player-status { color:var(--muted-foreground); font-size:12px }
+.config-player-identity small { font-variant-numeric:tabular-nums }
+.config-player-row-actions { display:none; max-width:100%; margin-inline-start:auto }
+.is-editing .config-player-row-actions:not(:empty) { display:flex; flex-wrap:wrap; justify-content:flex-end; gap:4px }
+#config-root .config-player-row-actions button { max-width:100%; height:auto; white-space:normal; overflow-wrap:anywhere }
+.config-player-footer { display:flex; align-items:center; flex-wrap:wrap; gap:0 4px; padding:0 6px; border-top:1px solid var(--border); container:player-footer / inline-size }
+.config-player-footer .config-player-action { border-color:transparent; box-shadow:none; background:transparent; color:#0062be }
+[data-theme=dark] .config-player-footer .config-player-action { color:#75baff }
+.config-player-footer .config-player-action:hover { background:var(--accent) }
+#config-root .config-player-action { min-height:44px }
+.config-player-footer button:last-child { margin-inline-start:auto }
+.config-player-status { min-width:0; flex:1 1 6rem; overflow-wrap:anywhere }
+.config-player-status:empty { display:none }
+@container player-footer (max-width:17rem) {
+  .config-player-status { order:1; flex-basis:100%; padding:0 8px 4px }
+}
+.config-player-headline { display:flex; align-items:baseline; gap:2px 8px; flex-wrap:wrap }
+.config-player-power { margin-inline-start:auto; white-space:nowrap; color:var(--muted-foreground); font-size:12px; font-variant-numeric:tabular-nums }
+.config-player-picker .config-option>span { flex:1; min-width:0 }
 .config-player-picker .config-add input { min-width:0; flex:1; width:100% }
 .config-select-foot { display:flex; flex-wrap:wrap; align-items:center; gap:8px; margin-top:8px; font-size:12px; color:var(--muted-foreground) }
 .config-select-foot-actions { display:flex; flex-wrap:wrap; justify-content:flex-end; gap:6px; margin-inline-start:auto }
@@ -132,6 +152,29 @@
 .config-order-tools .config-option:hover { background:transparent }
 .config-add { display:flex; gap:8px; align-items:center; padding:8px 0 4px }
 .config-add select { flex:1; min-width:0; width:auto }
+[data-refill-products] { container:refill-products / inline-size }
+.config-refill-line { display:grid; grid-template-columns:minmax(0,1.1fr) minmax(20rem,1.3fr) auto; align-items:center; gap:8px 14px }
+.config-refill-product [data-slot=native-select-wrapper] { width:12rem; flex:0 1 12rem }
+.config-refill-fields { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:12px }
+.config-refill-fields label { display:grid; grid-template-columns:auto minmax(0,1fr); align-items:center; gap:6px }
+.config-refill-fields [data-slot=input] { width:100% }
+@container refill-products (width < 45rem) {
+  .config-refill-line { grid-template-columns:minmax(0,1fr) auto }
+  .config-refill-product { grid-column:1 / -1 }
+}
+@container refill-products (width < 32rem) {
+  .config-refill-line { grid-template-columns:minmax(0,1fr) }
+  .config-refill-fields label { grid-template-columns:minmax(0,1fr); gap:3px }
+}
+.config-refill-add { display:flex; align-items:center; flex-wrap:wrap; gap:8px; padding:12px 16px }
+[data-refill-rules]:not(:empty) + .config-refill-add { border-top:1px solid var(--border) }
+.config-refill-add > [data-slot=native-select-wrapper] { flex:0 1 14rem }
+@media (max-width:639px) {
+  .config-refill-add { display:grid; grid-template-columns:minmax(0,1fr) auto; padding:10px 12px }
+  .config-refill-add > [data-slot=native-select-wrapper] { grid-column:1 }
+  .config-refill-add button { grid-column:2; grid-row:1 / span 2 }
+  .config-refill-add:has([hidden]) button { grid-row:1 }
+}
 .config-trial-lineup { display:grid; grid-template-columns:minmax(max-content,1fr) minmax(0,420px); align-items:center; column-gap:8px; padding:2px 0 }
 .config-trial-lineup select { min-width:0; text-overflow:ellipsis }
 .config-fleet-lineup { display:grid; grid-template-columns:max-content minmax(0,300px) max-content; align-items:center; gap:8px; padding:2px 0 }
@@ -142,22 +185,26 @@
 .config-discount-count { color:var(--muted-foreground); font-size:12px; font-variant-numeric:tabular-nums }
 .config-discount-add { margin-inline-start:auto }
 .config-discount-add>span { font:1rem/1 system-ui }
-.config-discount-form { display:grid; grid-template-columns:minmax(10rem,1.4fr) minmax(14rem,1fr) auto; align-items:start; gap:12px; padding:12px; margin-top:8px; border-radius:8px; background:var(--muted) }
+.config-discount-form { display:grid; grid-template-columns:minmax(0,1fr); align-items:start; gap:8px; padding:10px; margin-top:8px; border-radius:8px; background:var(--muted) }
 .config-discount-item-field { min-width:0 }
 .config-discount-item-field>strong { display:block; overflow-wrap:anywhere }
 .config-discount-limits { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:8px }
 .config-discount-limit { display:grid; gap:5px; min-width:0; font-size:12px; line-height:1.4; color:var(--muted-foreground) }
 .config-discount-form input { width:100%; min-width:0; height:var(--compact-control-height); padding-block:0; color:var(--foreground); background:var(--background) }
 .config-discount-actions { display:flex; align-items:center; justify-content:flex-end; gap:var(--compact-control-gap) }
-.config-discount-form>.config-discount-actions { align-self:end }
 .config-discount-picker { width:100%; min-width:0; background:var(--background); scroll-margin-block:calc(var(--header-h) + 64px) 8px }
-.config-discount-picker>summary { min-height:var(--compact-control-height); padding:4px 8px }
+.config-discount-picker>summary { min-height:calc(var(--compact-control-height) - 2px); padding:4px 8px }
 .config-discount-rules .config-discount-save { color:var(--primary-foreground); background:var(--primary) }
 .config-discount-table { margin-top:8px }
 .config-discount-item { overflow-wrap:anywhere }
 .config-discount-condition { display:none; color:var(--muted-foreground); font-size:12px; line-height:1.5 }
-@container main (max-width:46.5rem) {
-  .config-discount-form { grid-template-columns:minmax(0,1fr); gap:8px; padding:10px }
+@container main (width > 46.5rem) {
+  .config-discount-form { grid-template-columns:minmax(10rem,1.4fr) minmax(14rem,1fr) auto; gap:5px 12px; padding:12px }
+  .config-discount-limits { grid-area:1 / 2 / span 2; row-gap:inherit }
+  .config-discount-limits,.config-discount-limit { grid-template-rows:subgrid; align-items:start }
+  .config-discount-limit { grid-row:span 2 }
+  .config-discount-item-field,.config-discount-form>.config-discount-actions { grid-row:2 }
+  .config-discount-item-field>strong { display:flex; align-items:center; min-height:var(--compact-control-height) }
 }
 @media (max-width:768px) { .config-discount-picker { scroll-margin-bottom:calc(68px + env(safe-area-inset-bottom)) } }
 .config-discount-picker-body { padding:8px }

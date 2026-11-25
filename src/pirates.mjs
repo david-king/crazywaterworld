@@ -5,6 +5,9 @@ import { fleetRecordReason, legacyFleetReservationReason } from './fleet-availab
 import { prepareFleetLineups, fleetFormationSignature, markFleetLineupsDispatched, markFleetLineupsCancelled, recoverFleetLineups } from './fleet-lineups.mjs';
 
 export const PIRATE_CONFIRMATION_MS = 15 * 60 * 1000;
+export function pirateHuntEnabled(settings) {
+  return Boolean(settings?.pirate?.enabled && settings.pirateHunt?.enabled);
+}
 export function pirateConfirmationStart(ledger, key, details) {
   if (Number.isFinite(details.sentAt) && details.sentAt > 0) return details.sentAt;
   return [ledger.reservationTime?.(key), details.confirmationSince, details.releasedAt * 1000]

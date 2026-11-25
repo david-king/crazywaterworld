@@ -272,6 +272,7 @@ const extra = [
   'tools/selftest-city-war-priority.mjs',
   'tools/selftest-pirate-settlement-recovery.mjs',
   'tools/selftest-week-order-manual.mjs',
+  'tools/selftest-week-chip.mjs',
   'tools/selftest-week-order-auto.mjs',
   ...worldCity,
   'tools/selftest-world-live-view.mjs',

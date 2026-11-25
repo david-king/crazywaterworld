@@ -9,6 +9,7 @@ import { taskSettings, retiredAutomationTasks, migratedAutomationTasks, removedS
 import { EXTENDED_DEFAULTS, EXTENDED_CONSTRAINTS, SILICON_FLEET_NUMBERS, siliconTierLabels, validateSiliconFleets, validPlayerIdText } from './extended-settings.mjs';
 import { treasureRewardOptions } from './treasure-reward-filter.mjs';
 import { dailyWindowPattern } from './daily-time-windows.mjs';
+import { hasResidentMaterialRules } from './resident-materials.mjs';
 import { activityAutomationDefaults, activityAutomationFields } from './activity-automation.mjs';
 import { APPOINTMENT_PRIORITIES, DEFAULT_APPOINTMENT_PRIORITIES, normalizeAppointmentPriorities } from './appointment-priorities.mjs';
 import { validateLineupSettings, validateFleetLineupBindings } from './saved-lineups.mjs';
@@ -22,7 +23,7 @@ export const settingsFile = () => path.join(dataDirectory(), 'automation-setting
 export const SETTINGS_FORMAT = 'crazywaterworld-automation';
 // 文件 version / 账号 settingsVersion 是格式编号，只随结构迁移调整；
 // revision 是每次保存递增的修订号，仅用于并发冲突检查，不能用作格式版本。
-export const SETTINGS_SCHEMA_VERSION = 64;
+export const SETTINGS_SCHEMA_VERSION = 68;
 const LEGACY_SETTINGS_FORMAT = 'crazywaterword-automation';
 const treasureQualityLabels = { ORANGE: '万吨货轮', PURPLE: '中型货轮', BLUE: '小型货轮' };
 const treasureChaseDefaults = {
@@ -67,7 +68,7 @@ export const DEFAULT_SETTINGS = {
     autoUpgrade: false },
   loop: { rounds: 0, everySeconds: 60, tasks: false, dailies: false, world: false, heroes: false },
   building: { enabled: false, collect: false, build: false, upgrade: false, finish: false, supply: false, disabledTypes: [], speedUp: false, keepBlueprints: 0, maxBuilds: 5, maxUpgrades: 2 },
-  factory: { enabled: false, gain: false, blockedCollectionTypes: [], produce: false, strategy: 'smart', simulatedTargets: [], cooperateNative: false, disabledTypes: [], keepStock: 50, checkEverySeconds: 30, demandFirst: false, demandPriority: DEMAND_SOURCES.map(([id]) => id), speedUpSources: [], speedUp: false, speedUpItems: [] },
+  factory: { enabled: false, gain: false, blockedCollectionTypes: [], produce: false, strategy: 'smart', simulatedTargets: [], refillRules: [], refillSpeedUp: false, cooperateNative: false, disabledTypes: [], keepStock: 50, checkEverySeconds: 30, demandFirst: false, demandPriority: DEMAND_SOURCES.map(([id]) => id), speedUpSources: [], speedUp: false, speedUpItems: [] },
   farm: { enabled: false, harvest: false, autoPlant: false, customPlant: false, crops: [], speedUp: false },
   // 总开关与细项独立保存；开启总开关不会开启任何细项。
   gather: { enabled: false, fishing: false, fishBook: false, floaters: false, antiqueFloaters: false, continueWhenFull: false, diving: false, keyOpen: false, salvage: false, upgradeFishing: false, upgradeDiving: false, upgradeSalvage: false, targetLevel: 2 },
@@ -158,6 +159,7 @@ const constraints = {
   'building.keepBlueprints': int(), 'building.maxBuilds': int(100), 'building.maxUpgrades': int(100),
   'building.disabledTypes': strings(), 'factory.disabledTypes': strings(), 'factory.blockedCollectionTypes': strings(),
   'factory.strategy': { kind: 'choice', values: ['smart', 'nativeSimulation'] }, 'factory.simulatedTargets': strings(),
+  'factory.refillRules': { kind: 'refillRules' },
   'factory.keepStock': int(100000), 'factory.checkEverySeconds': int(300, 1),
   'factory.demandPriority': { ...strings(12), values: DEMAND_SOURCES.map(([id]) => id) },
   'factory.speedUpSources': { ...strings(12), values: DEMAND_SOURCES.map(([id]) => id) },
@@ -318,6 +320,7 @@ export function nativeTaskValues(settings, current) {
   for (const key of retiredAutomationTasks) result[key] = false;
   for (const key of removedScheduleKeys) delete result[key];
   result.startProduce = settings.factory.produce || settings.factory.cooperateNative;
+  result.denyOrder = settings.resident.reroll || hasResidentMaterialRules(settings.resident);
   result.speedUp = settings.building.speedUp || settings.factory.speedUp || settings.farm.speedUp || settings.factory.speedUpSources.length > 0;
   return result;
 }
@@ -445,6 +448,27 @@ function validateCurrentSettings(input, { partial = false, catalog = null } = {}
         if (!Array.isArray(value) || value.length > rule.max || value.some(v => typeof v !== 'string' || !v.trim() || v.length > 120) || new Set(value).size !== value.length) errors[name] = '选项必须为不重复的有效列表';
         else if (rule.values && value.some(v => !rule.values.includes(v))) errors[name] = '列表中含有不支持的选项';
         else output[group][key] = [...value];
+      } else if (rule?.kind === 'refillRules') {
+        const ids = new Set();
+        if (!Array.isArray(value) || value.length > 100) errors[name] = '工厂补库规则列表无效';
+        else for (const row of value) {
+          if (!plain(row) || Object.keys(row).some(k => !['buildingId','productId','trigger','target'].includes(k))
+            || ![row.buildingId, row.productId].every(id => typeof id === 'string' && id.trim() && id.length <= 120)
+            || !Number.isSafeInteger(row.trigger) || row.trigger < 0
+            || !(row.target === null || Number.isSafeInteger(row.target) && row.target > row.trigger)) {
+            errors[name] = '请选择工厂和物品，触发库存须为非负整数，补至库存须留空或填大于触发库存的整数'; break;
+          }
+          const pair = JSON.stringify([row.buildingId, row.productId]);
+          if (ids.has(pair)) { errors[name] = '同一工厂的补库物品不能重复'; break; }
+          ids.add(pair);
+          if (catalog) {
+            const factory = catalog.refillFactories?.find(f => f.value === row.buildingId);
+            if (!factory || !catalog.factoryProducts?.some(p => p.value === row.productId && p.factoryType === factory.factoryType)) {
+              errors[name] = '请选择该工厂可以生产的物品'; break;
+            }
+          }
+        }
+        if (!errors[name]) output[group][key] = copy(value);
       } else if (rule?.kind === 'discountRules') {
         const ids = new Set();
         if (!Array.isArray(value) || value.length > 500) errors[name] = '购买规则最多可设置 500 项';
@@ -591,6 +615,9 @@ export function settingsCatalog(config) {
   const materialLabels = new Map(materials.map(item => [item.value, item.label]));
   return {
     buildings, factories: buildings.filter(r => factoryTypes.has(r.value)),
+    refillFactories: rows('BuildingUnlockCfg').filter(r => factoryTypes.has(r.buildingType)).map(r => ({
+      ...option(r.buildingId, buildings.find(b => b.value === r.buildingType)?.label ?? r.buildingType), factoryType: r.buildingType,
+    })),
     factoryProducts: unique(rows('BuildingProduceCfg').map(r => ({
       ...option(r.itemId, (buildings.find(b => b.value === r.buildType)?.label ?? r.buildType) + ' · ' + (materialLabels.get(r.itemId) ?? r.itemId)),
       factoryType: r.buildType,
@@ -762,6 +789,14 @@ settingsMigrations.set(61, migrateVersion61Settings);
 settingsMigrations.set(62, migrateVersion62Settings);
 settingsMigrations.set(63, settings => plain(settings) && !Object.hasOwn(settings, 'seasonMerit')
   ? { ...settings, seasonMerit: { ...DEFAULT_SETTINGS.seasonMerit } } : settings);
+settingsMigrations.set(64, settings => plain(settings?.factory) && !Object.hasOwn(settings.factory, 'refillRules')
+  ? { ...settings, factory: { ...settings.factory, refillRules: [] } } : settings);
+settingsMigrations.set(65, settings => plain(settings?.factory) && !Object.hasOwn(settings.factory, 'refillSpeedUp')
+  ? { ...settings, factory: { ...settings.factory, refillSpeedUp: false } } : settings);
+settingsMigrations.set(66, settings => plain(settings?.weeklyActivity)
+  ? { ...settings, weeklyActivity: migrateWeeklyActivitySettings(settings.weeklyActivity) } : settings);
+settingsMigrations.set(67, settings => plain(settings?.guildShip) && !Object.hasOwn(settings.guildShip, 'checkEverySeconds')
+  ? { ...settings, guildShip: { ...settings.guildShip, checkEverySeconds: DEFAULT_SETTINGS.guildShip.checkEverySeconds } } : settings);
 const supportedSettingsVersion = version => Number.isSafeInteger(version) && version >= 1;
 const entrySettingsVersion = entry => Object.hasOwn(entry, 'settingsVersion') ? entry.settingsVersion : 1;
 function newestSettingsVersion(store) {

@@ -52,9 +52,9 @@ npm run sync-art              # 同步素材；缓存缺图可加 -- --fetch
 
 - `src/wechat/` 是仅用于微信扫码的 Node 原生协议模块（二维码、票据、MMTLS、小游戏 code），`wechat-login.mjs` 管理临时会话；禁止引入第三方授权可执行程序/额外服务。参考版本与数据边界见 `docs/wechat-native-login.md`。新增测试进入 `test:wechat-native` 和核心离线分组，真实扫码需用户参与，不能用真实账号自动回归。
 
-仓库不分发 `.proto` 或配置表，运行和部分测试需要本机游戏缓存。
+仓库维护 `protocol/game.js` 作为游戏协议兜底。配置表仍由资源更新流程管理。
 
-- `proto.mjs` 执行游戏自带 `game.js`，取得 protobufjs 编解码类。`protocol-source.mjs` 为来源描述和实际读取共用同一解析入口：显式参数/`CW_PROTO_BUNDLE` → 最高版本微信缓存 → 程序根目录 `_src_chunks_.wxapkg` → `protocol/_src_chunks_.wxapkg` → `work/extracted/_src_chunks_/src/chunks/game.js`。相对位置基于程序目录；缓存权限失败可使用自备文件，最新主包缺分包或所选协议损坏不得静默回退旧协议。
+- `proto.mjs` 执行游戏自带 `game.js`，取得 protobufjs 编解码类。 协议来源依次为显式参数或 `CW_PROTO_BUNDLE`、最新版微信分包、项目根目录或 `protocol/` 的自备包、已校验的本地解包副本、原有的 `work/extracted/` 提取文件、仓库内置协议。缺少可选分包时继续查找，选中但损坏的协议会明确报错。
 - 无反射信息，使用 `tools/describe.mjs` 还原字段、`tools/ctx.mjs` 查压缩代码上下文。`work/extracted/` 可能落后于微信缓存，客户端逻辑以缓存最高版本的主包为准。请求名和响应名必须核对真实 `protocol[name]`，不能凭名称推测接口。
 - `config.mjs` 按 `CW_CONFIG_PACK`、已验证的远程资源快照、较新的本地同步副本或微信缓存查找。`resource-updater.mjs` 在控制台和 CLI 持续挂机启动时及每 30 分钟检查发布清单（`CW_RESOURCE_UPDATE_MINUTES` 可调），验证配置和地图后原子启用；`config.resources` 保留任务的地图快照，挂机只在下一轮切换。`npm run sync-resources` 手动更新远程资源，`npm run sync-config` 备份本地配置来源；旧注释中的 `tools/fetch-config.mjs` 已不存在。测试应使用临时 `CW_RESOURCE_DIR`，控制台测试默认不启用远程更新。
 - `actions.mjs` 是协议操作目录，`mutate` 区分读写；`CW_DEBUG=1` 可同时在终端输出协议日志，原始日志默认写项目 `data/protocol.log`，主日志与 `.1` 按 `CW_PROTOCOL_LOG_MAX_BYTES`（默认 5 MB）轮转。

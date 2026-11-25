@@ -6,13 +6,14 @@ import { serviceGuildOrders } from './guild-orders.mjs';
 import { serviceCargo } from './cargo.mjs';
 import { runEquipmentForge } from './equipment-forge.mjs';
 import { runAntiqueUpgrade } from './antique-upgrade.mjs';
+import { recruitWithWeeklyTickets } from './antique-recruit.mjs';
 import { readHeroGrowthPlan, runHeroPlan, heroStepLabel } from './heroes.mjs';
 
 const requestWrites = new Set([
   'FinishGuildOrderRequest', 'FinishWorkerOrderRequest', 'FarmHarvestRequest', 'FarmPlantRequest',
   'FarmSpeedUpRequest', 'PickMadeEquipRequest', 'MakeEquipRequest', 'HeroStarUpRequest',
   'GetMaturePetRequest', 'PetBreedRequest', 'AntiqueStarUpRequest', 'AntiqueSuitLevelUpRequest', 'SetAutoFarmingRequest',
-  'FillCargoShipRequest', 'DrawShipRewardRequest', 'SpeedUpFactoryProduceRequest',
+  'FillCargoShipRequest', 'DrawShipRewardRequest', 'SpeedUpFactoryProduceRequest', 'AntiqueRecruitRequest',
 ]);
 const scopedClients = new WeakMap();
 
@@ -152,11 +153,14 @@ export async function runWeeklyActivity(client, protocol, config, player, {
         if (result.notes?.length) note(result.notes.join('；'));
       }
     } else if (context.kind === 'antique') {
-      if (!settings.antique.starQualities.length && !settings.antique.suitQualities.length) note('请先在藏品配置选择升星或套装升级的品质；无需开启普通养成开关，周活动只执行消耗藏品碎片或藏品经验的养成');
-      else {
+      const useTickets = settings.weeklyActivity.antiqueRecruitTickets;
+      if (settings.antique.starQualities.length || settings.antique.suitQualities.length) {
         const result = await runAntiqueUpgrade(connection, protocol, config, player, { getSettings: current, ledger, enabled: active, onStep: emit });
         if (result.notes?.length) note(result.notes.join('；'));
-      }
+      } else if (!useTickets) note('请先在藏品配置选择升星、套装升级的品质，或开启藏品日用券招募');
+      if (useTickets && active()) await recruitWithWeeklyTickets(connection, protocol, config, {
+        player, limit: settings.weeklyActivity.antiqueTicketLimit, ledger, enabled: active, report: emit,
+      });
     } else if (context.kind === 'hero') {
       if (!settings.heroes.heroIds.length) note('请先在英雄配置选择英雄；无需开启普通养成或升星开关，周日活动仅执行已核实计分的升星');
       else {

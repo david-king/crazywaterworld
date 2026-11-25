@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
 import { PAGE } from '../src/page.mjs';
 
 const script = [...PAGE.matchAll(/<script\b[^>]*>([\s\S]*?)<\/script>/g)]
@@ -7,6 +8,7 @@ assert.ok(script, '页面包含实际采集弹窗生命周期');
 const start = script.indexOf('let capturePoll =');
 const end = script.indexOf('// ---- APP 账号登录', start);
 assert.ok(start >= 0 && end > start);
+const selectionScript = readFileSync(new URL('../src/role-selection-ui.js', import.meta.url), 'utf8');
 const captureScript = script.slice(start, end);
 let passed = 0;
 
@@ -29,6 +31,7 @@ function node(tag = 'div', className = '', text = '') {
     tag, className, dataset: {}, children: [], hidden: false, disabled: false, open: false,
     get textContent() { return content + this.children.map(child => child.textContent).join(''); },
     set textContent(value) { content = String(value ?? ''); this.children = []; },
+    append(...children) { this.children.push(...children); },
     appendChild(child) { this.children.push(child); return child; },
     querySelector(selector) {
       for (const child of this.children) {
@@ -80,6 +83,11 @@ function fixture(channel = 'wechat') {
     const accountAddChanged = (channel,phase,options) => env.changes.push({channel,phase,...options});
     const openConfirm = (title,body,callback,label) => {env.confirmation={title,body,callback,label};$('modal').open=true;};
     const closeModal = () => {$('modal').open=false;env.confirmation=null;};
+    const smallButton = text => el('button', '', text);
+    const accounts = [], stateActions = { upsertAccount: a => accounts.push(a), setFlag() {} };
+    let accountDetailsOwner;
+    const configMayChangeAccount = async () => true, selectLoadedAccount = id => { env.selected = id; };
+    ${selectionScript}
     ${captureScript}
     env.api={beginCapture,pollCapture,renderCapture,resetAccountAddCapture,stopAccountCapture,
       owner:()=>captureOwner,busy:()=>captureActionBusy,view:()=>captureView};
@@ -188,7 +196,7 @@ await test('状态读取与启动请求在途时拒绝关闭，完成后可以�
 await test('停止本弹窗启动的采集，并隐藏原始代理地址和采集日志', async () => {
   const env = fixture('douyin');
   await env.start();
-  assert.deepEqual(env.calls.find(call => call.route.endsWith('/start')).payload, {confirm:true,platform:'douyin'});
+  assert.deepEqual(env.calls.find(call => call.route.endsWith('/start')).payload, { confirm: true, platform: 'douyin', selectRoles: true });
   env.api.renderCapture({ ...env.state, proxy: { ProxyServer: 'fixture-private-proxy' },
     originalProxy: { ProxyServer: 'fixture-original-proxy' }, log: ['fixture-private-log'] });
   assert.match(env.node('cap-box').textContent, /电脑版抖音/);
@@ -336,6 +344,31 @@ await test('关闭后的迟到轮询不会恢复内容、轮询或影响新页�
     assert.equal(env.timers.size, 0);
     assert.equal(env.errors.length, 0);
   }
+});
+
+await test('采集完成后可取消勾选并只保存所选角色', async () => {
+  const env = fixture();
+  const original = env.respond;
+  const choices = [1, 2, 3].map(n => ({ id: 'choice-' + n, accountId: 'fixture', worldId: n, nickname: '船长' + n }));
+  env.respond = async (route, payload) => {
+    if (route === '/api/capture/roles') return { choices };
+    if (route === '/api/capture/save-roles') {
+      const accounts = payload.choiceIds.map(id => ({ id }));
+      return { accounts, account: accounts[0] };
+    }
+    return original(route, payload);
+  };
+  await env.start();
+  env.state = { ...env.state, running: false, rolePreviewId: 'draft' };
+  await env.api.pollCapture();
+  const box = env.node('cap-box');
+  const inputs = box.querySelector('fieldset').children.filter(row => row.tag === 'label').map(row => row.querySelector('input'));
+  assert.equal(inputs.length, 3);
+  for (const i of [0, 1, 2, 0]) { inputs[i].checked = !inputs[i].checked; inputs[i].onchange(); }
+  await box.querySelector('button').onclick();
+  assert.deepEqual(env.calls.filter(r => r.route === '/api/capture/save-roles').map(r => r.payload.choiceIds), [['choice-2', 'choice-3']]);
+  assert.equal(env.changes.at(-1).phase, 'saved');
+  assert.equal(env.selected, 'choice-2');
 });
 
 await test('本人采集成功显示完成状态，外部结果不会误报添加成功', async () => {

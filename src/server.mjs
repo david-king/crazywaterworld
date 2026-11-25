@@ -94,7 +94,8 @@ import { readAfkUpgrade } from './afk-upgrade.mjs';
 import { newbieView } from './collections.mjs';
 import { normalize } from './worlds.mjs';
 import { pirateTracker, pirateHuntOptions, startPirateHunt } from './pirates.mjs';
-import { activityEntries, activityView, runActivity, runWeekOrder } from './activities.mjs';
+import { activityEntries, activityView, runActivity, runWeekOrder, runWeekChip } from './activities.mjs';
+import { updateChipFactoryScore } from './week-chip.mjs';
 import { activityCatalogPushNames, readActivityCatalog, rememberActivityCatalog, rememberActivityPush } from './activity-catalog.mjs';
 import { displayMaterial, getConfig } from './config.mjs';
 import { readHeroGrowthPlan, heroStepLabel, runHeroPlan, formatHeroPlan } from './heroes.mjs';
@@ -116,6 +117,7 @@ import { automationTasks, retiredAutomationTasks, migratedAutomationTasks, defau
 import { rewardSchedule } from './reward-schedule.mjs';
 import { beijingDay, loadAutomationSettings, loadRecoverableAutomationSettings, settingsFile, defaultSettings, saveAutomationSettings, validateSettings, settingsCatalog, settingsFromNative, settingsFromLegacyNative, nativeTaskValues, applyNativeTask, hasExtraWork, createUsageLedger, exportAutomationSettings, importAutomationSettings, SettingsError, settingsUiRules } from './automation-settings.mjs';
 import { listedPlayerNames, knownListPlayerIds, rememberPlayerNames, prunePlayerNames, readWorldListPlayers } from './player-name-history.mjs';
+import { playerPowerText } from './opponent-power.mjs';
 import { budgetPreview, exactAutomationId, createActionGuard, nativePreferenceEnabled, needsCargoDemand, AutomationSkip } from './automation-policy.mjs';
 import { guardRuntimeActions, validateRuntimeSettings } from './settings-runtime.mjs';
 import { assertResourcesReady, resourceReadiness } from './resource-store.mjs';
@@ -133,19 +135,21 @@ import { configuredMaterialRecipes, readProductionSnapshot } from './production-
 import { materialTreeRecipes, planProduction } from './production-planning.mjs';
 import { forecastProductionDay } from './production-day.mjs';
 import { factoryInsertions } from './factory-insert-store.mjs';
+import { productionDemandChanged } from './factory-replanning.mjs';
+import { guildOrderCounterChanged } from './guild-orders.mjs';
 import { advanceFactoryInsertion, prepareFactoryInsertion } from './factory-insertion.mjs';
 import { createProductionTiming, watchProductionTimings } from './production-timing.mjs';
 import { captureManualProductionMaterialState, refreshOrderMaterialSpends } from './order-reservations.mjs';
 import { createStageTask } from './stages.mjs';
 import { createChallengeRun } from './challenge-automation.mjs';
 import { runAction } from './actions.mjs';
-import { accountId, loadStore, saveStore, loginProfiles, matchingProfile, upsertAccount, removeAccount, setActive, pickAccount, describeAccount, revealAccount, rememberSeen, DATA_DIR } from './accounts.mjs';
+import { accountId, loadStore, saveStore, loginProfiles, matchingProfile, worldProfileId, upsertAccount, removeAccount, setActive, pickAccount, describeAccount, revealAccount, rememberSeen, DATA_DIR } from './accounts.mjs';
 import { ACCOUNT_BACKUP_MAX_BYTES, exportAccountBackup, previewAccountImport, importAccountBackup } from './account-backup.mjs';
 import { startCapture, stopCapture, captureState, inspectCaptureRecovery, recoverCapture, DEFAULT_PROXY_PORT } from './capture.mjs';
 import { createPhoneLogin, loadDeviceProfile, saveDeviceProfile, DEVICE_PROFILE_PATH } from './phone-login.mjs';
 import { createAlipayLogin } from './alipay-login.mjs';
 import { createWechatLogin } from './wechat-login.mjs';
-import { iconIndex, atlasFile, itemIcon, resourceIcon, materialIcon, heroIcon, heroCard, buildingIcon, workerIcon } from './art.mjs';
+import { iconIndex, atlasFile, itemIcon, resourceIcon, materialIcon, heroIcon, heroCard, buildingIcon, residentOrderIcon } from './art.mjs';
 
 const LOG_LIMIT = 400;
 const STREAM_BUFFER_LIMIT = 1024 * 1024;
@@ -221,6 +225,13 @@ export function createConsole({ host = '127.0.0.1', port = 17321, onLog, recover
   // 密码只用于当次请求；待保存凭证和待选账号只放在内存，十分钟后清理。
   const pendingPhoneLogins = new Map();
   const phonePreviewClients = new Set();
+  let captureRoleDraft = null;
+  function clearCaptureRoleDraft() {
+    if (!captureRoleDraft) return;
+    captureRoleDraft.controller.abort();
+    clearTimeout(captureRoleDraft.timer);
+    captureRoleDraft = null;
+  }
   const smsSendAt = new Map();
   const smsPending = new Set();
   let phoneLoginBusy = false;
@@ -311,19 +322,16 @@ export function createConsole({ host = '127.0.0.1', port = 17321, onLog, recover
     return pending;
   }
 
-  async function saveAlipayRole(pending, choice) {
-    // 排队期间扫码可能被取消、过期或刷新，落盘前重新检查本次选择。
-    if (requireAlipayRoles(pending.id) !== pending || pending.reading || !pending.entry.choices.includes(choice)) {
-      throw new Error('角色列表已变化，请重新选择角色');
-    }
+  async function saveAlipayRoles(pending, selections) {
+    const validateSelection = () => {
+      if (requireAlipayRoles(pending.id) !== pending || pending.reading
+        || selections.some(({ choice }) => !pending.entry.choices.includes(choice))) {
+        throw new Error('角色列表已变化或扫码已结束，请重新扫码');
+      }
+    };
+    validateSelection();
     pending.entry.credential = alipayLogin.takeCredential(pending.id);
-    const result = await saveSelectedRole(pending.entry, choice, { sourceLabel: '支付宝扫码', stopExisting: true,
-      validateSelection() {
-        if (requireAlipayRoles(pending.id) !== pending || pending.reading || !pending.entry.choices.includes(choice)) {
-          throw new Error('角色列表已变化或扫码已结束，请重新扫码');
-        }
-      },
-    });
+    const result = await saveSelectedRoles(selections, { sourceLabel: '支付宝扫码', stopExisting: true, validateSelection });
     pending.entry.credential = null;
     pending.entry.choices = [];
     cancelledAlipayLoginId = pending.id;
@@ -397,19 +405,16 @@ export function createConsole({ host = '127.0.0.1', port = 17321, onLog, recover
     return pending;
   }
 
-  async function saveWechatRole(pending, choice) {
-    // 排队期间扫码可能被取消、过期或刷新，落盘前重新检查本次选择。
-    if (requireWechatRoles(pending.id) !== pending || pending.reading || !pending.entry.choices.includes(choice)) {
-      throw new Error('角色列表已变化，请重新选择角色');
-    }
+  async function saveWechatRoles(pending, selections) {
+    const validateSelection = () => {
+      if (requireWechatRoles(pending.id) !== pending || pending.reading
+        || selections.some(({ choice }) => !pending.entry.choices.includes(choice))) {
+        throw new Error('角色列表已变化或扫码已结束，请重新扫码');
+      }
+    };
+    validateSelection();
     pending.entry.credential = wechatLogin.takeCredential(pending.id);
-    const result = await saveSelectedRole(pending.entry, choice, { sourceLabel: '微信扫码', stopExisting: true,
-      validateSelection() {
-        if (requireWechatRoles(pending.id) !== pending || pending.reading || !pending.entry.choices.includes(choice)) {
-          throw new Error('角色列表已变化或扫码已结束，请重新扫码');
-        }
-      },
-    });
+    const result = await saveSelectedRoles(selections, { sourceLabel: '微信扫码', stopExisting: true, validateSelection });
     pending.entry.credential = null;
     pending.entry.choices = [];
     cancelledWechatLoginId = pending.id;
@@ -425,7 +430,8 @@ export function createConsole({ host = '127.0.0.1', port = 17321, onLog, recover
     if (closing) throw new Error('控制台已关闭');
     signal?.throwIfAborted();
     const profiles = loginProfiles(loadStore(), credential);
-    const session = profiles.map(profile => sessions.get(profile.id)).find(s => s && !s.paused);
+    const candidates = profiles.map(profile => sessions.get(profile.id)).filter(s => s && !s.paused);
+    const session = candidates.find(s => s.client?.connected) ?? candidates.find(s => s.connecting);
     if (session?.connecting) {
       await session.connecting.catch(() => {});
       return readPhoneWorlds(credential, { signal });
@@ -482,7 +488,7 @@ export function createConsole({ host = '127.0.0.1', port = 17321, onLog, recover
 
   // 旧采集记录的 worldId=0 表示最近登录。添加其他角色前，先绑定旧记录的真实入口。
   function pinLegacyWorld(store, entry) {
-    const legacy = loginProfiles(store, entry.credential).find(profile => !Number(profile.login.worldId));
+    const legacy = loginProfiles(store, entry.credential).find(profile => !toNumber(profile.login.worldId));
     if (!legacy) return;
     const choices = entry.choices;
     const seen = legacy.lastSeen;
@@ -499,10 +505,13 @@ export function createConsole({ host = '127.0.0.1', port = 17321, onLog, recover
   function roleChoices(entry, store) {
     pinLegacyWorld(store, entry);
     const idOfAccount = accountId(entry.credential);
+    const hasProfiles = loginProfiles(store, entry.credential).length > 0;
     return entry.choices.map(choice => {
       const existing = matchingProfile(store, entry.credential, choice.worldId);
       return {
         id: choice.id, accountId: idOfAccount, userName: entry.userName,
+        profileId: existing?.id ?? (hasProfiles
+          ? worldProfileId({ ...entry.credential, login: { ...entry.credential.login, worldId: choice.worldId } }) : idOfAccount),
         nickname: choice.role.nickname || '未命名角色', level: choice.role.level ?? null, power: choice.role.power ?? null,
         worldId: choice.worldId, worldName: choice.worldName,
         roleWorldId: choice.role.worldId || choice.worldId, roleWorldName: choice.role.worldName || choice.worldName,
@@ -531,7 +540,22 @@ export function createConsole({ host = '127.0.0.1', port = 17321, onLog, recover
       linkedAccountCount: pending.linkedAccountCount, expiresAt: pending.createdAt + PHONE_PENDING_MS };
   }
 
-  async function saveSelectedRole(entry, choice, { sourceLabel = 'APP 登录', stopExisting = false, validateSelection = () => {} } = {}) {
+  function selectedLoginRoles(payload, entries) {
+    const available = entries.filter(entry => !entry.roleError).flatMap(entry => entry.choices.map(choice => ({ entry, choice })));
+    const ids = payload.choiceIds !== undefined ? payload.choiceIds : (payload.choiceId ? [payload.choiceId] : available.length === 1 ? [available[0].choice.id] : []);
+    if (payload.worldId !== undefined || (payload.choiceIds !== undefined && payload.choiceId !== undefined)
+      || !Array.isArray(ids) || !ids.length || ids.length > available.length || new Set(ids).size !== ids.length) {
+      throw new Error('请选择列表中的区服和角色后再保存');
+    }
+    const byId = new Map(available.map(item => [item.choice.id, item]));
+    return ids.map(id => {
+      const item = byId.get(id);
+      if (!item) throw new Error('请选择列表中的区服和角色后再保存');
+      return item;
+    });
+  }
+
+  async function prepareSelectedRole(entry, choice, { sourceLabel, stopExisting, validateSelection, interrupted }) {
     const session = selectedSession(entry, choice);
     if (session?.connectionDrain) await session.connectionDrain;
     if (closing) throw new Error('控制台已关闭');
@@ -544,6 +568,7 @@ export function createConsole({ host = '127.0.0.1', port = 17321, onLog, recover
       : toNumber(session?.player?.worldId) === roleWorldId
         && toNumber(session?.player?.bornWorldId || previous?.login?.worldId) === choice.worldId;
     if (session && (stopExisting || !sameRole || session.loginBlocked || session.loginRecoveryJob)) {
+      if (session.loop.running) interrupted.add(session);
       const reason = stopExisting ? `${sourceLabel}已重新登录，正在更新连接`
         : sameRole ? '账号凭证已更新，正在恢复连接' : '已选择其他角色，停止旧角色任务';
       requireProductionSync(session);
@@ -555,39 +580,61 @@ export function createConsole({ host = '127.0.0.1', port = 17321, onLog, recover
       for (const task of session.trials.values()) task.stop(reason);
       await closeSessionConnection(session, { includeWorld: true });
     }
-    if (closing) throw new Error('控制台已关闭');
-    validateSelection();
-    const store = loadStore();
+  }
+
+  function storeSelectedRole(store, { entry, choice }) {
     pinLegacyWorld(store, entry);
     const existing = matchingProfile(store, entry.credential, choice.worldId);
     const credential = { ...entry.credential, login: { ...entry.credential.login, worldId: choice.worldId },
-      loginFrameHex: Number(entry.credential.login.worldId) === choice.worldId ? entry.credential.loginFrameHex : null };
+      loginFrameHex: toNumber(entry.credential.login.worldId) === choice.worldId ? entry.credential.loginFrameHex : null };
     const fallbackLabel = ['alipay', 'wechat', 'douyin'].includes(entry.credential.source) ? '未命名角色' : entry.userName;
     const label = existing?.label && existing.label !== existing.lastSeen?.nickname ? existing.label : choice.role.nickname || fallbackLabel;
     const { account, created } = upsertAccount(store, credential, { label });
-    account.roleId = selectedRoleId;
+    account.roleId = uidText(choice.role.id);
     account.automation = { ...account.automation, autoStart: autoStartEnabled(account), loginBlocked: false, loginRecovery: null };
-    rememberSeen(account, { ...choice.role, nickname: choice.role.nickname || '未命名角色', worldId: roleWorldId });
-    setActive(store, account.id);
-    saveStore(store);
-    rememberLogAccounts(store.accounts);
-    emit(null, 'info', `${sourceLabel}${created ? '已新增' : '已更新'}账号 ${describeAccount(account).title}，已选择 ${choice.worldName} ${choice.role.nickname || '未命名角色'}`);
-    const savedSession = sessionFor(account.id);
-    savedSession.loginBlocked = false;
-    savedSession.loginRecovery = null;
-    void startAutomaticLoop(savedSession);
-    return {
-      ok: true,
-      account: { ...describeAccount(account, { active: true, hasSiblingRoles: loginProfiles(store, account).length > 1 }), status: accountStatus(savedSession) },
-      selectedRole: { nickname: choice.role.nickname || '未命名角色', worldId: choice.worldId, worldName: choice.worldName,
-        roleWorldId, roleWorldName: choice.role.worldName || choice.worldName },
-    };
+    rememberSeen(account, { ...choice.role, nickname: choice.role.nickname || '未命名角色', worldId: choice.role.worldId || choice.worldId });
+    return { account, choice, created };
   }
 
-  async function savePhoneRole(pending, entry, choice) {
-    const result = await saveSelectedRole(entry, choice);
-    pendingPhoneLogins.delete(pending.id);
-    return result;
+  async function saveSelectedRoles(selections, { sourceLabel = 'APP 登录', stopExisting = false, validateSelection }) {
+    // Lock existing role queues in a stable order. Check expiry again immediately before the single store write.
+    const queues = [...new Set(selections.map(({ entry, choice }) => selectedSession(entry, choice)))]
+      .filter(session => session && !session.paused).sort((a, b) => a.id.localeCompare(b.id));
+    const interrupted = new Set();
+    async function save() {
+      for (const { entry, choice } of selections) {
+        await prepareSelectedRole(entry, choice, { sourceLabel, stopExisting, validateSelection, interrupted });
+      }
+      if (closing) throw new Error('控制台已关闭');
+      validateSelection();
+      const store = loadStore();
+      const saved = selections.map(selection => storeSelectedRole(store, selection));
+      setActive(store, saved[0].account.id);
+      saveStore(store);
+      rememberLogAccounts(store.accounts);
+      const results = saved.map(({ account, choice, created }) => {
+        const session = sessionFor(account.id);
+        session.loginBlocked = false;
+        session.loginRecovery = null;
+        void startAutomaticLoop(session);
+        emit(null, 'info', sourceLabel + (created ? '已新增' : '已更新') + '角色 ' + describeAccount(account).title);
+        return {
+          account: { ...describeAccount(account, { active: account.id === store.activeId, hasSiblingRoles: loginProfiles(store, account).length > 1 }), status: accountStatus(session) },
+          selectedRole: { nickname: choice.role.nickname || '未命名角色', worldId: choice.worldId, worldName: choice.worldName,
+            roleWorldId: choice.role.worldId || choice.worldId, roleWorldName: choice.role.worldName || choice.worldName },
+        };
+      });
+      return { ok: true, ...results[0], accounts: results.map(row => row.account), selectedRoles: results.map(row => row.selectedRole) };
+    }
+    const lock = index => index === queues.length ? save() : enqueue(queues[index], () => lock(index + 1));
+    try {
+      return await lock(0);
+    } catch (error) {
+      // A cancelled preview can expire while existing connections drain.
+      // Resume only roles that still have a saved intent to run.
+      for (const session of interrupted) void startAutomaticLoop(session);
+      throw error;
+    }
   }
   let logId = 0;
   const logAccountLabels = new Map();
@@ -999,6 +1046,14 @@ export function createConsole({ host = '127.0.0.1', port = 17321, onLog, recover
     finally { if (session.lineupJob === job) session.lineupJob = null; }
   }
 
+  function manualChallengeSchedule(session, autoProgress) {
+    const resultWasUnknown = autoProgress?.resultUnknown;
+    return work => enqueue(session, () => {
+      if (!resultWasUnknown && autoProgress?.resultUnknown) throw new Error('刚才的挂机战果未确认，请核对进度后再开始挑战');
+      return work();
+    });
+  }
+
   function sessionLineupExecutor(session, client, presetId) {
     const generation = session.generation;
     const execute = createLineupExecutor(client, {
@@ -1216,10 +1271,14 @@ export function createConsole({ host = '127.0.0.1', port = 17321, onLog, recover
     }
     instance.on('list-player-profiles', rows => noteNames(rows));
     instance.on('message', ({name,body}) => {
+      if (session.client === instance && (productionDemandChanged(name,body) || guildOrderCounterChanged(name, body)
+        || name === 'SCUpdateWaterBuilding' && body?.building?.some(b => b.factory || b.farm))) {
+        session.productionRevision = (session.productionRevision ?? 0) + 1;
+      }
       if (name === 'GuildMemberResponse' || name === 'BlackListResponse' || name === 'WorldInfoResponse' || name === 'SCFleet') {
         const members = name === 'GuildMemberResponse' ? (body.titleList ?? []).flatMap(group => group.members ?? []) :
           name === 'BlackListResponse' ? body.list ?? [] : (body.fleets ?? []).map(fleet => fleet.owner).filter(Boolean);
-        noteNames(members.map(member => ({ id: exactAutomationId(member.playerId), name: member.nickname })), name !== 'GuildMemberResponse');
+        noteNames(members.map(member => ({ id: exactAutomationId(member.playerId), name: member.nickname, power: playerPowerText(member) })), name !== 'GuildMemberResponse');
       }
       if (session.client===instance && ['MyFleetsResponse','SCMyFleetUpdate'].includes(name)) {
         observeOwnedFleets(session,body?.fleets,{complete:name==='MyFleetsResponse'});
@@ -1329,6 +1388,7 @@ export function createConsole({ host = '127.0.0.1', port = 17321, onLog, recover
         for (const stream of streams) if (stream.allAccounts || stream.account === session.id) writeStream(stream, `event: guild-aid-changed\ndata: ${JSON.stringify({ account: session.id })}\n\n`);
       }
       if (session.client === instance && session.player) {
+        if (name === 'ChipChestOpenResponse' || name === 'ChipChestGotScoreResponse') updateChipFactoryScore(session.player, name, body);
         if (name === 'SCJoinGuild') session.player.guildId = body.guildId;
         if (name === 'SCLeaveGuild') session.player.guildId = 0;
       }
@@ -1870,6 +1930,7 @@ export function createConsole({ host = '127.0.0.1', port = 17321, onLog, recover
 
   function accountStatus(session) {
     return {
+      productionRevision: session.productionRevision ?? 0,
       paused: session.paused,
       syncingProduction: Boolean(session.syncingProduction),
       loginBlocked: session.loginBlocked,
@@ -1900,7 +1961,7 @@ export function createConsole({ host = '127.0.0.1', port = 17321, onLog, recover
       return { source: latest.kind, packageVersion: latest.packageVersion, modifiedAt: new Date(latest.mtimeMs).toISOString(),
         automaticDownload: false, refreshOnConnect: true,
         pendingConnections: active.filter(session => getProtocolSource(protocolFor(session.client))?.signature !== latest.signature).length,
-        message: '协议来自本机游戏包；新连接自动读取更新后的协议，已有连接保留原快照' };
+        message: '新连接自动读取当前游戏协议，已有连接保留原快照' };
     } catch (error) { return { automaticDownload: false, refreshOnConnect: true, error: error.message }; }
   }
 
@@ -2011,36 +2072,28 @@ export function createConsole({ host = '127.0.0.1', port = 17321, onLog, recover
     };
   }
 
-  async function world(session, account, allowAccelerators = false) {
+  async function world(session, account, allowAccelerators = false, buildingsView = false) {
     const instance = await ensureConnected(session, account);
     const config = loadConfigSafe();
     const survey = await surveyWorld(instance, protocolFor(instance), { config, player: session.player,
-      includeInventoryCaps: true, includeCargo: session.loop.tasks.cargo || needsCargoDemand(session.preferences) });
+      buildingsView, includeInventoryCaps: true, includeCargo: session.loop.tasks.cargo || needsCargoDemand(session.preferences) });
     const settings = session.preferences;
     const usage = usageFor(session).snapshot();
-    const extra = settings ? await surveyBaseAutomation(instance, protocolFor(instance), config, session.player, settings, survey, { ledger: usageFor(session), enabled: () => session.client === instance && instance.connected !== false }) : null;
-    const plan = planWorld(survey, { config, settings, usage, extraDemand: extra ? baseDemands(extra, config, settings) : [],
+    const extra = settings && (!buildingsView || survey.orders.length) ? await surveyBaseAutomation(instance, protocolFor(instance), config, session.player, settings, survey, { ledger: usageFor(session), enabled: () => session.client === instance && instance.connected !== false }) : null;
+    const planOptions = { config, settings, usage,
+      extraDemand: extra ? baseDemands(extra, config, settings) : [],
       allowSpeedUp: allowAccelerators && (!settings || session.loop.tasks.speedUp),
-      ...(settings ? { enabled: kind => session.loop.tasks[worldTaskKey(kind)] === true, allowReroll: settings.resident.reroll, minOrderExp: settings.resident.minExp } : {}) });
-    plan.actions = plan.actions.filter(step => allowAccelerators || !(step.costs ?? []).some(cost => cost.id === '加速器' && cost.num > 0));
+      ...(settings ? { enabled: kind => session.loop.tasks[worldTaskKey(kind)] === true, allowReroll: settings.resident.reroll, minOrderExp: settings.resident.minExp } : {}) };
+    const plan = buildingsView ? null : planWorld(survey, planOptions);
+    if (plan) plan.actions = plan.actions.filter(step => allowAccelerators || !(step.costs ?? []).some(cost => cost.id === '加速器' && cost.num > 0));
     // Manual preview and idle execution can use different toggles. The order
     // table describes what the account's idle loop can actually deliver.
-    const autoOrders = survey.orders.length ? planWorld(survey, {
-      config, enabled: kind => session.loop.tasks[worldTaskKey(kind)] === true,
-      allowReroll: session.loop.tasks.denyOrder, minOrderExp: null,
-      settings, usage,
-    }).orderDecisions : [];
-    let map = null, mapError;
-    try {
-      map = await loadMapAsset(Number(session.player?.scenarioId ?? 0), config?.resources ?? null);
-    } catch (error) {
-      mapError = error.message;
-    }
-    let guilds=null;try{guilds=(await instance.request('AllGuildAbstractionRequest',{},'AllGuildAbstractionResponse')).guilds;}catch{/*主城动态等级读取失败时显示未同步。*/}
-    const fields = { ...survey.resFields, text: formatFieldReport(survey, map, mapError), rows:resourceFieldRows(config,session.player,survey.resFields,guilds) };
-    fields.totals=resourceFieldTotals(survey.resFields,fields.rows);
+    const autoOrders = !survey.orders.length ? [] : settings && plan ? plan.orderDecisions : planWorld(survey, {
+      ...planOptions, residentDecisionsOnly: true, enabled: kind => session.loop.tasks[worldTaskKey(kind)] === true,
+      allowReroll: settings ? settings.resident.reroll : session.loop.tasks.denyOrder, minOrderExp: settings?.resident.minExp ?? null,
+    }).orderDecisions;
     const typeNames = new Map(config?.tables?.BuildingCfg?.data.map(row => [row.buildingType, row.name]));
-    const timing = createProductionTiming({ config, ...survey.productionTiming, serverNow: survey.serverNow });
+    const timing = plan && createProductionTiming({ config, ...survey.productionTiming, serverNow: survey.serverNow });
     const incoming = factoryIncomingStock(survey.factories);
     const now = Date.now() / 1000;
     const result = {
@@ -2067,11 +2120,11 @@ export function createConsole({ host = '127.0.0.1', port = 17321, onLog, recover
       factories: survey.factories.map(b => {
         const queueKnown = Array.isArray(b.factory.factoryQ);
         const queue = queueKnown ? b.factory.factoryQ : [];
-        const planned = plan.actions.filter(step => step.request === 'StartFactoryProduceRequest'
-          && step.body.buildingId === b.buildingId);
+        const planned = plan?.actions.filter(step => step.request === 'StartFactoryProduceRequest'
+          && step.body.buildingId === b.buildingId) ?? [];
         // The timing simulation uses the submitted queue first, then the proposed
         // inputs in dispatch order. The game snapshot itself stays unchanged.
-        const schedule = queueKnown && queue.every(job => job?.productId)
+        const schedule = timing && queueKnown && queue.every(job => job?.productId)
           ? timing.factoryQueue(b, [...queue, ...planned.map(step => step.body)]).jobs : [];
         const finishes = new Map(schedule.map(entry => [entry.job, entry.finish]));
         let canEstimate = queueKnown && (!queue.length || queue.some(job => job?.finishTime > 0));
@@ -2088,7 +2141,7 @@ export function createConsole({ host = '127.0.0.1', port = 17321, onLog, recover
             estimatedFinishTime: !finishTime && canEstimate ? finishes.get(job) : null,
           };
         });
-        const plannedJobs = queueKnown ? planned.map(step => {
+        const plannedJobs = plan && queueKnown ? planned.map(step => {
           const { productId } = step.body;
           if (step.needsConfirmedBorrow || !finishes.has(step.body)) canEstimate = false;
           return { productId, name: step.displayProduct || displayMaterial(config, productId),
@@ -2117,7 +2170,7 @@ export function createConsole({ host = '127.0.0.1', port = 17321, onLog, recover
       autoProduce: autoProduceView(config, survey),
       orders: survey.orders.map((order) => ({
         ...order,
-        workerIcon: workerIcon(order.workerId),
+        workerIcon: residentOrderIcon(order.workerId),
         decision: autoOrders.find(row => row.index === order.index),
         manualRefresh:{allowed:!!order.orderKey&&!order.refreshTime&&!order.refreshPending&&order.requirements.length>0&&session.player?.level>=12,reason:order.refreshPending?'上次换单待确认':order.refreshTime?'等待新订单':session.player?.level<12?'角色12级开放':!order.orderKey?'订单身份待确认':!order.requirements.length?'订单需求未同步':''},
         manualDecision: manualResidentOrderDecision(survey, order, config),
@@ -2137,11 +2190,24 @@ export function createConsole({ host = '127.0.0.1', port = 17321, onLog, recover
       stock: inventoryStockRows(survey, config).map(row => ({
         ...row, name: displayMaterial(config, row.id), sources: config?.materialSources(row.id), icon: materialIcon(row.id),
       })),
-      resFields: fields,
-      plan: plan.actions,
-      notes: [...survey.notes, ...plan.notes],
-      text: formatWorldPlan(survey, plan),
     };
+    if (plan) {
+      let map = null, mapError;
+      try {
+        map = await loadMapAsset(Number(session.player?.scenarioId ?? 0), config?.resources ?? null);
+      } catch (error) {
+        mapError = error.message;
+      }
+      let guilds = null;
+      try { guilds = (await instance.request('AllGuildAbstractionRequest', {}, 'AllGuildAbstractionResponse')).guilds; }
+      catch { /* 主城动态等级读取失败时显示未同步。 */ }
+      const rows = resourceFieldRows(config, session.player, survey.resFields, guilds);
+      result.resFields = { ...survey.resFields, text: formatFieldReport(survey, map, mapError), rows,
+        totals: resourceFieldTotals(survey.resFields, rows) };
+      result.plan = plan.actions;
+      result.notes = [...survey.notes, ...plan.notes];
+      result.text = formatWorldPlan(survey, plan);
+    }
     const products = result.farms.map(plot => plot.productId);
     for (const factory of result.factories) {
       for (const job of [...factory.jobs, ...(factory.plannedJobs ?? [])]) products.push(job.productId);
@@ -2180,18 +2246,25 @@ export function createConsole({ host = '127.0.0.1', port = 17321, onLog, recover
   }
 
   // 抓到登录包就落库；顺手连一次把昵称/等级/区服回填，账号列表才看得到人话。
-  async function addCapturedAccount({ url, body, rawFrameHex }, platform) {
+  async function addCapturedAccount({ url, body, rawFrameHex }, platform, draft = null) {
     if (platform === 'douyin' && !['openId', 'token', 'sign', 'timestamp'].every(key => body?.eworldParams?.[key])) {
       throw new Error('抖音游戏登录报文缺少凭证字段');
     }
     const credential = { url, login: body, loginFrameHex: rawFrameHex, source: platform === 'douyin' ? 'douyin-mitm' : 'mitm', capturedAt: new Date().toISOString() };
+    if (draft) {
+      if (captureRoleDraft !== draft || closing) return;
+      draft.entry = { credential, userName: platform === 'douyin' ? '电脑抖音' : '电脑微信', choices: [] };
+      draft.timer = setTimeout(() => { if (captureRoleDraft === draft) clearCaptureRoleDraft(); }, PHONE_PENDING_MS);
+      draft.timer.unref?.();
+      return;
+    }
     let store = loadStore();
-    const unpinned = loginProfiles(store, credential).find(row => !Number(row.login.worldId));
-    if (Number(body.worldId) && unpinned?.lastSeen) {
+    const unpinned = loginProfiles(store, credential).find(row => !toNumber(row.login.worldId));
+    if (toNumber(body.worldId) && unpinned?.lastSeen) {
       const worlds = await readPhoneWorlds(credential);
       store = loadStore();
       pinLegacyWorld(store, { credential, choices: worlds.recentWorlds.filter(row => uidText(row.role?.id)), player: worlds.player });
-      if (store.accounts.some(row => row.id === unpinned.id && !Number(row.login.worldId))) {
+      if (store.accounts.some(row => row.id === unpinned.id && !toNumber(row.login.worldId))) {
         throw new Error('未能确认旧角色的登录区服，请打开对应卡片的区服管理，加载区服并核对角色');
       }
     }
@@ -2594,7 +2667,7 @@ export function createConsole({ host = '127.0.0.1', port = 17321, onLog, recover
             }, { recoverFormation: false });
             if (!current()) break;
             if (typeof profile?.nickname !== 'string' || !profile.nickname.trim()) continue;
-            recordListNames(session, effectiveSettings(session), [{ id, name: profile.nickname }]);
+            recordListNames(session, effectiveSettings(session), [{ id, name: profile.nickname, power: playerPowerText(profile) }]);
             synced.push(id);
           } catch (error) { if (!error.prompt) break; }
         }
@@ -2826,7 +2899,7 @@ export function createConsole({ host = '127.0.0.1', port = 17321, onLog, recover
             return {...output({actions:[],notes:['任务顺序：'+settings.fleetDispatch.priority.map(k=>dispatchLabels[k]).join(' → '),'意向仅表示配置允许；派遣前仍核对目标和费用，正在执行的任务不抢占。']},{fleets:table.length},'舰队调度'),viewOnly:true,dispatch:{fleets:table.map(f=>({name:f.buildingId,reason:[f.reason,...f.reserved.map(r=>'预留给'+r),'允许顺序：'+(f.intents.map(i=>i.label).join(' → ')||'无'),'当前目标：'+(f.targetGrid??'主城')].filter(Boolean).join('；')}))}};
           }
           if(category==='pirateSweep'){
-            const state=await readPirateSweeps(client,config,session.player,settings,usageFor(session).keyRecords()),notes=[];
+            const state=await readPirateSweeps(client,config,session.player,settings,usageFor(session)),notes=[];
             if(state.left!==null)notes.push('今日剩余 '+state.left+'/'+state.limit+' 次（三种海盗共用）');
             for(const row of state.allocations)notes.push(row.name+' · 挂机已用 '+row.used+' 次，'+(row.times===-1?'使用剩余次数':'每日设定 '+row.times+' 次'));
             if(state.reason)notes.push(state.reason);if(!settings.schedule.pirate)notes.push('每日免费扫荡已关闭');
@@ -2934,7 +3007,7 @@ export function createConsole({ host = '127.0.0.1', port = 17321, onLog, recover
             const gearOnly = category === 'equipmentGrowth';
             const excluded = gearOnly
               ? { level: false, star: false, skill: false, skillAdvance: false, exclusiveLevel: false, exclusiveStar: false, showSkillReward: false }
-              : { equipment: false, badge: false };
+              : { equipment: false };
             const previewSettings = { ...settings, heroes: { ...settings.heroes, ...excluded } };
             const { plan, heroes, stock } = await readHeroGrowthPlan(client, config, session.player, previewSettings);
             const actions = plan.steps.map(step => ({ ...step, label: heroStepLabel(step), setting: 'heroes.' + step.kind }));
@@ -3253,15 +3326,10 @@ export function createConsole({ host = '127.0.0.1', port = 17321, onLog, recover
         const pending = requireAlipayRoles(payload.id);
         if (pending.reading) throw new Error('正在读取区服和角色，请稍候');
         if (pending.entry.roleError) throw new Error('角色列表读取失败，请重试后再保存');
-        const choices = pending.entry.choices;
-        const choice = payload.choiceId ? choices.find(item => item.id === String(payload.choiceId))
-          : choices.length === 1 ? choices[0] : null;
-        if (!choice || payload.worldId !== undefined) throw new Error('请选择列表中的区服和角色后再保存');
+        const selections = selectedLoginRoles(payload, [pending.entry]);
         alipaySaving = true;
         try {
-          const session = selectedSession(pending.entry, choice);
-          const save = () => saveAlipayRole(pending, choice);
-          const result = session && !session.paused ? await enqueue(session, save) : await save();
+          const result = await saveAlipayRoles(pending, selections);
           // 凭证已落盘，临时浏览器清理失败也应返回已保存的账号。
           try { await alipayLogin.cancel(payload.id); } catch {}
           json(result);
@@ -3317,15 +3385,10 @@ export function createConsole({ host = '127.0.0.1', port = 17321, onLog, recover
         const pending = requireWechatRoles(payload.id);
         if (pending.reading) throw new Error('正在读取区服和角色，请稍候');
         if (pending.entry.roleError) throw new Error('角色列表读取失败，请重试后再保存');
-        const choices = pending.entry.choices;
-        const choice = payload.choiceId ? choices.find(item => item.id === String(payload.choiceId))
-          : choices.length === 1 ? choices[0] : null;
-        if (!choice || payload.worldId !== undefined) throw new Error('请选择列表中的区服和角色后再保存');
+        const selections = selectedLoginRoles(payload, [pending.entry]);
         wechatSaving = true;
         try {
-          const session = selectedSession(pending.entry, choice);
-          const save = () => saveWechatRole(pending, choice);
-          const result = session && !session.paused ? await enqueue(session, save) : await save();
+          const result = await saveWechatRoles(pending, selections);
           // 凭证已落盘，临时授权会话清理失败也应返回已保存的账号。
           try { await wechatLogin.cancel(payload.id); } catch {}
           json(result);
@@ -3443,22 +3506,16 @@ export function createConsole({ host = '127.0.0.1', port = 17321, onLog, recover
         const pending = pendingPhoneLogins.get(String(payload.id ?? ''));
         if (!pending) throw new Error('登录结果已过期，请重新登录');
         if (pending.busy) throw new Error('正在处理此登录结果，请稍候');
-        const available = pending.entries.flatMap(entry => entry.choices.map(choice => ({ entry, choice })));
-        const selected = payload.choiceId
-          ? available.find(item => item.choice.id === String(payload.choiceId))
-          : available.length === 1 ? available[0] : null;
-        if (!selected) throw new Error('请选择列表中的区服和角色后再保存');
+        const selections = selectedLoginRoles(payload, pending.entries);
         pending.busy = true;
         try {
-          const session = selectedSession(selected.entry, selected.choice);
-          const save = () => {
-            if (closing) throw new Error('控制台已关闭');
+          const result = await saveSelectedRoles(selections, { validateSelection() {
             if (pendingPhoneLogins.get(pending.id) !== pending || Date.now() - pending.createdAt >= PHONE_PENDING_MS) {
               throw new Error('登录结果已过期，请重新登录');
             }
-            return savePhoneRole(pending, selected.entry, selected.choice);
-          };
-          json(session && !session.paused ? await enqueue(session, save) : await save());
+          } });
+          pendingPhoneLogins.delete(pending.id);
+          json(result);
         } finally {
           pending.busy = false;
         }
@@ -3475,7 +3532,8 @@ export function createConsole({ host = '127.0.0.1', port = 17321, onLog, recover
       if (route === 'POST /api/accounts/pause') {
         const { account, session } = scoped_(parsed);
         const payload = jsonBody();
-        const { paused, start = false } = payload;
+        const { paused, start = false, exclusive = false } = payload;
+        if (typeof exclusive !== 'boolean' || (exclusive && !start)) throw new Error('切换托管需要开始目标角色');
         if (typeof paused !== 'boolean') throw new Error('请选择暂停或恢复');
         if (typeof start !== 'boolean' || (start && paused)) throw new Error('开始托管需要先恢复账号');
         if (start) needConfirm(payload);
@@ -3488,7 +3546,7 @@ export function createConsole({ host = '127.0.0.1', port = 17321, onLog, recover
         const identity = accountId(account);
         const revision = session.hostingPauseRevision;
         const previous = hostingChanges.get(identity);
-        const change = (previous ?? Promise.resolve()).catch(() => {}).then(() => changeHosting(session, account, false, start, revision));
+        const change = (previous ?? Promise.resolve()).catch(() => {}).then(() => changeHosting(session, account, false, start, revision, exclusive));
         hostingChanges.set(identity, change);
         try { await change; }
         finally { if (hostingChanges.get(identity) === change) hostingChanges.delete(identity); }
@@ -3517,7 +3575,32 @@ export function createConsole({ host = '127.0.0.1', port = 17321, onLog, recover
 
       // ---- 从电脑微信采集登录 ----
       if (route === 'GET /api/capture') {
-        json({ ...captureController.captureState(), qr: qrInfo() });
+        json({ ...captureController.captureState(), qr: qrInfo(), rolePreviewId: captureRoleDraft?.entry ? captureRoleDraft.id : null });
+        return;
+      }
+      if (['POST /api/capture/roles', 'POST /api/capture/save-roles', 'POST /api/capture/cancel-roles'].includes(route)) {
+        const payload = jsonBody();
+        needConfirm(payload);
+        const draft = captureRoleDraft;
+        if (!draft?.entry || draft.id !== payload.id) throw new Error('角色选择已过期，请重新读取账号');
+        if (route.endsWith('/cancel-roles')) { clearCaptureRoleDraft(); json({ ok: true }); return; }
+        if (draft.busy) throw new Error('正在处理所选角色，请稍候');
+        draft.busy = true;
+        try {
+          const validateSelection = () => {
+            if (closing || captureRoleDraft !== draft) throw new Error('角色选择已结束，请重新读取账号');
+          };
+          if (route.endsWith('/roles')) {
+            await readPhoneRoles(draft.entry, { signal: draft.controller.signal });
+            validateSelection();
+            json({ choices: roleChoices(draft.entry, loadStore()), roleError: draft.entry.roleError });
+          } else {
+            const selections = selectedLoginRoles(payload, [draft.entry]);
+            const result = await saveSelectedRoles(selections, { sourceLabel: draft.entry.userName, validateSelection });
+            clearCaptureRoleDraft();
+            json(result);
+          }
+        } finally { draft.busy = false; }
         return;
       }
       if (route === 'GET /api/capture/qrcode') {
@@ -3537,17 +3620,21 @@ export function createConsole({ host = '127.0.0.1', port = 17321, onLog, recover
         const platform = payload.platform ?? 'wechat';
         if (!['wechat', 'douyin'].includes(platform)) throw new Error('未知的采集渠道');
         emit(null, 'info', `开始抓包：本地 CA 与系统代理（127.0.0.1:${DEFAULT_PROXY_PORT}）都是当前用户范围，抓到即自动还原`);
+        clearCaptureRoleDraft();
+        const draft = payload.selectRoles === true ? { id: randomUUID(), controller: new AbortController() } : null;
+        captureRoleDraft = draft;
         await captureController.startCapture({
           port: DEFAULT_PROXY_PORT,
           platform,
           onLog: (line) => emit(null, /失败|超时/.test(line) ? 'error' : 'info', line),
-          onLogin: record => addCapturedAccount(record, platform),
+          onLogin: record => addCapturedAccount(record, platform, draft),
         });
         json({ ...captureController.captureState(), qr: qrInfo() });
         return;
       }
       if (route === 'POST /api/capture/stop') {
         needConfirm(jsonBody());
+        clearCaptureRoleDraft();
         await captureController.stopCapture('用户点了停止');
         json({ ...captureController.captureState(), qr: qrInfo() });
         return;
@@ -4216,7 +4303,10 @@ export function createConsole({ host = '127.0.0.1', port = 17321, onLog, recover
         const { account, session } = scoped_(parsed);
         json(await progressionJob(session, account, route, null, async (client, enabled) => {
           const config = loadConfigSafe();
-          const view = await activityView(client, client.festivals, config, session.player);
+          const view = await activityView(client, client.festivals, config, session.player, session.id);
+          for (const status of Object.values(view.status)) {
+            for (const item of status.chip?.statistics?.inventory ?? []) item.thumbnail = itemIcon(item.id)?.thumb;
+          }
           view.newbie = newbieView(client);
           if (view.order?.materials.length && !view.order.finished && enabled()) {
             const typeOf = makeTypeResolver(config);
@@ -4249,6 +4339,20 @@ export function createConsole({ host = '127.0.0.1', port = 17321, onLog, recover
           return Object.assign(view, activityCatalogView(session, activities));
         }, { read: true }));
         return;
+      }
+      if (route === 'POST /api/activities/week-chip/open') {
+        const payload = jsonBody();
+        needConfirm(payload);
+        const { account, session } = scoped_(parsed);
+        const result = await progressionJob(session, account, route + ':' + payload.planKey, '硅晶达标', async (client, enabled) => {
+          try {
+            const opened = await runWeekChip(client, loadConfigSafe(), { activityId: payload.activityId, planKey: payload.planKey,
+              owner: session.id, player: session.player, enabled, ledger: usageFor(session) });
+            emit(session, 'info', opened.message);
+            return opened;
+          } finally { session.activityStatistics = null; }
+        });
+        json(result); return;
       }
       if (route === 'POST /api/activities/run') {
         const payload = jsonBody();
@@ -4589,20 +4693,29 @@ export function createConsole({ host = '127.0.0.1', port = 17321, onLog, recover
             const config = loadConfigSafe();
             const timing = watchProductionTimings(client, loadConfigSafe);
             await refreshOrderMaterialSpends(client, player, { enabled, request: 'PetFeedRequest' });
+            const productionRevision = session.productionRevision ?? 0;
             const snapshot = await readProductionSnapshot(client, protocolFor(client), config, player, settings,
-              { enabled, observedDurations: timing.snapshot() });
+              { enabled, observedDurations: timing.snapshot(), ledger: usageFor(session) });
             if (!enabled()) throw new Error('账号或排产设置已变化，请重新计算');
             if (loadConfigSafe() !== config) throw new Error('游戏配置已更新，请重新计算');
             snapshot.timing.observedDurations = timing.snapshot();
             const pendingMaterials = captureManualProductionMaterialState(session.player).all;
-            return { snapshot, config, pendingMaterials, insertions:factoryInsertions(player) };
-          }).then(async ({ snapshot, config, pendingMaterials, insertions }) => {
+            return { snapshot, config, productionRevision, pendingMaterials, insertions:factoryInsertions(player) };
+          }).then(async ({ snapshot, config, productionRevision, pendingMaterials, insertions }) => {
             if (!enabled()) throw new Error('账号或排产设置已变化，请重新计算');
-            const result = planProduction(snapshot, config, settings, { pendingMaterials });
+            let result = planProduction(snapshot, config, settings, { pendingMaterials });
             const anchors = new Map();
-            result.forecast = await forecastProductionDay(snapshot, config, settings, result.orders, {
+            const forecast = await forecastProductionDay(snapshot, config, settings, result.orders, {
               anchors, insertions, pendingMaterials, checkCurrent() { if (!accountCurrent()) throw new Error('账号已变化，请重新计算'); },
             });
+            if (forecast.initialQueueChanges?.length) {
+              const removed = new Map(forecast.initialQueueChanges.map(({buildingId, indices}) => [buildingId, new Set(indices)]));
+              const factories = snapshot.factories.map(f => removed.has(f.id)
+                ? {...f, queue:f.queue.filter(job => !removed.get(f.id).has(job.index))} : f);
+              result = planProduction({...snapshot, factories}, config, settings, {pendingMaterials});
+            }
+            result.forecast = forecast;
+            result.productionRevision = productionRevision;
             if (result.strategy === 'nativeSimulation' && !result.forecast.partial) {
               const ready = new Map(result.forecast.completions.map(order => [order.id, order.at]));
               for (const order of result.orders) if (!order.reason) order.completionAt = ready.get(order.id) ?? null;
@@ -4650,11 +4763,15 @@ export function createConsole({ host = '127.0.0.1', port = 17321, onLog, recover
       if (route === 'GET /api/world') {
         const { account, session } = scoped_(parsed);
         const allowAccelerators = parsed.searchParams.get('speedUp') === 'true';
-        if (!session.worldRead || session.worldReadSpeedUp !== allowAccelerators) {
-          const job = readJob(session, () => world(session, account, allowAccelerators)).finally(() => { if (session.worldRead === job) session.worldRead = null; });
-          session.worldRead = job; session.worldReadSpeedUp = allowAccelerators;
+        const buildingsView = parsed.searchParams.get('view') === 'buildings';
+        const reads = session.worldRead ??= new Map();
+        const view = buildingsView ? 'buildings' : allowAccelerators ? 'speedUp' : 'full';
+        const readKey = session.generation + ':' + view;
+        if (!reads.has(readKey)) {
+          const job = readJob(session, () => world(session, account, allowAccelerators, buildingsView));
+          reads.set(readKey, job.finally(() => reads.delete(readKey)));
         }
-        json(await session.worldRead);
+        json(await reads.get(readKey));
         return;
       }
       if (['POST /api/world/production-speed', 'POST /api/world/production-start', 'POST /api/world/production-auto'].includes(route)) {
@@ -4675,8 +4792,9 @@ export function createConsole({ host = '127.0.0.1', port = 17321, onLog, recover
           else if (start) result = await startManualFactoryProduction(client, protocolFor(client), payload, { ...context, settings: session.preferences });
           else result = await speedUpProduction(client, protocolFor(client), payload, { ...context, getSettings: () => session.preferences });
           session.worldRead = null;
-          emit(session, result.confirmed ? 'info' : 'warn', result.label, { worldUpdated: true });
-          return result;
+          const worldUpdateId = randomUUID();
+          emit(session, result.confirmed ? 'info' : 'warn', result.label, { worldUpdated: true, worldUpdateId });
+          return { ...result, worldUpdateId };
         }, label);
         json(result);
         return;
@@ -4749,21 +4867,25 @@ export function createConsole({ host = '127.0.0.1', port = 17321, onLog, recover
           })) });
           return;
         }
-        const choice = choices.find(world => world.worldId === payload.worldId);
-        if (!choice) throw new Error('请选择该账号已有角色的登录区服');
-        const existing = matchingProfile(store, owner, choice.worldId);
-        if (existing && Number(existing.login.worldId)) {
-          saveStore(store);
-          json({ id: existing.id });
-          return;
+        const requested = payload.worldIds !== undefined ? payload.worldIds : [payload.worldId];
+        if (!Array.isArray(requested) || !requested.length || requested.length > choices.length
+          || (payload.worldIds !== undefined && payload.worldId !== undefined) || new Set(requested).size !== requested.length) {
+          throw new Error('请选择该账号已有角色的登录区服');
         }
-        const { account: saved } = upsertAccount(store, {
-          ...owner, login: { ...owner.login, worldId: choice.worldId }, loginFrameHex: null,
-        }, { label: choice.role.nickname, refreshCredentials: false });
-        saved.roleId = uidText(choice.role.id);
-        rememberSeen(saved, choice.role);
+        const ids = requested.map(worldId => {
+          const choice = choices.find(world => world.worldId === worldId);
+          if (!choice) throw new Error('请选择该账号已有角色的登录区服');
+          const existing = matchingProfile(store, owner, worldId);
+          if (existing && toNumber(existing.login.worldId)) return existing.id;
+          const { account: saved } = upsertAccount(store, {
+            ...owner, login: { ...owner.login, worldId }, loginFrameHex: null,
+          }, { label: choice.role.nickname, refreshCredentials: false });
+          saved.roleId = uidText(choice.role.id);
+          rememberSeen(saved, choice.role);
+          return saved.id;
+        });
         saveStore(store);
-        json({ id: saved.id });
+        json({ id: ids[0], ids });
         return;
       }
       // 进服自己开一条短连接，所以不会打扰控制台这边正在跑的会话。
@@ -4773,8 +4895,8 @@ export function createConsole({ host = '127.0.0.1', port = 17321, onLog, recover
         const { account, session } = scoped_(parsed);
         if (!payload.worldId) throw new Error('要指定 worldId');
         if (session.paused) throw new Error('账号已暂停，请先恢复托管');
-        if (loginProfiles(loadStore(), account).length > 1 && Number(payload.worldId) !== Number(account.login.worldId)) {
-          throw new Error('该账号已按角色托管，请在目标角色卡片切换托管');
+        if (loginProfiles(loadStore(), account).length > 1 && Number(payload.worldId) !== toNumber(account.login.worldId)) {
+          throw new Error('该账号已按角色托管，请在目标角色卡片操作');
         }
         const client = new GameClient({ url: account.url, protocol: currentProtocol() });
         session.worldClient = client;
@@ -4869,12 +4991,11 @@ export function createConsole({ host = '127.0.0.1', port = 17321, onLog, recover
         let task = session.trials.get(payload.raidId);
         if (!task) { task = createTrialTask(payload.raidId); session.trials.set(payload.raidId, task); }
         const generation = session.generation;
-        const progression = settingsView(session).settings.progression;
-        if (session.loop.running && progression.enabled && progression.trials && progression.raidIds.includes(String(payload.raidId))) throw new Error('该试炼已随挂机推关，请先暂停挂机再手动开始');
+        const schedule = manualChallengeSchedule(session, session.loop.challengeRun?.trials[payload.raidId]);
         let lastReport = '';
         json(task.start(payload, async () => {
           const client = await ensureConnected(session, account);
-          return { client, player: session.player, config, schedule: work => enqueue(session, work),
+          return { client, player: session.player, config, schedule,
             executeBattle: sessionLineupExecutor(session, client, payload.lineupId ?? ''),
             enabled: () => !session.paused && session.generation === generation && session.client === client && client.connected };
         }, state => {
@@ -5058,7 +5179,7 @@ export function createConsole({ host = '127.0.0.1', port = 17321, onLog, recover
         const settings = session.preferences;
         const usage = usageFor(session).snapshot();
         const extra = settings ? await surveyBaseAutomation(instance, protocolFor(instance), config, session.player, settings, survey, { ledger: usageFor(session), enabled: () => session.client === instance && instance.connected !== false }) : null;
-        const plan = planWorld(survey, { config, settings, usage, extraDemand: extra ? baseDemands(extra, config, settings) : [],
+        const plan = planWorld(survey, { config, settings, usage, trackRefills:true, extraDemand: extra ? baseDemands(extra, config, settings) : [],
           allowSpeedUp: allowAccelerators && (!settings || session.loop.tasks.speedUp), allowReroll: settings ? settings.resident.reroll : payload.reroll === true,
           ...(settings ? { enabled: kind => session.loop.tasks[worldTaskKey(kind)] === true, minOrderExp: settings.resident.minExp } : {}) });
         plan.actions = plan.actions.filter(step => allowAccelerators || !(step.costs ?? []).some(cost => cost.id === '加速器' && cost.num > 0));
@@ -5103,14 +5224,13 @@ export function createConsole({ host = '127.0.0.1', port = 17321, onLog, recover
         const { session, account } = scoped_(parsed);
         if (session.paused) throw new Error('账号已暂停，请先恢复托管');
         selectedSavedLineup(settingsView(session).settings, { presetId: payload.lineupId ?? '' });
-        const progression = settingsView(session).settings.progression;
-        if (session.loop.running && progression.enabled && progression.mainline) throw new Error('主线已随挂机推关，请先暂停挂机再手动开始');
+        const schedule = manualChallengeSchedule(session, session.loop.challengeRun?.mainline);
         json(session.stages.start(payload, async () => {
           const client = await ensureConnected(session, account);
           const config = loadConfigSafe();
           let nextCheck = 0;
           let checkedAfkHours;
-          return { client, player: session.player, config, schedule: work => enqueue(session, work),
+          return { client, player: session.player, config, schedule,
             executeBattle: sessionLineupExecutor(session, client, payload.lineupId ?? ''), async beforeBattle(signal) {
             const enabled = key => key === 'afk' && session.loop.tasks.afk && !session.loop.running && !signal.aborted;
             const hours = session.preferences?.afk?.claimIntervalHours;
@@ -5274,7 +5394,7 @@ export function createConsole({ host = '127.0.0.1', port = 17321, onLog, recover
     emit(session, 'state', '账号已暂停，可以自行上号', { pauseChanged: true });
   }
 
-  async function changeHosting(session, account, paused, start, revision) {
+  async function changeHosting(session, account, paused, start, revision, exclusive = false) {
     if (session.connectionDrain) await session.connectionDrain;
     const checkTarget = () => {
       if (closing || sessions.get(session.id) !== session || !loadStore().accounts.some(row => row.id === account.id)) {
@@ -5290,7 +5410,7 @@ export function createConsole({ host = '127.0.0.1', port = 17321, onLog, recover
     if (!session.paused && loginRecoveryActive(session) && (!start || session.loop.running)) return;
     const siblings = loginProfiles(loadStore(), account).filter(row => row.id !== account.id);
     if (start && siblings.length && !session.loop.running) validateLoopStart(session);
-    for (const sibling of siblings) {
+    for (const sibling of exclusive ? siblings : []) {
       if (revision !== session.hostingPauseRevision) return;
       const old = sessionFor(sibling.id);
       if (!old.paused) await pauseHosting(old);
@@ -5763,6 +5883,7 @@ export function createConsole({ host = '127.0.0.1', port = 17321, onLog, recover
       for (const client of phonePreviewClients) client.stop();
       phonePreviewClients.clear();
       pendingPhoneLogins.clear();
+      clearCaptureRoleDraft();
       await resources?.stop();
       for (const stream of streams) stream.destroy();
       streams.clear();

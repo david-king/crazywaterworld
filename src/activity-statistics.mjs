@@ -4,6 +4,7 @@ import {openRankWindows} from './activity-rankings.mjs';
 import {exactAutomationId,automationWireId} from './automation-policy.mjs';
 import {merchantProgress, merchantJournalSummary} from './merchant-activity.mjs';
 import {fishView,newbieView} from './collections.mjs';
+import { weekChipProgress } from './week-chip.mjs';
 
 const rows=(c,n)=>c?.tables?.[n]?.data??[];
 const valid=n=>Number.isSafeInteger(n)&&n>=0;
@@ -79,10 +80,11 @@ export async function readActivityStatistics(client,config,player,ledger,setting
     row.rewards=s.isGotFinal?'全部已领':count===tiers.length?'最终奖励待领':'订单奖励 '+count+'/'+tiers.length+' · 最终未达成';
    }else if(event.type===6){
     const s=await ask('WeekChipInfo');if(!valid(s.score)||!Array.isArray(s.gotTaskId)||!Array.isArray(s.gifts))throw Error('硅晶进度未完整返回');
-    row.progress='第 '+text(s.round)+' 轮 · 积分 '+text(s.score);
+    const tiers=rows(config,'WeekChipPointsCfg'),progress=weekChipProgress(s,tiers);
+    row.progress='第 '+text(s.round)+' 轮 · 积分 '+text(progress.score);
     const gift=rows(config,'WeekChipPackCfg').find(t=>t.price===0&&t.buyLimit>0);
     row.welfare=gift?(s.gifts.find(g=>g.giftId===gift.packId)?.paidTimes??0)>=gift.buyLimit?'免费礼包已领':'免费礼包未领':'未同步';
-    row.rewards=activityRewardState(rows(config,'WeekChipPointsCfg'),t=>s.score>=t.amount,t=>s.gotTaskId.includes(t.rwdId));
+    row.rewards=activityRewardState(tiers,t=>progress.score>=t.amount,t=>s.gotTaskId.includes(t.rwdId));
    }else if(event.type===7){
     const s=await ask('WeekUniqueLottery');if(!valid(s.floor)||!valid(s.gotFloor)||typeof s.gotFree!=='boolean')throw Error('翻牌进度未完整返回');
     row.progress='第 '+text(s.floor)+' 层';row.welfare=s.gotFree?'免费礼包已领':'免费礼包未领';

@@ -1,10 +1,12 @@
 import { optimizeProductionSchedule } from './production-optimizer.mjs';
 import { planStockRefills, scheduleRankedStock } from './production-restock.mjs';
 import { nativeMaterialReceipts, simulateNativeFactoryStarts } from './factory-native-simulation.mjs';
+import { refillGoal, snapshotRefills } from './factory-refill.mjs';
 import { createProductionTiming } from './production-timing.mjs';
 import { resourceReserve, worldPreferenceEnabled } from './automation-policy.mjs';
 import { activityProductionEnabled } from './activity-automation.mjs';
 import { createProductionEligibility } from './production-eligibility.mjs';
+import { cropRelatedMaterialIds, residentMaterialRule, residentMaterialReasons } from './resident-materials.mjs';
 import { displayBuilding } from './world.mjs';
 
 const rows = (config, key) => config?.tables?.[key]?.data ?? [];
@@ -77,6 +79,7 @@ export function buildProductionModel(snapshot, config, settings, { pendingMateri
     quantity: Math.max(0, item.num - (resourceReserve(settings, item.id) || 0)) }));
   const factoryConfigs = new Map(rows(config, 'BuildingProduceCfg').map(recipe => [recipe.itemId, recipe]));
   const cropConfigs = new Map(rows(config, 'FarmlandPlantCfg').map(recipe => [recipe.id, recipe]));
+  const cropRelatedIds = cropRelatedMaterialIds(config, cropConfigs.keys());
   const factoryMachines = new Map();
   const uncertainSupply = new Map();
   const nativeReceipts = worldPreferenceEnabled(settings, 'gainFactory');
@@ -155,11 +158,26 @@ export function buildProductionModel(snapshot, config, settings, { pendingMateri
   });
   const skippedOrders = new Map();
   const waitingSupply = new Map();
+  const onHand = new Map(inventory.map(item => [item.itemId, item.quantity]));
+  const available = id => onHand.get(id) ?? 0;
   const activeOrderRows = orderRows.filter(order => {
+    if (order.metadata?.recruitBlock) {
+      skippedOrders.set(order.id, [order.metadata.recruitBlock]);
+      return false;
+    }
+    const rule = order.source === 'resident' && residentMaterialRule(settings.resident, order.requirements, cropRelatedIds,
+      (snapshot.inventoryKnown ?? snapshot.complete) ? available : null);
+    if (rule) {
+      skippedOrders.set(order.id, [{ reason: residentMaterialReasons[rule] }]);
+      return false;
+    }
     const blocked = snapshot.complete ? eligibility(order.requirements, { reserve: true }) : [];
     if (blocked.length) {
       const waiting = blocked.every(block => block.kind === 'future-harvest' || block.kind === 'native-factory');
       (waiting ? waitingSupply : skippedOrders).set(order.id, blocked);
+    } else if (settings.resident?.skipProduction &&
+      (order.source !== 'merchant' || order.requirements.every(item => available(item.id) >= item.num))) {
+      for (const { id, num } of order.requirements) onHand.set(id, Math.max(0, available(id) - num));
     }
     return blocked.length === 0;
   });
@@ -228,6 +246,12 @@ export function planProduction(snapshot, config, settings, options = {}) {
     waitingLabels.set(id, harvest && factory ? '等待原生来料' : factory ? '等待原生工厂' : '等待农田来料');
   }
   const waitingSupplyCount = waitingLabels.size;
+  const {active:refillsInProgress} = snapshotRefills(snapshot, config, settings);
+  const refillNote = refillsInProgress.map(rule => {
+    const factory = snapshot.factories.find(f => f.id === rule.buildingId);
+    return displayBuilding(config, {...factory, buildingId:factory.id}) + '优先补' + (config?.materialName?.(rule.productId) || rule.productId)
+      + '至 ' + refillGoal(rule, snapshot.stockCap) + ' 件';
+  }).join('，');
   if (settings.factory?.strategy === 'nativeSimulation') {
     const name = id => config?.materialName?.(id) || id;
     const now = snapshot.serverNow;
@@ -246,7 +270,7 @@ export function planProduction(snapshot, config, settings, options = {}) {
     const canPlan = (snapshot.inventoryKnown ?? snapshot.complete) && now > 0 && snapshot.stockCap > 0
       && settings.factory.enabled && settings.factory.produce && settings.loop?.world !== false;
     const picks = canPlan ? simulateNativeFactoryStarts({
-      buildings: snapshot.buildings.filter(b => eligible.has(b.id)),
+      buildings: snapshot.buildings.filter(b => eligible.has(b.id) && !refillsInProgress.some(rule => rule.buildingId === b.id)),
       recipes: rows(config, 'BuildingProduceCfg'), availableProducts: unlocked,
       targets: settings.factory.simulatedTargets,
       timing: createProductionTiming({ config, ...snapshot.timing, serverNow: now }),
@@ -262,7 +286,7 @@ export function planProduction(snapshot, config, settings, options = {}) {
       ...job, machineName: model.machineNames.get(job.machineId), productName: name(job.itemId),
     }));
     return {
-      strategy: 'nativeSimulation', status: 'next-dispatch', scope: 'next-dispatch', snapshotTime: now, timeline,
+      strategy: 'nativeSimulation', status: 'next-dispatch', scope: 'next-dispatch', snapshotTime: now, timeline, refillNote,
       config: snapshot.config, estimated: true, completionAt: null, upperBound: null, lowerBound: null, stockTarget: snapshot.stockCap,
       statusLabel: '模拟原生 · 本轮排产', missingReads: model.input.missingReads,
       pending: pendingInputs.size > 0, waitingHarvestCount, waitingSupplyCount,
@@ -316,10 +340,10 @@ export function planProduction(snapshot, config, settings, options = {}) {
   });
   const blocks = new Map(blockedOrders);
   return {
-    ...result, scope, status: uncertainCompletion ? 'incomplete' : result.status,
+    ...result, scope, refillNote, status: uncertainCompletion ? 'incomplete' : result.status,
     statusLabel: refreshUncertain.size ? '方案越过订单刷新边界，齐套时间待确认'
       : waitingSupplyCount ? '部分需求的原生来料时间待定'
-      : allSkipped ? '当前需求因工厂等级或禁用限制已全部跳过排产'
+      : allSkipped ? '当前需求已全部跳过排产'
         : !model.orderRows.length && result.status === 'optimal' ? (refills.length ? '当前按库存水位备货' : '当前没有待齐套订单') : labels[result.status], estimated, config: snapshot.config,
     stockTarget,
     lowerBound: uncertainCompletion ? null : result.lowerBound,
@@ -335,7 +359,7 @@ export function planProduction(snapshot, config, settings, options = {}) {
       label: '第' + (bound.priority + 1) + '级 · ' + (model.priorityLabels.get(bound.priority) || '需求备料'),
       ...(uncertainCompletion ? { lowerBound: null, upperBound: null } : {}) })),
     notes: unique([...model.notes, ...result.reasons,
-      ...(model.skippedOrders.size ? ['已跳过 ' + model.skippedOrders.size + ' 项工厂等级不足或禁用的需求，材料可用于其他排产，恢复生产条件后重新计算'] : []),
+      ...(model.skippedOrders.size ? ['已跳过 ' + model.skippedOrders.size + ' 项需求，原因见对应订单，材料可用于其他排产'] : []),
       ...(refreshUncertain.size ? ['生产顺序按本次固定需求计算，联盟募兵订单刷新边界之后的实际需求需重新读取确认'] : []),
       ...(estimated ? ['候选方案比较含估算耗时或生产位条件，生产加成与容量变化后需重新读取计算'] : [])]),
     assumptions: [

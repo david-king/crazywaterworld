@@ -1,6 +1,7 @@
 import { setImmediate as yieldToLoop } from 'node:timers/promises';
 import { planWorld, displayBuilding } from './world.mjs';
-import { insertionRecipeReady } from './production-eligibility.mjs';
+import { insertionRecipeReady, readyCargoOrdersFirst } from './production-eligibility.mjs';
+import { snapshotRefills } from './factory-refill.mjs';
 import { createProductionTiming, nextFactoryLane, commitFactoryLane } from './production-timing.mjs';
 import { resourceReserve } from './automation-policy.mjs';
 import { consumeInsertionUnit, insertionYieldsToProduction, nextInsertionIndex } from './factory-insertion-queue.mjs';
@@ -196,9 +197,7 @@ export async function forecastProductionDay(
       .map(j => {
         // Only an unexpired game timer confirms that this entry has started.
         const status = j.job.finishTime > startAt ? 'running' : 'queued';
-        if (j.finish > j.start) trace?.units.push({ id: j.job.productId, idx: j.job.idx, from: j.start, to: j.finish, lane: j.index + 1, status });
-        chart.record(j.job.productId, j.start, j.finish, status, j.index);
-        return { id: j.job.productId, idx: j.job.idx, start: j.start, end: j.finish };
+        return { id: j.job.productId, idx: j.job.idx, start: j.start, end: j.finish, lane:j.index, status };
       });
     const timedIndices = new Set(jobs.filter(j => j.start < endAt).map(j => j.idx));
     const untimedQueue = [];
@@ -267,6 +266,7 @@ export async function forecastProductionDay(
     },
   };
   const slots = snapshot.factories[0]?.capacity ?? 0;
+  const {history:refillHistory} = snapshotRefills(snapshot, config, settings);
   const waitHistory = new Map(),
     occupied = new Map();
   const stockNeeds = {
@@ -299,13 +299,20 @@ export async function forecastProductionDay(
     nextYield = performance.now() + 24;
   function processOrders() {
     const reserved = new Map();
-    for (const order of [...remainder]) {
+    const free = id => Math.max(0, have(id) - (resourceReserve(settings, id) || 0) - (reserved.get(id) ?? 0));
+    const autoCargo = order => order.source === 'cargo' && order.metadata?.enabled;
+    let cargo;
+    for (const entry of [...remainder]) {
+      let order = entry;
+      if (autoCargo(entry)) {
+        cargo ??= readyCargoOrdersFirst(remainder.filter(autoCargo), free).values();
+        order = cargo.next().value;
+      }
       const expiry = order.metadata?.refreshAt;
       if ((expiry && now >= expiry) || (order.deadline && now > order.deadline)) {
         remainder.splice(remainder.indexOf(order), 1);
         continue;
       }
-      const free = id => Math.max(0, have(id) - (resourceReserve(settings, id) || 0) - (reserved.get(id) ?? 0));
       if (order.requirements.every(r => free(r.id) >= r.num)) {
         const consume =
           order.kind === 'order' &&
@@ -324,6 +331,13 @@ export async function forecastProductionDay(
     }
     for (const f of factories) {
       const factory = f.building.factory;
+      // Waiting jobs can move. Record a slot once it starts, or when the forecast ends.
+      for (const job of f.jobs) if (!job.recorded && (job.start <= now || now === endAt)) {
+        job.recorded = true;
+        f.chart.record(job.id, job.start, job.end, job.status, job.lane, job.manual);
+        if (job.end > job.start) f.trace?.units.push({id:job.id, idx:job.idx, from:job.start, to:job.end,
+          lane:job.lane + 1, status:job.status, at:job.at, manual:!!job.manual, sourceIndex:job.manual?.sourceIndex});
+      }
       for (const job of f.jobs.filter(j => j.end <= now)) {
         const item = factory.finishedProducts.find(r => r.id === job.id);
         if (item) item.num++;
@@ -366,6 +380,7 @@ export async function forecastProductionDay(
       settings: dispatchSettings,
       extraDemand,
       factoryWaitHistory: waitHistory,
+      refillHistory,
       enabled: kind => settings.loop.world && ['startProduce', 'gainFactory', 'farm'].includes(kind),
     });
     occupied.clear();
@@ -374,6 +389,30 @@ export async function forecastProductionDay(
       for (const r of f.building.factory.finishedProducts) add(occupied, r.id, r.num);
     }
     const liveTiming = timingAt(now);
+    for (const [buildingId, displaced] of plan.queueChanges) {
+      const f = active.get(buildingId);
+      if (!f) continue;
+      const removed = new Set(displaced.map(({job}) => job.idx));
+      f.jobs = f.jobs.filter(job => !removed.has(job.idx));
+      const queue = f.building.factory.factoryQ.filter(job => !removed.has(job.idx));
+      const handoff = liveTiming.factoryQueue(f.building, queue);
+      f.finishes = handoff.finishes;
+      const byIndex = new Map(handoff.jobs.map(job => [job.job.idx, job]));
+      for (const job of f.jobs.filter(job => !job.recorded)) {
+        const next = byIndex.get(job.idx);
+        job.start = next.start; job.end = next.finish; job.lane = next.index;
+      }
+      if (now === startAt) {
+        (result.initialQueueChanges ??= []).push({buildingId, indices:[...removed]});
+        // The displayed positions assume these changes have gone through.
+        f.replanned = true;
+        anchors?.delete(buildingId);
+      }
+    }
+    if (plan.actions.some(step => step.refillRule && step.request !== 'StartFactoryProduceRequest')) {
+      result.partial = true;
+      result.refillNote = '强制补库将调整生产队列。调整完成前，时间表暂按现有工时估算。';
+    }
     const isFull = id => (stock.get(id) ?? 0) + (occupied.get(id) ?? 0) >= snapshot.stockCap;
     const free = id => have(id) - (resourceReserve(settings,id) || 0);
     const ready = (factory, id) => insertionRecipeReady(recipes.get(id), factory.building.level, survey.festivals, now, free);
@@ -385,6 +424,7 @@ export async function forecastProductionDay(
         yield {request:'FarmPlantRequest', body:{args:[{buildingId:plot.buildingId,productId:job.id}]}, costs:[{id,num}], job};
       }
       for (const [buildingId, f] of manualFacilities) {
+        if (plan.refilling.has(buildingId)) continue;
         while (f.jobs.length < f.capacity && f.manual.length) {
           const index = nextInsertionIndex(f.manual, now, isFull, id => ready(f,id)), job = f.manual[index];
           if (!job || !ready(f,job.id)) break;
@@ -416,7 +456,7 @@ export async function forecastProductionDay(
           f = (step.job ? manualFacilities : active).get(buildingId);
         if (
           !f || f.jobs.length >= f.capacity || isFull(productId) ||
-          (!step.job && !insertionYieldsToProduction(survey.factoryInsertions[buildingId], now, isFull, id => ready(f,id)))
+          (!step.job && !step.refillRule && !insertionYieldsToProduction(survey.factoryInsertions[buildingId], now, isFull, id => ready(f,id)))
         )
           continue;
         const duration = liveTiming.factory(recipes.get(productId), { building: f.building }).seconds;
@@ -426,10 +466,8 @@ export async function forecastProductionDay(
         const lane = nextFactoryLane(finishes, lanes.expiresAt, duration);
         commitFactoryLane(finishes, lane);
         f.finishes = finishes;
-        f.jobs.push({ id: productId, idx: ++f.serial, start: lane.start, end: lane.finish });
-        f.chart.record(productId, lane.start, lane.finish, 'planned', lane.index, step.job);
-        f.trace?.units.push({ id: productId, lane: lane.index + 1, from: lane.start, to: lane.finish,
-          at: now, status: 'planned', manual: !!step.job, sourceIndex:step.job?.sourceIndex });
+        f.jobs.push({ id: productId, idx: ++f.serial, start: lane.start, end: lane.finish, lane:lane.index,
+          status:'planned', at:now, manual:step.job && {...step.job} });
         if (step.job) consumeInsertionUnit(f.manual, step.index);
         if (step.job || f.manual.length) manualAdvanced = true;
         add(occupied, productId, 1);
@@ -448,7 +486,7 @@ export async function forecastProductionDay(
       ...remainder.map(o => o.metadata?.refreshAt),
       ...remainder.map(o => o.deadline && o.deadline + 1),
     ];
-    if (manualAdvanced) events.push(now + 1);
+    if (manualAdvanced || plan.queueChanges.size) events.push(now + 1);
     if ([...waitHistory.values()].some(t => now - t < 3 * revisit)) events.push(now + revisit);
     now = Math.min(endAt, ...events.filter(t => t > now));
   }
@@ -492,8 +530,8 @@ export async function forecastProductionDay(
       name: displayBuilding(config, f.building),
       unknown: f.unknown,
       disabled: f.disabled,
-      editing: f.editing || staged.has(id),
-      insertNote: f.insertNote || (f.editing ? '正在核对游戏队列，完成后可继续插单' : undefined),
+      editing: f.editing || staged.has(id) || !!f.replanned,
+      insertNote: f.insertNote || (f.replanned ? '等待任务会按最新库存调整，实际位置以游戏回读为准' : f.editing ? '正在核对游戏队列，完成后可继续插单' : undefined),
       upstream: upstream.get(f.building.buildingId) ?? [],
       untimedQueue: f.untimedQueue,
       ready: snapshot.factories[index].finished.filter(j => j.num > 0).map(j => ({id:j.id,name:name(j.id),quantity:j.num})),

@@ -1,6 +1,6 @@
 import { exactAutomationId } from './automation-policy.mjs';
 import { createGuildNameResolver } from './guild-name.mjs';
-import { siliconOpeningReason, isIdleSiliconFleet } from './silicon-mining.mjs';
+import { siliconFleetSlot, siliconOpeningReason, siliconSlotDispatches } from './silicon-mining.mjs';
 
 const integer = (value, min = 0) => Number.isSafeInteger(value) && value >= min;
 const serverNow = client => Math.floor((Date.now() + (client.serverClockOffsetMs || 0)) / 1000);
@@ -98,22 +98,11 @@ export async function readSiliconOverview(client, protocol, config, player, { en
   view.mines.sort((a, b) => ['BLUE', 'PURPLE', 'ORANGE'].indexOf(a.tier) - ['BLUE', 'PURPLE', 'ORANGE'].indexOf(b.tier) || a.gridId - b.gridId);
   view.fleetsSynced = Array.isArray(own?.fleets);
   const fleets = view.fleetsSynced ? own.fleets : [];
-  // 行军协议只有矿区编号。具体矿位从本账号的派遣记录读取，不能从空位或敌方占位猜测。
-  const worldId = exactAutomationId(player.worldId);
-  for (const record of Object.values(ledger?.keyRecords() ?? {})) {
-    const order = record.details;
-    if (order?.kind !== 'siliconDispatch' || order.worldId !== worldId || order.active === false || !integer(order.index)) continue;
-    const fleet = fleets.find(row => row.buildingId === order.buildingId);
-    if (record.confirmed && isIdleSiliconFleet(fleet)) continue;
-    const mine = view.mines.find(row => row.gridId === order.gridId && !row.reason);
-    if (!mine || order.index >= mine.positionCount) continue;
-    if (mine.positions.some(row => row.player.fleetId === order.buildingId && (mine.personal || row.displayIndex === order.index))) continue;
-    view.dispatches.push({ gridId: mine.gridId, index: order.index, fleetId: order.buildingId,
-      kind: order.opponent ? 'attack' : 'dispatch', pending: !record.confirmed });
-  }
+  const snapshot = { worldId: exactAutomationId(player.worldId), fleets, mines: view.mines };
+  view.dispatches = siliconSlotDispatches(snapshot, ledger?.keyRecords() ?? {}).filter(order =>
+    view.mines.some(mine => mine.gridId === order.gridId && !mine.reason && order.index < mine.positionCount));
   view.fleets = fleets.filter(fleet => /^\d+远征船$/.test(fleet.buildingId)).map(fleet => {
-    const slot = view.mines.filter(mine => !mine.reason).flatMap(mine => mine.positions.map(position => ({ mine, position })))
-      .find(row => row.position.player.fleetId === fleet.buildingId);
+    const slot = siliconFleetSlot(snapshot, fleet.buildingId);
     const target = view.mines.find(mine => mine.gridId === fleet.targetGridIdx);
     const mining = fleet.state === 5 && !!fleet.chipWar;
     const status = mining ? '采矿中' : ({ 1: fleet.curGridIdx ? '驻守中' : '空闲', 2: target ? '前往硅矿' : '行军中', 3: '战斗中', 4: '维修中', 5: '排队中' })[fleet.state] || '状态未同步';

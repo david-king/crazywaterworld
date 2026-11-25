@@ -10,26 +10,33 @@ function recommendationKnown(condition) {
     && typeof condition?.careerLimit === 'string' && typeof condition?.factionLimit === 'string';
 }
 
+function heroQuality(heroConfig) {
+  const quality = qualityIndices[heroConfig?.quality] ?? heroConfig?.qualityIndex;
+  return integer(quality) ? quality : null;
+}
+
+function heroStars(hero) {
+  const star = hero?.star ?? 0, exclusiveStar = hero?.exclusive?.star ?? 0;
+  return integer(star) && integer(exclusiveStar) ? star + exclusiveStar : null;
+}
+
 function heroRecommendationKnown(hero, heroConfig, condition) {
-  const quality = heroConfig && (qualityIndices[heroConfig.quality] ?? heroConfig.qualityIndex);
-  return recommendationKnown(condition) && !!heroConfig && integer(hero?.star ?? 0)
-    && integer(hero?.exclusive?.star ?? 0) && integer(quality)
+  return recommendationKnown(condition) && heroQuality(heroConfig) !== null && heroStars(hero) !== null
     && (!condition.careerLimit || typeof heroConfig.career === 'string')
     && (!condition.factionLimit || typeof heroConfig.faction === 'string');
 }
 
 export function matchesMuseumRecommendation(hero, heroConfig, condition) {
   if (!recommendationKnown(condition) || !heroConfig) return false;
-  const star = hero?.star ?? 0, exclusiveStar = hero?.exclusive?.star ?? 0;
-  const quality = qualityIndices[heroConfig.quality] ?? heroConfig.qualityIndex;
-  return integer(star) && integer(exclusiveStar) && integer(quality)
-    && star + exclusiveStar >= condition.heroStar && quality >= condition.heroQualityIndex
+  const stars = heroStars(hero), quality = heroQuality(heroConfig);
+  return stars !== null && quality !== null
+    && stars >= condition.heroStar && quality >= condition.heroQualityIndex
     && (!condition.careerLimit || heroConfig.career === condition.careerLimit)
     && (!condition.factionLimit || heroConfig.faction === condition.factionLimit);
 }
 
-// MuseumHeroSelectPop orders available heroes by recommendation first, then
-// their existing power order, and fills the remaining slots with other heroes.
+// Keep recommended heroes in power order. Fill spare slots with lower-quality,
+// lower-star heroes so other maps can use the more demanding recommendations.
 // Callers include both active expeditions and unconfirmed/planned dispatches
 // in busyHeroIds so a hero cannot be allocated twice in the same round.
 function museumCandidates(stage, heroes, config, busyHeroIds) {
@@ -48,12 +55,19 @@ function museumCandidates(stage, heroes, config, busyHeroIds) {
     seen.add(hero.heroId);
     if (busy.has(hero.heroId)) continue;
     const configs = rows(config, 'HeroCfg').filter(row => row.id === hero.heroId);
+    const heroConfig = configs.length === 1 ? configs[0] : null;
     candidates.push({ heroId: hero.heroId,
-      recommendationKnown: configs.length === 1 && heroRecommendationKnown(hero, configs[0], condition),
-      recommended: configs.length === 1 && matchesMuseumRecommendation(hero, configs[0], condition),
+      recommendationKnown: heroRecommendationKnown(hero, heroConfig, condition),
+      recommended: matchesMuseumRecommendation(hero, heroConfig, condition),
+      quality: heroQuality(heroConfig) ?? Infinity, stars: heroStars(hero) ?? Infinity,
       power: Number.isFinite(hero.power) && hero.power >= 0 ? hero.power : 0 });
   }
-  candidates.sort((a, b) => Number(b.recommended) - Number(a.recommended) || b.power - a.power || a.heroId.localeCompare(b.heroId));
+  candidates.sort((a, b) => {
+    if (a.recommended !== b.recommended) return a.recommended ? -1 : 1;
+    if (!a.recommended && a.quality !== b.quality) return a.quality - b.quality;
+    if (!a.recommended && a.stars !== b.stars) return a.stars - b.stars;
+    return b.power - a.power || a.heroId.localeCompare(b.heroId);
+  });
   return { ...result, candidates };
 }
 

@@ -4,32 +4,12 @@ let wechatBusy = false;
 let wechatGeneration = 0;
 let wechatTimer = null;
 let wechatPollFailures = 0;
-let wechatChoiceId = '';
-let wechatSelectedRole = null;
+const wechatSelection = createRoleSelection();
 const wechatLoginPath = '/api/accounts/wechat-login';
 
-function selectedWechatRole() {
-  return wechatState?.choices?.find(choice => choice.id === wechatChoiceId);
-}
-
-function wechatRoleWorld(role) {
-  return role.roleWorldName || role.worldName || '区服 ' + role.worldId;
-}
-
 function receiveWechatState(state) {
-  if (state.id !== wechatState?.id) wechatSelectedRole = null;
   wechatState = state;
-  if (state.phase !== 'captured') return;
-  const choices = state.choices || [];
-  if (!choices.length && state.roleError) {
-    wechatChoiceId = '';
-    return;
-  }
-  const previous = wechatSelectedRole;
-  const selected = choices.find(choice => choice.accountId === previous?.accountId && choice.worldId === previous?.worldId)
-    || (choices.length === 1 ? choices[0] : null);
-  wechatSelectedRole = selected;
-  wechatChoiceId = selected?.id || '';
+  if (state.phase === 'captured') wechatSelection.receive(state.id, state.choices || [], true);
 }
 
 function renderWechatRoles() {
@@ -43,35 +23,35 @@ function renderWechatRoles() {
     return;
   }
   const list = el('fieldset', 'phone-roles');
-  list.appendChild(el('legend', null, '选择区服和游戏角色'));
+  list.appendChild(el('legend', null, '选择区服和游戏角色（可多选）'));
   for (const choice of choices) {
     const row = el('label', 'phone-role');
     const input = el('input');
-    input.type = 'radio';
+    input.type = 'checkbox';
     input.name = 'wechat-role';
     input.value = choice.id;
-    input.checked = choice.id === wechatChoiceId;
+    input.checked = wechatSelection.has(choice);
     input.disabled = wechatBusy || Boolean(wechatState.roleError) || wechatState.expiresAt <= Date.now();
     input.onchange = () => {
-      if (!input.checked || input.disabled || wechatBusy || wechatState?.phase !== 'captured'
+      if (input.disabled || wechatBusy || wechatState?.phase !== 'captured'
         || wechatState.roleError || wechatState.expiresAt <= Date.now()) return;
       const selected = wechatState.choices.find(role => role.id === input.value);
       if (!selected) return;
-      wechatChoiceId = selected.id;
-      wechatSelectedRole = selected;
-      $('wechat-save').disabled = false;
-      $('wechat-result').textContent = '已选择 ' + (selected.nickname || '未命名角色') + ' · ' + wechatRoleWorld(selected);
+      wechatSelection.set(selected, input.checked);
+      const roles = wechatSelection.selected(wechatState.choices);
+      $('wechat-save').disabled = !roles.length;
+      $('wechat-result').textContent = roles.length ? '已选择 ' + selectedRoleNames(roles) : '请选择要保存的角色。';
     };
     const info = el('div', 'phone-role-info');
     const heading = el('div', 'phone-role-heading');
-    heading.append(el('strong', null, choice.nickname || '未命名角色'), el('span', null, wechatRoleWorld(choice)));
+    heading.append(el('strong', null, choice.nickname || '未命名角色'), el('span', null, (choice.roleWorldName || choice.worldName || '区服 ' + choice.worldId)));
     info.appendChild(heading);
     const stats = [];
     if (choice.level != null) stats.push('等级 ' + choice.level);
     if (choice.power != null) stats.push('战力 ' + Number(choice.power).toLocaleString('zh-CN'));
     if (stats.length) info.appendChild(el('p', 'dim', stats.join(' · ')));
     if (choice.roleWorldId && String(choice.roleWorldId) !== String(choice.worldId)) {
-      info.appendChild(el('p', 'dim', '原区服 ' + (choice.worldName || choice.worldId) + '，合服后位于 ' + wechatRoleWorld(choice)));
+      info.appendChild(el('p', 'dim', '原区服 ' + (choice.worldName || choice.worldId) + '，合服后位于 ' + (choice.roleWorldName || choice.worldName || '区服 ' + choice.worldId)));
     }
     if (choice.matched) info.appendChild(el('p', 'dim', '本角色已添加，再次保存会刷新角色资料和登录凭据。'));
     row.append(input, info);
@@ -97,7 +77,7 @@ function renderWechatLogin() {
     saved: '账号已保存并切换，尚未开始挂机。可先在「挂机配置」设置任务，再点击账号卡片或页头的「开始挂机」。',
   };
   if (state.account?.hasSiblingRoles && state.account.status?.paused) {
-    messages.saved = '角色已添加。配置好本角色的任务后，点击「切换并托管」即可从同账号的其他角色接手。';
+    messages.saved = '角色已添加。可在各角色卡片分别配置任务并开始托管。';
   } else if (state.account?.status?.paused || state.account?.status?.loginBlocked) {
     messages.saved = '账号已保存并切换。点击页面顶部的「恢复托管」，连接后核对角色和区服。';
   } else if (state.account?.status?.looping) {
@@ -118,18 +98,16 @@ function renderWechatLogin() {
   $('wechat-cancel').hidden = !state.id || ['cancelled', 'saved'].includes(state.phase);
   $('wechat-cancel').disabled = wechatBusy;
   $('wechat-save').hidden = !captured;
-  const selected = selectedWechatRole();
-  $('wechat-save').disabled = wechatBusy || !captured || !selected?.accountId || Boolean(state.roleError) || state.expiresAt <= Date.now();
+  const selected = wechatSelection.selected(state.choices);
+  $('wechat-save').disabled = wechatBusy || !captured || !selected.length || Boolean(state.roleError) || state.expiresAt <= Date.now();
   $('wechat-roles-retry').hidden = !captured || (!state.roleError && Boolean(state.choices?.length));
   $('wechat-roles-retry').disabled = wechatBusy || state.expiresAt <= Date.now();
   $('wechat-result').hidden = !captured && state.phase !== 'saved';
-  $('wechat-result').textContent = selected
-    ? '已选择 ' + (selected.nickname || '未命名角色') + ' · ' + wechatRoleWorld(selected)
+  $('wechat-result').textContent = selected.length ? '已选择 ' + selectedRoleNames(selected)
     : captured && state.choices?.length ? '请选择要保存的角色。' : '';
-  if (state.phase === 'saved' && state.selectedRole) {
-    $('wechat-result').textContent = (state.selectedRole.nickname || '未命名角色') + ' · ' + wechatRoleWorld(state.selectedRole);
-  }
+  if (state.phase === 'saved') $('wechat-result').textContent = selectedRoleNames(state.selectedRoles);
   $('wechat-expiry').textContent = captured ? '请在本次登录结果过期前保存。' : '';
+
   $('wechat-flow').setAttribute('aria-busy', String(wechatBusy || ['starting', 'authorizing', 'reading-roles'].includes(state.phase)));
   renderWechatRoles();
   if (typeof accountAddChanged === 'function') {
@@ -154,8 +132,7 @@ async function resetWechatLogin() {
     }
     if (id) await call(wechatLoginPath + '/cancel', { method: 'POST', body: JSON.stringify({ id }) });
     wechatState = null;
-    wechatChoiceId = '';
-    wechatSelectedRole = null;
+    wechatSelection.reset();
     wechatPollFailures = 0;
     return true;
   } catch {
@@ -209,8 +186,7 @@ $('wechat-start').onclick = async () => {
   clearTimeout(wechatTimer);
   wechatBusy = true;
   wechatPollFailures = 0;
-  wechatChoiceId = '';
-  wechatSelectedRole = null;
+  wechatSelection.reset();
   wechatState = { phase: 'starting' };
   renderWechatLogin();
   try {
@@ -278,8 +254,8 @@ $('wechat-roles-retry').onclick = async () => {
 
 $('wechat-save').onclick = async () => {
   if (wechatBusy || wechatState?.phase !== 'captured' || wechatState.roleError) return;
-  const choice = selectedWechatRole();
-  if (!choice?.accountId) return;
+  const choices = wechatSelection.selected(wechatState.choices);
+  if (!choices.length) return;
   if (wechatState.expiresAt <= Date.now()) {
     wechatState = { ...wechatState, phase: 'expired', error: null };
     renderWechatLogin();
@@ -290,7 +266,7 @@ $('wechat-save').onclick = async () => {
   renderWechatLogin();
   $('wechat-save').textContent = '正在保存…';
   try {
-    if (!await configMayChangeAccount(choice.accountId)) {
+    if (!await configMayChangeAccount(choices[0].profileId || choices[0].accountId)) {
       wechatState = { ...pending, error: '当前账号的配置尚未保存，请处理配置后再次保存此账号。' };
       return;
     }
@@ -298,12 +274,11 @@ $('wechat-save').onclick = async () => {
       wechatState = { ...pending, phase: 'expired', error: null };
       return;
     }
-    const data = await call(wechatLoginPath + '/save', { method: 'POST', body: JSON.stringify({ confirm: true, id: pending.id, choiceId: choice.id }) });
+    const data = await call(wechatLoginPath + '/save', { method: 'POST', body: JSON.stringify({ confirm: true, id: pending.id, ...roleSavePayload(choices) }) });
     ++wechatGeneration;
     clearTimeout(wechatTimer);
-    wechatState = { phase: 'saved', account: data.account, selectedRole: data.selectedRole || choice };
-    stateActions.upsertAccount({ ...accounts.find(account => account.id === data.account.id), ...data.account });
-    if (!data.account.status?.connected) stateActions.setFlag('disconnected', data.account.id, true);
+    wechatState = { phase: 'saved', account: data.account, selectedRoles: data.selectedRoles || [data.selectedRole || choices[0]] };
+    showSavedRoleAccounts(data);
     accountDetailsOwner = null;
     selectLoadedAccount(data.account.id);
     renderAccounts();

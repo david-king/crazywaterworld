@@ -1,5 +1,7 @@
 import assert from 'node:assert/strict';
 import { EventEmitter } from 'node:events';
+import { iconEntry } from '../src/art.mjs';
+import { defaultSettings } from '../src/automation-settings.mjs';
 
 function gate() {
   let resolve;
@@ -33,7 +35,9 @@ export async function testResidentHttp(app) {
   game.stop = () => { game.connected = false; };
   session.player = { playerId: '9101000000000001', worldId: 1001001, level: 1, scenarioId: 1.5 }; // no real map fetch for this fixture
   session.client = game;
-  const orders = [1, 2].map(index => ({ index, workerId: index, textId: index, requirements: [{ id: '烤鱼', num: 3 }] }));
+  const orders = [18, 2, 1].map((workerId, slot) => ({
+    index: slot + 1, workerId, textId: slot + 1, requirements: [{ id: '烤鱼', num: 3 }],
+  }));
   const now = Math.floor(Date.now() / 1000);
   let autoProduceForever = false, autoProduceEndTime = now - 1;
   let buildings = [
@@ -83,6 +87,9 @@ export async function testResidentHttp(app) {
   };
   const firstView = await request('world');
   assert.equal(firstView.status, 200);
+  assert.deepEqual(firstView.data.orders.map(order => [order.workerName, order.workerIcon]), [
+    ['活塞哥', iconEntry('worker_001')], ['防水鞋', iconEntry('worker_019')], ['小胖', iconEntry('worker_002')],
+  ], '按订单的居民 ID 取昵称和订单专用头像');
   assert.equal(firstView.data.autoDeliverOrders, false);
   const [factory, workshop, unknownFactory] = firstView.data.factories;
   assert.equal(factory.displayName, '食品厂-1');
@@ -140,6 +147,26 @@ export async function testResidentHttp(app) {
   assert.equal(timedView.data.factories[1].autoEnabled, false);
   assert.equal(timedView.data.factories[0].jobs[0].estimatedFinishTime, null, '首项开工时间待同步时不推算完成时间');
   buildings = [];
+  const savedTasks = session.loop.tasks;
+  const preferences = defaultSettings();
+  preferences.loop.world = true;
+  preferences.resident.enabled = preferences.resident.reroll = true;
+  session.preferences = preferences;
+  session.loop.tasks = { ...savedTasks, finishOrder: true, denyOrder: true };
+  try {
+    displayedStock = 0;
+    const waiting = await request('world');
+    assert.equal(waiting.status, 200);
+    assert.deepEqual(waiting.data.orders.map(row => row.decision.status), Array(3).fill('productionSkipped'),
+      '缺料且没有工厂时，页面应按挂机设置显示已跳过排产');
+    displayedStock = 3;
+    const ready = await request('world');
+    assert.equal(ready.status, 200);
+    assert.equal(ready.data.orders[0].decision.status, 'ready');
+  } finally {
+    session.preferences = previousPreferences;
+    session.loop.tasks = savedTasks;
+  }
   weekUnavailable = true;
   displayedStock = 0;
   const manualView = await request('world');
