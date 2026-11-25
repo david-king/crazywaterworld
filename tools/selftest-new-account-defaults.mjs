@@ -61,8 +61,9 @@ function enabledFields(value, prefix = '') {
   return Object.entries(value).flatMap(([key, child]) => enabledFields(child, prefix ? prefix + '.' + key : key));
 }
 function assertEnabledSettings(settings, allowed = []) {
-  // 装备和巨轮的默认子选项均受各自的总开关控制。
-  assert.deepEqual(enabledFields(settings).sort(), ['ads.noPrivilege', 'forge.collect', 'forge.craft', 'treasure.outboundSpeedUp', ...allowed].sort());
+  // 装备、海商和巨轮的默认子选项均受各自的总开关控制。
+  assert.deepEqual(enabledFields(settings).sort(), ['ads.noPrivilege', 'forge.collect', 'forge.craft', 'merchant.knownPortChains', 'treasure.outboundSpeedUp', ...allowed].sort());
+  assert.equal(settings.merchant.enabled, false);
   assert.equal(settings.forge.enabled, false);
   assert.equal(settings.forge.nativeAuto, false);
 }

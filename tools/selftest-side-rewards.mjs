@@ -134,12 +134,12 @@ await test('游戏连接记录擂台赛阶段和参赛资格，新赛期和断�
   push('SCTournamentUpdate', { state: { currentStageId: 5 } });
   assert.equal(client.tournament, undefined);
   push('SCTournamentOpen', { ...open, contestant: { qualified: true } });
-  assert.deepEqual(client.tournament, { stageId: 3, qualified: true, lastClaimDailyGiftTime: 123 });
+  assert.deepEqual(client.tournament, { stageId: 3, nextMatchTimeId: 0, nextMatchTime: 0, qualified: true, lastClaimDailyGiftTime: 123 });
   push('SCTournamentContestantUpdate', { contestant: { qualified: false } });
-  assert.deepEqual(client.tournament, { stageId: 3, qualified: false, lastClaimDailyGiftTime: 123 });
+  assert.deepEqual(client.tournament, { stageId: 3, nextMatchTimeId: 0, nextMatchTime: 0, qualified: false, lastClaimDailyGiftTime: 123 });
   push('SCTournamentContestantUpdate', { contestant: { qualified: true } });
   push('SCTournamentUpdate', { state: { currentStageId: 8 } });
-  assert.deepEqual(client.tournament, { stageId: 8, qualified: true, lastClaimDailyGiftTime: 123 });
+  assert.deepEqual(client.tournament, { stageId: 8, nextMatchTimeId: 0, nextMatchTime: 0, qualified: true, lastClaimDailyGiftTime: 123 });
   push('SCTournamentOpen', { ...open, contestId: 8 });
   assert.equal(client.tournament.qualified, false);
   client.stop();
@@ -565,7 +565,7 @@ await test('控制台在登录时记住擂台赛推送', async () => {
     await fetch('http://127.0.0.1:' + app.server.address().port + '/api/overview?account=a', { signal: AbortSignal.timeout(5000) }).then((reply) => reply.text());
     const client = app.sessions.get('a')?.client;
     assert(client?.connected, '未建立连接');
-    assert.deepEqual(client.tournament, { stageId: 4, qualified: false, lastClaimDailyGiftTime: 456 });
+    assert.deepEqual(client.tournament, { stageId: 4, nextMatchTimeId: 0, nextMatchTime: 0, qualified: false, lastClaimDailyGiftTime: 456 });
     client.emit('message', { name: 'SCTournamentUpdate', body: { state: { currentStageId: 8 } } });
     assert.equal(client.tournament.stageId, 8);
   } finally {

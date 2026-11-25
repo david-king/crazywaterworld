@@ -172,6 +172,7 @@ export function templates() {
   return renderToStaticMarkup(<>
     <template id="ui-table"><Table><TableHeader><TableRow><TableHead /></TableRow></TableHeader><TableBody><TableRow><TableCell /></TableRow></TableBody></Table></template>
     <template id="ui-button"><Button variant="outline" size="sm" /></template>
+    <template id="ui-primary"><Button size="sm" /></template>
     <template id="ui-building-card"><Card><CardHeader className="flex-row flex items-center justify-between"><CardTitle><h2 /></CardTitle></CardHeader><CardContent /></Card></template>
     <template id="ui-factory-toggle"><Button type="button" variant="ghost" size="sm" className="factory-toggle -ml-1 justify-start px-1 has-[>svg]:px-1"><ChevronDown aria-hidden="true" className="size-3.5" /></Button></template>
     <template id="ui-confirm"><Button size="sm" /></template>

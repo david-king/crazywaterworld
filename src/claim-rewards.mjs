@@ -1,10 +1,13 @@
 import { runAction } from './actions.mjs';
 import { afkClaimTime } from './afk-rewards.mjs';
 import { claimDailies } from './dailies.mjs';
-import { surveyTaskRewards, surveyOrderDaily, runTasks } from './tasks.mjs';
+import { claimOrderDaily, orderRewardsEnabled, surveyTaskRewards, runTasks } from './tasks.mjs';
 import { claimMail } from './mail.mjs';
+import { dailyCardKeys } from './daily-card-rewards.mjs';
 
-export async function claimRewards(client, protocol, config, onResult, enabled = () => true, onAfkDeadline, scheduler, player, { settings = null, getSettings = () => settings } = {}) {
+export async function claimRewards(client, protocol, config, onResult, enabled = () => true, onAfkDeadline, scheduler, player, {
+  settings = null, getSettings = () => settings, ledger, orderSelected = () => enabled('tasks'),
+} = {}) {
   const results = [];
   const ready = key => enabled(key) && (!scheduler || scheduler.due(key));
   const report = entry => {
@@ -36,26 +39,19 @@ export async function claimRewards(client, protocol, config, onResult, enabled =
     onAfkDeadline?.(claimTime != null && deadline > now ? deadline : now + 60_000);
   }
 
-  if (ready('tasks')) {
-    const options = { config, scheduler, player };
-    if (!settings || settings.loop.tasks) await group('任务与成就', ['tasks'], async () => {
-      const survey = await surveyTaskRewards(client, options);
-      await runTasks(client, protocol, survey, { allowMutate: true, enabled: () => enabled('tasks'), settings,
-        onStep: entry => report({ label: entry.step.label, ok: entry.ok, error: entry.error }) });
-    });
-    const orderEnabled = () => {
-      const current = getSettings();
-      return enabled('tasks') && (!current || (current.loop.world && current.resident.rewards));
-    };
-    if (orderEnabled()) await group('每日订单', ['orderDaily'], async () => {
-      const survey = await surveyOrderDaily(client, options);
-      if (survey.orderError) throw new Error(survey.orderError);
-      await runTasks(client, protocol, survey, { allowMutate: true, enabled: orderEnabled,
-        onStep: ({ step, ...result }) => report({ label: step.label, taskKey: 'orderDaily', ...result }) });
-    });
-  }
-  if (['dailyRewards', 'chests', 'gift'].some(ready)) await group('日常与赠礼', ['dailyRewards', 'chests', 'gift'], () => claimDailies(client, protocol, { config, enabled, scheduler, settings, getSettings,
-    onStep: (entry) => report({ label: entry.note || entry.title, ok: entry.ok, error: entry.error }) }));
+  const orderEnabled = () => orderSelected() && orderRewardsEnabled(getSettings());
+  if (orderEnabled()) await group('每日订单', ['orderDaily'], () => claimOrderDaily(client, protocol, {
+    config, player, scheduler, allowMutate: true, enabled: orderEnabled,
+    onStep: ({ step, ...result }) => report({ label: step.label, ...result }),
+  }));
+  if (ready('tasks') && (getSettings()?.loop.tasks ?? true)) await group('任务与成就', ['tasks'], async () => {
+    const survey = await surveyTaskRewards(client, { config });
+    await runTasks(client, protocol, survey, { allowMutate: true, enabled: () => enabled('tasks'), settings: getSettings(),
+      onStep: ({ step, ok, error }) => report({ label: step.label, ok, error }) });
+  });
+  if (['dailyRewards', 'chests', 'gift', ...dailyCardKeys].some(ready)) await group('日常与赠礼', ['dailyRewards', 'chests', 'gift'], () => claimDailies(client, protocol, { config, player, enabled, scheduler, settings, getSettings, ledger,
+    onStep: entry => report(dailyCardKeys.includes(entry.id) ? { ...entry, taskKey: entry.id }
+      : { label: entry.note || entry.title, ok: entry.ok, error: entry.error }) }));
   if (ready('mail')) await group('邮件', ['mail'], async () => {
     const entry = await claimMail(client, { enabled: () => enabled('mail') });
     if (entry.status === 'empty') {

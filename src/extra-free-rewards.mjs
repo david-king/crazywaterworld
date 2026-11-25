@@ -1,4 +1,5 @@
 import { normalize } from './worlds.mjs';
+import { rowsForSeason, seasonOf, seasonRows } from './season-config.mjs';
 import { exactAutomationId, automationWireId } from './automation-policy.mjs';
 import { adAccess, takeAdSlot, prepareAd, coolAd, isAdNotFinished, AD_PACED_REASON, AD_NOT_FINISHED_REASON, AD_PAUSED_REASON } from './ad-shop.mjs';
 
@@ -19,7 +20,7 @@ export async function claimOnce(client,{ledger,key,title,request,body={},respons
  try{const reply=await client.request(request,body,response,undefined,beforeSend);if(!await verify(reply))throw Error('服务器尚未确认领取成功');ledger.confirm(ticket);report({label:title,ok:true,status:'confirmed'});return reply;}
  catch(error){if(error.notSent||error.prompt&&error.request===request)ledger.cancel(ticket);report({label:title,ok:false,status:error.notSent||error.prompt&&error.request===request?'rejected':'unknown',error:error.message});return false;}
 }
-export async function claimVipDaily(client, config, { player, enabled, ledger, report }) {
+export async function claimVipDaily(client, config, { player, enabled, ledger, report, scheduler }) {
   if (!enabled()) return;
   const clock = watchFreeRewardClock(client), day = dayOf(nowOf(client)), vip = player?.vip;
   const label = 'VIP 每日免费奖励';
@@ -28,6 +29,7 @@ export async function claimVipDaily(client, config, { player, enabled, ledger, r
     return;
   }
   const vipLevel = vip.vipLevel;
+  const reset = scheduler?.nextDay();
   // 原客户端跨日只重置当前 VIP 档位，低档首次礼包状态保留。
   if (clock.vipDay !== day) {
     vip.dailyReward = vip.dailyReward.filter(row => row.vipLevel !== vipLevel);
@@ -38,9 +40,13 @@ export async function claimVipDaily(client, config, { player, enabled, ledger, r
   let attempted = false;
   for (const { level } of unlocked) {
     if (!allowed()) return;
-    if (vip.dailyReward.some(row => row.vipLevel === level && row.isGot)) continue;
+    const key = 'vip-free:' + day + ':' + level;
+    if (vip.dailyReward.some(row => row.vipLevel === level && row.isGot)) {
+      if (ledger?.keyRecords?.()[key]?.confirmed === false) ledger.resolveKey(key, true);
+      continue;
+    }
     attempted = true;
-    const reply = await claimOnce(client, { ledger, key: 'vip-free:' + day + ':' + level, title: 'VIP ' + level + ' 每日免费礼包',
+    const reply = await claimOnce(client, { ledger, key, title: 'VIP ' + level + ' 每日免费礼包',
       request: 'GotVipDailyRewardRequest', body: { vipLevel: level }, enabled: allowed, report });
     if (reply && allowed()) {
       const got = vip.dailyReward.find(row => row.vipLevel === level);
@@ -49,27 +55,30 @@ export async function claimVipDaily(client, config, { player, enabled, ledger, r
     }
   }
   if (!attempted) report({ label, skipped: true, reason: unlocked.length ? '今日礼包已领取' : '已解锁档位没有免费礼包配置' });
+  if (allowed() && unlocked.length && unlocked.every(({level}) => vip.dailyReward.some(row => row.vipLevel === level && row.isGot))) {
+    scheduler?.defer('vipDaily', reset);
+  }
 }
 export function limitedFreeCandidates(config,player,type){
  const typeNames={1:'日礼包',2:'周礼包',3:'月礼包',4:'赛季礼包'};
  let packs=rows(config,'LimitedPackCfg').filter(r=>r.type===typeNames[type]);
- if(type===4){
-  const world=exactAutomationId(player?.worldId),season=world?Math.floor(Number(world)/1e6)%1000:0;
-  if(!valid(season)||season<1)return [];
-  const selected=Math.max(0,...packs.filter(r=>valid(r.season)&&r.season<=season).map(r=>r.season));
-  if(selected<1)return [];packs=packs.filter(r=>r.season===selected);
- }
+ if(type===4)packs=rowsForSeason(packs,seasonOf(player));
  const vip=player?.vip?.vipLevel;
  return packs.filter(r=>r.price===0&&r.limitedTimes>0&&!(r.weekDay>0)&&valid(r.vipLevel??0)&&(r.vipLevel??0)<=(valid(vip)?vip:0));
 }
-export async function claimLimitedFree(client,config,{player,enabled,ledger,report}){
+export async function claimLimitedFree(client,config,{player,enabled,ledger,report,scheduler}){
  const typeNames={1:'日礼包',2:'周礼包',3:'月礼包',4:'赛季礼包'};
  if(!ledger){report({label:'商城限购免费礼包',skipped:true,status:'pending',reason:'领取记录不可用'});return;}
+ const deadlines=[];
+ const vip=player?.vip?.vipLevel;
  for(const type of [1,2,3,4]){
   if(!enabled())return;
   const candidates=limitedFreeCandidates(config,player,type);if(!candidates.length)continue;
+  const task='limitedFreeGifts:'+type;
+  if(scheduler&&!scheduler.due(task)){deadlines.push(scheduler.scheduledAt(task));continue;}
+  const midnight=scheduler?.nextDay();
   const read=()=>client.request('LimitedShopRequest',{type},'LimitedShopResponse');let state;
-  try{state=await read();}catch(error){report({label:'限购商城 · '+typeNames[type],skipped:true,reason:error.message});continue;}
+  try{state=await read();}catch(error){deadlines.push(0);report({label:'限购商城 · '+typeNames[type],skipped:true,reason:error.message});continue;}
   if(!Array.isArray(state?.shopItem))throw Error('限购商城状态不完整');
   // 原客户端用配置补齐服务器省略的未领条目，缺少条目表示gotTimes=0，不是礼包未开放。
   const itemFor=(snapshot,id)=>{const found=snapshot.shopItem?.filter(item=>item.id===id);if(!Array.isArray(found)||found.length>1)throw Error('限购礼包记录未完整或重复');return found[0]??{id,gotTimes:0,charge:0};};
@@ -77,7 +86,8 @@ export async function claimLimitedFree(client,config,{player,enabled,ledger,repo
   if(freeItems.some(item=>!valid(item.gotTimes)))throw Error('限购领取次数未确认');
   const reset=valid(state.resetTime)&&state.resetTime>0?state.resetTime:'day'+dayOf(nowOf(client));
   for(const item of freeItems){const key='limited-free:'+type+':'+reset+':'+item.id;if(item.gotTimes>0&&ledger.keyRecords()[key]?.confirmed===false)ledger.resolveKey(key,true);}
-  if(freeItems.every(item=>item.gotTimes>0)){report({label:'限购商城 · '+typeNames[type],skipped:true,reason:'当前免费礼包已领取'});continue;}
+  if(freeItems.every(item=>item.gotTimes>0))report({label:'限购商城 · '+typeNames[type],skipped:true,reason:'当前免费礼包已领取'});
+  let latest=state;
   for(const item of freeItems){
    if(item.gotTimes!==0||!enabled())continue;
    const fresh=await read();const current=itemFor(fresh,item.id);
@@ -86,20 +96,39 @@ export async function claimLimitedFree(client,config,{player,enabled,ledger,repo
    if(prior.length){report({label:'限购商城 · '+typeNames[type],skipped:true,status:'pending',reason:'前次免费礼包结果未确认，重置时间变化也不重复领取'});continue;}
    const claimDay=dayOf(nowOf(client));
    await claimOnce(client,{ledger,key:'limited-free:'+type+':'+reset+':'+item.id,title:'限购商城 · '+typeNames[type]+'免费礼包',request:'LimitedShopGotFreeRequest',body:{type,id:item.id},enabled,report,
-    verify:async reply=>{if(!hasReward(reply))return false;const after=await read();return dayOf(nowOf(client))===claimDay&&after.resetTime===fresh.resetTime&&itemFor(after,item.id).gotTimes>0;}});
+    verify:async reply=>{if(!hasReward(reply))return false;const after=await read();if(dayOf(nowOf(client))!==claimDay||after.resetTime!==fresh.resetTime||!(itemFor(after,item.id).gotTimes>0))return false;latest=after;return true;}});
   }
+  if(scheduler&&enabled()&&vip===player?.vip?.vipLevel&&scheduler.now()<midnight&&candidates.every(cfg=>itemFor(latest,cfg.id).gotTimes>=cfg.limitedTimes)){
+   scheduler.defer(task,valid(state.resetTime)&&state.resetTime>scheduler.now()?state.resetTime:midnight);
+  }
+  deadlines.push(scheduler?.scheduledAt(task)??0);
  }
+ if(deadlines.length&&vip===player?.vip?.vipLevel)scheduler?.defer('limitedFreeGifts',Math.min(...deadlines));
 }
-export async function claimWeekHeroStar(client,config,{enabled,ledger,report}){
+export async function claimWeekHeroStar(client,config,{enabled,ledger,report,scheduler}){
  if(!enabled())return;
  const schedule=await client.request('WeekInfoRequest',{},'WeekInfoResponse');
  const event=schedule.activityTime?.find(r=>r.type===3&&r.startTime<=nowOf(client)&&nowOf(client)<r.endTime);if(!event){report({label:'升星达标奖励',skipped:true,reason:'当前升星达标活动未开放'});return;}
  const period=rows(config,'WeekHeroStarPeriodCfg').find(r=>r.periodId===event.period);if(!period)throw Error('升星达标活动期数未确认');
  const allowed=()=>enabled()&&event.startTime<=nowOf(client)&&nowOf(client)<event.endTime;
+ const tiers=rows(config,'WeekHeroStarRwdCfg').filter(row=>row.periodId===event.period);
+ const highest=Math.max(...tiers.map(row=>row.rwdId));
  const read=()=>client.request('WeekHeroStarInfoRequest',{},'WeekHeroStarInfoResponse');let state=await read();
  for(let limit=0;limit<100&&allowed();limit++){
   if(!valid(state.gotStage))throw Error('升星达标已领档位未确认');
-  const tier=rows(config,'WeekHeroStarRwdCfg').find(r=>r.periodId===event.period&&r.rwdId===state.gotStage+1);if(!tier){report({label:'升星达标奖励',skipped:true,reason:'本期档位奖励已全部领取'});return;}
+  const tier=tiers.find(r=>r.rwdId===state.gotStage+1);
+  if(!tier){
+   const complete=highest>0&&state.gotStage===highest;
+   if(complete&&allowed()){
+    const records=ledger?.keyRecords?.()??{};
+    for(const row of tiers){
+     const key='week-star:'+event.startTime+':'+event.period+':'+row.rwdId;
+     if(records[key]?.confirmed===false)ledger.resolveKey(key,true);
+    }
+    scheduler?.defer('weekHeroStar',event.endTime);
+   }
+   report({label:'升星达标奖励',skipped:true,reason:complete?'本期档位奖励已全部领取':'本期下一档奖励配置未确认'});return;
+  }
   const heroes=(await client.request('AllHeroRequest',{},'AllHeroResponse')).heroes;if(!Array.isArray(heroes))throw Error('英雄星级状态未确认');
   const a=heroes.find(h=>h.heroId===period.showHero1),b=heroes.find(h=>h.heroId===period.showHero2);
   if(!a||!b||![a.star,b.star,tier.hero1Star,tier.hero2Star].every(valid)||a.star<tier.hero1Star||b.star<tier.hero2Star){report({label:'升星达标奖励',skipped:true,reason:'指定英雄星级尚未达到第 '+tier.rwdId+' 档要求'});return;}
@@ -131,9 +160,8 @@ export async function claimLinkageFree(client,config,{player,enabled,ledger,repo
   }
   if(enabled('festivalFreeGift')){
    const sub=liveSub(row,6,nowOf(client)),data=sub?.dailyCombGift;if(!data||!Array.isArray(data.boughtGiftId))continue;
-   const season=Math.floor(Number(player?.worldId?.toString?.()??player?.worldId)/1e6)%1000;
-   const eligible=rows(config,'LinkageLSRDailyDealCfg').filter(r=>r.season>0&&r.season<=season),chosen=Math.max(0,...eligible.map(r=>r.season));
-   for(const cfg of eligible.filter(r=>r.season===chosen&&r.price===0&&!r.chargeId)){
+   const eligible=seasonRows(config,'LinkageLSRDailyDealCfg',player);
+   for(const cfg of eligible.filter(r=>r.price===0&&!r.chargeId)){
     if(data.boughtGiftId.includes(cfg.packId))continue;
     const allowed=()=>enabled('festivalFreeGift')&&dayOf(nowOf(client))===day&&!!liveSub(active()??{},6,nowOf(client));
     const reply=await claimOnce(client,{ledger,key:'lsr-free:'+id+':'+day+':'+cfg.packId,title:'酆都诡事 · 每日特惠免费礼包',request:'ClaimDailyCombGiftRequest',body:{activityId:automationWireId(id),giftId:cfg.packId},enabled:allowed,report});
@@ -142,9 +170,10 @@ export async function claimLinkageFree(client,config,{player,enabled,ledger,repo
   }
  }
 }
-export async function recruitWithSkipAds(client,config,{player,clientInfo,enabled,ledger,report,scheduler,getSettings}){
+export async function recruitWithSkipAds(client,config,{player,clientInfo,enabled,ledger,report:reportEntry,scheduler,getSettings}){
  for(const [key,id,kind,request,response]of [['heroAdRecruit',2,'hero','RecruitStartRequest','RecruitStartResponse'],['antiqueAdRecruit',7,'antique','AntiqueRecruitRequest','AntiqueRecruitResponse']]){
   if(!enabled(key))continue;const title=kind==='hero'?'英雄免广告招募':'藏品免广告招募';
+  const report=entry=>reportEntry({...entry,taskKey:key});
   const access=await adAccess(client,config.tables,{player,clientInfo,settings:getSettings?.()});
   if(access.reason){report({label:title,skipped:true,reason:access.reason});continue;}
   const day=dayOf(nowOf(client)),limit=rows(config,'AdvEffectCfg').find(r=>r.id===id)?.dailyLimit;
@@ -153,11 +182,17 @@ export async function recruitWithSkipAds(client,config,{player,clientInfo,enable
   for(let n=0;n<limit&&allowed();n++){
    const water=await client.request('OnWaterRequest',{},'OnWaterResponse');
    const effects=water.adv?.filter(e=>e.id===id);if(!effects||effects.length!==1||!valid(effects[0].gotTimes)){report({label:title,skipped:true,reason:'今日广告招募次数未完整返回'});break;}
-   const used=effects[0].gotTimes;if(used>=limit)break;
+   const used=effects[0].gotTimes;
+   const unresolved=Object.entries(ledger?.keyRecords()??{}).filter(([savedKey,r])=>!r.confirmed&&r.details?.kind==='adRecruit'&&r.details.id===id&&savedKey.startsWith('ad-recruit:'+day+':'));
+   if(used>=limit&&!unresolved.length){
+    report({label:title,skipped:true,reason:'今日广告招募次数已用完'});
+    if(allowed())scheduler?.defer?.(key,scheduler.nextDay());
+    break;
+   }
    const before=(await client.request('RecruitInfoRequest',{},'RecruitInfoResponse'))?.[kind];if(!valid(before?.recruitTimes))throw Error('招募次数未确认');
-   const unresolved=Object.entries(ledger.keyRecords()).filter(([savedKey,r])=>!r.confirmed&&r.details?.kind==='adRecruit'&&r.details.id===id&&savedKey.startsWith('ad-recruit:'+day+':'));
    for(const [savedKey,r]of unresolved)if(used===r.details.used+1 && (before.recruitTimes===r.details.recruitTimes+1 || valid(r.details.taskTimes)&&before.task?.times===r.details.taskTimes+1))ledger.resolveKey(savedKey,true);
    if(unresolved.some(([savedKey])=>!ledger.keyRecords()[savedKey].confirmed)){report({label:title,skipped:true,reason:'前次广告准备或招募结果未确认，暂停后续次数'});break;}
+   if(used>=limit){if(allowed())scheduler?.defer?.(key,scheduler.nextDay());break;}
    const uniqueKey='ad-recruit:'+day+':'+id+':'+used;
    if(ledger.hasKey(uniqueKey)){report({label:title,skipped:true,reason:'前次免广告招募结果待核对，未重复提交'});break;}
    if(!takeAdSlot(client,access,{target:'effect:'+id})){report({label:title,skipped:true,reason:AD_PACED_REASON});break;}
@@ -174,6 +209,7 @@ export async function recruitWithSkipAds(client,config,{player,clientInfo,enable
     const counter=(await client.request('OnWaterRequest',{},'OnWaterResponse')).adv?.find(e=>e.id===id);
     if(!reply?.recruitData||!(after?.recruitTimes===before.recruitTimes+1 || valid(before.task?.times)&&after?.task?.times===before.task.times+1)||counter?.gotTimes!==used+1)throw Error('招募或广告次数未确认，已阻止重复提交');
     ledger.confirm(ticket);scheduler?.clear(kind==='hero'?'heroRecruitRewards':'antiqueRecruitRewards');report({label:title+' · 今日 '+(used+1)+'/'+limit,ok:true});
+    if(used+1>=limit&&allowed())scheduler?.defer?.(key,scheduler.nextDay());
    }catch(error){
     if(isAdNotFinished(error)){ledger.cancel(ticket);coolAd(client,'effect:'+id);report({label:title,skipped:true,reason:AD_NOT_FINISHED_REASON});break;}
     if(error.prompt&&!drawSent&&error.request==='WatchAdvRequest')ledger.cancel(ticket);

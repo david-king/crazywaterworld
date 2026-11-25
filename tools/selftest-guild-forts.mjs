@@ -14,6 +14,17 @@ const fixture=()=>guildShipFixture(protocol,dir);
 const read=f=>readGuildForts(f.client,protocol,config,f.options);
 const run=f=>serviceGuildForts(f.client,protocol,config,f.options);
 try{
+ await check('本人捐赠达上限后跳过库存和后续工事进度推送',async()=>{
+   const {rewardSchedule}=await import('../src/reward-schedule.mjs');
+   const f=fixture();
+   f.settings.guildFort.dailyLimit=f.state.dailyDonateNum=10;
+   f.options.scheduler=rewardSchedule(f.client);
+   assert.match((await run(f)).reason,/上限/);
+   assert(!f.state.calls.some(row=>row.name==='AllItemRequest'));
+   f.state.calls.length=0;
+   f.client.emit('message',{name:'SCFortProcess',body:{}});
+   await run(f); assert.equal(f.state.calls.length,0);
+ });
  await check('工事冷却保留上次实查原因，不用等待提示覆盖运行状态',async()=>{
    const {rewardSchedule}=await import('../src/reward-schedule.mjs');
    const f=fixture(), scheduler=rewardSchedule(f.client), reports=[];

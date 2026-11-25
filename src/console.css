@@ -109,7 +109,7 @@ section h2:first-child { margin-top:0 }
 .runtime-summary strong,.runtime-name strong { font-weight:600; color:var(--foreground) }
 .runtime-badge { display:inline-flex; align-items:center; justify-self:start; gap:6px; font-size:13px; font-weight:500; white-space:nowrap; color:var(--muted-foreground) }
 .runtime-badge::before { content:""; width:7px; height:7px; border-radius:50%; background:currentColor; flex:none }
-.runtime-badge:is([data-state=running],[data-state=ok]) { color:var(--success) }
+.runtime-badge:is([data-state=running],[data-state=ok],[data-state=completed]) { color:var(--success) }
 .runtime-badge[data-state=error] { color:var(--destructive) }
 .runtime-badge:is([data-state=pending],[data-state=blocked],[data-state=setup],[data-state=recovery]),.runtime-summary .runtime-count { color:var(--warning) }
 .runtime-summary>.runtime-badge { padding:3px 9px; border-radius:5px; background:color-mix(in srgb,currentColor 9%,transparent) }
@@ -520,6 +520,26 @@ button.factory-empty:disabled { cursor:wait; opacity:.6 }
   .gift-account>.dim { flex-basis:100%; padding-left:24px }
 }
 
+/* ---- 装备制造 ---- */
+.crafting-layout { display:grid; grid-template-columns:minmax(13rem,1fr) minmax(0,2fr); gap:clamp(14px,2.5vw,32px); align-items:start }
+.crafting-summary { display:grid; justify-items:start; align-content:start; gap:8px; padding:14px 16px; border-radius:var(--radius); background:var(--muted) }
+.crafting-summary:only-child { grid-column:1 / -1 }
+.crafting-product { display:flex; flex-wrap:wrap; align-items:baseline; gap:4px 10px; overflow-wrap:anywhere }
+.crafting-product strong { font-size:1.25rem; font-weight:650; line-height:1.35 }
+.crafting-time,.crafting-recipe-meta { color:var(--muted-foreground); font-size:13px; font-variant-numeric:tabular-nums }
+.crafting-recipe,.crafting-preview { display:grid; gap:10px; min-width:0 }
+.crafting-recipe-bar { display:flex; flex-wrap:wrap; align-items:center; justify-content:space-between; gap:6px 12px }
+.crafting-recipe-bar .choice-field { display:flex; flex-wrap:wrap; align-items:center; gap:6px 10px }
+.crafting-recipe-bar .choice-field select { max-width:100% }
+.crafting-preview>button { justify-self:end }
+.crafting-costs th.num,.crafting-costs th:nth-child(4) { text-align:right !important }
+.crafting-costs td:nth-child(4) { text-align:right; white-space:nowrap }
+.crafting-costs td:first-child,.crafting-costs td:last-child { overflow-wrap:anywhere }
+@media (max-width:700px) {
+  .crafting-layout { grid-template-columns:minmax(0,1fr); gap:12px }
+  .crafting-summary { padding:10px 12px; gap:5px }
+}
+
 /* ---- 挑战 ---- */
 #stage-view { display:inline; font-size:14px; font-weight:400; color:var(--muted-foreground) }
 #stage-failures { width:165px; flex:0 0 165px; max-width:100% }
@@ -896,16 +916,15 @@ button.factory-empty:disabled { cursor:wait; opacity:.6 }
 .merchant-presets { container-type:inline-size; min-width:0; margin:0; padding:0 0 12px; border:0; border-bottom:1px solid var(--border) }
 .merchant-presets legend { padding:0; font-weight:600 }
 .merchant-presets > p { margin:4px 0 12px }
-.merchant-preset-choices { display:grid; grid-template-columns:minmax(0,1fr); gap:14px }
+.merchant-preset-choices { display:grid; grid-template-columns:minmax(0,1fr); grid-auto-rows:1fr; gap:14px }
 @container (min-width:690px) {
   .merchant-preset-choices { grid-template-columns:repeat(3,minmax(0,1fr)) }
 }
 .merchant-preset { display:flex; flex-direction:column; min-width:0; padding:16px; border:1px solid var(--border); border-radius:10px; background:var(--card); color:var(--card-foreground) }
 .merchant-preset[data-active=true] { border-color:var(--ring); box-shadow:inset 0 0 0 1px var(--ring); background:var(--accent); color:var(--accent-foreground) }
 .merchant-preset-title { margin:0; font-size:16px; line-height:1.4; font-weight:650 }
-.merchant-preset-description { margin:8px 0 0; font-size:14px; line-height:1.5 }
-.merchant-preset-forecast { margin:4px 0 14px; line-height:1.5 }
-.merchant-preset-footer { display:flex; flex-wrap:wrap; align-items:center; justify-content:space-between; gap:8px 12px; margin-top:auto; padding-top:12px; border-top:1px solid var(--border) }
+.merchant-preset-description { margin:8px 0 14px; font-size:14px; line-height:1.5 }
+.merchant-preset-footer { display:grid; grid-template-columns:minmax(0,1fr) auto; align-items:center; gap:12px; margin-top:auto; padding-top:12px; border-top:1px solid var(--border) }
 .merchant-preset-budget { display:grid; gap:2px; font-size:12px; color:var(--muted-foreground) }
 .merchant-preset-budget strong { color:var(--foreground); font-size:22px; font-weight:650; line-height:1.1; font-variant-numeric:tabular-nums }
 .merchant-preset-apply { display:inline-flex; align-items:center; justify-content:center; gap:7px; min-height:44px; min-width:100px; padding:8px 16px; border:1px solid transparent; border-radius:7px; background:var(--primary); color:var(--primary-foreground); font-size:14px; font-weight:600; cursor:pointer }
@@ -914,8 +933,6 @@ button.factory-empty:disabled { cursor:wait; opacity:.6 }
 .merchant-preset-apply:disabled { opacity:.65; cursor:default }
 .merchant-preset-apply[aria-pressed=true] { background:transparent; color:var(--accent-foreground); opacity:1 }
 .merchant-preset-apply[aria-pressed=true]::before { content:""; width:7px; height:12px; border:solid currentColor; border-width:0 2px 2px 0; transform:translateY(-2px) rotate(45deg) }
-.merchant-preset-forecast,.merchant-presets .merchant-model-note { color:var(--muted-foreground); font-size:12px }
-.merchant-presets .merchant-model-note { margin:10px 0 0 }
 .merchant-manual-settings summary { cursor:pointer; padding-block:10px; font-weight:500 }
 .activity-settings .activity-auto { white-space:normal }
 .activity-content { display:grid; gap:16px; min-width:0 }

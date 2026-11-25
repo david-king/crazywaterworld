@@ -399,13 +399,21 @@ export async function beautyActivity(client, config, ctx) {
   const today = dayOf(clock(client)),
     allowed = () => ctx.enabled() && active() && dayOf(clock(client)) === today;
   const readVote = () => read(client, 'BeautyInfo');
+  const complete = () => {
+    if (allowed() && ctx.scheduler) ctx.scheduler.defer(ctx.key, Math.min(event.endTime, ctx.scheduler.nextDay()));
+  };
   const state = await readVote();
   if (!natural(state.todayVote) || typeof state.gotVote !== 'boolean') throw Error('当日投票状态未同步');
   if (ctx.key === 'beautyGift') {
-    if (state.todayVote < 3 || state.gotVote)
-      return waiting(ctx, state.gotVote ? '今日礼包已领' : '每日礼包需要累计投3票');
-    return claimOnce(client, {
-      key: 'beauty-gift:' + event.startTime + ':' + today,
+    const key = 'beauty-gift:' + event.startTime + ':' + today;
+    if (state.gotVote) {
+      if (ctx.ledger?.keyRecords()[key]?.confirmed === false) ctx.ledger.resolveKey(key, true);
+      complete();
+      return waiting(ctx, '今日礼包已领');
+    }
+    if (state.todayVote < 3) return waiting(ctx, '每日礼包需要累计投3票');
+    const claimed = await claimOnce(client, {
+      key,
       ledger: ctx.ledger,
       enabled: allowed,
       title: ctx.label,
@@ -414,8 +422,20 @@ export async function beautyActivity(client, config, ctx) {
       response: 'GotBeautyVoteResponse',
       verify: async (r) => hasReward(r) && (await readVote()).gotVote === true
     });
+    if (claimed) complete();
+    return claimed;
   }
-  if (state.todayVote >= 3) return waiting(ctx, '今日已投 ' + state.todayVote + ' 票，目标已完成');
+  const scope = 'beauty-vote:' + event.startTime + ':' + today;
+  const matches = (expected, after) => after.today >= expected.today && (after.own?.find(v => v.no === expected.no)?.vote ?? 0) >= expected.mine;
+  if (state.todayVote >= 3) {
+    for (const [key, record] of Object.entries(ctx.ledger?.keyRecords() ?? {})) {
+      if (record.confirmed || record.expired || record.details?.scope !== scope) continue;
+      if (!matches(record.details.expected, {today: state.todayVote, own: state.ownVote})) return waiting(ctx, '前次投票结果待确认');
+      ctx.ledger.resolveKey(key, true);
+    }
+    complete();
+    return waiting(ctx, '今日已投 ' + state.todayVote + ' 票，目标已完成');
+  }
   const ticket = table(config, 'BeautyParamCfg').find((r) => r.period === event.period)?.itemid;
   if (!ticket) return waiting(ctx, '本期投票券配置未确认');
   const stock = await itemBalance(client, ticket);
@@ -427,7 +447,7 @@ export async function beautyActivity(client, config, ctx) {
   const mine = fresh.ownVote?.find((r) => r.no === leader.no)?.vote ?? 0;
   if (!natural(fresh.todayVote) || !natural(mine)) return waiting(ctx, '投票进度未同步');
   await checkedAction(ctx, {
-    scope: 'beauty-vote:' + event.startTime + ':' + today,
+    scope,
     before: { today: fresh.todayVote, own: fresh.ownVote },
     expected: {
       request: 'BeautyVoteRequest',
@@ -442,7 +462,8 @@ export async function beautyActivity(client, config, ctx) {
       const r = await readVote();
       return { today: r.todayVote, own: r.ownVote };
     },
-    matches: (e, r) => r.today >= e.today && (r.own?.find((v) => v.no === e.no)?.vote ?? 0) >= e.mine,
+    matches,
+    onOutcome: result => { if (result.status === 'confirmed' && result.after.today >= 3) complete(); },
     accept: (r) => r.player?.no === leader.no && r.ownVote?.no === leader.no && r.ownVote.vote >= mine + count
   });
 }

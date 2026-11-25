@@ -255,6 +255,9 @@ try {
       assert.equal(f.writes.length, ordinary ? 1 : 0);
       if (ordinary) assert.equal(f.writes[0].body.makeId, 1002, '达标后普通制造沿用原配方顺序');
       assert(f.reports.some(entry => /已达目标积分/.test(entry.reason ?? '')));
+      f.calls.length = 0;
+      await f.run();
+      assert(!f.calls.includes('CrossRankInfoRequest'));
     }
   });
 

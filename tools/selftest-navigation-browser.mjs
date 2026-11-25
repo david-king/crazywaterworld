@@ -283,6 +283,7 @@ try {
       await search.fill('工厂');
       runtime.running = false;
       await refresh();
+      await rows.locator('summary').filter({ hasText: '未运行' }).waitFor();
       assert.match(await rows.innerText(), /未运行.*上次记录.*已领取/s);
       runtime.running = true;
       delete runtime.controls[0].observation;
@@ -301,6 +302,20 @@ try {
       ];
       await refresh();
       await rows.locator('summary').getByText('未开启动作').waitFor();
+      await search.fill('居民订单');
+      const reward = {key:'resident.rewards', group:'基地', label:'领取居民订单进度奖励', enabled:true};
+      runtime.controls = [reward];
+      for (const [state, badge, text] of [
+        ['inProgress', '进行中', '今日已交 3 单，下一档 6 单'],
+        ['completed', '已完成', '今日 6 档奖励已全部领取'],
+      ]) {
+        reward.observation = {state, text};
+        await refresh();
+        const summary = rows.locator('summary');
+        await summary.getByText(badge, {exact:true}).waitFor();
+        assert((await summary.innerText()).includes(text));
+        assert.doesNotMatch(await summary.innerText(), /待检查|上次记录/);
+      }
       await page.unroute(route);
       await page.reload(); await tab('overview');
     }
@@ -354,7 +369,7 @@ try {
     await tab('overview');
     assert.equal(await page.locator('#tabs [data-tab="activities"]').getAttribute('aria-label'), '活动');
     assert.equal(await page.locator('#tabs [data-tab="resources"]').getAttribute('aria-label'), '杂项');
-    assert.deepEqual(await page.locator('[data-resource-tab]').allTextContents(), ['联盟', '仓库', '英雄与装备', '装备与徽章', '礼包兑换', '日常任务', '商店', '赛季预览', '聊天']);
+    assert.deepEqual(await page.locator('[data-resource-tab]').allTextContents(), ['联盟', '仓库', '装备与徽章', '礼包兑换', '日常任务', '商店', '赛季预览', '聊天']);
     assert.equal(await page.locator('#tabs [data-tab="items"]').count(), 0);
     await main('settings');
     await config('base', 'building');
@@ -472,7 +487,7 @@ try {
 
     await cityWar();
     await main('resources');
-    await page.locator('[data-resource-tab="heroes"]').click();
+    await page.getByRole('button', { name: '装备与徽章', exact: true }).click();
     await tab('resources', 'heroes');
     assert.equal(new URL(page.url()).hash, '');
     await main('settings');
@@ -482,13 +497,13 @@ try {
     await tab('resources', 'heroes');
     await page.reload();
     await tab('resources', 'heroes');
-    await page.getByRole('button', { name: '装备与徽章', exact: true }).click();
-    await tab('resources', 'items');
-    await page.reload();
-    await tab('resources', 'items');
-    await page.locator('#items-root').getByText('账号已暂停，恢复托管后可查看装备。').waitFor();
-    await reloadFrom({ consoleView: { tab: 'items', resource: 'guild' } });
-    await tab('resources', 'items');
+    for (const legacy of [{ tab: 'items', resource: 'guild' }, { tab: 'resources', resource: 'items' }]) {
+      await reloadFrom({ consoleView: legacy });
+      await tab('resources', 'heroes');
+      const equipment = page.getByRole('region', { name: '装备与徽章', exact: true });
+      await equipment.locator('#items-root').getByText('账号已暂停，恢复托管后可查看装备。').waitFor();
+      await equipment.getByRole('button', { name: '刷新装备厂' }).waitFor();
+    }
     await page.locator('[data-resource-tab="dailies"]').click();
     await page.reload();
     await tab('resources', 'dailies');

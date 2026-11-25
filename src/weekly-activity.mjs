@@ -41,13 +41,14 @@ function unlocked(client, config, player) {
     && dayOf(nowOf(client)) - dayOf(player.worldOpenTime) + 1 >= minimum;
 }
 
-export async function createWeeklyActivityContext(client, config, player, { getSettings, enabled = () => true, report = () => {} }) {
+export async function createWeeklyActivityContext(client, config, player, { getSettings, enabled = () => true, report = () => {}, scheduler }) {
   const source = getSettings(), pref = source?.weeklyActivity;
   const waiting = reason => { report({ label: '军备竞赛', skipped: true, reason }); return null; };
   if (!pref?.enabled || !enabled() || client.connected === false) return null;
   if (!Object.values(WEEKLY_SUBJECTS).some(({ kind }) => pref[kind + 'Enabled'])) return waiting('尚未选择参与的每日活动');
   if (!unlocked(client, config, player)) return waiting('军备竞赛尚未开放或开放条件未同步');
   const read = () => client.request('CrossRankInfoRequest', {}, 'CrossRankInfoResponse');
+  const midnight = scheduler?.nextDay();
   const initial = await read(), subject = WEEKLY_SUBJECTS[initial?.subjectId];
   if (!subject) return waiting(initial?.subjectId === 7 ? '今日城战杀敌，按世界中的联盟城战配置执行' : '今日活动主题尚未同步');
   const { kind, label } = subject;
@@ -68,7 +69,10 @@ export async function createWeeklyActivityContext(client, config, player, { getS
       const mine = Array.isArray(state.rankList) ? state.rankList.filter(row => exactAutomationId(row.playerId) === playerId) : [];
       const score = mine.length === 1 ? toNumber(mine[0].score) : NaN;
       if (!valid(target) || target < 1 || !valid(score)) return '无法确认本人积分或目标积分，暂停消费';
-      if (score >= target) return label + '已达目标积分（' + score + '/' + target + '）';
+      if (score >= target) {
+        scheduler?.defer('weeklyActivity', Math.min(state.settleTime, midnight));
+        return label + '已达目标积分（' + score + '/' + target + '）';
+      }
     }
     return null;
   }

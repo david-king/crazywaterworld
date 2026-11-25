@@ -45,6 +45,15 @@ await test('海盗扫荡只按海盗开关和扫荡选择执行',async()=>{
 });
 await test('旧配置补默认先锋，保留连败上限及原扫荡开关',()=>{const s=defaultSettings();delete s.pirateSweep;s.schedule.pirate=false;s.pirateHunt.maxFailures=2;const next=importAutomationSettings({format:SETTINGS_FORMAT,version:1,settings:s});assert.deepEqual(next.pirateSweep,defaultSettings().pirateSweep);assert.equal(next.schedule.pirate,false);assert.deepEqual(next.pirateHunt,s.pirateHunt);});
 const targets=f=>f.calls.filter(c=>c.n==='PirateSweepRequest').map(c=>c.b.uid);
+await test('固定配额完成后整轮跳过，提高次数后继续扫荡', async () => {
+ const f=setup();
+ f.settings.pirate.enabled=f.settings.schedule.pirate=true;
+ Object.assign(f.settings.pirateSweep,{types:['1'],times1:1});
+ const round=()=>runLoop(f.client,p,{config:f.config,player:f.player,rounds:1,allowMutate:true,isEnabled:key=>key==='pirate',getSettings:()=>f.settings,usageLedger:f.ledger});
+ await round(); assert.equal(f.state.used,1);
+ f.calls.length=0; await round(); assert(!f.calls.some(row=>row.n==='AllPirateRequest'));
+ f.settings.pirateSweep.times1=2; await round(); assert.equal(f.state.used,2);
+});
 const sweep=f=>runPirateSweeps(f.client,f.config,f.player,f.options);
 await test('首杀未结算时为本类保留固定次数或应分余额，其他类型仍可扫荡',async()=>{
  for (const times1 of [2, -1]) {

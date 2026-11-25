@@ -1,5 +1,6 @@
 import { displayMaterial } from './config.mjs';
 import { normalize } from './worlds.mjs';
+import { seasonRows, seasonOf } from './season-config.mjs';
 import { createHmac, randomBytes } from 'node:crypto';
 import { fleetRecordReason, legacyFleetReservationReason } from './fleet-availability.mjs';
 import { prepareFleetLineups, fleetFormationSignature, markFleetLineupsDispatched, markFleetLineupsCancelled, recoverFleetLineups } from './fleet-lineups.mjs';
@@ -63,8 +64,7 @@ export function planPirateSweeps({ task, probe, player, config, now, client, dai
   }, 0);
   const available = base + sweepBonus(vip?.effects) + cardBonus - map.sweepTimes;
   if (!Number.isSafeInteger(available) || available <= 0) return blocked('今日可确认的海盗扫荡次数已用完');
-  const world = normalize(player.worldId);
-  const configs = tables.WorldPirateCfg?.data?.filter(row => Number(row.season) === Math.floor(world / 1e6) % 1000);
+  const configs = seasonRows(config, 'WorldPirateCfg', player);
   if (!configs?.length) return blocked('无法确认本赛季海盗配置');
   const attempts = sweepAttempts(client, dailyResetTime, now);
   const counts = new Map();
@@ -122,9 +122,9 @@ export async function runPirateSweep({ client, survey, action, timeout, allowAct
 export async function pirateTracker(client, config, player) {
   const worldId = normalize(player?.worldId);
   if (!(worldId > 0)) throw new Error('未取得角色世界编号');
-  const season = Math.floor(worldId / 1e6) % 1000;
+  const season = seasonOf(player);
   const required = config?.tables.ModuleOpenCfg?.data.find(row => row.moduleId === '世界')?.playerLevel;
-  const rows = config?.tables.WorldPirateCfg?.data.filter(r => Number(r.season) === season);
+  const rows = seasonRows(config, 'WorldPirateCfg', player);
   if (!required || !rows?.length) throw new Error('缺少本赛季海盗配置');
   const locked = player.level < required;
   let records, pirates;
@@ -302,13 +302,12 @@ export async function inspectHunt(client, config, player, enterMap = false, allo
   if (!required || !player?.level || !world) { view.reason = '无法确认世界入口是否已开放'; return snapshot; }
   if (player.level < required) { view.reason = '世界在角色 ' + required + ' 级开放'; return snapshot; }
   view.locked = false;
-  const season = Math.floor(world / 1e6) % 1000;
   const scenario = player.scenarioId || 1;
-  const configRows = tables.WorldPirateCfg?.data?.filter(row => Number(row.season) === season);
+  const configRows = seasonRows(config, 'WorldPirateCfg', player);
   if (!configRows?.length) { view.reason = '缺少本赛季海盗配置'; return snapshot; }
   const { stage } = await client.request('SeasonTaskStageRequest', {}, 'SeasonTaskStageResponse');
-  const stages = tables[scenario + '_SeasonTaskCfg']?.data;
-  const stageCap = stage === 0 ? Infinity : stages?.find(r => Number(r.season) === season && r.stage === stage)?.maxPirateLevel;
+  const stages = seasonRows(config, scenario + '_SeasonTaskCfg', player);
+  const stageCap = stage === 0 ? Infinity : stages.find(r => r.stage === stage)?.maxPirateLevel;
   if (!stageCap) view.reason = '无法确认当前赛季阶段的海盗等级上限';
   const readKillRecords = async () => {
     const { records } = await client.request('PirateKillRecordRequest', {}, 'PirateKillRecordResponse');

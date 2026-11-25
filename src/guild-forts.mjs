@@ -20,7 +20,10 @@ function preferences(settings){return {...EXTENDED_DEFAULTS.guildFort,...setting
 function watch(client,scheduler){
   if(watched.has(client)){if(scheduler)watched.get(client).scheduler=scheduler;return;}
   const state={scheduler};watched.set(client,state);
-  client.on?.('message',({name})=>{if(['SCFortProcess','SCFortBuilding','SCBuildFort','SCFortRemoved','SCJoinGuild','SCLeaveGuild'].includes(name))state.scheduler?.clearTask?.('guildFort');});
+  client.on?.('message',({name})=>{
+    if(['SCJoinGuild','SCLeaveGuild'].includes(name)) state.scheduler?.clearTask?.('guildFort');
+    else if(['SCFortProcess','SCFortBuilding','SCBuildFort','SCFortRemoved'].includes(name)) state.scheduler?.clear?.('guildFort');
+  });
 }
 
 function processOf(fort){
@@ -97,7 +100,7 @@ export async function serviceGuildForts(client,protocol,config,{player,getSettin
   const delay=seconds=>scheduler?.defer('guildFort',scheduler.now()+seconds);
   watch(client,scheduler);
   if(!active())return finish({skipped:true,reason:'联盟工事捐赠已关闭'});
-  if(scheduler&&!scheduler.due('guildFort'))return {key:'guildFort',label:'联盟工事捐赠',skipped:true,
+  if(scheduler&&(!scheduler.due('guildFort')||!scheduler.due('guildFort:quota')))return {key:'guildFort',label:'联盟工事捐赠',skipped:true,
     reason:scheduler.status?.('guildFort')?.text || '等待下次检查'};
   if(busy.has(client))return finish({skipped:true,reason:'正在核对联盟工事'});
   busy.add(client);
@@ -107,6 +110,11 @@ export async function serviceGuildForts(client,protocol,config,{player,getSettin
     if(initial.state!=='ready'){delay(180);return finish({skipped:true,reason:initial.reason});}
     for(const[key,record]of Object.entries(ledger.keyRecords()))if(!record.confirmed&&matching(record.details,initial)&&evidence(initial,record.details))ledger.resolveKey(key,true);
     if(Object.values(ledger.keyRecords()).some(record=>!record.confirmed&&matching(record.details,initial))){delay(180);return finish({skipped:true,pending:true,reason:'上次工事捐赠结果待确认，不重复消耗材料'});}
+    const limit=preferences(getSettings()).dailyLimit;
+    if(limit>0&&initial.dailyDonateNum>=limit&&initial.day===dayOf(nowOf(client))){
+      scheduler?.defer('guildFort:quota',scheduler.nextDay());
+      return finish({skipped:true,reason:'今日工事捐赠已达设置上限 '+limit});
+    }
     await refreshOrderMaterialSpends(client,player,{enabled:active});
     const first=await readGuildForts(client,protocol,config,{player,getSettings,enabled:active});
     const chosen=first.candidates.find(row=>row.num>0);
@@ -129,7 +137,11 @@ export async function serviceGuildForts(client,protocol,config,{player,getSettin
       const progress=processOf(reply),reward=array(reply?.reward?.asset,'工事捐赠奖励');
       if((progress.get(candidate.id)??0)<candidate.progress+candidate.num||!reward.some(row=>typeof row.id==='string'&&number(row.num,'捐赠奖励')>0))throw new Error('服务端未返回可确认的捐赠进度及奖励');
       ledger.updateKeyDetails(key,{...details,acknowledged:true});ledger.confirm(ticket);confirmOrderMaterialOperation(debit);
-      await refreshOrderMaterialSpends(client,player,{enabled:active});delay(60);
+      await refreshOrderMaterialSpends(client,player,{enabled:active});
+      if (pref.dailyLimit > 0 && current.dailyDonateNum + candidate.num >= pref.dailyLimit &&
+          current.day === dayOf(nowOf(client)) && policy === digest(preferences(getSettings()))) {
+        scheduler?.defer('guildFort:quota',scheduler.nextDay());
+      } else delay(60);
       return finish({ok:true,label:`联盟工事 · 已向 ${candidate.cityId} 城市的${candidate.type}捐赠${displayMaterial(config,candidate.id)} ×${candidate.num}`});
     }catch(error){const rejected=(!received&&error.notSent===true)||error.prompt&&error.request==='DonateFortRequest';if(rejected){ledger.cancel(ticket);cancelOrderMaterialSpend(debit);}delay(180);return finish({ok:false,pending:!rejected,error:(rejected?'捐赠未执行：':'捐赠结果待确认，已保留材料和额度：')+error.message});}
   }catch(error){delay(180);return finish({ok:false,error:error.message});}finally{busy.delete(client);}

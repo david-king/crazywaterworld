@@ -16,9 +16,11 @@
 
 import { displayMaterial } from './config.mjs';
 import { afkClaimTime } from './afk-rewards.mjs';
+import { rowsForSeason, seasonOf } from './season-config.mjs';
 import { linkOperationResult } from './operation-log.mjs';
 import { normalize } from './worlds.mjs';
 import { FREE_DAILY_PACK_ID } from './actions.mjs';
+import { cardRewardEnabled, dailyCardKeys, dailyCardRewards } from './daily-card-rewards.mjs';
 import { arenaDailyDriver } from './arena.mjs';
 import { pirateSweepProbes, planPirateSweeps, runPirateSweep } from './pirates.mjs';
 
@@ -86,15 +88,15 @@ export function canClaimDailyReward(task, settings, group) {
 // 所以判「哪几档可领」必须按 kind 选表——混用会把 85 周活跃算成能领 4 档，发出去被服务端拒。
 export const CHEST_TABLE = { daily: 'DailyActivityRewardCfg', weekly: 'WeeklyActivityRewardCfg' };
 
-// 哪几档现在能领：活跃度够了、而且服务端没记在已领列表里。
-// 四个季节的门槛与档位号完全一样（只有第 5 档的奖励不同），所以领哪几档不用挑季节；
-// 只有要显示「第 5 档给什么」时才需要知道季节，那一步交给界面，不在这里猜。
-export function chestTiers(config, { kind = 'daily', activity = 0, claimed = [], season = null } = {}) {
+function chestRows(config, kind, season) {
   const rows = config?.tables?.[CHEST_TABLE[kind] ?? CHEST_TABLE.daily]?.data ?? [];
-  const use = season == null ? rows : rows.filter((row) => row.season === season);
+  return season == null ? rows : rowsForSeason(rows, season, { includeCommon: true });
+}
+
+export function chestTiers(config, { kind = 'daily', activity = 0, claimed = [], season = null } = {}) {
   const taken = new Set(claimed ?? []);
   const byId = new Map();
-  for (const row of use) {
+  for (const row of chestRows(config, kind, season)) {
     if (taken.has(row.id) || Number(activity) < Number(row.activity)) continue;
     if (!byId.has(row.id)) byId.set(row.id, { id: row.id, activity: row.activity, reward: row.reward });
   }
@@ -102,11 +104,12 @@ export function chestTiers(config, { kind = 'daily', activity = 0, claimed = [],
 }
 
 // 从一次 DailyTaskInfoResponse 算出要发的两个请求。两个都没有可领档位时返回空动作表。
-export function planChests(daily, config) {
+export function planChests(daily, config, player) {
+  const season = seasonOf(player) || null;
   const day = { activity: daily?.dailyActivity ?? 0, claimed: daily?.dailyRewardClaimed ?? [] };
   const week = { activity: daily?.weeklyActivity ?? 0, claimed: daily?.weeklyRewardClaimed ?? [] };
-  const dailyTiers = chestTiers(config, { ...day, kind: 'daily' });
-  const weeklyTiers = chestTiers(config, { ...week, kind: 'weekly' });
+  const dailyTiers = chestTiers(config, { ...day, kind: 'daily', season });
+  const weeklyTiers = chestTiers(config, { ...week, kind: 'weekly', season });
   const actions = [];
   if (dailyTiers.length > 0) {
     actions.push({
@@ -127,15 +130,15 @@ export function planChests(daily, config) {
     });
   }
   return {
-    daily: { ...day, tiers: dailyTiers, nextAt: nextThreshold(config, 'daily', day) },
-    weekly: { ...week, tiers: weeklyTiers, nextAt: nextThreshold(config, 'weekly', week) },
+    daily: { ...day, tiers: dailyTiers, nextAt: nextThreshold(config, 'daily', day, season) },
+    weekly: { ...week, tiers: weeklyTiers, nextAt: nextThreshold(config, 'weekly', week, season) },
     actions,
   };
 }
 
 // 下一档的门槛，界面上用来解释「为什么现在没得领」。
-function nextThreshold(config, kind, { activity = 0, claimed = [] }) {
-  const rows = config?.tables?.[CHEST_TABLE[kind] ?? CHEST_TABLE.daily]?.data ?? [];
+function nextThreshold(config, kind, { activity = 0, claimed = [] }, season) {
+  const rows = chestRows(config, kind, season);
   return rows
     .filter((row) => !claimed.includes(row.id) && Number(row.activity) > Number(activity))
     .reduce((min, row) => (min == null || row.activity < min ? row.activity : min), null);
@@ -357,7 +360,7 @@ function lowPower(power) {
 }
 
 // 只读调研：跑一遍前置请求，给出每个日常任务能不能做、要发什么。
-export async function surveyDailies(client, protocol, { config = null, player = null, timeout = 8000, includeTask = () => true, probeGift = true, idle = false, allowRecruitTickets = true, settings = null, afkClaimHours = settings?.afk?.claimIntervalHours, ledger = null } = {}) {
+export async function surveyDailies(client, protocol, { config = null, player = null, timeout = 8000, includeTask = () => true, includeCard = () => true, probeGift = true, idle = false, allowRecruitTickets = true, settings = null, afkClaimHours = settings?.afk?.claimIntervalHours, ledger = null } = {}) {
   const daily = await client.request('DailyTaskInfoRequest', {}, 'DailyTaskInfoResponse', timeout);
   const tasks = (daily.dailyTask ?? []).filter(task => includeTask(task.id)).map((task) => describeDailyTask(task, config));
   const needsAction = task => task.id === 1005 && idle && settings?.arena
@@ -438,7 +441,11 @@ export async function surveyDailies(client, protocol, { config = null, player = 
   }
   const gold = probe('ClickGoldInfoRequest')?.info;
   const freeLimit = config?.tables?.OfflineParamCfg?.data?.find(row => row.paramName === '免费点金次数')?.paramValue;
-  return { daily, tasks: evaluations, chests: planChests(daily, config), gift, ruby, config, player,
+  const cards = [];
+  if (!idle) for (const key of dailyCardKeys) {
+    if (includeCard(key) && cardRewardEnabled(key, settings, protocol)) cards.push(...await dailyCardRewards(client, protocol, key, { ledger, timeout }));
+  }
+  return { daily, tasks: evaluations, chests: planChests(daily, config, player), gift, cards, ruby, config, player,
     freeRecruitAt: probe('RecruitInfoRequest')?.hero?.freeEndTimeSeconds,
     freeGoldAt: freeLimit > 0 && gold?.freeTimes >= freeLimit ? gold.resetTime : undefined,
   };
@@ -458,7 +465,7 @@ async function sendAction(client, protocol, action, timeout) {
 // claimRewards 走的是「收尾」：驱动动作发完服务端才更新完成数，所以这里重新问一次
 // DailyTaskInfoResponse，先把达标任务的奖励领了（奖励里的活跃度会把活跃度顶上去），
 // 再领活跃度宝箱。少了这一步，任务做完了奖励还挂在服务端上。
-export async function runDailies(client, protocol, survey, { allowMutate = false, allowPaid = false, claimRewards = true, config = null, timeout = 15000, onStep, allowAction = () => true, settings = null, getSettings = () => settings, ledger = null, beforeAction, afterAction, cancelAction } = {}) {
+export async function runDailies(client, protocol, survey, { allowMutate = false, allowPaid = false, claimRewards = true, config = null, timeout = 15000, onStep, allowAction = () => true, rewardEnabled, settings = null, getSettings = () => settings, ledger = null, beforeAction, afterAction, cancelAction } = {}) {
   if (!allowMutate) throw new Error('完成日常会改变账号状态，需要 --yes');
   const results = [];
   if (settings && !settings.dailies.enabled) return results;
@@ -535,13 +542,13 @@ export async function runDailies(client, protocol, survey, { allowMutate = false
   if (claimRewards) {
     // 服务端的完成数是异步落库的，动作刚发完就问会读到旧值。
     await new Promise((resolve) => setTimeout(resolve, 1000));
-    results.push(...await claimDailies(client, protocol, { config: config ?? survey.config, timeout, onStep, settings, getSettings }));
+    results.push(...await claimDailies(client, protocol, { config: config ?? survey.config, player: survey.player, timeout, onStep, enabled: rewardEnabled, settings, getSettings, ledger }));
   }
   return results;
 }
 
 // 收尾两连：先领达标任务的奖励，再领活跃度宝箱。
-export async function claimDailies(client, protocol, { config = null, timeout = 15000, onStep, enabled = () => true, scheduler, settings = null, getSettings = () => settings } = {}) {
+export async function claimDailies(client, protocol, { config = null, player, timeout = 15000, onStep, enabled = () => true, scheduler, settings = null, getSettings = () => settings, ledger } = {}) {
   const results = [];
   const selected = key => !settings || (settings.dailies.enabled && (key === 'dailyRewards' ? settings.dailies.claimTasks || settings.arena?.claimTask || settings.league?.claimTask : key === 'gift' ? settings.dailies.claimGift : settings.dailies.claimDailyChest || settings.dailies.claimWeeklyChest));
   const ready = key => selected(key) && enabled(key) && (!scheduler || scheduler.due(key));
@@ -557,6 +564,23 @@ export async function claimDailies(client, protocol, { config = null, timeout = 
     } catch (error) {
       report({ id: 'dailyInfo', title, ok: false, error: error.message });
       return null;
+    }
+  }
+  for (const key of dailyCardKeys) {
+    const active = () => enabled(key) && cardRewardEnabled(key, getSettings(), protocol);
+    if (!active() || (scheduler && !scheduler.due(key))) continue;
+    const reset = scheduler?.nextDay();
+    const rows = await dailyCardRewards(client, protocol, key, { claim: true, enabled: active, ledger, timeout });
+    for (const row of rows) {
+      const failed = row.state === 'pending' || row.state === 'error';
+      report({ id: key, title: row.label + '每日奖励', label: row.text, note: row.text, ok: !!row.claimedNow,
+        skipped: !row.claimedNow && !failed, reason: row.text, status: row.claimedNow ? 'confirmed' : row.state,
+        ...(failed ? { error: row.text } : {}) });
+    }
+    const state = ['error', 'pending', 'setup', 'waiting', 'completed'].find(value => rows.some(row => row.state === value));
+    if (scheduler && scheduler.now() < reset) {
+      scheduler.observe?.(key, rows.map(row => row.text).join(' · '), state);
+      scheduler.defer(key, state === 'completed' ? reset : Math.min(scheduler.now() + 180, reset));
     }
   }
   const canReadDaily = protocol.DailyTaskInfoRequest && protocol.DailyTaskInfoResponse;
@@ -577,8 +601,8 @@ export async function claimDailies(client, protocol, { config = null, timeout = 
   }
 
   // 任务奖励刚加过活跃度，所以宝箱要按新活跃度重新算一次，否则会漏掉刚好够到的档位。
-  const fresh = ready('chests') && results.some(entry => entry.ok) ? await readDaily('刷新活跃度') : after;
-  const actions = (fresh ? planChests(fresh, config).actions : []).filter(action => !settings || (action.request === 'DrawWeeklyRewardRequest' ? settings.dailies.claimWeeklyChest : settings.dailies.claimDailyChest));
+  const fresh = ready('chests') && results.some(entry => entry.ok && entry.request === 'DrawDailyTaskRewardRequest') ? await readDaily('刷新活跃度') : after;
+  const actions = (fresh ? planChests(fresh, config, player).actions : []).filter(action => !settings || (action.request === 'DrawWeeklyRewardRequest' ? settings.dailies.claimWeeklyChest : settings.dailies.claimDailyChest));
   if (scheduler && fresh?.dailyResetTime > scheduler.now()) {
     const recheck = Math.min(fresh.dailyResetTime, scheduler.now() + 180);
     if (ready('dailyRewards') && fresh.dailyTask?.length) {
@@ -598,24 +622,22 @@ export async function claimDailies(client, protocol, { config = null, timeout = 
     }
     // This switch serves both day and week tiers. Only sleep once both sets
     // are exhausted, waking at the earlier (daily) reset.
-    const allCollected = kind => {
-      if (settings && !(kind === 'daily' ? settings.dailies.claimDailyChest : settings.dailies.claimWeeklyChest)) return true;
-      const rows = config?.tables?.[CHEST_TABLE[kind]]?.data;
-      const claimed = fresh[kind + 'RewardClaimed'];
-      return rows?.length && rows.every(row => claimed?.includes(row.id));
-    };
     if (ready('chests')) {
+      const season = seasonOf(player) || null;
+      let configured = true, allCollected = true;
       for (const [kind, field] of [['daily', 'claimDailyChest'], ['weekly', 'claimWeeklyChest']]) {
-        const tiers = config?.tables?.[CHEST_TABLE[kind]]?.data;
-        if ((settings && !settings.dailies[field]) || !tiers?.length) continue;
+        if (settings && !settings.dailies[field]) continue;
+        const tiers = chestRows(config, kind, season);
+        if (!tiers.length) { configured = false; continue; }
         const ids = fresh[kind + 'RewardClaimed'] ?? [];
         const count = tiers.filter(tier => ids.includes(tier.id)).length;
+        if (count < tiers.length) allCollected = false;
         scheduler.observe?.('dailies.' + field, '已领取 ' + count + '/' + tiers.length + ' 档');
       }
-    }
-    if (ready('chests') && !actions.length && Object.values(CHEST_TABLE).every(table => config?.tables?.[table]?.data?.length)) {
-      scheduler.observe?.('chests',allCollected('daily')&&allCollected('weekly')?'当前可领活跃宝箱已全部领取':'活跃度尚未达到下一档');
-      scheduler.defer('chests', allCollected('daily') && allCollected('weekly') ? fresh.dailyResetTime : recheck);
+      if (configured && !actions.length) {
+        scheduler.observe?.('chests', allCollected ? '当前可领活跃宝箱已全部领取' : '活跃度尚未达到下一档');
+        scheduler.defer('chests', allCollected ? fresh.dailyResetTime : recheck);
+      }
     }
   }
   for (const action of actions) {
@@ -693,5 +715,6 @@ export function formatSurvey(survey) {
       ? `每日赠礼 未领 · 可领（免费，${FREE_DAILY_PACK_ID}）`
       : `每日赠礼 已领（${FREE_DAILY_PACK_ID}）`);
   }
+  for (const row of survey.cards ?? []) lines.push(row.text);
   return lines.join('\n');
 }

@@ -5,11 +5,15 @@ export function rememberTournament(client, name, body) {
   if (name === 'SCTournamentOpen') {
     client.tournament = {
       stageId: body?.state?.currentStageId ?? 0,
+      nextMatchTime: body?.state?.nextMatchTime ?? 0,
+      nextMatchTimeId: body?.state?.nextMatchTimeId ?? 0,
       qualified: body?.contestant?.qualified === true,
       lastClaimDailyGiftTime: body?.lastClaimDailyGiftTime ?? 0,
     };
   } else if (name === 'SCTournamentUpdate' && client.tournament && body?.state) {
     client.tournament.stageId = body.state.currentStageId ?? client.tournament.stageId;
+    client.tournament.nextMatchTime = body.state.nextMatchTime ?? client.tournament.nextMatchTime;
+    client.tournament.nextMatchTimeId = body.state.nextMatchTimeId ?? client.tournament.nextMatchTimeId;
   } else if (name === 'SCTournamentContestantUpdate' && client.tournament) {
     client.tournament.qualified = body?.contestant?.qualified === true;
   }

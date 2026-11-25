@@ -7,7 +7,7 @@ import { Switch } from "./switch"
 import { HelpTip } from "./help-tip"
 import { Badge } from "./badge"
 import { DialogFooter, DialogHeader, DialogTitle } from "./dialog"
-import { Backpack, Factory, Gem, Gift, LayoutGrid, type LucideIcon, MessageCircle, Music2, Package, Plus, QrCode, Search, ShipWheel, Shirt, Smartphone, Sprout, Timer, X } from "lucide-react"
+import { Backpack, Bookmark, BookmarkPlus, ChevronRight, Factory, Gem, Gift, LayoutGrid, type LucideIcon, MessageCircle, Music2, Package, Plus, QrCode, RefreshCw, Search, ShipWheel, Shirt, Smartphone, Sprout, Timer, Trash2, X } from "lucide-react"
 
 function Panel({title, help, titleAfter, children}: {title: string; help?: string; titleAfter?: React.ReactNode; children: React.ReactNode}) {
   return <Card><CardHeader><CardTitle className="title-with-help">{title}{help && <HelpTip title={title}>{help}</HelpTip>}</CardTitle>{titleAfter && <CardAction className="row-span-1 self-center max-md:col-span-2 max-md:col-start-1 max-md:row-start-2 max-md:justify-self-start">{titleAfter}</CardAction>}</CardHeader><CardContent>{children}</CardContent></Card>
@@ -289,15 +289,44 @@ export function inventoryPage() {
 
 export function heroesPage() {
   return renderToStaticMarkup(<div className="grid gap-3">
-    <Panel title="装备制造"><div className="bar"><Button id="crafting-refresh" variant="outline">刷新装备厂</Button></div><div id="crafting-view" className="progression-view" aria-live="polite" /></Panel>
+    <div id="items-root" />
+    <Card className="gap-3 py-4">
+      <CardHeader className="flex flex-row items-center justify-between">
+        <CardTitle role="heading" aria-level={2}>装备制造</CardTitle>
+        <Button id="crafting-refresh" type="button" variant="outline" size="sm">刷新装备厂</Button>
+      </CardHeader>
+      <CardContent><div id="crafting-view" className="progression-view" aria-live="polite" /></CardContent>
+    </Card>
   </div>)
 }
 
 export function lineupsPage() {
-  return renderToStaticMarkup(<div className="grid gap-3">
-    <Panel title="我的阵容" help="管理已保存的自定义阵容，点击查看或在弹窗中编辑。主线和试炼可在各自入口选择阵容，挑战结束后自动还原到挑战前的搭配。">
-      <div id="saved-lineup-view" className="progression-view" />
-    </Panel>
+  return renderToStaticMarkup(<div className="lineup-page">
+    <div className="lineup-page-toolbar">
+      <div className="lineup-segments" role="group" aria-label="阵容来源">
+        <Button id="lineup-show-game" variant="ghost" size="sm" aria-pressed="true" aria-controls="game-lineup-pane"><LayoutGrid />游戏阵容</Button>
+        <Button id="lineup-show-presets" variant="ghost" size="sm" aria-pressed="false" aria-controls="saved-lineup-pane"><Bookmark />我的预设</Button>
+      </div>
+      <Button id="game-lineup-refresh" variant="outline" size="sm" aria-label="刷新游戏阵容"><RefreshCw /><span>刷新<span className="max-sm:hidden">游戏阵容</span></span></Button>
+      <fieldset id="saved-lineup-actions" aria-label="预设操作" disabled hidden>
+        <Button id="saved-lineup-create" size="sm"><Plus aria-hidden="true" />新建阵容</Button>
+        <Button id="saved-lineup-capture" variant="outline" size="sm"><BookmarkPlus aria-hidden="true" />保存当前主线阵容</Button>
+      </fieldset>
+    </div>
+    <div id="lineup-page-recovery" />
+    <section id="game-lineup-pane" aria-label="游戏阵容">
+      <p id="game-lineup-status" className="dim" role="status" />
+      <div id="game-lineup-view" className="game-lineup-categories" />
+    </section>
+    <section id="saved-lineup-pane" aria-label="我的预设" hidden>
+      <div id="saved-lineup-view" />
+      <template id="ui-saved-lineup-name"><Button variant="link" size="sm" className="h-auto min-h-8 max-w-full justify-start gap-1 whitespace-normal px-0 py-0 text-left text-base leading-snug font-semibold text-foreground has-[>svg]:px-0 pointer-coarse:h-auto pointer-coarse:min-h-10">
+        <span /><ChevronRight aria-hidden="true" className="size-3.5 text-muted-foreground" />
+      </Button></template>
+      <template id="ui-saved-lineup-delete"><Button variant="ghost" size="icon-sm" className="text-muted-foreground hover:text-destructive pointer-coarse:size-10">
+        <Trash2 aria-hidden="true" />
+      </Button></template>
+    </section>
   </div>)
 }
 

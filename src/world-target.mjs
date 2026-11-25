@@ -25,7 +25,7 @@ export async function readWorldTarget(client,protocol,config,player,settings,led
  if(layer==='fields'){view.notes.push('在总览的「资源田概览」查看本盟城市内可占田地、产量与快捷占领；可在资源田配置中开启自动补满名额。');return view;}
  if(layer==='fleets'){
   const own=await client.request('MyFleetsRequest',{},'MyFleetsResponse');
-  view.fleets=fleetDispatchView(client,settings,ledger,own.fleets??[],exactAutomationId(player.worldId)).filter(f=>'fleet-'+f.buildingId===key).map(f=>({name:f.buildingId,reason:[f.reason,...f.reserved.map(r=>'预留给'+r),'允许任务顺序：'+(f.intents.map(i=>i.label+(i.key==='cityWar'?'（'+((settings.cityWar.defenceFleetIds??[]).includes(f.buildingId)?'防守':'进攻')+'）':'')).join(' → ')||'无'),'当前目标格：'+(f.targetGrid??'主城')].filter(Boolean).join('；')}));return view;
+  view.fleets=fleetDispatchView(client,settings,ledger,own.fleets??[],exactAutomationId(player.worldId)).filter(f=>'fleet-'+f.buildingId===key).map(f=>({name:f.buildingId,reason:[f.reason,...f.reservationNotes,'允许任务顺序：'+(f.intents.map(i=>i.label+(i.key==='cityWar'?'（'+((settings.cityWar.defenceFleetIds??[]).includes(f.buildingId)?'防守':'进攻')+'）':'')).join(' → ')||'无'),'当前目标格：'+(f.targetGrid??'主城')].filter(Boolean).join('；')}));return view;
  }
  if(layer==='boss'){
   const state=await readWorldBoss(client,config,player,settings,ledger,{cityReservedFleetIds:reserved});view.fuel=state.fuel;view.cost=state.cost;view.fleets=state.fleets.map(f=>({name:f.buildingId,reason:reserved.includes(f.buildingId)?'城战时段预留':f.reason}));view.notes.push(state.reason||'今日首战尚未派遣');if(!settings.worldBoss.enabled)view.notes.push('世界Boss自动首战未开启');return view;

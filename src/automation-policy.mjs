@@ -89,6 +89,8 @@ export function nativePreferenceEnabled(settings, key) {
     dailyRewards: () => settings.dailies.enabled && (settings.dailies.claimTasks || settings.arena?.claimTask || settings.league?.claimTask),
     chests: () => settings.dailies.enabled && (settings.dailies.claimDailyChest || settings.dailies.claimWeeklyChest),
     gift: () => settings.dailies.enabled && settings.dailies.claimGift,
+    monthCardDaily: () => settings.dailies.enabled && settings.schedule.monthCardDaily,
+    seasonCardDaily: () => settings.dailies.enabled && settings.schedule.seasonCardDaily,
     tasks: () => settings.loop.tasks || (settings.loop.world && settings.resident.rewards),
     adSpeedUpProduce: () => settings.loop.world && settings.factory.enabled,
     adSpeedUpBuilding: () => settings.loop.world && settings.building.enabled,
@@ -103,6 +105,18 @@ export function nativePreferenceEnabled(settings, key) {
   };
   if (map[key]) return !!map[key]();
   return worldPreferenceEnabled(settings, key);
+}
+
+export function productionDemandConsumes(order, settings) {
+  if (order.kind === 'consumption' && order.source === 'building') {
+    const action = order.metadata?.action;
+    if (action !== 'build' && action !== 'upgrade') return false;
+    const limit = action === 'build' ? settings.building.maxBuilds : settings.building.maxUpgrades;
+    return limit > 0 && worldPreferenceEnabled(settings, action);
+  }
+  return order.kind === 'order' && (order.source === 'merchant'
+    ? activityProductionEnabled(settings, 'merchant') && settings.schedule?.weekOrderSubmit === true
+    : order.metadata?.enabled === true);
 }
 
 export function resourceReserve(settings, id, step = null) {

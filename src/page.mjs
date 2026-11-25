@@ -52,8 +52,7 @@ export const PAGE = `<!doctype html>
 ${chrome()}
 <div class="deck"><main>
   <nav id="resource-tabs" class="resource-tabs" aria-label="杂项分类" hidden>
-    <button type="button" data-resource-tab="guild">联盟</button><button type="button" data-resource-tab="inventory">仓库</button><button type="button" data-resource-tab="heroes">英雄与装备</button>
-    <button type="button" data-resource-tab="items">装备与徽章</button>
+    <button type="button" data-resource-tab="guild">联盟</button><button type="button" data-resource-tab="inventory">仓库</button><button type="button" data-resource-tab="heroes">装备与徽章</button>
     <button type="button" data-resource-tab="giftcodes">礼包兑换</button>
     <button type="button" data-resource-tab="dailies">日常任务</button>
     <button type="button" data-resource-tab="shops">商店</button>
@@ -84,7 +83,7 @@ ${chrome()}
     ${inventoryPage()}
   </section>
 
-  <section id="tab-heroes" class="hidden">
+  <section id="tab-heroes" class="hidden" aria-label="装备与徽章">
     ${heroesPage()}
   </section>
 
@@ -96,7 +95,6 @@ ${chrome()}
   <section id="tab-dailies" class="hidden" aria-label="日常任务"><div id="daily-tasks-root"></div></section>
   <section id="tab-shops" class="hidden" aria-label="商店"><div id="shops-root"></div></section>
   <section id="tab-chat" class="hidden" aria-label="聊天"><div id="chat-root"></div></section>
-  <section id="tab-items" class="hidden" aria-label="装备与徽章"><div id="items-root"></div></section>
 
   <section id="tab-giftcodes" class="hidden">
     ${giftCodesPage()}
@@ -313,8 +311,8 @@ function cell(entry, size, name, qty, showPlaceholder = true) {
 function component(id) {
   return $(id).content.firstElementChild.cloneNode(true);
 }
-function smallButton(label, danger = false) {
-  const button = component(danger ? 'ui-delete' : 'ui-button');
+function smallButton(label, danger = false, primary = false) {
+  const button = component(danger ? 'ui-delete' : primary ? 'ui-primary' : 'ui-button');
   button.textContent = label;
   return button;
 }
@@ -832,6 +830,7 @@ function setBusy(text) {
 function paintConnection() {
   renderAccountOptions();
   setBusy(connectingAccounts.has(current) ? '连接中…' : connectionStatus(snapshot));
+  syncGameLineupPage();
 }
 
 function setAccountStatus(account, status) {
@@ -1053,7 +1052,7 @@ let overviewPending = null;
 async function refreshOverview() {
   if (!$('tab-account').classList.contains('hidden')) return refreshAccountCards();
   if (!current || overviewPending?.account === current || snapshot.paused || snapshot.loginBlocked || disconnected.has(current) || document.hidden) return;
-  if ($('tab-overview').classList.contains('hidden') && $('tab-heroes').classList.contains('hidden')) return;
+  if ($('tab-overview').classList.contains('hidden')) return;
   const account = current;
   const statusRevision = accountStatusRevision;
   const request = { account };
@@ -3144,7 +3143,7 @@ function activateConsolePage(button, resource = selectedResource) {
       }
       refreshManualWorld();
     }
-    if (target === 'lineups') void refreshSavedLineups();
+    if (target === 'lineups') { void refreshSavedLineups(); syncGameLineupPage(true); }
     if (button.dataset.tab === 'account') {
       renderAccounts();
       refreshAccountCards();
@@ -3178,22 +3177,23 @@ async function boot() {
   const previousView = history.state?.consoleView;
   const savedView = ['chat', 'items', 'season-preview'].includes(previousView?.tab)
     ? { tab: 'resources', resource: previousView.tab } : previousView;
+  const savedResource = savedView?.resource === 'items' ? 'heroes' : savedView?.resource;
   const initialTab = location.hash.startsWith('#config-group-') ? 'settings'
     : location.hash === '#pirate-first-kill' ? 'stages' : location.hash === '#journal' ? 'overview'
     : savedView?.tab === 'login-settings' ? 'account'
-    : savedView?.tab === 'resources' && savedView.resource === 'activities' ? 'activities' : savedView?.tab;
+    : savedView?.tab === 'resources' && savedResource === 'activities' ? 'activities' : savedView?.tab;
   try {
     // 恢复账号页时先显示保存的角色资料，由该页按连接状态决定是否读取资源。
     await loadAccounts(true, initialTab !== 'account'
-      && !(initialTab === 'resources' && ['shops', 'season-preview', 'chat', 'items'].includes(savedView?.resource)));
+      && !(initialTab === 'resources' && ['shops', 'season-preview', 'chat', 'heroes'].includes(savedResource)));
   } catch (error) {
     reportError(error);
     return;
   }
   const button = [...document.querySelectorAll('#tabs button')].find(tab => tab.dataset.tab === initialTab)
     || document.querySelector('#tabs [data-tab="overview"]');
-  const resource = [...document.querySelectorAll('[data-resource-tab]')].some(tab => tab.dataset.resourceTab === savedView?.resource)
-    ? savedView.resource : selectedResource;
+  const resource = [...document.querySelectorAll('[data-resource-tab]')].some(tab => tab.dataset.resourceTab === savedResource)
+    ? savedResource : selectedResource;
   activateConsolePage(button, resource);
   if (location.hash === '#journal') openJournal();
   pollCapture();

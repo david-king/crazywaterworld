@@ -76,15 +76,19 @@ function prepare(input) {
     confirmedStock.set(event.itemId, total);
   }
   const orderIds = new Set();
+  const populationRoom = input.populationRoom ?? 0;
+  if (!Number.isSafeInteger(populationRoom) || populationRoom < 0) errors.push('可用人口空间未确认');
   const orders = (input.orders ?? []).map(order => {
     if (typeof order.id !== 'string' || !order.id || orderIds.has(order.id)) errors.push('订单标识缺失或重复');
     orderIds.add(order.id);
     if (order.deadline != null && !Number.isFinite(order.deadline)) errors.push(`${order.id}订单截止时间未确认`);
     const priority = order.priority ?? 0;
+    const populationGain = order.populationGain ?? 0;
+    if (!Number.isSafeInteger(populationGain) || populationGain < 0) errors.push(`${order.id}开工新增人口未确认`);
     if (!Number.isSafeInteger(priority) || priority < 0) errors.push(`${order.id}订单优先级未确认`);
     return { ...order, requirements: quantities(order.requirements, `${order.id}订单`, errors),
       priority: Number.isSafeInteger(priority) && priority >= 0 ? priority : 0,
-      consumeOnCompletion: order.consumeOnCompletion !== false };
+      consumeOnCompletion: order.consumeOnCompletion !== false, populationGain };
   });
   if (!Array.isArray(input.orders)) errors.push('订单列表未读取');
   const priorityLevels = [...new Set(orders.map(order => order.priority))].sort((a, b) => a - b);
@@ -138,7 +142,7 @@ function prepare(input) {
     ...Object.values(capacityReservations).flatMap(entries => entries.map(entry => entry.until))]
     .filter(Number.isFinite))].sort((a, b) => a - b);
   const data = { inventory, machines, recipes, recipeByItem, incoming, orders, priorityLevels, caps, stockCapMode, orderDemand, capacityReservations, calendarTimes,
-    topological: postorder.reverse(), items, errors };
+    topological: postorder.reverse(), items, errors, populationRoom };
   data.maxBatches = expandDemand(data, orderDemand, inventory, false).batches;
   if (hasRelevantCaps) for (const recipe of recipes) {
     if (visited.has(recipe.itemId)) data.maxBatches[recipe.index] = Infinity;
@@ -180,7 +184,7 @@ function initialState(data) {
     if (event.time <= EPSILON) stock.set(event.itemId, (stock.get(event.itemId) ?? 0) + event.quantity);
     else events.push(event);
   }
-  return { time: 0, stock, held: new Map(), events,
+  return { time: 0, stock, held: new Map(), events, populationRoom: data.populationRoom,
     available: data.machines.map(machine => machine.availableAt),
     started: Array(data.recipes.length).fill(0), delivered: Array(data.orders.length).fill(false),
     timeline: [], orderCompletions: [], priorityCompletions: data.priorityLevels.map(() => 0) };
@@ -287,14 +291,16 @@ function applyAction(data, state, action) {
   const sequence = state.timeline.length + state.orderCompletions.length;
   if (action.kind === 'delivery') {
     const order = data.orders[action.order];
+    const consumeOnCompletion = order.consumeOnCompletion && order.populationGain <= next.populationRoom;
+    if (consumeOnCompletion) next.populationRoom -= order.populationGain;
     for (const [id, quantity] of order.requirements) {
       next.stock.set(id, (next.stock.get(id) ?? 0) - quantity);
-      if (!order.consumeOnCompletion) next.held.set(id, (next.held.get(id) ?? 0) + quantity);
+      if (!consumeOnCompletion) next.held.set(id, (next.held.get(id) ?? 0) + quantity);
     }
     next.delivered[action.order] = true;
     next.priorityCompletions[order.priorityIndex] = Math.max(next.priorityCompletions[order.priorityIndex], state.time);
     next.orderCompletions.push({ orderId: order.id, completedAt: state.time, sequence,
-      priority: order.priority, consumeOnCompletion: order.consumeOnCompletion, deadline: order.deadline ?? null });
+      priority: order.priority, consumeOnCompletion, deadline: order.deadline ?? null });
     return next;
   }
   const recipe = data.recipes[action.recipe];
@@ -330,7 +336,7 @@ function advance(data, state) {
 function stateKey(data, state) {
   return JSON.stringify([state.time, data.items.map(id => state.stock.get(id) ?? 0),
     data.items.map(id => state.held.get(id) ?? 0), state.available.map(time => Math.max(time, state.time)),
-    state.started, state.delivered, state.events.map(event => [event.time, event.itemId, event.quantity])
+    state.populationRoom, state.started, state.delivered, state.events.map(event => [event.time, event.itemId, event.quantity])
       .sort((a, b) => a[0] - b[0] || a[1].localeCompare(b[1]) || a[2] - b[2]), state.priorityCompletions]);
 }
 
@@ -476,7 +482,7 @@ function blockers(data) {
   for (const order of data.orders) for (const [id, quantity] of order.requirements) {
     if (quantity > maximumStock(id)) blocked.push({ orderId: order.id, itemId: id,
       reason: '单个订单齐套数量超过该产物可达仓存上限', missingQuantity: quantity - maximumStock(id) });
-    if (!order.consumeOnCompletion) held.set(id, (held.get(id) ?? 0) + quantity);
+    if (!order.consumeOnCompletion || order.populationGain > data.populationRoom) held.set(id, (held.get(id) ?? 0) + quantity);
   }
   for (const [id, quantity] of held) if (quantity > maximumStock(id)) {
     blocked.push({ itemId: id, reason: '需保留的订单产物总量超过可达仓存上限', missingQuantity: quantity - maximumStock(id) });
@@ -503,7 +509,7 @@ export function optimizeProductionSchedule(input, options = {}) {
     reasons: [], objective: data.priorityLevels.length > 1 ? 'priority-makespan' : 'makespan', deadlinesEnforced: true,
     priorityLevels: data.priorityLevels, objectiveLowerBound: null, objectiveUpperBound: null,
     priorityBounds: data.priorityLevels.map(priority => ({ priority, lowerBound: null, upperBound: null })),
-    assumptions: ['固定快照、当前设施与资源', '已有加工固定完成时间', '每种产物单配方、依赖无环', '不含新升级与付费加速'],
+    assumptions: ['固定快照、当前设施与资源', '已有加工固定完成时间', '每种产物单配方、依赖无环', '采用当前设施等级与产能，不计付费加速'],
     stats: { nodes: 0, elapsedMilliseconds: 0, exhausted: false, limitReached: false } };
   const finish = () => { result.stats.elapsedMilliseconds = clock() - startedAt; return result; };
   result.assumptions.push(data.stockCapMode === 'start-projected'

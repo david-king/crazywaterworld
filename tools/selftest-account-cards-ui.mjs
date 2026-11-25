@@ -187,6 +187,7 @@ function fixture(initial = sampleAccounts()) {
     const exportAccounts = id => env.exports.push(id);
     const refreshProgression = () => {};
     const refreshSavedLineups = async () => {};
+    const syncGameLineupPage = () => {};
     const refreshManualWorld = () => {};
     const refreshActivities = () => {};
     const refreshStages = () => {};
@@ -202,6 +203,7 @@ function fixture(initial = sampleAccounts()) {
     const resourceFieldsAccountChanged = () => {};
     const resetWorldMap = () => {};
     const resetProductionPlan = () => {};
+    const refreshChangedProductionPlan = () => {};
     let accounts=structuredClone(env.serverRows),current=env.selected,dailyAccount=current,dailyVersion=0;
     let worldMapOwner=null,productionPlanOwner=null,productionPlanBusy=false,loopAccount=current,loopVersion=0;
     ${accountScript}

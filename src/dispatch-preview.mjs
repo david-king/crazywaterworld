@@ -3,7 +3,10 @@ import { resourceReserve } from './automation-policy.mjs';
 import { radarKey } from './fleet-settlement.mjs';
 import { previouslySwept } from './radar-sweep.mjs';
 
-export const pendingPetrol = ledger => ['radarPetrol','piratePetrol','treasurePetrol','cityWarPetrol','worldBossPetrol','siliconPetrol','resourceFieldPetrol'].reduce((n,k)=>n+(ledger.pendingCounters()[k]??0),0);
+export function pendingPetrol(ledger) {
+ const pending = ledger.pendingCounters();
+ return ['radarPetrol','piratePetrol','treasurePetrol','cityWarPetrol','worldBossPetrol','siliconPetrol','resourceFieldPetrol'].reduce((n,k)=>n+(pending[k]??0),0);
+}
 export function planRadarPreview(snapshot, settings, ledger, client, {cityReservedFleetIds=null}={}) {
  const p=settings.radar, notes=[],actions=[];
  const disabled=p.runEnabled===false?'联盟情报总开关已关闭':!p.enabled?'联盟情报自动处理未开启':'';

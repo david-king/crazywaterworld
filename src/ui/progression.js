@@ -20,12 +20,13 @@ async function refreshProgression(only) {
     viewVersions.set(view.id,version);
     const valid=()=>version===viewVersions.get(view.id)&&account===current;
     const same=box.dataset.owner===account;
-    if(!same||!account||snapshot.paused||disconnected.has(account)){
+    const offline = disconnected.has(account) || (view.id === 'crafting' && !only && !snapshot.connected);
+    if(!same||!account||snapshot.paused||offline){
       clear(box);delete box.progressSnapshot;
       if(view.id==='pirate-manual')setManualPirateChoices(null);
     }
     box.dataset.owner=account||'';
-    if(!account||snapshot.paused||disconnected.has(account)){
+    if(!account||snapshot.paused||offline){
       box.textContent=!account?'请先选择账号':snapshot.paused?'账号已暂停':'请先连接账号';return;
     }
     if(!box.childNodes.length && !box.progressSnapshot)box.textContent='正在读取…';
@@ -645,50 +646,59 @@ function craftingCosts(costs) {
     return [c.name, { text: fmt(c.need), num: true }, { text: fmt(c.have), num: true },
       el('span', missing > 0 ? 'warn' : 'ok', missing > 0 ? '缺 ' + fmt(missing) : '已备齐'),
       c.sources.join('、') || '—'];
-  }));
+  }), 'crafting-costs');
 }
 
 function renderCrafting(box, data, account) {
   const { state, job, recipes, buildingId } = data;
   const labels = { locked: '尚未开放', unbuilt: '待建', building: '建造中', idle: '空闲', making: '制作中', ready: '成品待领' };
-  box.appendChild(el('strong', null, '装备厂 · ' + labels[state]));
-  if (data.reason) box.appendChild(el('p', 'dim', data.reason));
+  const layout = el('div', 'crafting-layout');
+  const summary = el('div', 'crafting-summary');
+  const tone = state === 'ready' ? 'ready' : ['building', 'making'].includes(state) ? 'waiting' : 'unknown';
+  summary.appendChild(chip(tone, labels[state]));
+  layout.appendChild(summary);
+  box.appendChild(layout);
+  const defaultReasons = { making: '本批装备制作中', ready: '本批装备已完成', building: '装备厂施工中' };
+  if (data.reason && data.reason !== defaultReasons[state]) summary.appendChild(el('p', 'dim', data.reason));
   if (state === 'locked' || state === 'unbuilt' || state === 'building') {
-    if (data.buildFinishTime) box.appendChild(el('p', null, '建造完成时间 · ' + when(data.buildFinishTime * 1000)));
+    if (data.buildFinishTime) summary.appendChild(el('p', 'crafting-time', '建造完成时间 · ' + when(data.buildFinishTime * 1000)));
     if (state !== 'building' && data.buildCosts.length) {
-      box.appendChild(craftingCosts(data.buildCosts));
-      if (state === 'unbuilt') box.appendChild(el('p', 'dim', '材料备齐后，可在「挂机 → 海面」开启空位建造。'));
+      layout.appendChild(craftingCosts(data.buildCosts));
+      if (state === 'unbuilt') summary.appendChild(el('p', 'dim', '材料备齐后，可在「挂机 → 海面」开启空位建造。'));
     }
     return;
   }
 
   const base = '/api/equipment/crafting';
   if (job) {
-    const detail = el('div');
+    const detail = el('div', 'crafting-product');
     const product = job.equipId && job.equipName && job.equipName !== job.equipId ? job.equipName : job.name;
     detail.appendChild(el('strong', null, product));
-    if (job.equipId && job.star != null) detail.appendChild(el('span', 'dim', ' · ' + fmt(job.star) + ' 星'));
-    if (job.finishTime) detail.appendChild(el('p', 'dim', '制作完成时间 · ' + when(job.finishTime * 1000)));
-    box.appendChild(detail);
-    if (state === 'ready') box.appendChild(progressionAction('领取成品', base + '/collect',
+    if (job.equipId && job.star != null) detail.appendChild(el('span', 'dim', fmt(job.star) + ' 星'));
+    summary.appendChild(detail);
+    if (job.finishTime) summary.appendChild(el('p', 'crafting-time', '制作完成时间 · ' + when(job.finishTime * 1000)));
+    if (state === 'ready') summary.appendChild(progressionAction('领取成品', base + '/collect',
       { buildingId, previewKey: job.previewKey }, account, job.previewKey ? '' : data.reason || '请刷新并确认当前成品', 'crafting'));
   }
   if (!recipes.length) {
-    box.appendChild(el('p', 'dim', '当前没有可查看的制作配方。'));
+    summary.appendChild(el('p', 'dim', '当前没有可查看的制作配方。'));
     return;
   }
 
-  const bar = el('div', 'bar');
+  const pane = el('div', 'crafting-recipe');
+  const bar = el('div', 'crafting-recipe-bar');
   const select = choice(bar, '制作配方', recipes.map(r => ({
     value: String(r.makeId), text: r.name + (r.canStart ? ' · 可制造' : ''),
   })));
   const available = recipes.find(r => r.canStart);
   if (available) select.value = String(available.makeId);
-  const preview = el('div', 'progression-view');
+  const meta = el('span', 'crafting-recipe-meta');
+  bar.appendChild(meta);
+  const preview = el('div', 'crafting-preview');
   const draw = () => {
     const recipe = recipes.find(r => String(r.makeId) === select.value);
-    clear(preview).appendChild(el('p', null, recipe.type + ' · 基础工时 ' + fmt(recipe.seconds / 60) + ' 分钟'));
-    preview.appendChild(craftingCosts(recipe.costs));
+    meta.textContent = recipe.type + ' · 基础工时 ' + fmt(recipe.seconds / 60) + ' 分钟';
+    clear(preview).appendChild(craftingCosts(recipe.costs));
     if (recipe.reason && recipe.reason !== data.reason) preview.appendChild(el('p', 'dim', recipe.reason));
     if (state === 'idle') preview.appendChild(progressionAction('制作一件' + recipe.name, base + '/start',
       { buildingId, makeId: recipe.makeId, previewKey: recipe.previewKey }, account,
@@ -696,7 +706,8 @@ function renderCrafting(box, data, account) {
   };
   select.onchange = draw;
   draw();
-  box.append(bar, preview);
+  pane.append(bar, preview);
+  layout.appendChild(pane);
 }
 
 
@@ -825,4 +836,4 @@ function renderPirateBoard(box, data, account) {
   renderPirateProgress(box, data, account);
 }
 
-setInterval(() => { if (!document.hidden && !$('tab-heroes').classList.contains('hidden')) void refreshProgression('crafting'); }, 15000);
+setInterval(() => { if (!document.hidden && snapshot.connected && !$('tab-heroes').classList.contains('hidden')) void refreshProgression('crafting'); }, 15000);

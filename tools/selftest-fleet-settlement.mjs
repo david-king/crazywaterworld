@@ -6,6 +6,7 @@ import { createUsageLedger } from '../src/automation-settings.mjs';
 import {
   checkFleetSettlement,
   invalidateFleetReports,
+  markCityDispatchSending,
   settleFleetSnapshot,
   radarEvents,
   recordsInWorld
@@ -308,6 +309,127 @@ await test('城战及两类维修结束后释放；未确认的空闲和同城�
     assert(!l.hasKey(key));
     assert.equal(l.confirmedCounters().cityWarPetrol, 300);
   }
+});
+await test('漏收城战行军回包，跨日重启后按个人战报释放两队和旧汽油预留', async () => {
+  const file = path.join(dir, ++seq + '.json');
+  const first = { buildingId: '1远征船', cityId: 59, sentAt: 1795522799 };
+  const second = { buildingId: '2远征船', cityId: 41, sentAt: 1795436517 };
+  const checkedAt = 1795598992;
+  for (const fleet of [second, first]) {
+    const old = createUsageLedger('sample', { file, now: () => fleet.sentAt * 1000 });
+    add(old, 'cityWar:' + world + ':' + parseInt(fleet.buildingId), { kind: 'cityDispatch', role: 'attack', ...fleet },
+      false, { cityWarPetrol: 500, cityWarDispatches: 1 });
+  }
+  const ledger = createUsageLedger('sample', { file, now: () => checkedAt * 1000 });
+  const report = (fleet, at, uid) => ({ type: 2, scenarioId: 1, uid, createTime: { low: at, high: 0 },
+    cityWar: { buildingId: fleet.buildingId, cityId: fleet.cityId, isAttack: true } });
+  const pages = [
+    [{ uid: 1, type: 3, cityWarResult: { cityId: 59, isAttack: true } }],
+    [report(second, 1795522936, 2)],
+    [report(first, 1795522936, 3), report(second, 1795436585, 4)]
+  ];
+  const requests = [];
+  const client = { serverClockOffsetMs: checkedAt * 1000 - Date.now(), request: async (name, body) => {
+    if (name === 'MyFleetsRequest') return { fleets: [home(first.buildingId), home(second.buildingId)] };
+    if (name === 'AllItemRequest') throw Error('库存暂未同步，仍可用个人战报确认');
+    assert.equal(name, 'CampaignReportsRequest');
+    requests.push(body.pageNo);
+    return { total: 40, reports: pages[body.pageNo] };
+  } };
+  const check = () => checkFleetSettlement(client, { worldId: world, playerId: 1 }, ledger);
+  assert.deepEqual(await check(), []);
+  assert.equal(ledger.pendingCounters().cityWarPetrol, 1000);
+  await check();
+  assert.deepEqual(requests, [0, 1, 2]);
+  assert.deepEqual(ledger.keyRecords(), {});
+  assert.deepEqual(ledger.pendingCounters(), {});
+  assert.equal(ledger.snapshot().counters.cityWarDispatches ?? 0, 0);
+  assert.equal(ledger.confirmedCounters().cityWarPetrol ?? 0, 0);
+  assert.deepEqual(await check(), []);
+});
+await test('即时归队与全量库存同轮同步，两笔旧城战释放，无需调战报或增加已确认消费', async () => {
+  const ledger = make(), keys = [1, 2].map(i => 'cityWar:' + world + ':' + i);
+  const fleets = [home('1远征船'), home('2远征船')];
+  for (const [i, key] of keys.entries()) {
+    add(ledger, key, { kind: 'cityDispatch', buildingId: fleets[i].buildingId, cityId: i ? 41 : 59,
+      role: 'attack', sentAt: now - 86400 }, false, { cityWarDispatches: 1, cityWarPetrol: i ? 6000 : 8338 });
+  }
+  add(ledger, 'other-petrol', { kind: 'other' }, false, { radarPetrol: 500 });
+  const calls = [];
+  const client = { serverClockOffsetMs: now * 1000 - Date.now(), request: async name => {
+    calls.push(name);
+    if (name === 'MyFleetsRequest') return { fleets };
+    if (name === 'AllItemRequest') return { items: [{ itemId: '汽油', num: { low: 573373, high: 0 } }] };
+    assert.fail(name);
+  } };
+  const check = () => checkFleetSettlement(client, { worldId: world, playerId: 1 }, ledger);
+  assert.equal(ledger.pendingCounters().cityWarPetrol, 14338);
+  const changes = await check();
+  assert.deepEqual(changes.map(c => c.key).sort(), keys);
+  assert.deepEqual(calls.sort(), ['AllItemRequest', 'MyFleetsRequest']);
+  assert.deepEqual(ledger.pendingCounters(), { radarPetrol: 500 });
+  assert.equal(ledger.confirmedCounters().cityWarDispatches ?? 0, 0);
+  assert.equal(ledger.snapshot().counters.cityWarDispatches, 2);
+  for (const key of keys) assert(!ledger.hasKey(key));
+  assert.deepEqual(await check(), []);
+  add(ledger, keys[0], { kind: 'cityDispatch', buildingId: fleets[0].buildingId }, false);
+});
+await test('城战快照核对只释放同一笔旧派遣，刚发出、仍在途或库存不完整时继续等待', async () => {
+  const ledger = make(), id = '1远征船', key = 'cityWar:' + world + ':1';
+  const details = { kind: 'cityDispatch', buildingId: id, cityId: 59, role: 'attack', sentAt: now - 30 };
+  const petrol = { itemId: '汽油', num: 0 };
+  let bag = { items: [petrol] }, fleets = [home(id)], onRead = () => {};
+  const ticket = ledger.reserve({ cityWarPetrol: 500 }, {}, {}, { uniqueKey: key, details });
+  const player = { worldId: world, playerId: 1 };
+  const client = { connected: true, serverClockOffsetMs: now * 1000 - Date.now(), request: async name => {
+    if (name === 'AllItemRequest') { onRead(); return bag; }
+    if (name === 'MyFleetsRequest') return { fleets };
+    if (name === 'CampaignReportsRequest') return { reports: [], total: 0 };
+    throw Error(name);
+  } };
+  const check = () => checkFleetSettlement(client, player, ledger);
+  for (bag of [null, {}, { items: [petrol, petrol] }, { items: [{ ...petrol, num: -1 }] }])
+    assert.deepEqual(await check(), []);
+  bag = { items: [petrol] };
+  for (fleets of [[], [home(id), home(id)], [home('2远征船')], [{ ...home(id), state: 4 }],
+    [{ ...home(id), curGridIdx: 4 }], [{ ...home(id), targetCityId: 12 }], [{ ...home(id), state: 2, targetCityId: 12 }],
+    [{ ...home(id), moveEndTs: now + 30 }], [{ ...home(id), owner: { playerId: 2 } }]])
+    assert.deepEqual(await check(), []);
+  fleets = [home(id)];
+  onRead = () => { player.playerId = 2; };
+  assert.deepEqual(await check(), []);
+  player.playerId = 1;
+  onRead = () => markCityDispatchSending(ledger, key, ticket, now);
+  assert.deepEqual(await check(), [], '读取期间才真正发出的请求不能被旧回包释放');
+  onRead = () => {};
+  assert.deepEqual(await check(), [], '刚发出时仍须给服务端处理时间');
+  assert.equal(ledger.pendingCounters().cityWarPetrol, 500);
+  client.serverClockOffsetMs += 10_000;
+  assert.equal((await check())[0]?.petrol, 0, '零库存也是有效的最新库存');
+  add(ledger, key, details, false, { cityWarPetrol: 900 });
+  assert.throws(() => markCityDispatchSending(ledger, key, ticket, now), /预留已变化/);
+  assert.equal(ledger.pendingCounters().cityWarPetrol, 900);
+});
+await test('城战战报须匹配同队、城市、攻守、场景和派遣时段，归队后才释放', () => {
+  const l = make(), id = '1远征船', key = 'cityWar:' + world + ':1';
+  const d = { kind: 'cityDispatch', role: 'defence', buildingId: id, cityId: 59,
+    sentAt: now - 120, warEndTime: now - 10, scenarioId: 2 };
+  add(l, key, d, false, { cityWarDispatches: 1 });
+  const cityWar = { buildingId: id, cityId: 59, isAttack: false };
+  const good = { uid: 42, type: 2, scenarioId: 2, createTime: now - 30, cityWar, win: false };
+  for (const report of [
+    { ...good, uid: 0 }, { ...good, type: 3 }, { ...good, scenarioId: 1 },
+    { ...good, createTime: d.sentAt - 1 }, { ...good, createTime: now },
+    { ...good, cityWar: { ...cityWar, buildingId: '2远征船' } },
+    { ...good, cityWar: { ...cityWar, cityId: 60 } }, { ...good, cityWar: { ...cityWar, isAttack: true } },
+    { ...good, cityWar: { buildingId: id, cityId: 59 } }
+  ]) assert.deepEqual(settle(l, [home(id)], { reports: [report] }), []);
+  assert.deepEqual(settle(l, [home(id)], { reports: [good], baseline: {} }), []);
+  assert.deepEqual(settle(l, [{ ...home(id), state: 2, targetCityId: 60 }], { reports: [good] }), []);
+  assert(l.hasKey(key));
+  settle(l, [home(id)], { reports: [good] });
+  assert(!l.hasKey(key));
+  assert.equal(l.confirmedCounters().cityWarDispatches, 1);
 });
 await test('货轮确认保留一次参与键，首杀不能只按返航推断输赢', () => {
   const l = make(),

@@ -621,15 +621,61 @@ test('建筑备料关闭时不加入目标，开启后保护已经齐套的建�
   snapshot.inventory = [{ id: '小麦', num: 1 }, { id: '小麦种子', num: 1 }];
   snapshot.orders[0].requirements[0].num = 1;
   snapshot.orders.push({ id: 'building:1', source: 'building', kind: 'consumption',
-    requirements: [{ id: '小麦', num: 1 }], metadata: { buildingId: '1民居', level: 2, ready: true } });
+    requirements: [{ id: '小麦', num: 1 }], metadata: { buildingId: '1民居', level: 2, action: 'upgrade', ready: true } });
   assert.equal(buildProductionModel(snapshot, config, settings).input.orders.length, 1);
   settings.building.supply = true;
   const model = buildProductionModel(snapshot, config, settings);
-  assert.equal(model.input.orders[0].consumeOnCompletion, false);
+  assert.equal(model.input.orders[0].consumeOnCompletion, true);
   const result = planProduction(snapshot, config, settings, { search: { maxMilliseconds: 1000, maxNodes: 100000 } });
   assert.equal(result.orders.find(order => order.source === 'building').completionAt, 1000);
   assert.equal(result.orders.find(order => order.source === 'resident').completionAt, 1090);
 });
+
+{
+  const { snapshot, settings } = fixture();
+  settings.factory.demandPriority = ['building'];
+  settings.factory.gain = settings.building.supply = true;
+  snapshot.stockCap = 20;
+  snapshot.population = { current: 10, future: 12, max: 16 };
+  snapshot.inventory = [{ id: '排水管', num: 12 }, { id: '金属', num: 12 }, { id: '金币', num: 200 }];
+  snapshot.recipes = [{ ...snapshot.recipes[0], id: '排水管', productId: '排水管', costs: [{ id: '金属', num: 1 }] }];
+  const local = { ...config, tables: { ...config.tables, BuildingProduceCfg: table([
+    { ...config.tables.BuildingProduceCfg.data[0], itemId: '排水管', costItem: [['金属', 1]] },
+  ]) } };
+  snapshot.orders = ['11A民居', '12A民居'].map(id => ({ id, source: 'building', kind: 'consumption',
+    requirements: [{ id: '排水管', num: 12 }, { id: '金币', num: 100 }],
+    metadata: { buildingId: id, level: 2, action: 'upgrade', populationGain: 2 } }));
+  const plan = () => planProduction(snapshot, local, settings);
+  const forecast = result => forecastProductionDay(snapshot, local, settings, result.orders);
+  const expected = [snapshot.serverNow, snapshot.serverNow + 12 * 60];
+  const sequential = plan();
+  assert.deepEqual(sequential.orders.map(order => order.completionAt).sort((a,b) => a-b), expected);
+  assert(sequential.orderCompletions.every(order => order.consumeOnCompletion));
+  assert.equal(sequential.timeline.filter(job => job.itemId === '排水管').length, 12);
+  assert.deepEqual((await forecast(sequential)).completions.map(order => order.at), expected);
+
+  snapshot.population.max = 14;
+  settings.factory.keepStock = 20;
+  settings.factory.demandPriority.push('factory');
+  snapshot.inventory.find(item => item.id === '金属').num = 50;
+  const oneStart = plan();
+  assert.deepEqual(oneStart.orderCompletions.map(order => order.consumeOnCompletion), [true, false]);
+  const produced = day => day.factories[0].runs.filter(run => run.id === '排水管').reduce((n, run) => n + run.quantity, 0);
+  assert.equal(produced(await forecast(oneStart)), 20, '第二栋的12根管仍占仓，另可补8根');
+
+  settings.building.maxUpgrades = 0;
+  const held = plan();
+  assert(held.orders.every(order => order.reason.includes('仓库放不下所有订单要预留的材料')));
+  assert.equal((await forecast(held)).completions.length, 1);
+  snapshot.orders[1].metadata.action = 'build';
+  const mixed = plan();
+  assert(mixed.orderCompletions.some(order => order.orderId === snapshot.orders[1].id && order.consumeOnCompletion));
+  assert.equal((await forecast(mixed)).completions[0].id, snapshot.orders[1].id);
+  snapshot.orders = [snapshot.orders[1]];
+  snapshot.orders[0].requirements[0].num = 21;
+  assert.match(plan().orders[0].reason, /仓库放不下这项需求的全部材料/);
+  console.log('通过：建筑分批开工释放仓容，零额度、人口和单栋材料上限仍生效');
+}
 
 test('交换用户来源优先级后共享库存分配与完成次序随之改变', () => {
   const { snapshot, settings } = fixture();

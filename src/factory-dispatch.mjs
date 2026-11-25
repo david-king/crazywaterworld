@@ -81,6 +81,17 @@ export function createFactoryDispatch(survey, timing, collectable, crops) {
     if (!durations.has(key)) durations.set(key, timing.factory(recipe, { building }).seconds ?? Infinity);
     return durations.get(key);
   }
+  function batchFitsBy(building, recipe, units, deadline) {
+    const queue = queues.get(building);
+    const finishes = [...queue.finishes];
+    const duration = seconds(building, recipe);
+    for (let n = 0; n < units; n++) {
+      const lane = nextFactoryLane(finishes, queue.lanes.expiresAt, duration);
+      if (lane.finish > deadline) return false;
+      commitFactoryLane(finishes, lane);
+    }
+    return true;
+  }
   function readyAt(recipe, free, batches = 1) {
     let at = now;
     for (const [item, count] of recipe.costItem ?? []) {
@@ -109,7 +120,10 @@ export function createFactoryDispatch(survey, timing, collectable, crops) {
       // Bound the wait for unobserved supply. Longer non-preemptible jobs
       // justify more observation, up to three configured review intervals.
       const patience = job.earlyFallback ? 0 : Math.min(3 * revisit, Math.max(revisit, Math.sqrt(duration * revisit)));
-      if (unknown && job.waited >= patience) {
+      // While the priority output is full, a short refill batch can finish
+      // before its next capacity check, even after a long wait for space.
+      const fitsBeforeCapacityCheck = job.capacityBlocked && lane.finish <= release;
+      if (unknown && job.waited >= patience && !fitsBeforeCapacityCheck) {
         if (lane.start > now) return false;
         if (parallel && nextFactoryLane(after, queue.lanes.expiresAt, urgent).start
           > nextFactoryLane(before, queue.lanes.expiresAt, urgent).start) return false;
@@ -135,5 +149,5 @@ export function createFactoryDispatch(survey, timing, collectable, crops) {
     queue.count++;
     if (collectable(building)) return addArrival(recipe.itemId, 1, lane.finish);
   }
-  return { queues, seconds, readyAt, fits, commit };
+  return { queues, seconds, readyAt, batchFitsBy, fits, commit };
 }

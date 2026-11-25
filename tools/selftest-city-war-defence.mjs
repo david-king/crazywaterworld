@@ -713,7 +713,9 @@ await check('未知防守占用会阻止同队巨轮出征，其他舰队仍可�
   await run(f, settings, usage);
   Object.assign(settings.treasure, { enabled: true, autoJoin: true, fleetIds: ['1远征船', '2远征船'], petrolReserve: 0 });
   const snapshot = await readTreasureLoot(f.client, f.protocol, f.config, f.player);
-  const preview = planTreasureLoot(snapshot, f.config, settings, { keys: usage.keyRecords(), pendingFuel: 0 });
+  const preview = planTreasureLoot(snapshot, f.config, settings, { keys: usage.keyRecords(), pendingFuel: 0,
+    unavailableFleets: { '2远征船': '此舰队已预留给其他任务' } });
+  assert.match(preview.fleets.find(row => row.name === '远征舰队 2 队').reason, /城战任务结果待确认/);
   assert.equal(preview.actions.length, 1);
   assert.deepEqual(preview.actions[0].body.fleetBuildingIds, ['1远征船']);
 });

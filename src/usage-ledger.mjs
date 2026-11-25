@@ -15,13 +15,15 @@ import { atomicJson, readJson, withFileLock } from './json-store.mjs';
 /** @typedef {{id: string, confirmed: boolean, expired?: boolean, details?: Record<string, unknown>}} KeyRecord */
 /** @typedef {{revision: number, owned: Record<string,string>, lost: Record<string,string>, settled?: Record<string,string>}} FieldHistory */
 /** @typedef {Record<string, {revision:string, specialtyId:number, shortageId:number, reporter:string|null}>} MerchantEdits */
-/** @typedef {{day: string, counters: Counters, pending: Record<string, Reservation>, confirmed: Counters, keys: Record<string, KeyRecord>, pirateRuns?: Record<string,PirateRun>, fieldHistory?: Record<string,FieldHistory>, merchantIntel?: Record<string,{expiresAt:number, ports:MerchantEdits}>}} LedgerEntry */
+/** @typedef {{day: string, counters: Counters, pending: Record<string, Reservation>, confirmed: Counters, keys: Record<string, KeyRecord>, dailyCompletions?: Record<string,true>, pirateRuns?: Record<string,PirateRun>, fieldHistory?: Record<string,FieldHistory>, merchantIntel?: Record<string,{expiresAt:number, ports:MerchantEdits}>}} LedgerEntry */
 /** @typedef {{version: number, accounts: Record<string, LedgerEntry>}} LedgerStore */
 /**
  * @typedef {object} UsageLedger
  * @property {(pirateWorld?: string) => {day: string, counters: Counters, uncertain: number, pendingPaidGold?: true, pirateRun?: PirateRun}} snapshot
  * @property {(update: PirateRunUpdate) => number} savePirateRun
  * @property {() => Counters} confirmedCounters
+ * @property {(key: string) => boolean} hasDailyCompletion
+ * @property {(key: string) => void} markDailyCompletion
  * @property {(uniqueKey: string) => boolean} hasKey
  * @property {() => Record<string, KeyRecord>} keyRecords
  * @property {(scope: string) => MerchantEdits} merchantEdits
@@ -31,7 +33,7 @@ import { atomicJson, readJson, withFileLock } from './json-store.mjs';
  * @property {(uniqueKey: string) => number | null} reservationTime
  * @property {() => Counters} pendingCounters
  * @property {(uniqueKey: string, confirmed: boolean, details?: Record<string, unknown>) => void} resolveKey
- * @property {(uniqueKey: string, expected: KeyRecord) => boolean} retireUnknownKey
+ * @property {(uniqueKey: string, expected: KeyRecord, options?: {releaseSlot?: boolean}) => boolean} retireUnknownKey
  * @property {(uniqueKey: string, expected: KeyRecord, details: Record<string, unknown>) => boolean} expirePirateDispatch
  * @property {(uniqueKey: string, expected: KeyRecord, dailyLimit?: boolean) => boolean} failGuildAidGift
  * @property {(counters: Counters, limits?: Counters, minimums?: Counters, options?: {uniqueKey?: string | null, details?: Record<string, unknown> | null, paidGold?: PaidGoldBaseline, pirateRun?: PirateRunUpdate}) => LedgerTicket} reserve
@@ -171,6 +173,16 @@ export function createUsageLedger(accountId, { file = usageFile(), now = Date.no
       });
     },
     confirmedCounters() { return { ...read().confirmed }; },
+    hasDailyCompletion(key) { return read().dailyCompletions?.[key] === true; },
+    markDailyCompletion(key) {
+      withFileLock(file, () => {
+        const { store, entry } = forUpdate();
+        const completions = entry.dailyCompletions ??= {};
+        if (completions[key] === true) return;
+        completions[key] = true;
+        atomicJson(file, store);
+      });
+    },
     hasKey(uniqueKey) { return Object.hasOwn(read().keys, uniqueKey); },
     keyRecords() { return copy(read().keys); },
     merchantEdits(scope) {
@@ -250,15 +262,16 @@ export function createUsageLedger(accountId, { file = usageFile(), now = Date.no
         return true;
       });
     },
-    retireUnknownKey(uniqueKey, expected) {
+    retireUnknownKey(uniqueKey, expected, { releaseSlot = false } = {}) {
       return withFileLock(file, () => {
         const { store, entry } = forUpdate();
         const record = entry.keys[uniqueKey];
         if (!record || record.confirmed || record.expired || !isDeepStrictEqual(record, expected)) return false;
         const reservation = entry.pending[record.id];
         if (reservation && reservation.uniqueKey !== uniqueKey) throw new Error('待确认操作与额度预留不一致');
-        // 旧状态已失效。保留防重键及当日已占额度，已核实消费不增加。
-        record.expired = true;
+        // 一次性目标保留防重键，可复用的舰队槽位与对应预留一起释放。保留当日尝试用量。
+        if (releaseSlot) delete entry.keys[uniqueKey];
+        else record.expired = true;
         delete entry.pending[record.id];
         atomicJson(file, store);
         return true;

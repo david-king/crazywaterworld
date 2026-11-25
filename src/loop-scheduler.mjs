@@ -111,21 +111,21 @@ export function createLoopScheduler({
 
   // The caller owns the account queue. A scan can supply server timestamps
   // (seconds) in addition to its polling interval. Pushes only mark it due.
-  function scanTask({ enabled, intervalMs, hourlyFallback = false, observe }) {
+  function scanTask({ enabled, intervalMs, notBefore, hourlyFallback = false, observe }) {
     let pollAt = 0, serverDeadline = Infinity;
     let observedUntil = 0, revision = 0;
     let requested = false, running = false;
     const offset = () => client.serverClockOffsetMs || 0;
     const nextAt = () => {
       if (!active() || !enabled() || running) return Infinity;
-      return requested ? 0 : Math.min(pollAt, serverDeadline - offset());
+      return Math.max(notBefore?.() ?? 0, requested ? 0 : Math.min(pollAt, serverDeadline - offset()));
     };
     function invalidate() {
       revision++;
       observedUntil = 0;
       if (!active() || !enabled()) return;
       requested = true;
-      wake();
+      if (!(notBefore?.() > now())) wake();
     }
     if (observe) observers.push({
       nextRead: () => Math.max(nextAt(), observedUntil),

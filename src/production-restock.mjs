@@ -40,7 +40,7 @@ export function planStockRefills(snapshot, input, firm, target) {
   }
   for (const order of input.orders) {
     const delivery = firm.orderCompletions.find(row => row.orderId === order.id);
-    protect(order.requirements, order.consumeOnCompletion ? delivery.completedAt : null);
+    protect(order.requirements, delivery.consumeOnCompletion ? delivery.completedAt : null);
   }
   for (const lane of lanes) at(lane.freeAt);
 
@@ -102,9 +102,11 @@ export function scheduleRankedStock(snapshot, input, target, priority, search) {
     }
   }
   for (const job of booked) reserve(job.inputs, job.start);
+  let populationRoom = input.populationRoom ?? 0;
   for (const order of higherOrders) {
     const done = higher.orderCompletions.find(row => row.orderId === order.id);
-    reserve(order.requirements, order.consumeOnCompletion ? done.completedAt : Infinity);
+    reserve(order.requirements, done.consumeOnCompletion ? done.completedAt : Infinity);
+    if (done.consumeOnCompletion) populationRoom -= order.populationGain ?? 0;
   }
   // The booked schedule is feasible. Assign its inputs from the earliest lots
   // first, so a later arrival can never be spent early by a lower-order recipe.
@@ -120,7 +122,7 @@ export function scheduleRankedStock(snapshot, input, target, priority, search) {
   const incoming = surplus([...input.incoming, ...booked.map(job => ({ itemId: job.itemId, quantity: job.quantity, readyAt: job.end }))]
     .sort((a, b) => a.readyAt - b.readyAt));
   const lower = optimizeProductionSchedule({ ...input, orders: input.orders.filter(order => order.priority > priority),
-    inventory, incoming, capacityReservations: Object.fromEntries(reservations),
+    inventory, incoming, populationRoom, capacityReservations: Object.fromEntries(reservations),
     machines: input.machines.map(machine => ({ ...machine, bookings: booked.filter(job => job.machineId === machine.id) })),
   }, search);
   const feasible = lower.upperBound !== null;

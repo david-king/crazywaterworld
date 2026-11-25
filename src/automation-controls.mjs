@@ -7,7 +7,7 @@ const add = (key, label, group, options = {}) => controls.push({ key, label, gro
 add('loop.world', '基地执行总开关', '总控制');
 add('loop.dailies', '日常行动与点金总开关', '总控制', { help: '控制英雄免费/券招募、点金和竞技场。免费领奖等独立项目不由本项控制。' });
 add('loop.tasks', '主线、支线与成就总开关', '总控制');
-add('dailies.enabled', '每日任务与奖励总开关', '总控制', { help: '控制日常行动和每日任务、活跃宝箱、免费赠礼。钻石点金独立受点金和钻石开关限制。' });
+add('dailies.enabled', '每日任务与奖励总开关', '总控制', { help: '控制日常行动、每日任务奖励、活跃宝箱、免费赠礼，以及月卡和赛季卡每日领奖。钻石点金独立受点金和钻石开关限制。' });
 add('heroes.enabled', '英雄自动养成', '总控制', { fields: ['heroes.enabled','loop.heroes'], help: '控制英雄随挂机自动养成；养成动作、目标和资源保留在游戏配置中设置。' });
 add('resources.allowDiamonds', '自动钻石消耗总开关', '总控制', { help: '折扣商店由「日常 → 折扣商店」独立控制，按实际余额购买。这里的开关、每日钻石使用量和钻石保留阈值均不适用于折扣商店。海商王升船和指南针补购也按实际余额独立执行。指南针补购另有每日预算。' });
 for (const [key,label] of [
@@ -58,6 +58,10 @@ for (const [key,label,group,gates] of [
 const nativeKeys = new Set(['trialPaidSweep','trialAdSweep','diveEnhance','autoDive','salvageEnhance','autoSalvage','autoFish','fishEnhance','floaters','antiqueFloaters','cargo','farm','collect','finishUpgrade','build','buildSupply','upgrade','finishOrder','startProduce','speedUp','denyOrder','paidGold','dailyRewards','chests','gift','tasks']);
 const combatGroups = { arena: '竞技场', leagueChallenge: '积分赛', leagueCollect: '积分赛', leaguePassRewards: '积分赛' };
 for (const task of automationTasks) {
+ if (task.key === 'monthCardDaily' || task.key === 'seasonCardDaily') {
+   add('schedule.' + task.key, task.label, '任务与领奖', { gates: ['dailies.enabled'], taskKey: task.key });
+   continue;
+ }
  if (task.key === 'vipDaily') {
    add('activityAutomation.vip', 'VIP 每日自动领奖', '任务与领奖', { taskKey: task.key });
    continue;

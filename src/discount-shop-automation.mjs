@@ -1,6 +1,8 @@
 import { budgetPreview } from './automation-policy.mjs';
 import { buyShopProduct, createShopState, readShop, refreshDiscountShop } from './shops.mjs';
 
+const emptyPurchaseList = '检查时该账号的购买清单为 0 项';
+
 function matchesRule(product, rules) {
   return rules.some(rule => rule.id === product.asset.id && (
     (rule.maxPercent !== null && product.discount <= rule.maxPercent) ||
@@ -21,7 +23,7 @@ export function planDiscountShop(view, settings, usage) {
   const skip = reason => ({ actions: [], notes: [reason] });
   if (!settings.schedule.shop) return skip('折扣商店总开关已关闭');
   const { rules } = settings.discountShop;
-  if (!rules.length) return skip('请先添加物品和购买条件');
+  if (!rules.length) return skip(emptyPurchaseList);
   const matches = view.products.filter(product => !product.buyTimes && matchesRule(product, rules));
   const fallback = matches.length ? null : fallbackProduct(view, settings, usage);
   const costs = num => num ? [{ id: 'RUBY', num }] : [];
@@ -36,8 +38,11 @@ export function planDiscountShop(view, settings, usage) {
     return plan;
   }
   const quote = view.gameRefresh;
-  if (!quote?.canRefresh) return skip(quote?.blockedReason || '无法确认刷新次数和费用');
-  if (quote.price?.num !== 0) return skip('当前没有免费刷新次数');
+  const noMatch = '该账号购买清单 ' + rules.length + ' 项，当前货架没有符合条件的待购商品。';
+  if (!quote?.canRefresh || !Number.isFinite(quote.price?.num)) {
+    return skip(noMatch + '无法刷新：' + (quote?.blockedReason || '无法确认刷新次数和费用'));
+  }
+  if (quote.price.num !== 0) return skip(noMatch + '下次刷新需 ' + quote.price.num + ' 钻石，挂机只使用免费刷新');
   return budgetPreview([{ scope: 'discountShop', kind: 'shopRefresh', request: 'DiscountShopRefreshRequest', token: quote.token, costs: [],
     label: '免费刷新折扣商店 · 今日第 ' + (quote.refreshCount + 1) + ' 次' }], view.stock, settings, usage);
 }
@@ -46,7 +51,7 @@ export async function runDiscountShop(client, config, { player, protocol, getSet
   const settings = getSettings();
   if (!enabled() || !settings?.schedule.shop) return;
   if (!settings.discountShop?.rules.length) {
-    report({ skipped: true, reason: '请先添加物品和购买条件' });
+    report({ skipped: true, reason: emptyPurchaseList });
     return;
   }
   // Recheck even inside the client's send callback if the account settings changed during a read.

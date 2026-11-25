@@ -68,6 +68,13 @@ async function checkFleetSummary(page, mobile, fleets) {
       }
     }
   };
+  fleets[0].dispatchNote = '已为城战留队。上次检查时，耐久 1900/2500，出战至少需要 2000（设置 80%），自动维修已关闭';
+  await page.evaluate(() => refreshWorldMap());
+  const reservation = summary.getByText(fleets[0].dispatchNote, { exact: true });
+  await reservation.waitFor();
+  assert(await reservation.evaluate(node => node.scrollWidth <= node.clientWidth + 1 && node.scrollHeight <= node.clientHeight + 1), '城战待命原因应完整换行显示');
+  await checkWidth();
+  delete fleets[0].dispatchNote;
   const now = Math.floor(Date.now() / 1000);
   fleets[0].state = '城战 · 行军';
   fleets[0].journey = {from:'联盟主城',to:'来自海峡另一侧的特别长的目的城池名称',startAt:now-80,endAt:now+65};

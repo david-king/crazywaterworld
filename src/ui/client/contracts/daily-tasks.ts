@@ -68,6 +68,15 @@ export function parseDailyTasks(value: unknown) {
 
 export type DailyTask = ReturnType<typeof parseDailyTasks>[number];
 
+export function parseCardRewards(value: unknown): string[] {
+  if (!isRecord(value) || !Array.isArray(value.cards)) return [];
+  return value.cards.map((row: unknown) => {
+    if (!isRecord(row) || typeof row.text !== "string")
+      throw new Error("每日领奖状态格式无效");
+    return row.text;
+  });
+}
+
 export function parseDailyOutcome(value: unknown) {
   if (
     !isRecord(value) ||

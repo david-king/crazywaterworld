@@ -45,14 +45,14 @@ export function addDailyOptions(survey, state) {
   });
   // 连续刷新不无限保留旧报价；已经在执行的对象由执行函数持有。
   while (state.quotes.size > 200) state.quotes.delete(state.quotes.keys().next().value);
-  return { tasks, chests: survey.chests, gift: survey.gift, ruby: survey.ruby };
+  return { tasks, chests: survey.chests, gift: survey.gift, cards: survey.cards, ruby: survey.ruby };
 }
 
 export async function runDailySingle(client, protocol, { state, token, paid = false, config, player, settings, getSettings = () => settings, ledger, guard, enabled = () => true, wait = delay } = {}) {
   const quote = state.quotes.get(token);
   if (!quote || quote.expires < Date.now()) throw new Error('此项操作已过期，请刷新日常后再试');
   if (quote.used) throw new Error('此项操作已经提交，请刷新查看结果');
-  const read = () => surveyDailies(client, protocol, { config, player, settings: getSettings(), ledger, includeTask: id => id === quote.id, probeGift: false });
+  const read = () => surveyDailies(client, protocol, { config, player, settings: getSettings(), ledger, includeTask: id => id === quote.id, includeCard: () => false, probeGift: false });
   let survey = await read();
   let entry = survey.tasks.find(row => row.task.id === quote.id);
   let current = entry && plan(survey, entry);

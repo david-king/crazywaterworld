@@ -184,6 +184,23 @@ try {
     assert.equal(f.state.logins, 1);
   });
 
+  await test('旧工厂报告只在本次控制台首次成功启动该账号的挂机时回放', async () => {
+    const f = account({ autoStart: false });
+    const report = { time: '2026/11/23 18:33:27', lines: ['木材厂历史记录'] };
+    fs.writeFileSync(path.join(directory, 'factory-report-' + f.id + '.json'), JSON.stringify(report));
+    await launch([f]);
+    const reports = () => session(f.id).log.filter(entry => entry.message === '上次工厂检查 · ' + report.time);
+    assert.equal((await response(f.id, 'loop/start', { rounds: -1 })).status, 400);
+    assert.equal(reports().length, 0);
+    await api(f.id, 'loop/start', { rounds: 1 });
+    await session(f.id).loop.job;
+    assert.equal(reports().length, 1);
+    assert.equal(reports()[0].detail, report.lines[0]);
+    await api(f.id, 'loop/start', { rounds: 1 });
+    await session(f.id).loop.job;
+    assert.equal(reports().length, 1);
+  });
+
   await test('旧账号显式关闭和新配置关闭均保持停止，账号间设置独立', async () => {
     const legacy = account({ enabled: false });
     const disabled = account({ enabled: true, autoStart: false });

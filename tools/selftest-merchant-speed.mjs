@@ -68,6 +68,135 @@ function fixture(at = now) {
 async function test(name, run) { await run(); passed++; console.log('通过：' + name); }
 
 try {
+  await test('达标优先从首日加速载货回款，满级后按缺口用针，末日追赶并在五千万停针', async () => {
+    const f = fixture();
+    f.event.endTime = now + 3 * 86400;
+    const cfg = structuredClone(config);
+    cfg.tables.TradeShipCfg.data.push({ lv: 5, capacity: 81000, profitMargin: 1500, upMoney: 1000000 });
+    const settings = { ...f.settings.merchant, speedUpMode: 'targetFirst', periodPointerLimit: -1, keepPointers: 0 };
+    const plan = (options = {}) => planMerchantSpeed(cfg, f.event, f.state, f.radar, f.stock, settings, now, options);
+    assert.equal(plan().accelerationReason, 'full');
+    assert.notEqual(plan({ exploration: true }).kind, 'speed');
+    assert.notEqual(plan({ plannedOpening: f.state.cargo.moveEndTime + 1 }).kind, 'speed');
+    assert.notEqual(plan({ dailyUsed: 28 }).kind, 'speed');
+    f.state.player.profit = 1000000;
+    assert.notEqual(plan().accelerationReason, 'full');
+    f.event.endTime = now + 4 * 3600;
+    assert.equal(plan().accelerationReason, 'full');
+    const holding = f.state.player.goods;
+    f.state.player.goods = [];
+    assert.notEqual(plan().kind, 'speed');
+    f.state.player.goods = holding;
+    f.stock.set(pointer, 0);
+    assert.notEqual(plan().kind, 'speed');
+    f.stock.set(pointer, 4);
+    f.state.player.profit = 50000000;
+    assert.equal(plan().kind, 'none');
+  });
+  await test('按情报用针，已知紧缺港不足时留针，首日和升船期间同样适用，收盘前七小时放开', async () => {
+    const f = fixture(now - (8 * 60 + 30) * 60); // 12:45，正常 14:00 到港。
+    f.event.endTime = now + 3 * 86400;
+    const cfg = structuredClone(config);
+    cfg.tables.TradeShipCfg.data.push({ lv: 5, capacity: 81000, profitMargin: 1500, upMoney: 1000000 });
+    f.state.player.profit = 1000000;
+    f.radar.radar.push({ cityId: 30, specGoodsId: 1003 });
+    const settings = { ...f.settings.merchant, speedUpMode: 'full', keepPointers: 0, speedUpIntelPorts: 2 };
+    const plan = (options = {}, policy = settings) => planMerchantSpeed(cfg, f.event, f.state, f.radar, f.stock, policy, f.now, options);
+    const held = plan();
+    assert.equal(held.kind, 'wait');
+    assert.match(held.reason, /已知紧缺港 0\/2 个.*15:00 后放开/);
+    assert.match(plan({}, { ...settings, speedUpMode: 'targetFirst', periodPointerLimit: -1 }).reason, /已知紧缺港 0\/2 个/, '冲刺方案同样受限');
+    f.radar.radar[1].rareGoodsId = 1001;
+    assert.equal(plan().kind, 'wait', '只点亮一个港仍留针');
+    assert.equal(plan({ knownShortagePorts: 2 }).kind, 'speed', '手动情报计入已知紧缺港');
+    f.radar.radar[2].rareGoodsId = 1002;
+    assert.equal(plan().kind, 'speed');
+    assert.match(plan({}, { ...settings, speedUpIntelPorts: 12 }).reason, /已知紧缺港 2\/3 个/, '门槛不超过可航行港口数');
+    f.radar.radar[0].rareGoodsId = 1003;
+    assert.equal(plan({}, { ...settings, speedUpIntelPorts: 12 }).kind, 'speed');
+    for (const port of f.radar.radar) port.rareGoodsId = 0;
+    assert.equal(plan({}, { ...settings, speedUpIntelPorts: 0 }).kind, 'speed', '默认 0 不限制');
+    assert.equal(plan({}, { ...settings, speedUpIntelPorts: -1 }).kind, 'wait', '无效门槛不发针');
+    f.state.player.profit = 999999;
+    assert.equal(plan().kind, 'wait', '解锁满级船前同样等情报');
+    assert.equal(plan({}, { ...settings, speedUpMode: 'targetFirst', periodPointerLimit: -1 }).kind, 'wait', '冲刺方案升船期间不抢在情报前用针');
+    f.event.startTime = f.now - 3600;
+    assert.equal(plan().kind, 'wait', '首个交易日同样等情报');
+    for (const port of f.radar.radar.slice(0, 2)) port.rareGoodsId = 1003;
+    assert.equal(plan({}, { ...settings, speedUpMode: 'targetFirst', periodPointerLimit: -1 }).accelerationReason, 'full', '情报补齐后首日照常加速回款');
+    for (const [minutes, kind] of [[421, 'wait'], [420, 'speed']]) {
+      const late = fixture(now + 45 * 60 - minutes * 60); // 收盘 22:00 前 421 与 420 分钟。
+      Object.assign(late.settings.merchant, { speedUpMode: 'full', keepPointers: 0, speedUpIntelPorts: 2 });
+      assert.equal(late.plan().kind, kind, '收盘前 ' + minutes + ' 分钟');
+    }
+  });
+  await test('收盘前加速航次用刚好够成交并备隔夜货的根数，根数不够或末日不适用', () => {
+    const at = now - 45 * 60; // 20:30，收盘 22:00。
+    const voyage = (departedAgo, extra = {}) => {
+      const f = fixture(at);
+      f.event.endTime = now + 3 * 86400; // 次日仍开市。
+      Object.assign(f.settings.merchant, { speedUpMode: 'goal', keepPointers: 0, dailyPointerLimit: 45, ...extra });
+      Object.assign(f.state.cargo, { moveStartTime: at - departedAgo, moveEndTime: at - departedAgo + 7200 });
+      return f;
+    };
+    const f = voyage(60); // 自然 22:29 到港。
+    const plan = f.plan({ closingPointers: 2 });
+    // 一根 21:59 到港来不及卖；两根 21:29 到港，卖一批再留三轮备货。
+    assert.deepEqual([plan.kind, plan.useNum, plan.accelerationReason, plan.spareActions, plan.expected.afterEndTime],
+      ['speed', 2, 'evening', 3, f.state.cargo.moveEndTime - 3600]);
+    assert.notEqual(f.plan().accelerationReason, 'evening', '未按收盘前航次配货的船不走这条规则');
+    f.stock.set(pointer, 1);
+    assert.match(f.plan({ closingPointers: 2 }).reason, /随船隔夜/);
+    f.stock.set(pointer, 4);
+    assert.notEqual(f.plan({ closingPointers: 2, dailyUsed: 45 }).kind, 'speed', '每日额度用完不再发针');
+    f.state.player.goods.push({ pid: 2, goodsId: 1001, num: 5, buyPrice: 10, cityId: 20 });
+    assert.equal(f.plan({ closingPointers: 2 }).saleSeconds, 60, '目的港自产的批次不占成交时间');
+    f.event.endTime = now + 3 * 3600;
+    assert.notEqual(f.plan({ closingPointers: 2 }).accelerationReason, 'evening', '末日仍按收尾规则');
+    const early = voyage(60 + 30 * 60); // 自然 21:59 到港，下一秒起来不及卖。
+    assert.equal(early.plan({ closingPointers: 1 }).accelerationReason, 'evening');
+    early.state.cargo.moveEndTime -= 120; // 自然 21:57 到港，一批货能卖完。
+    assert.notEqual(early.plan({ closingPointers: 1 }).accelerationReason, 'evening', '自然到港赶得上成交时不为它用针');
+    const late = fixture(now + 42 * 60); // 21:57，出航后被耽搁。
+    late.event.endTime = now + 3 * 86400;
+    Object.assign(late.settings.merchant, { speedUpMode: 'goal', keepPointers: 0 });
+    late.state.cargo.moveEndTime = late.now + 3600;
+    const rescue = late.plan({ closingPointers: 2 });
+    assert.deepEqual([rescue.useNum, rescue.accelerationReason, rescue.spareActions], [2, 'evening', 0], '来不及备隔夜货时仍保住今天成交');
+  });
+  await test('收盘前航次按出航记录发针，旧记录没有用针计划时保持原样', async () => {
+    const at = now - 45 * 60;
+    const leg = accelerationRequired => {
+      const f = fixture(at), c = f.state.cargo;
+      f.event.endTime = now + 3 * 86400;
+      Object.assign(f.settings.merchant, { speedUpMode: 'goal', keepPointers: 0, dailyPointerLimit: 45 });
+      Object.assign(c, { moveStartTime: at - 60, moveEndTime: at - 60 + 7200 });
+      f.ledger.confirm(f.ledger.reserve({}, {}, {}, { uniqueKey: 'evening-leg', details: {
+        scope: 'merchant:' + f.event.startTime + ':' + f.event.period, expected: {
+          request: 'TradeMoveRequest', city: c.cityId, destination: c.moveToCityId, start: c.moveStartTime,
+          ...(accelerationRequired && { accelerationRequired }) } } }));
+      return f;
+    };
+    const planned = leg(2);
+    await planned.run();
+    assert.deepEqual(planned.sent().map(r => r.body.useNum), [2]);
+    assert.equal(planned.reports.at(-1).status, 'confirmed');
+    const legacy = leg(0);
+    await legacy.run();
+    assert.equal(legacy.sent().length, 0, '没有收盘前用针计划的隔夜船不发针');
+  });
+  await test('情报不足时不发针并报告原因，紧缺港点亮后同一航程照常加速', async () => {
+    const f = fixture(now - (8 * 60 + 30) * 60);
+    f.event.endTime = now + 3 * 86400;
+    Object.assign(f.settings.merchant, { speedUpMode: 'full', keepPointers: 0, speedUpIntelPorts: 2 });
+    await f.run();
+    assert.equal(f.sent().length, 0);
+    assert.match(f.reports.at(-1).reason, /已知紧缺港 0\/2 个/);
+    f.radar.radar[0].rareGoodsId = 1002;
+    f.radar.radar[1].rareGoodsId = 1001;
+    await f.run();
+    assert.deepEqual(f.sent().map(r => r.body.useNum), [3]);
+  });
   await test('已确认的隔夜航程自然到港可赶上开市时，即使全速模式也保留库存', async () => {
     const f = fixture(), c = f.state.cargo, opening = now + 12 * 3600 + 45 * 60;
     f.event.endTime = opening + 86400;

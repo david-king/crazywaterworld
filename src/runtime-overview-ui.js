@@ -4,6 +4,7 @@ const runtimeLabels = {
   disabled: '已关闭', scope: '已开启', unseen: '待检查', unsynced: '待同步',
   idle: '未运行', offline: '未连接', stopping: '正在停止', recovery: '重连中',
   ok: '最近成功', sent: '已发送', waiting: '已检查', full: '耐久已满', busy: '舰队占用',
+  completed: '已完成', inProgress: '进行中', claimable: '可领取',
   repairing: '维修中', ready: '准备维修', fuelWait: '等待维修',
 };
 const attentionOrder = ['error', 'pending', 'blocked', 'setup'];

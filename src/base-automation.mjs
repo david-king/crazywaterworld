@@ -79,7 +79,7 @@ export function watchBasePushes(client) {
   return state;
 }
 
-export async function surveyBaseAutomation(client, protocol, config, player, settings, waterSurvey, { ledger, enabled = () => true } = {}) {
+export async function surveyBaseAutomation(client, protocol, config, player, settings, waterSurvey, { ledger, enabled = () => true, includeGold = true, scheduler } = {}) {
   const notes = [], notesBySetting = {};
   const note = (setting, text) => addBaseNote(notes, notesBySetting, setting, text);
   const state = watchBasePushes(client);
@@ -91,6 +91,8 @@ export async function surveyBaseAutomation(client, protocol, config, player, set
     catch { note(setting, `${request} 本轮未取得状态`); return null; }
   };
   const readFactoryGuildOrder = async () => {
+    if (scheduler && !scheduler.due('guildOrders:factoryGameLimit')) return null;
+    const midnight = scheduler?.nextDay();
     const reply = await get('GuildOrderRequest', 'factory');
     if (!reply?.order?.requirements?.length) return null;
     const counters = await get('CounterInfoRequest', 'factory');
@@ -99,7 +101,11 @@ export async function surveyBaseAutomation(client, protocol, config, player, set
     if (!(reply.order.nextRefreshTime > now)) return null;
     try {
       const { maxNum } = guildOrderQuota(config, player);
-      return guildOrderProgress(counters, maxNum).limitReason ? null : reply;
+      if (guildOrderProgress(counters, maxNum).limitReason) {
+        scheduler?.defer('guildOrders:factoryGameLimit', midnight);
+        return null;
+      }
+      return reply;
     } catch (error) {
       note('factory', '联盟募兵补产：' + error.message);
       return null;
@@ -111,14 +117,14 @@ export async function surveyBaseAutomation(client, protocol, config, player, set
     settings.museum.runEnabled !== false && settings.museum.enabled ? get('AllHeroRequest', 'museum.enabled') : null,
     settings.pet.enabled && (settings.pet.advance || settings.pet.levelUp && settings.pet.levelUids.length)
       ? get('AllPetRequest', 'pet') : null,
-    settings.gold.enabled ? get('ClickGoldInfoRequest', 'gold.enabled') : null,
+    includeGold && settings.gold.enabled ? get('ClickGoldInfoRequest', 'gold.enabled') : null,
     member && needs.has('guildRecruit') && !settings.alliance?.enabled ? readFactoryGuildOrder() : null,
     member && needs.has('guildShip') && !settings.guildShip?.enabled ? get('GuildShipRequest', 'factory') : null,
     needs.has('refugee') ? get('RadarInfoRequest', 'factory') : null,
   ]);
   let guildRecruitDemand = [];
   if (member && settings.alliance?.enabled && settings.alliance.recruit && settings.alliance.recruitProduction) {
-    try { guildRecruitDemand = await readAllianceRecruitDemand(client, protocol, config, player, settings, { ledger, enabled }); }
+    try { guildRecruitDemand = await readAllianceRecruitDemand(client, protocol, config, player, settings, { ledger, enabled, scheduler }); }
     catch (error) { notes.push('联盟募兵补产：' + error.message); }
   }
   let guildShipDemand = [];
@@ -128,7 +134,7 @@ export async function surveyBaseAutomation(client, protocol, config, player, set
     catch (error) { notes.push('联盟商船补产：' + error.message); }
   }
   return { now: waterSurvey.serverNow ?? waterSurvey.now, player, world: waterSurvey, museum, heroes: heroes?.heroes ?? [], pets: pets?.pets ?? [], gold,
-    guildOrder, guildRecruitDemand, guildShip, guildShipDemand, heroRaidDemand: heroRaidDemands(client, config, player, settings, { ledger }),
+    includeGold, guildOrder, guildRecruitDemand, guildShip, guildShipDemand, heroRaidDemand: heroRaidDemands(client, config, player, settings, { ledger }),
     radar, choices: [...state.choices.values()], raids: [...state.raids.values()], choiceObserved: state.choiceObserved, notes, notesBySetting };
 }
 
@@ -300,7 +306,8 @@ export function planBaseAutomation(snapshot, config, settings, usage = {}, { div
         costs: [{ id: '保险箱钥匙', num: 1 }], label: '潜水后使用 1 把保险箱钥匙开箱' });
     }
   }
-  if (settings.loop.dailies && settings.gold.enabled) planPaidGold();
+  let goldResetTime;
+  if (snapshot.includeGold !== false && settings.loop.dailies && settings.gold.enabled) planPaidGold();
   const checked = budgetPreview(actions, world.stock, settings, usage);
   for (const [setting, values] of Object.entries(checked.notesBySetting)) {
     (notesBySetting[setting] ??= []).push(...values);
@@ -308,7 +315,7 @@ export function planBaseAutomation(snapshot, config, settings, usage = {}, { div
   return { actions: checked.actions, notes: [...notes, ...checked.notes], notesBySetting, demands: baseDemands(snapshot, config, settings),
     caseMuseum,
     museumStages: settings.loop.world && settings.museum.runEnabled && settings.museum.enabled ? snapshot.museum?.exploreStages : null,
-    goldInfo: settings.loop.dailies && settings.gold.enabled ? snapshot.gold?.info : null, pendingPaidGold: usage.pendingPaidGold === true };
+    includeGold: snapshot.includeGold, goldResetTime, goldInfo: settings.loop.dailies && settings.gold.enabled ? snapshot.gold?.info : null, pendingPaidGold: usage.pendingPaidGold === true };
 
   function planPaidGold() {
     const target = settings.gold.times;
@@ -333,6 +340,7 @@ export function planBaseAutomation(snapshot, config, settings, usage = {}, { div
     }
     const remaining = Math.min(target, maxPaidTimes) - paidBefore;
     if (remaining <= 0) {
+      goldResetTime = resetTime ?? 0;
       note('gold.enabled', `付费点金：今日已付费 ${paidBefore} 次，${paidBefore >= target ? '已达到设置目标' : '已达到游戏当日上限'}`);
       return;
     }
@@ -552,6 +560,7 @@ export function observeBaseAutomationPlan(rewards, plan, settings, everyMs) {
     const activeKeys = activeFields.map(field => group + '.' + field);
     for (const field of activeFields) {
       const key = group + '.' + field;
+      if (key === 'gold.enabled' && plan.includeGold === false) continue;
       const aggregate = key === 'museum.runEnabled' || key === 'pet.enabled';
       const keys = aggregate ? activeKeys : key === 'museum.enabled' ? ['museum.enabled', 'museum.useGuide'] : [key];
       const actions = plan.actions.filter(action => keys.includes(action.setting));

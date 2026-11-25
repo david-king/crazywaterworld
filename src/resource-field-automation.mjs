@@ -4,10 +4,10 @@ import { resourceFieldRows, resourceFieldTotals } from './resource-fields.mjs';
 import { resourceFieldTargets } from './resource-field-allocation.mjs';
 import { observeResourceFieldHoldings, forgetReleasedResourceField } from './resource-field-history.mjs';
 import { pendingPetrol } from './dispatch-preview.mjs';
-import { fleetRecordReason, dispatchReservationReason, reserveDispatch } from './fleet-availability.mjs';
+import { cityWarReservationNote, fleetRecordReason, dispatchReservationReason, reserveDispatch } from './fleet-availability.mjs';
 import { registerFleetReservations, isFleetReserved } from './fleet-reservations.mjs';
 import { resourceFieldFleetIdle, settleFleetSnapshot, cancelResourceFieldReplacement, releaseResourceFieldReplacementLock } from './fleet-settlement.mjs';
-import { readCityWar, cityWarReservedFleets } from './city-war.mjs';
+import { readCityWar, previewCityWarReservations } from './city-war.mjs';
 import { settleResourceFieldGiveUps } from './resource-field-giveup.mjs';
 export { previewResourceFieldGiveUp, runResourceFieldGiveUp } from './resource-field-giveup.mjs';
 
@@ -205,17 +205,17 @@ export async function readResourceFieldState(client, protocol, config, player, o
         : prior ? (prior[1].details.active !== false ? '已有占领任务，等待结果' : '此田本日已尝试，请明日再试') : '';
     }
   }
-  let cityReserved = [];
+  let cityReservations = {};
   if (settings.cityWar?.enabled && settings.cityWar.reserveDuringWar) {
     const war = await readCityWar(client, protocol, config, player, settings.cityWar); check();
-    cityReserved = war.reason ? settings.cityWar.fleetIds : cityWarReservedFleets(war, settings, now(client));
+    cityReservations = previewCityWarReservations(war, settings, ledger, now(client));
   }
   state.fleets = state.rawFleets.map(fleet => {
     const formation = water?.building?.find(b => b.buildingId === fleet.buildingId && b.level > 0)?.fleet?.formation;
     const reason = fleet.ownerPlayerId && fleet.ownerPlayerId !== exactAutomationId(player.playerId) ? '舰队不属于当前角色'
       : !resourceFieldFleetIdle(fleet) ? '舰队未在主城空闲待命' : !integer(fleet.durability, 1) || !integer(fleet.maxDura, 1) ? '耐久不足或未同步'
       : !formation?.heroPositions?.some(h => h.heroId) ? '缺少英雄编队'
-      : cityReserved.includes(fleet.buildingId) ? '舰队预留给城战时段'
+      : Object.hasOwn(cityReservations, fleet.buildingId) ? cityWarReservationNote(cityReservations[fleet.buildingId])
       : fleetRecordReason(visibleRecords, fleet.buildingId, state.worldId)
         || (operation && isFleetReserved(client, fleet.buildingId, ['resourceFields', 'dispatch-ledger']) ? '舰队有其他自动任务尚未结束' : '')
         || dispatchReservationReason(client, settings, 'resourceFields', fleet.buildingId, { ignoreOwners: ['cityWar'], ignoreLegacy: !!operation });

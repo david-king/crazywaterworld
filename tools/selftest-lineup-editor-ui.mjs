@@ -83,6 +83,7 @@ const savedData = (name = '阵容A', revision = 1) => ({
 
 function fixture({ server = new Map([['account-a', savedData()]]) } = {}) {
   const host = new Element(), body = new Element('body'), selectors = [], calls = [], renders = [], errors = [];
+  const presetActions = new Element('fieldset');
   body.append(host);
   const runtime = { response: null, drop: null, server };
   const respond = request => {
@@ -103,7 +104,7 @@ function fixture({ server = new Map([['account-a', savedData()]]) } = {}) {
       setItem() { assert.fail('挑战阵容应写入服务器配置'); },
     },
     reportError: (error, action, account) => errors.push({ message: error.message, action, account }),
-    $: id => id === 'saved-lineup-view' ? host : null,
+    $: id => ({ 'saved-lineup-view': host, 'saved-lineup-actions': presetActions })[id] || null,
     el: (tag, className, text) => new Element(tag, className, text),
     Option: class extends Element { constructor(text, value) { super('option', '', text); this.value = value; } },
     document: { body, activeElement: null, querySelectorAll: selector => selector === 'select[data-lineup-mode]' ? selectors : body.querySelectorAll(selector), elementFromPoint: () => runtime.drop },
@@ -115,6 +116,12 @@ function fixture({ server = new Map([['account-a', savedData()]]) } = {}) {
     },
     clear: element => { element.textContent = ''; return element; },
     smallButton: label => new Element('button', '', label),
+    component: id => {
+      assert(['ui-saved-lineup-name', 'ui-saved-lineup-delete'].includes(id));
+      const button = new Element('button');
+      if (id === 'ui-saved-lineup-name') button.append(new Element('span'));
+      return button;
+    },
     iconEl: (icon, size, name) => new Element('span', '', name),
   });
   vm.runInContext(script, context);
@@ -426,7 +433,7 @@ await test('编辑弹窗使用阵型下拉框并渲染英雄和海兽，管理�
   const f = fixture();
   f.draft().formation.petUid = '9223372036854775806';
   f.realRender('account-a');
-  assert.match(f.host.textContent, /查看/);
+  assert.equal(f.host.querySelector('button[aria-label^="查看阵容"]').textContent, '阵容A');
   assert(!f.host.textContent.includes('自动挑战使用的阵容'));
   assert(!f.host.textContent.includes('选择英雄'));
   await f.context.openSavedLineupEditor('account-a', f.state.saved.presets[0]);
@@ -494,11 +501,18 @@ await test('英雄池Pointer拖入空站位，保留原有上阵英雄', async (
   ]);
 });
 
-await test('空闲恢复记录隐藏，冲突记录提供原目标摘要及三种处理入口', () => {
+await test('正常挑战全程隐藏恢复卡片，待恢复与冲突各自提供对应操作', () => {
   const f = fixture(), host = new Element();
-  f.state.saved.recovery = { phase: 'idle', pending: false, transactionId: null };
+  for (const phase of ['idle', 'switching', 'battling', 'restoring']) {
+    f.state.saved.recovery = { phase, pending: phase !== 'idle', transactionId: 'txn-1' };
+    f.context.renderLineupRecovery(host, f.state, 'account-a');
+    assert.equal(host.children.length, 0, phase);
+  }
+  f.state.saved.recovery = { phase: 'pending', pending: true, transactionId: 'txn-1', reason: '连接中断' };
   f.context.renderLineupRecovery(host, f.state, 'account-a');
-  assert.equal(host.children.length, 0);
+  assert.match(host.textContent, /连接中断/);
+  assert.deepEqual(host.querySelectorAll('button').map(button => button.textContent), ['重试恢复']);
+  host.replaceChildren();
   f.state.saved.recovery = { phase: 'conflict', pending: true, transactionId: 'txn-1',
     original: formation(), target: formation([['c', 4, 4]]), reason: '阵容已被其他操作修改' };
   f.context.renderLineupRecovery(host, f.state, 'account-a');
@@ -520,7 +534,7 @@ await test('挑战恢复状态刷新仅更新提示，保留编辑器DOM、筛�
   assert.deepEqual(f.renders, []);
   assert.equal(f.state.ui.root, editor);
   assert(f.body.querySelector('dialog').contains(editor));
-  assert.match(f.state.recoveryHost.textContent, /使用所选阵容挑战中/);
+  assert.equal(f.state.recoveryHost.children.length, 0);
   assert.equal(f.state.query, '英雄a');
   assert.equal(f.draft().name, '仍在输入');
   assert.equal(f.state.saved.revision, 2);

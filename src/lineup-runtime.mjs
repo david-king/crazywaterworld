@@ -74,6 +74,14 @@ export function readLineupRuntime(accountId) {
   return { ...record, pending: true };
 }
 
+export function lineupRecoveryView(accountId) {
+  const record = readLineupRuntime(accountId);
+  if (!['switching', 'battling', 'restoring'].includes(record.phase)) return record;
+  const owner = readOwner(ownerFile(accountId));
+  if (owner && (owner.pid === process.pid || processAlive(owner.pid))) return record;
+  return { ...record, phase: 'pending', reason: '上次挑战已中断，原阵容仍待核对。' };
+}
+
 function updateRecord(accountId, transactionId, change) {
   return withFileLock(runtimeFile(), () => {
     const store = readStore();

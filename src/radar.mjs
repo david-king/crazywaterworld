@@ -1,4 +1,5 @@
 import { uidText } from './hero-equipment.mjs';
+import { seasonRows } from './season-config.mjs';
 import { describeLogError } from './log-errors.mjs';
 import { registerFleetReservations, isFleetReserved, hasOtherFleetReservations } from './fleet-reservations.mjs';
 
@@ -136,7 +137,7 @@ function observeFleets(session, fleets, events, baseline, businessEvidence) {
   }
 }
 
-function eventPlan(event, config, season, stock) {
+function eventPlan(event, config, pirates, stock) {
   const cfg = rows(config, event.fixed ? 'RadarFixedEventCfg' : 'RadarRandEventCfg').find(r => r.eventId === event.eventId);
   if (!cfg) return null;
   const name = String(cfg.eventName || '情报事件').replace(/\{(\d+)\}/g, (_, index) => cfg.eventNameParams?.[index] ?? '');
@@ -145,7 +146,7 @@ function eventPlan(event, config, season, stock) {
   if (event.fixed) power = safe(cfg.power);
   else if (cfg.type === '击退海盗') {
     const pirate = event.pirate;
-    const matches = rows(config, 'WorldPirateCfg').filter(r => Number(r.season) === season && r.type === pirate?.type && r.level === pirate?.level);
+    const matches = pirates.filter(r => r.type === pirate?.type && r.level === pirate?.level);
     power = matches.length === 1 ? safe(matches[0].power) : null;
     if (safe(cfg.param1) !== pirate?.type) return null;
   } else if (!['收集资源', '救助海兽', '打捞宝箱'].includes(cfg.type)) return null;
@@ -243,8 +244,8 @@ export async function serviceRadar(client, protocol, config, {
     // including one using a different ship, so wait before all fuel spending.
     if (otherPending()) return entries;
     const used = new Set();
-    const season = world === null ? 0 : Math.floor(world / 1e6) % 1000;
-    if (allowed('radarAuto') && (!season || !rows(config, 'WorldPirateCfg').some(r => Number(r.season) === season))) {
+    const pirates = seasonRows(config, 'WorldPirateCfg', player);
+    if (allowed('radarAuto') && !pirates.length) {
       skip('radarAuto', '无法确认当前赛季的敌方配置，暂不派舰');
     } else if (allowed('radarAuto')) {
       const targets = events.filter(e => e.state === 1 && !(e.startTime > 0))
@@ -257,7 +258,7 @@ export async function serviceRadar(client, protocol, config, {
         events = snapshot.events;
         reconcileBudget(snapshot);
         const current = events.find(e => e.key === target.key && e.state === 1 && !(e.startTime > 0));
-        const plan = current && eventPlan(current, config, season, budget);
+        const plan = current && eventPlan(current, config, pirates, budget);
         if (!plan) continue;
         const fleet = snapshot.fleets.filter(f => freeFleet(f) && !used.has(f.buildingId) && !isFleetReserved(client, f.buildingId)
           && f.durability >= f.maxDura * 0.8 && safe(f.power) !== null && safe(f.power) >= plan.power)

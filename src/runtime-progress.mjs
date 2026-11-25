@@ -90,6 +90,7 @@ export function runtimeProgress(control,observation,usage={counters:{}},{running
   progress='本工具今日出征 '+(counters.treasureDispatches??0)+'次 · '+treasureReward;
  }else if(match){progress=match[1];condition=match[2]||'—';}
  else if(/^(今日.*礼包|当前免费礼包|本期.*免费礼包).*已领取$/.test(text)){progress=text;condition='—';}
+ else if(['completed','inProgress','claimable'].includes(state)){progress=text;condition='—';}
  else if(state==='ok'&&!trial){progress=text||'已确认执行成功';condition='—';}
  if(state==='error'||state==='pending')condition=text||'等待确认';
  if(!control.enabled)condition='已关闭'+(condition==='—'?'':'；'+condition);

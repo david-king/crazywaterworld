@@ -46,6 +46,8 @@ export const SPEED_UP_ITEM = '加速器';
 export const SPEED_UP_ITEM_TYPE = 2;
 const STOCK_PARAM = '产品存量初始上限';
 const SLOTS_PARAM = '制造位上限';
+const BASIC_FACTORY_MATERIALS = new Set(['布匹', '长绳', '粗纸']);
+const QUICK_RESTOCK_SECONDS = 10;
 const POPULATION_PARAM = '初始人口上限';
 
 function rowsOf(config, name) {
@@ -683,6 +685,7 @@ export function planWorld(survey, {
   extraDemand = [],
   reserveFactoryInputs = false,
   factoryWaitHistory,
+  materialRestock = {},
   refillHistory,
   trackRefills = false,
   checkShortFeeds = true,
@@ -1296,6 +1299,9 @@ export function planWorld(survey, {
     facilities = facilities.filter(b => !queueChanges.has(b.buildingId));
   }
   const usableRows = new Set(facilities.flatMap(b => produceRows.filter(r => r.buildType === b.type && r.unlockLevel <= b.level)));
+  let restockBatchSizes;
+  let quickRestockDuringOrders = false;
+  const coversRestockBatch = row => projectedStock(row.itemId) >= (restockBatchSizes.get(row.itemId) ?? 1);
   const downstream = new Map();
   for (const row of usableRows) {
     if (!orderNeedsProduction(row.itemId)) continue;
@@ -1370,7 +1376,7 @@ export function planWorld(survey, {
   }
   const constructionGap = id => buildMaterials.has(id)
     ? Math.max(0, buildMaterials.get(id).num - free(id) - (incoming.get(id) ?? 0)) : 0;
-  function planFactory(b, tier, stockouts, shortFeed = false) {
+  function planFactory(b, tier, quantities, { shortFeed = false, balanceMaterials = false, quickRestock = false } = {}) {
     if (isNative(b)) {
       const desired = !simulateNative && settings?.factory.cooperateNative ? produceRows.filter(row =>
         row.buildType === b.type && row.unlockLevel <= b.level && (productionNeeded(row.itemId) || Number.isFinite(recipeRank(row)))
@@ -1407,13 +1413,13 @@ export function planWorld(survey, {
       factoryReasons.set(b.buildingId, unavailableRecipes.get(b.type) || '当前等级没有已解锁的生产配方');
       return;
     }
-    const inTier = row => recipeRank(row) === tier && (!stockouts || stockouts.get(row.itemId) > 0);
+    const inTier = row => recipeRank(row) === tier && (!quantities || quantities.get(row.itemId) > 0);
     if (!localRows.some(inTier)) return;
     const higher = [...usableRows].filter(row => recipeRank(row) < tier);
     const protectedInputs = new Map();
     for (const row of higher) {
       // Reserve one runnable batch for a blocked higher-priority recipe.
-      if (stockouts && !roomForRecipe(row)) continue;
+      if (quantities && !roomForRecipe(row)) continue;
       for (const [item, n] of row.costItem ?? []) protectedInputs.set(item, (protectedInputs.get(item) ?? 0) + n);
     }
     // The source's share is already excluded from the lower tier's free stock.
@@ -1429,7 +1435,7 @@ export function planWorld(survey, {
         .flatMap(row => {
           // A full output cannot start until someone spends it. Ingredients
           // being on hand do not establish a release time for that job.
-          const room = stockouts ? roomForRecipe(row) : Infinity;
+          const room = quantities ? roomForRecipe(row) : Infinity;
           const at = room ? dispatch.readyAt(row, recipeFree) : Infinity;
           const rank = recipeRank(row);
           const wanted = rank === stockRank && Number.isFinite(rank) ? Math.max(0, stockTarget - projectedStock(row.itemId))
@@ -1444,7 +1450,8 @@ export function planWorld(survey, {
             nextWaits.set(key, since);
             waited = time - since;
           }
-          const wave = { row, at, quantity, waited, earlyFallback: earlyFallback.has(b) };
+          const wave = { row, at, quantity, waited, earlyFallback: earlyFallback.has(b),
+            capacityBlocked: balanceMaterials && room === 0 };
           if (Number.isFinite(at) && state.lanes.count > 1 && quantity > 1) {
             const secondAt = dispatch.readyAt(row, recipeFree, 2);
             return Number.isFinite(secondAt) ? [{ ...wave, quantity: 1 }, { row, at: secondAt, quantity: 1 }]
@@ -1457,14 +1464,15 @@ export function planWorld(survey, {
       const cand = localRows.filter(row => {
         if (!inTier(row)) return false;
         const id = row.itemId;
+        const batch = quickRestock ? quantities.get(id) : 1;
         let reason;
         if (occupiedStock(id) >= survey.stockCap)
           reason = '库存、待收和在产合计已达 ' + survey.stockCap;
         else if (settings && projectedStock(id) >= stockTarget && !orderNeedsProduction(id))
           reason = '已达到有效备货水位 ' + stockTarget;
-        else if (!shortFeed && smart && (waiting.length || tier === Infinity) && !dispatch.fits(b, row, waiting, revisit))
+        else if (!shortFeed && !quickRestock && (smart || balanceMaterials) && (waiting.length || tier === Infinity) && !dispatch.fits(b, row, waiting, revisit))
           reason = '为下一次需求派单保留生产时间';
-        else if ((row.costItem ?? []).some(([item,n]) => protectedInputs.has(item) && recipeFree(row,item) - n < protectedInputs.get(item)))
+        else if ((row.costItem ?? []).some(([item,n]) => protectedInputs.has(item) && recipeFree(row,item) - n * batch < protectedInputs.get(item)))
           reason = '共享原料已为更高优先级的生产预留';
         else {
           const missing = (row.costItem ?? []).filter(([item, n]) => recipeFree(row, item) < n);
@@ -1492,7 +1500,11 @@ export function planWorld(survey, {
           }
         }
       }
-      const compareCustom = (a, other) => Number(feedsIdle.has(other)) - Number(feedsIdle.has(a))
+      const compareCustom = (a, other) => (restockBatchSizes && !quickRestockDuringOrders && tier === stockRank && !balanceMaterials
+        ? Number(coversRestockBatch(a)) - Number(coversRestockBatch(other)) : 0)
+        || (balanceMaterials ? projectedStock(a.itemId) - projectedStock(other.itemId)
+        || dispatch.seconds(b, a) - dispatch.seconds(b, other) : 0)
+        || Number(feedsIdle.has(other)) - Number(feedsIdle.has(a))
         || (tailTime.get(other) ?? 0) - (tailTime.get(a) ?? 0)
         || dispatch.seconds(b, a) - dispatch.seconds(b, other)
         || (settings.factory.demandFirst ? (detailedNeeds.get(other.itemId)?.num ?? 0) - (detailedNeeds.get(a.itemId)?.num ?? 0) : 0)
@@ -1544,7 +1556,9 @@ export function planWorld(survey, {
       const displayFactory = buildingName(b);
       const displayProduct = name(best.itemId);
       const reason = forDemand && weeklyNeed ? `商人订单缺 ${weeklyNeed} 件` + (needsConfirmedBorrow ? '，居民交单后补回' : '') : forDemand && cargoNeed ? `贸易港缺 ${cargoNeed} 件`
-        : forDemand && need ? `居民订单缺 ${need} 件` : forDemand && buildNeed ? `${buildMaterials.get(best.itemId).name}建造缺 ${buildNeed} 件` : `补库存，排入后预计共 ${projected + 1} 件（含待收和在产）`;
+        : forDemand && need ? `居民订单缺 ${need} 件` : forDemand && buildNeed ? `${buildMaterials.get(best.itemId).name}建造缺 ${buildNeed} 件`
+        : quickRestock ? `快速补货至一批用量，排入后预计共 ${projected + 1} 件（含待收和在产）`
+        : balanceMaterials ? `基础材料补货，排入后预计 ${projected + 1}/${stockTarget} 件（含待收和在产）` : `补库存，排入后预计共 ${projected + 1} 件（含待收和在产）`;
       const step = {
         kind: 'startProduce',
         request: 'StartFactoryProduceRequest',
@@ -1560,13 +1574,13 @@ export function planWorld(survey, {
         label: `${displayFactory}安排生产${displayProduct} 1 件，预计耗时 ${durationText(dispatch.seconds(b, best))}。${reason}`,
       };
       jobs.push({ step, recipe: best, priority, arrival: dispatch.commit(b, best) });
-      if (stockouts) {
-        stockouts.set(best.itemId, stockouts.get(best.itemId) - 1);
+      if (quantities) {
+        quantities.set(best.itemId, quantities.get(best.itemId) - 1);
         factoryReasons.delete(b.buildingId);
-        break;
+        if (!balanceMaterials) break;
       }
     }
-    const ordered = higher.some(row => row.buildType === b.type) ? jobs.map(job => job.step)
+    const ordered = balanceMaterials || higher.some(row => row.buildType === b.type) ? jobs.map(job => job.step)
       : orderFactoryJobs(jobs, b, timing, { ...state, finishes: initialFinishes }, batchHandoffs(b, jobs, tier));
     if (ordered.some((step, index) => step !== jobs[index].step)) {
       state.finishes = initialFinishes;
@@ -1624,6 +1638,49 @@ export function planWorld(survey, {
   }
 
   function planSmartFactories(ordinary) {
+    if (smart && settings.factory.produce && stockTarget > 0) {
+      // On-hand or queued goods may still belong to an undelivered order.
+      const hasClaim = order => order.requirements?.some(item => item.num > 0) || order.reserved?.some(item => item.num > 0);
+      const activeClaim = [...directOrders, ...extraDemand, ...buildingSupplies].some(order =>
+        order.source !== 'factory' && demandPriority.includes(order.source) && hasClaim(order))
+        || demandPriority.includes('resident') && survey.orders.some((order, i) =>
+          ['ready', 'reserved', 'missing', 'disabled'].includes(orderDecisions[i].status) && hasClaim(order));
+      quickRestockDuringOrders = activeClaim && demandPriority.includes('factory') && survey.stockKnown !== false && enabled('gainFactory');
+      if (!activeClaim || quickRestockDuringOrders) {
+        restockBatchSizes = new Map();
+        for (const row of usableRows) {
+          if (projectedStock(row.itemId) >= stockTarget || !ordinary.some(b => b.type === row.buildType && b.level >= row.unlockLevel)) continue;
+          const costs = row.costItem ?? [];
+          for (const [id, quantity] of costs) {
+            if (quantity > (restockBatchSizes.get(id) ?? 1)
+              && costs.every(([other, n]) => other === id || recipeFree(row, other) >= n)) {
+              restockBatchSizes.set(id, quantity);
+            }
+          }
+        }
+      }
+    }
+    // Remember completion only from a confirmed snapshot. A planned batch
+    // may be rejected or only partially sent before the next inventory read.
+    const basics = [...usableRows].filter(row => row.buildType === '材料厂' && BASIC_FACTORY_MATERIALS.has(row.itemId)
+      && ordinary.some(b => b.type === row.buildType && b.level >= row.unlockLevel));
+    const canRestock = settings?.factory.produce && basics.length > 0 && survey.stockKnown !== false;
+    if (canRestock) {
+      const key = JSON.stringify([stockTarget, ...basics.map(row => row.itemId)]);
+      if (materialRestock.key !== key) {
+        materialRestock.key = key;
+        materialRestock.complete = false;
+      }
+      if (basics.every(({ itemId }) => warehouseCount(itemId) + (incoming.get(itemId) ?? 0) >= stockTarget))
+        materialRestock.complete = true;
+    }
+    function planTier(b, tier) {
+      if (canRestock && !materialRestock.complete && tier === stockRank && b.type === '材料厂') {
+        const gaps = new Map(basics.map(row => [row.itemId, stockTarget - projectedStock(row.itemId)]));
+        planFactory(b, tier, gaps, { balanceMaterials: true });
+      }
+      planFactory(b, tier);
+    }
     if (checkShortFeeds && smart && settings.factory.produce && enabled('gainFactory')) {
       const feed = shortFactoryFeed({
         idle: ordinary.filter(b => dispatch.queues.get(b).count === 0 && canCollect(b)),
@@ -1631,7 +1688,8 @@ export function planWorld(survey, {
         room: row => Math.min(roomForRecipe(row), orderNeedsProduction(row.itemId) ? Infinity : Math.max(0,stockTarget-projectedStock(row.itemId))),
         defaultHeads() {
           const baseline = planWorld(survey, { config, allowSpeedUp, allowReroll, minOrderExp, maxUpgrades,
-            enabled, settings, blockedCollectionTypes, usage, extraDemand, factoryWaitHistory:new Map(factoryWaitHistory), refillHistory, checkShortFeeds:false });
+            enabled, settings, blockedCollectionTypes, usage, extraDemand, factoryWaitHistory:new Map(factoryWaitHistory),
+            materialRestock: { ...materialRestock }, refillHistory, checkShortFeeds:false });
           const heads = new Map();
           for (const step of baseline.actions) if (step.request === 'StartFactoryProduceRequest' && !heads.has(step.body.buildingId))
             heads.set(step.body.buildingId,step.body.productId);
@@ -1642,11 +1700,12 @@ export function planWorld(survey, {
         const shortage = new Map([[feed.row.itemId,feed.units]]);
         for (let i=0; i<feed.units; i++) {
           const before = actions.length;
-          planFactory(feed.building,recipeRank(feed.row),shortage,true);
+          planFactory(feed.building,recipeRank(feed.row),shortage,{ shortFeed: true });
           if (actions.length === before) break;
         }
       }
     }
+    if (quickRestockDuringOrders) for (const b of ordinary) planQuickRestock(b);
     for (const tier of priorities) {
       const candidates = ordinary.map(building => {
         const local = produceRows.filter(row => row.buildType === building.type && row.unlockLevel <= building.level && recipeRank(row) === tier);
@@ -1654,14 +1713,14 @@ export function planWorld(survey, {
         return { building, path:Math.max(-1, ...local.map(row => tailTime.get(row) ?? 0)),
           finish:Math.min(Infinity, ...local.map(row => nextFactoryLane(state.finishes, state.lanes.expiresAt, dispatch.seconds(building,row)).finish)) };
       });
-      for (const {building} of candidates.sort((a,b) => b.path - a.path || (smart ? a.finish - b.finish : 0))) planFactory(building, tier);
+      for (const {building} of candidates.sort((a,b) => b.path - a.path || (smart ? a.finish - b.finish : 0))) planTier(building, tier);
     }
     // A downstream booking can expose a replenishment gap at a factory we
     // already visited. Each successful pass consumes at least one free slot.
     let before;
     do {
       before = actions.length;
-      for (const b of ordinary) planFactory(b, Infinity);
+      for (const b of ordinary) planTier(b, Infinity);
     } while (smart && actions.length > before);
     // Recheck genuinely idle machines after the main allocations. Include
     // the missing ingredients of one batch, even when their stock is nonzero.
@@ -1689,6 +1748,34 @@ export function planWorld(survey, {
       if (stockouts.size) for (const tier of [...priorities, Infinity]) {
         for (const b of idle) if (!dispatch.queues.get(b).count) planFactory(b, tier, stockouts);
       }
+    }
+  }
+
+  function planQuickRestock(b) {
+    const queue = dispatch.queues.get(b);
+    const freeSlots = survey.factorySlots - queue.count;
+    if (freeSlots < 2 || !canCollect(b) || survey.factoryInsertions?.[b.buildingId] || queue.missing.length && queue.count) return;
+    const deadline = (survey.serverNow ?? now) + Math.min(QUICK_RESTOCK_SECONDS, revisit);
+    const offers = [];
+    for (const row of usableRows) {
+      if (row.buildType !== b.type || row.unlockLevel > b.level) continue;
+      const stock = projectedStock(row.itemId);
+      const units = Math.min(stockTarget, restockBatchSizes.get(row.itemId) ?? 1) - stock;
+      // Leave a queue slot for normal dispatch. The entire shortage must fit
+      // behind existing work, even if the second production lane expires.
+      if (units <= 0 || units >= freeSlots || occupiedStock(row.itemId) + units > survey.stockCap) continue;
+      if (!dispatch.batchFitsBy(b, row, units, deadline) || !(row.costItem ?? []).every(([id,n]) => recipeFree(row, id) >= n * units)) continue;
+      offers.push({ row, units, stock, duration: dispatch.seconds(b, row) * units });
+    }
+    offers.sort((a, other) => a.duration - other.duration || a.stock - other.stock || recipeRank(a.row) - recipeRank(other.row));
+    for (const { row, units } of offers) {
+      const shortage = new Map([[row.itemId, units]]);
+      while (shortage.get(row.itemId) > 0) {
+        const before = actions.length;
+        planFactory(b, recipeRank(row), shortage, { quickRestock: true });
+        if (actions.length === before) break;
+      }
+      if (shortage.get(row.itemId) < units) break;
     }
   }
 

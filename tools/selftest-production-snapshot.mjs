@@ -271,8 +271,8 @@ await test('建筑备料遵守来源、补料、主开关和普通生产开关',
 await test('首建与升级分别读取真实前置条件和当前执行开关', () => {
   const { raw, settings, buildingConfig, targets } = buildingFixture();
   assert.deepEqual(targets().map(order => order.metadata), [
-    { buildingId: '1民居', level: 2, action: 'upgrade', ready: false },
-    { buildingId: '2民居', level: 1, action: 'build', ready: false },
+    { buildingId: '1民居', level: 2, action: 'upgrade', populationGain: 0, ready: false },
+    { buildingId: '2民居', level: 1, action: 'build', populationGain: 10, ready: false },
   ]);
   settings.building.build = false;
   assert.deepEqual(targets().map(order => order.id), ['building:1民居:2']);

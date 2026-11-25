@@ -4,7 +4,7 @@ import { hasOtherFleetReservations, isFleetReserved, registerFleetReservations }
 import { freeFleet, normalizeFleet } from './radar.mjs';
 import { gameplayOpenDay, worldOpenDays } from './extra-rewards.mjs';
 import { isMiningSilicon, fleetRecordReason,legacyFleetReservationReason} from './fleet-availability.mjs';
-import { isTreasureReturn, matchesTreasureReturn, matchesTreasureSpeedLeg, recordsInWorld, settleFleetSnapshot, treasureDispatchEvidence, treasureSpeedConfirmed as speedConfirmed } from './fleet-settlement.mjs';
+import { isTreasureReturn, matchesTreasureReturn, matchesTreasureSpeedLeg, outstandingFleets, recordsInWorld, settleFleetSnapshot, treasureDispatchEvidence, treasureSpeedConfirmed as speedConfirmed } from './fleet-settlement.mjs';
 // 货轮：读取实际状态后规划，派遣前再次核对；保存设置和预览均不发送游戏动作。
 import { exactAutomationId } from './automation-policy.mjs';
 import { readGuildMembers } from './guild.mjs';
@@ -115,7 +115,7 @@ function openingReason(config, player, now) {
   return '';
 }
 
-export async function readTreasureLoot(client, protocol, config, player, { targetUid = null, preferences = null } = {}) {
+export async function readTreasureLoot(client, protocol, config, player, { targetUid = null, preferences = null, skipFullTargets = false } = {}) {
   const now = serverNow(client);
   const participating = inDailyWindows(preferences?.windows, now);
   const chaseActive = treasureChaseActive(preferences, now);
@@ -189,6 +189,9 @@ export async function readTreasureLoot(client, protocol, config, player, { targe
     startGridIdx: fleet.startGridIdx, cityId: fleet.cityId, targetCityId: fleet.targetCityId,
     ownerPlayerId: fleet.owner ? exactAutomationId(fleet.owner.playerId) : null }));
   snapshot.allUids = list.treasure.filter(target => integer(target.uid, 1, 2147483647)).map(target => target.uid);
+  // 返航加速和派遣对账只需要舰队、当前货轮编号与库存。
+  if (skipFullTargets && !chaseActive && !snapshot.rewardStatusReason && preferences.participationMode === 'untilFull' &&
+      snapshot.todayRewardTimes >= snapshot.rewardLimit) return snapshot;
   const fallback = fallbackState(snapshot, preferences);
   const qualities = new Set(normalQualities(preferences));
   if (fallback.active) for (const quality of preferences.fallbackQualities ?? []) qualities.add(quality);
@@ -414,7 +417,7 @@ export function planTreasureLoot(snapshot, config, settings, { usage = { counter
   candidates.sort((a, b) => (a.chase?.priority ?? Infinity) - (b.chase?.priority ?? Infinity) ||
     Number(a.isFallback) - Number(b.isFallback) || a.qualityPriority - b.qualityPriority ||
     a.rewardPriority - b.rewardPriority || (a.follow?.priority ?? Infinity) - (b.follow?.priority ?? Infinity) || a.target.progress - b.target.progress || a.target.uid - b.target.uid);
-  if (!snapshot.targets.length && !chaseWait) plan.notes.push(p.chase ? '当前没有可追击的货轮' : fallback.active ? '当前没有可读取的常规或所选兜底货轮' : waitingForTreasure(p));
+  if (!snapshot.targets.length && !chaseWait && (!rewardBlocked || p.chase)) plan.notes.push(p.chase ? '当前没有可追击的货轮' : fallback.active ? '当前没有可读取的常规或所选兜底货轮' : waitingForTreasure(p));
   // 一艘货轮最多占一个潜在领奖名额，已在途和结果未知的派遣也计入，避免兜底同时铺满所有舰队。
   const rewardTargets = new Set(snapshot.fleets.filter(fleet => fleet.treasureLootUid > 0).map(fleet => fleet.treasureLootUid));
   for (const [key, record] of Object.entries(keys)) {
@@ -462,10 +465,10 @@ export function planTreasureLoot(snapshot, config, settings, { usage = { counter
     });
     const fleetPreferences = chosen?.chase ? { ...p, minDurabilityPercent: 0 } : p;
     let reason = fleetReason(fleet, snapshot, fleetPreferences, true);
-    if (!reason) reason = unavailableFleets[buildingId] || '';
-    if (!reason && reservedFleetIds.includes(buildingId)) reason = '城战时段保留给城战接续';
     const warRecord = keys['cityWar:' + snapshot.worldId + ':' + fleetNumber(buildingId)];
     if (!reason && warRecord && !warRecord.confirmed) reason = '城战任务结果待确认，暂不派遣巨轮';
+    if (!reason) reason = unavailableFleets[buildingId] || '';
+    if (!reason && reservedFleetIds.includes(buildingId)) reason = '城战时段保留给城战接续';
     if(!reason&&Object.values(keys).some(r=>r.details?.kind==='worldBoss'&&r.details.buildingId===buildingId&&r.details.active!==false))reason='世界Boss首战尚未结束或结果待确认';
     if (!reason && Object.entries(keys).some(([key,r])=>key.startsWith('radar-send:'+snapshot.worldId+':') && r.details?.buildingId===buildingId && r.details.active!==false)) reason='联盟情报尚在执行或结果待确认';
     const prefix = `treasure:${snapshot.worldId}:`, suffix = ':' + fleetNumber(buildingId);
@@ -556,7 +559,8 @@ export async function runTreasureLoot(client, protocol, config, player, { getSet
   const results = [];
   try {
     const baseline = ledger.keyRecords();
-    const snapshot = await readTreasureLoot(client, protocol, config, player, { preferences: getSettings().treasure });
+    const preferences = getSettings().treasure;
+    const snapshot = await readTreasureLoot(client, protocol, config, player, { preferences, skipFullTargets: true });
     if (integer(petrolCeiling)) snapshot.fuel = Math.min(snapshot.fuel, petrolCeiling);
     reconcileKeys(snapshot, ledger, baseline);
     const pendingFuel = () => { const counters = ledger.pendingCounters?.() ?? {}; return (counters.treasurePetrol ?? 0) + (counters.cityWarPetrol ?? 0) + (counters.piratePetrol ?? 0) + (counters.radarPetrol ?? 0) + (counters.worldBossPetrol ?? 0) + (counters.siliconPetrol ?? 0) + (counters.resourceFieldPetrol ?? 0); };
@@ -582,7 +586,7 @@ export async function runTreasureLoot(client, protocol, config, player, { getSet
       const freshBaseline = ledger.keyRecords();
       const preferences = getSettings().treasure;
       const scanAll = proposed.mode === 'fallback' || (treasureChaseActive(preferences, serverNow(client)) && proposed.mode && proposed.mode !== 'chase');
-      const fresh = await readTreasureLoot(client, protocol, config, player, { targetUid: scanAll ? null : proposed.targetUid, preferences });
+      const fresh = await readTreasureLoot(client, protocol, config, player, { targetUid: scanAll ? null : proposed.targetUid, preferences, skipFullTargets: true });
       reconcileKeys(fresh, ledger, freshBaseline);
       fresh.fuel = Math.min(fresh.fuel, remainingFuel);
       if (integer(remainingDiamonds) && integer(fresh.diamonds)) fresh.diamonds = Math.min(fresh.diamonds, remainingDiamonds);
@@ -690,7 +694,14 @@ export async function runTreasureLoot(client, protocol, config, player, { getSet
         if (acceleration) plan.actions.push(acceleration);
       }
     }
-    return { results, notes: plan.notes, nextRefreshTime: snapshot.nextRefreshTime,
+    const quotaComplete = !snapshot.reason && !snapshot.rewardStatusReason && preferences === getSettings().treasure &&
+      preferences.participationMode === 'untilFull' && !preferences.chase && !preferences.recallSilicon &&
+      snapshot.todayRewardTimes >= snapshot.rewardLimit && dayNumber(snapshot.now) === dayNumber(serverNow(client)) &&
+      preferences.fleetIds.every(id => {
+        const fleet = snapshot.fleets.find(row => row.buildingId === id);
+        return fleet && integer(fleet.state, 1) && fleet.treasureLootUid === 0 && !isTreasureReturn(fleet);
+      }) && !outstandingFleets(ledger.keyRecords(), snapshot.worldId).some(([, record]) => record.details.kind.startsWith('treasure'));
+    return { results, notes: plan.notes, nextRefreshTime: snapshot.nextRefreshTime, quotaComplete,
       canPrepare: !snapshot.reason,
       miningFleetIds: snapshot.fleets.filter(isMiningSilicon).map(f => f.buildingId) };
   } finally { inFlight.delete(client); }

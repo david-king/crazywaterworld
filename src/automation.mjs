@@ -91,6 +91,8 @@ export const automationTasks = [
   ['dailyRewards', '每日任务奖励', '领奖', false],
   ['chests', '活跃宝箱', '领奖', false],
   ['gift', '每日免费赠礼', '领奖', false],
+  ['monthCardDaily', '领取月卡每日奖励', '领奖', false],
+  ['seasonCardDaily', '领取赛季卡每日奖励', '领奖', false],
   ['adShop', '广告商店资源', '领奖', false],
   ['mail', '邮件附件', '领奖', false],
   ['afk', '闯关挂机收益', '领奖', false],

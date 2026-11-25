@@ -45,7 +45,7 @@ import { claimAdShop, beginAdRound } from './ad-shop.mjs';
 import { claimAfkAd, claimAdSpeedUps } from './ad-rewards.mjs';
 import { rewardSchedule } from './reward-schedule.mjs';
 import { normalize } from './worlds.mjs';
-import { surveyTasks, runTasks } from './tasks.mjs';
+import { surveyTaskRewards, runTasks, claimOrderDaily, orderRewardsEnabled } from './tasks.mjs';
 import { surveyDailies, runDailies } from './dailies.mjs';
 import { surveyWorld, planWorld, runWorldRound, displayBuilding } from './world.mjs';
 import { createFactorySchedule } from './factory-schedule.mjs';
@@ -78,6 +78,7 @@ import { claimExtraRewards, extraRewardKeys } from './extra-rewards.mjs';
 import { setTimeout as pause } from 'node:timers/promises';
 import { claimRewards } from './claim-rewards.mjs';
 import { upgradeAfk } from './afk-upgrade.mjs';
+import { dailyCardKeys } from './daily-card-rewards.mjs';
 import { claimWeekly, runLinkage, weekSchedule, readWeekOrder, runAutomaticWeekOrder } from './activities.mjs';
 import { automationTasks, dailyTaskKey, defaultCompassSpinCount, worldTaskKey } from './automation.mjs';
 import { automationControls } from './automation-controls.mjs';
@@ -105,10 +106,12 @@ export async function runLoop(client, protocol, {
   sleep = defaultSleep,
   stop = { aborted: false },
   isEnabled,
+  includeCard = () => true,
   getCompassSpinCount = () => defaultCompassSpinCount,
   isStageBusy = () => false,
   isTrialBusy = () => false, isPirateBusy = () => false,
   challengeRun = createChallengeRun(),
+  materialRestock = {},
   getSettings = () => null, getHeroSettings = getSettings, getBlockedCollectionTypes, onFishBookComplete,
   getAfkSettings = getSettings, getAfkClaimHours = () => getAfkSettings()?.afk?.claimIntervalHours,
   usageLedger = null, heroUsageLedger = usageLedger,
@@ -239,6 +242,7 @@ export async function runLoop(client, protocol, {
   }
   const treasureScan = scheduler.scanTask({
     enabled: () => treasureAutomationEnabled(getSettings()),
+    notBefore: () => (rewards?.scheduledAt('treasureDaily') ?? 0) * 1000 - (client.serverClockOffsetMs || 0),
     intervalMs: () => (getSettings()?.treasure?.checkEverySeconds ?? 15) * 1000,
     hourlyFallback: true,
     async observe(current) {
@@ -275,6 +279,7 @@ export async function runLoop(client, protocol, {
     },
     intervalMs: () => (getSettings()?.radar?.checkEverySeconds ?? 30) * 1000,
   });
+  let treasureFleetVersion = 0;
   scheduler.listen(client, 'message', ({ name, body }) => {
     if (name === 'SCAllActivity' || name === 'SCServerTimeChanged') wakeActivities();
     if (name === 'SCTreasureLootRefresh') { recallStarts.treasure = null; treasureScan.invalidate(); }
@@ -294,6 +299,10 @@ export async function runLoop(client, protocol, {
     if (name === 'SCMyFleetUpdate') {
       const idle = (body?.fleets ?? []).filter(fleet => fleet.state === 1);
       const settings = getSettings();
+      if (body?.fleets?.some(fleet => fleet.treasureLootUid > 0 && settings?.treasure?.fleetIds.includes(fleet.buildingId))) {
+        treasureFleetVersion++;
+        treasureScan.invalidate();
+      }
       if (inWar && idle.some(fleet => settings?.cityWar?.fleetIds?.includes(fleet.buildingId))) cityWarScan.invalidate();
       if (idle.some(fleet => settings?.treasure?.fleetIds?.includes(fleet.buildingId))) treasureScan.invalidate();
       const miners = (body?.fleets ?? []).filter(isMiningSilicon);
@@ -322,9 +331,23 @@ export async function runLoop(client, protocol, {
   }));
   const fleetScans = { treasure: treasureScan, cityWar: cityWarScan, radar: radarScan };
   const scanOptions = new Map(Object.keys(fleetScans).map(key => [key, JSON.stringify(getSettings()?.[key])]));
+  function syncDailyPreferences(settings) {
+    if (!rewards || !settings) return;
+    rewards.syncPreference('gold.enabled', settings.gold);
+    rewards.syncPreference('pirate', settings.pirateSweep);
+    rewards.syncPreference('trialPaidSweep', [settings.trials?.paid, settings.trials?.paidPerRaidLimit,
+      settings.trials?.dailyDiamondBudget, settings.resources?.diamondDailyLimit]);
+    rewards.syncPreference('trialAdSweep', settings.trials?.ads);
+    rewards.syncPreference('guildOrders', [settings.alliance?.recruitDailyLimit, player?.level, exactAutomationId(player?.guildId)]);
+    rewards.syncPreference('guildFort', settings.guildFort);
+    rewards.syncPreference('treasureDaily', settings.treasure);
+    rewards.syncPreference('weeklyActivity', settings.weeklyActivity);
+    rewards.syncPreference('weekSupplyFree', [settings.activityAutomation?.weekLottery, settings.activityAutomation?.weekChip, settings.activityAutomation?.weekUnique]);
+  }
   const settingsWake = () => { fleetSpeedAt = 0; siliconAt = 0; resourceFieldsAt = 0; extendedAt = 0; siliconVersion++;
     meritCheckAt = 0;
     const settings = getSettings();
+    syncDailyPreferences(settings);
     dispatchSettingsPending = Boolean((cityWarState && !cityWarEnabled(settings)) || watchFleetMaintenance(client).held().length);
     for (const [key, scan] of Object.entries(fleetScans)) {
       const options = JSON.stringify(settings?.[key]);
@@ -334,7 +357,7 @@ export async function runLoop(client, protocol, {
       }
       scanOptions.set(key, options);
     }
-    guildShipSchedule.clearTask('guildShip'); rewards?.clearTask('guildFort'); wakeActivities(); scheduler.wake(); };
+    guildShipSchedule.clearTask('guildShip'); rewards?.clear('guildFort'); wakeActivities(); scheduler.wake(); };
   const extendedPush = ({ name }) => {
     if (isGuildShipPush(name) && getSettings()?.guildShip?.enabled) scheduler.wake();
     if (/^SCFort|^SCHeroRaid/.test(name) || ['SCAllActivity','SCGuildOrder','SCNewGuildAidAsk','SCGuildAidHelp','SCGuildAidRemove','SCNewGuildWelfarePack'].includes(name)) {
@@ -381,10 +404,13 @@ export async function runLoop(client, protocol, {
     const empty = () => ({ planned: 0, results: [] });
     const summary = { round, startedAt: Math.floor(Date.now() / 1000), tasks: empty(), dailies: empty(), world: empty() };
     const settings = getSettings();
+    syncDailyPreferences(settings);
     // 查询关闭或尚未到期的任务无需扫描磁盘。允许执行时仍使用最新资源复核。
     const selected = key => !stop.aborted && isActivityTaskAvailable(key, client)
       && nativePreferenceEnabled(getSettings(), key) && (!isEnabled || isEnabled(key));
     const enabled = key => selected(key) && (!rewards || rewards.due(key)) && runtimeActive();
+    const orderSelected = () => selected('tasks') && runtimeActive();
+    const orderDue = () => orderSelected() && orderRewardsEnabled(getSettings()) && (!rewards || rewards.due('orderDaily'));
     const guard = runtimeGuard(createActionGuard(client, getSettings, usageLedger, { player, enabled: () => !stop.aborted && client.connected }));
     const usage = () => usageLedger?.snapshot() ?? { counters: {} };
     let extraDemand = [];
@@ -441,10 +467,18 @@ export async function runLoop(client, protocol, {
       } catch (error) { phaseFailure('tasks', '赛季自动偷榜', error, 'seasonMerit'); }
     }
     const reportTrial = (key, raids, entry, raidId) => {
-      if (entry.pending) entry = { ...entry, status: 'pending' };
-      summary.dailies.results.push(entry);
-      if (!entry.skipped) summary.dailies.planned++;
-      stepLog('dailies')({ ...entry, taskKey: key + ':' + raidId, category: '试炼' });
+      const taskKey = key + ':' + raidId;
+      if (entry.cached) {
+        if (rewards.scheduledAt(taskKey) === entry.nextCheckAt) return;
+        // 重连后恢复控制台状态，不把本地记录算作新的服务端检查。
+        rewards.observe(taskKey, entry.reason);
+      } else {
+        if (entry.pending) entry = { ...entry, status: 'pending' };
+        summary.dailies.results.push(entry);
+        if (!entry.skipped) summary.dailies.planned++;
+        stepLog('dailies')({ ...entry, taskKey, category: '试炼' });
+      }
+      if (entry.nextCheckAt) rewards.defer(taskKey, entry.nextCheckAt);
       summarizeTrialChecks(rewards, key, raids);
     };
     const allowDaily = (id, action) => !(getSettings() && action.request === 'ClickGoldRequest' && !action.body.free) && enabled(dailyTaskKey(id, action));
@@ -558,7 +592,7 @@ export async function runLoop(client, protocol, {
         let demand = [];
         if (currentSettings && canFactory('startProduce') && (!simulateNative || checkUpgrade)) {
           const extra = await surveyBaseAutomation(client, protocol, config, player, currentSettings, survey,
-            { ledger: usageLedger, enabled: current });
+            { ledger: usageLedger, enabled: current, scheduler: rewards, includeGold: false });
           if (current()) demand = baseDemands(extra, config, currentSettings);
         }
         const orderRead = !survey.notes.some(note => note.startsWith('本轮未能读取商人订单'));
@@ -571,7 +605,7 @@ export async function runLoop(client, protocol, {
           if (kind === 'upgrade') return checkUpgrade && enabled('upgrade') && orderRead;
           return ['startProduce', 'nativeProduce'].includes(kind) && canFactory('startProduce') && (simulateNative || orderRead);
         };
-        const plan = planWorld(survey, { config, enabled: allow, settings: currentSettings, blockedCollectionTypes: getBlockedCollectionTypes?.(), usage: usage(), extraDemand: demand, factoryWaitHistory, trackRefills:true });
+        const plan = planWorld(survey, { config, enabled: allow, settings: currentSettings, blockedCollectionTypes: getBlockedCollectionTypes?.(), usage: usage(), extraDemand: demand, factoryWaitHistory, materialRestock, trackRefills:true });
         // 工厂巡检只处理材料规则换单；奖励筛选留给常规订单检查。
         plan.actions = plan.actions.filter(step => step.kind !== 'denyOrder' || step.materialRule);
         if (currentSettings?.factory?.cooperateNative && allow('startProduce')) observeNativePlan(survey, plan);
@@ -649,7 +683,7 @@ export async function runLoop(client, protocol, {
     let pirateChecked = false;
     const challengeOptions = { player, getSettings, state: challengeRun, ledger: usageLedger, executeBattle,
       enabled: () => !stop.aborted && runtimeActive() && client.connected !== false, isStageBusy, isTrialBusy, isPirateBusy,
-      prepareDispatch: () => refreshCityWarReservations(client, protocol, config, player, getSettings),
+      prepareDispatch: () => refreshCityWarReservations(client, protocol, config, player, getSettings, usageLedger),
       wait: (ms, _value, { signal } = {}) => sleep(ms, signal),
       signal: typeof stop.throwIfAborted === 'function' ? stop : undefined };
     async function checkPirateSweeps() {
@@ -732,7 +766,7 @@ export async function runLoop(client, protocol, {
       };
       try {
         if (getSettings()?.alliance?.enabled) {
-          await runAllianceAutomation(client, protocol, config, player, { getSettings, ledger: usageLedger, enabled: active, report: report('alliance.enabled') });
+          await runAllianceAutomation(client, protocol, config, player, { getSettings, ledger: usageLedger, scheduler: rewards, enabled: active, report: report('alliance.enabled') });
           const options = { player, getSettings, ledger: usageLedger, scheduler: rewards,
             enabled: () => active() && getSettings()?.alliance?.enabled };
           if (getSettings()?.guildFort?.enabled) await serviceGuildForts(client, protocol, config, { ...options, report: report('guildFort.enabled') });
@@ -796,9 +830,14 @@ export async function runLoop(client, protocol, {
     }
     async function checkBoss(){
       if(stop.aborted||!getSettings()?.worldBoss.enabled||!rewards?.due('worldBoss'))return;
-      try{await runWorldBoss(client,config,player,{getSettings,ledger:usageLedger,enabled:()=>!stop.aborted&&runtimeActive()&&client.connected&&getSettings().worldBoss.enabled,report:entry=>{summary.world.results.push(entry);stepLog('world')({...entry,title:entry.label,taskKey:'worldBoss'});}});}
+      const reset = rewards.nextDay();
+      let completed = false;
+      try{
+        const result = await runWorldBoss(client,config,player,{getSettings,ledger:usageLedger,enabled:()=>!stop.aborted&&runtimeActive()&&client.connected&&getSettings().worldBoss.enabled,report:entry=>{summary.world.results.push(entry);stepLog('world')({...entry,title:entry.label,taskKey:'worldBoss'});}});
+        completed = result?.count > 0;
+      }
       catch(error){phaseFailure('world','世界Boss首战',error);}
-      finally{rewards?.defer('worldBoss',rewards.now()+Math.ceil(getEveryMs()/1000));}
+      finally{rewards.defer('worldBoss',completed ? reset : Math.min(reset,rewards.now()+Math.ceil(getEveryMs()/1000)));}
     }
     async function checkTreasure() {
       if (await treasureScan.check(scanTreasure)) publishScanDeadline('万吨巨轮', treasureScan);
@@ -837,6 +876,7 @@ export async function runLoop(client, protocol, {
     }
     async function scanTreasure() {
       const started = serverNowSeconds();
+      const fleetVersion = treasureFleetVersion, preferences = getSettings().treasure, midnight = rewards?.nextDay();
       if(getSettings()?.cityWar.reserveDuringWar)await checkCityWar();
       try {
         const result = await runTreasureLoot(client, protocol, config, player, { getSettings, ledger: usageLedger,
@@ -856,6 +896,10 @@ export async function runLoop(client, protocol, {
             lastTreasureNotes = text;
           },
         });
+        if (rewards && result.quotaComplete && preferences === getSettings().treasure && fleetVersion === treasureFleetVersion) {
+          rewards.observe('treasureDaily', '今日巨轮领奖次数已满', 'completed', {fleetIds:[...preferences.fleetIds]});
+          rewards.defer('treasureDaily', midnight);
+        }
         const recallTimes = await prepareSiliconRecall('treasure', result.canPrepare ? result.nextRefreshTime : null, result.miningFleetIds);
         return [...treasureScanTimes(started, result.nextRefreshTime), ...recallTimes];
       } catch (error) { recallStarts.treasure = null; phaseFailure('world', '万吨巨轮检查', error); }
@@ -922,10 +966,10 @@ export async function runLoop(client, protocol, {
     }
 
     async function checkWeeklyActivity() {
-      if (stop.aborted || !getWeeklySettings()?.weeklyActivity?.enabled) return;
+      if (stop.aborted || !getWeeklySettings()?.weeklyActivity?.enabled || (rewards && !rewards.due('weeklyActivity'))) return;
       try {
         await runWeeklyActivity(client, protocol, config, player, {
-          getSettings: getWeeklySettings, ledger: usageLedger,
+          getSettings: getWeeklySettings, ledger: usageLedger, scheduler: rewards,
           enabled: () => !stop.aborted && runtimeActive() && client.connected,
           report(entry) {
             summary.world.results.push(entry);
@@ -952,14 +996,22 @@ export async function runLoop(client, protocol, {
       yield;
       await checkAppointments();
       yield;
-      if (!isEnabled && enabled('tasks')) {
+      if (!isEnabled && enabled('tasks') && (!settings || settings.loop.tasks)) {
         try {
-          const survey = await surveyTasks(client, protocol, { config, player });
+          const survey = await surveyTaskRewards(client, { config });
           summary.tasks.planned = survey.plan.length;
           summary.tasks.results = await runTasks(client, protocol, survey, {
             allowMutate, enabled: () => enabled('tasks'), onStep: stepLog('tasks'), settings,
           });
         } catch (error) { phaseFailure('tasks', '任务检查', error); }
+      }
+      if (!isEnabled && orderDue()) {
+        try {
+          const entries = await claimOrderDaily(client, protocol, { config, player, allowMutate, scheduler: rewards,
+            enabled: () => orderSelected() && orderRewardsEnabled(getSettings()), onStep: stepLog('tasks') });
+          summary.tasks.planned += entries.length;
+          summary.tasks.results.push(...entries);
+        } catch (error) { phaseFailure('tasks', '每日订单', error, 'orderDaily'); }
       }
       yield;
       // 详细设置下付费点金由基地计划独立执行，普通日常的进度与重置时间只属于免费点金。
@@ -968,7 +1020,7 @@ export async function runLoop(client, protocol, {
         try {
            const includeTask = id => id === 1007 || (id === 1010 && settings)
              ? false : !isEnabled || dailyKeys[id]?.some(enabled);
-          const survey = await surveyDailies(client, protocol, { config, player, includeTask, probeGift: !isEnabled, idle: !!isEnabled, allowRecruitTickets: false, settings, afkClaimHours: getAfkClaimHours(), ledger: usageLedger });
+          const survey = await surveyDailies(client, protocol, { config, player, includeTask, includeCard, probeGift: !isEnabled, idle: !!isEnabled, allowRecruitTickets: false, settings, afkClaimHours: getAfkClaimHours(), ledger: usageLedger ?? heroUsageLedger });
           for (const entry of survey.tasks) for (const key of dailyKeys[entry.task.id]??[]) rewards?.observe(key, entry.reason || (Number.isFinite(entry.task.progress)&&Number.isFinite(entry.task.targetProgress)?entry.task.progress+'/'+entry.task.targetProgress+(entry.task.progress>=entry.task.targetProgress?' · 今日目标已完成':' · 等待执行'):'已读取任务状态'));
            const recruit = survey.tasks.find(entry => entry.task.id === 1002 && entry.status === 'waiting');
            if (recruit && (includeRepeatedWaits || recruit.reason !== lastRecruitWait)) stepLog('dailies')({ title: recruit.task.title, skipped: true, reason: recruit.reason, taskKey: 'freeRecruit' });
@@ -981,11 +1033,13 @@ export async function runLoop(client, protocol, {
            }
           summary.dailies.planned = survey.tasks.reduce((n, entry) =>
             n + (entry.actions ?? []).filter(action => allowDaily(entry.task.id, action)).length, 0);
-          if (!isEnabled) summary.dailies.planned += (survey.chests?.actions.length ?? 0) + (survey.gift?.actions.length ?? 0);
+          if (!isEnabled) summary.dailies.planned += (survey.chests?.actions.length ?? 0) + (survey.gift?.actions.length ?? 0)
+            + survey.cards.filter(card => card.state === 'claimable').length;
           if (summary.dailies.planned) {
             summary.dailies.results = await runDailies(client, protocol, survey, {
               allowMutate, allowPaid: isEnabled ? true : allowPaid, claimRewards: !isEnabled, config,
-              allowAction: allowDaily, onStep: stepLog('dailies'), ledger: usageLedger,
+              allowAction: allowDaily, onStep: stepLog('dailies'), ledger: usageLedger ?? heroUsageLedger,
+              rewardEnabled: key => !stop.aborted && runtimeActive() && client.connected !== false && (!dailyCardKeys.includes(key) || includeCard(key)),
               settings, getSettings, beforeAction: guard.before, afterAction: guard.after, cancelAction: guard.cancel,
             });
           }
@@ -1036,8 +1090,8 @@ export async function runLoop(client, protocol, {
           summary.dailies.results.push(entry); stepLog('dailies')(entry);
         }
       }
-      if (isEnabled && groupEnabled('领奖')) {
-        const results = await observed(['tasks','dailyRewards','chests','gift','mail','afk'],()=>claimRewards(client, protocol, config, logReward, enabled, rememberDeadline, rewards, player, { settings, getSettings }));
+      if (isEnabled && (groupEnabled('领奖') || orderDue())) {
+        const results = await observed(['tasks','dailyRewards','chests','gift','mail','afk', ...dailyCardKeys],()=>claimRewards(client, protocol, config, logReward, enabled, rememberDeadline, rewards, player, { settings, getSettings, ledger: usageLedger, orderSelected }));
         summary.tasks.planned += results.length;
         summary.tasks.results.push(...results);
         try { await claimAfkAdNow(); } catch (error) { phaseFailure('tasks', '闯关挂机广告收益', error); }
@@ -1093,7 +1147,7 @@ export async function runLoop(client, protocol, {
         if (!raids.length) for (const key of ['trialPaidSweep','trialAdSweep']) {
           if (enabled(key)) stepLog('dailies')({ taskKey: key, title: '试炼扫荡', skipped: true, reason: '尚未选择扫荡副本' });
         }
-        await runExtraTrialSweeps(client, protocol, config, player, { getSettings, ledger: usageLedger, channel: adChannel,
+        await runExtraTrialSweeps(client, protocol, config, player, { getSettings, ledger: usageLedger, channel: adChannel, scheduler: rewards,
           enabled: mode => enabled(mode === 'paid' ? 'trialPaidSweep' : 'trialAdSweep'),
           report: (entry, id, mode) => reportTrial(mode === 'paid' ? 'trialPaidSweep' : 'trialAdSweep', raids, entry, id) });
       }
@@ -1104,7 +1158,7 @@ export async function runLoop(client, protocol, {
           yield;
           if (!settings && key === 'weekHeroStar') continue;
           if (!settings && !usageLedger && key === 'vipDaily') continue;
-          if (!serviceEnabled(key)) continue;
+          if (!serviceEnabled(key) || !rewards.due(key)) continue;
           // 战报两个开关共享一次检查。
           const checkCampaignReports = key === 'battleReportRewards' && active('campaignReports');
           let reported = false;
@@ -1312,12 +1366,12 @@ export async function runLoop(client, protocol, {
           includeWeekOrder: readsOrders || cargoDemand || (allowWorld('speedUpProduce') && settings?.factory.speedUpSources.includes('merchant')) });
         if (settings && ((allowWorld('startProduce') && (!simulateNative || readsOrders) && (settings.factory.demandFirst || settings.alliance?.enabled &&
           settings.alliance.recruit && settings.alliance.recruitProduction || settings.guildShip?.enabled && settings.guildShip.produceMissing)) || settings.factory.speedUpSources.length > 0)) {
-          const extra = await surveyBaseAutomation(client, protocol, config, player, settings, survey, { ledger: usageLedger, enabled: () => !stop.aborted && runtimeActive() && client.connected !== false });
+          const extra = await surveyBaseAutomation(client, protocol, config, player, settings, survey, { ledger: usageLedger, scheduler: rewards, includeGold: false, enabled: () => !stop.aborted && runtimeActive() && client.connected !== false });
           extraDemand = baseDemands(extra, config, settings);
         }
         if (factorySchedule.active() || factorySchedule.due())
           factorySchedule.checked(survey.factories, { version: factoryReadVersion, demandVersion, slots: survey.factorySlots, progressed: true });
-        const plan = planWorld(survey, { config, enabled: allowWorld, factoryWaitHistory, trackRefills:true,
+        const plan = planWorld(survey, { config, enabled: allowWorld, factoryWaitHistory, materialRestock, trackRefills:true,
           settings, blockedCollectionTypes: getBlockedCollectionTypes?.(), usage: usage(), extraDemand,
           allowSpeedUp: isEnabled ? enabled('speedUp') : allowSpeedUp,
           allowReroll: isEnabled ? enabled('denyOrder') : allowReroll,
@@ -1434,14 +1488,25 @@ export async function runLoop(client, protocol, {
       }
       yield;
       const latest = getSettings();
-      if (hasBaseWork(latest)) {
+      const includeGold = !!latest?.gold?.enabled && latest.loop.dailies &&
+        (usageLedger?.snapshot().pendingPaidGold || (latest.gold.times > 0 && (!rewards || rewards.due('gold.enabled'))));
+      if (hasBaseWork(latest, { includeGold })) {
+        const midnight = rewards?.nextDay();
+        const deferGold = reset => rewards?.defer('gold.enabled', reset > rewards.now() ? reset : midnight);
         try {
           const survey = await surveyWorld(client, protocol, { config, player, includeWeekOrder: false, includeProductionTiming: false });
-          const extra = await surveyBaseAutomation(client, protocol, config, player, latest, survey, { ledger: usageLedger, enabled: () => !stop.aborted && runtimeActive() && client.connected !== false });
+          const extra = await surveyBaseAutomation(client, protocol, config, player, latest, survey, { ledger: usageLedger, scheduler: rewards, includeGold, enabled: () => !stop.aborted && runtimeActive() && client.connected !== false });
           const plan = planBaseAutomation(extra, config, latest, usage(), { diveCompleted });
           observeBaseAutomationPlan(rewards, plan, latest, getEveryMs());
+          if (latest === getSettings() && plan.goldResetTime != null) deferGold(plan.goldResetTime);
           const results = await runBaseAutomation(client, protocol, config, plan, { player, getSettings, ledger: usageLedger,
             enabled: () => !stop.aborted && runtimeActive() && client.connected, onStep: stepLog('world') });
+          for (const {step, ok} of results) {
+            if (!ok || step.kind !== 'paidGold' || !step.verify || latest !== getSettings()) continue;
+            if (step.verify.paidBefore + step.body.times >= Math.min(latest.gold.times, step.verify.maxPaidTimes)) {
+              deferGold(step.verify.resetTime);
+            }
+          }
           summary.world.planned += plan.actions.length;
           summary.world.results.push(...results);
           summary.world.notes = [...(summary.world.notes ?? []), ...plan.notes];
@@ -1513,7 +1578,10 @@ export async function runLoop(client, protocol, {
         let upgradeAt = Date.now() + 30_000;
         while (scheduler.active() && Date.now() < waitStartedAt + getEveryMs()) {
           const nextRound = waitStartedAt + getEveryMs();
-          const weeklyAt = nextWeeklyActivityBoundary(client, getWeeklySettings(), roundStartedMs);
+          const weeklySettings = getWeeklySettings();
+          const weeklyDeadline = weeklySettings?.weeklyActivity?.enabled && rewards?.scheduledAt('weeklyActivity');
+          const weeklyAt = Math.min(nextWeeklyActivityBoundary(client, weeklySettings, roundStartedMs),
+            weeklyDeadline ? weeklyDeadline * 1000 - (client.serverClockOffsetMs || 0) : Infinity);
           const activityAt = activityVersion !== roundActivityVersion ? 0
             : nextActivityBoundary(client, activityConfigured, roundStartedMs);
           const wakeAt = Math.min(nextRound, activityAt, weeklyAt, factorySchedule.nextAt(), dispatchNext(), guildShipNext(), extendedNext(), merchantNext(), appointmentNext(), worldOnlineNext(), meritNext(),
@@ -1561,6 +1629,7 @@ export function formatLoopStep(entry) {
   const category = automationControlLabels.get(entry.category) ?? entry.category
     ?? ({ tasks: '任务', dailies: '日常', world: '海面' })[entry.phase] ?? '挂机';
   const title = entry.step?.label || entry.title || entry.label;
+  if (dailyCardKeys.includes(entry.id)) return category + ' · ' + entry.label;
   const action = [title, entry.note && entry.note !== title ? entry.note : null].filter(Boolean).join(' · ') || '检查任务';
   const message = category + ' · ' + action;
   if (stepObservation(entry).state === 'pending') return message+'等待确认：'+(entry.reason||entry.error||'保留记录，不重复提交');

@@ -259,11 +259,11 @@ export function buildProductionSnapshot(raw, config, settings = {}) {
       if (!costs) { incomplete('building', '建筑材料需求未完整确认'); continue; }
       const missing = costs.filter(item => free(item.id) < item.num);
       if (missing.some(item => !craftable.has(item.id))) continue;
-      // Fully prepared construction materials remain an exclusive target too,
-      // so lower-priority demands cannot borrow them while planning new work.
+      // Include ready projects so their inputs are accounted for exactly once.
       const targetLevel = building.level + 1;
       addOrder('building', building.id + ':' + targetLevel, costs, null,
-        { buildingId: building.id, level: targetLevel, action: building.level === 0 ? 'build' : 'upgrade', ready: missing.length === 0 }, 'consumption');
+        { buildingId: building.id, level: targetLevel, action: building.level === 0 ? 'build' : 'upgrade',
+          populationGain: gain, ready: missing.length === 0 }, 'consumption');
     }
   }
   const recipes = rows(config, 'BuildingProduceCfg').map(recipe => {

@@ -1,6 +1,7 @@
 import { displayMaterial } from './config.mjs';
 import { readOrderReservedStock, beginOrderMaterialSpend, cancelOrderMaterialSpend, confirmOrderMaterialOperation, refreshOrderMaterialSpends } from './order-reservations.mjs';
 import { toNumber } from './client.mjs';
+import { rowsForSeason } from './season-config.mjs';
 
 const key = 'guildOrders';
 const label = '联盟募兵';
@@ -64,8 +65,7 @@ export function guildOrderQuota(config, player) {
   const invalid = () => new Error('缺少或存在异常的联盟募兵次数配置');
   if (!Array.isArray(all) || !all.length
     || all.some(row => !Number.isSafeInteger(row?.season) || row.season < 1)) throw invalid();
-  const configSeason = all.reduce((best, row) => row.season <= season ? Math.max(best, row.season) : best, 0);
-  const available = all.filter(row => row.season === configSeason);
+  const available = rowsForSeason(all, season);
   // A missing season may fall back; a malformed tier must not silently fall
   // back to a different quota (possibly an unlimited one).
   if (available.some(row => !Number.isSafeInteger(row.playerLevel) || row.playerLevel < 1
@@ -109,7 +109,7 @@ async function request(client, protocol, name, enabled) {
   return client.request(name, {}, response);
 }
 
-export async function readGuildOrderView(client, protocol, config, { player, settings = {}, enabled = () => true } = {}) {
+export async function readGuildOrderView(client, protocol, config, { player, settings = {}, enabled = () => true, dailyLimit = 0 } = {}) {
   const view = { state: 'blocked', reason: '', canFinish: false, requirements: [], cities: [], cityId: null,
     doneToday: null, maxNum: null, season: null, nextRefreshTime: null };
   if (!enabled()) return { ...view, reason: '已暂停' };
@@ -134,7 +134,7 @@ export async function readGuildOrderView(client, protocol, config, { player, set
   if ([...requirements.keys()].some(id => !known.has(id))) throw new Error('联盟募兵包含未识别的材料配置');
   const cities = list(cityReply?.cities, '联盟城市').map(city => ({ cityId: amount(city?.cityId, '联盟城市编号', true), recommended: city.recommended === true }));
   if (new Set(cities.map(city => city.cityId)).size !== cities.length) throw new Error('联盟城市记录重复');
-  const { doneToday, limitReason } = guildOrderProgress(counterReply, maxNum);
+  const { doneToday, limitReason } = guildOrderProgress(counterReply, maxNum, dailyLimit);
   const city = cities.find(city => city.recommended) ?? cities[0];
   Object.assign(view, { season, maxNum, doneToday, cityId: city?.cityId ?? null, cities, nextRefreshTime,
     identity: stamp, accountKey: accountKey(player), day: dayOf(now(client)),
@@ -165,12 +165,15 @@ export async function serviceGuildOrders(client, protocol, config, { player, get
   const delay = seconds => scheduler?.defer(key, scheduler.now() + seconds);
   if (!enabled()) return skip('已暂停');
   if (!Number.isSafeInteger(dailyLimit) || dailyLimit < 0) return skip('联盟募兵每日上限无效');
-  if (scheduler && !scheduler.due(key)) return skip('等待下次检查');
+  if (scheduler && (!scheduler.due(key) || scheduler.scheduledAt?.('guildOrders:quota') > scheduler.now())) return skip('等待下次检查');
   if (busy.has(client)) return skip('正在核对联盟募兵');
   busy.add(client);
   try {
+    const midnight = scheduler?.nextDay?.();
+    const configuredLimit = getSettings()?.alliance?.recruitDailyLimit;
+    const limitCurrent = () => enabled() && getSettings()?.alliance?.recruitDailyLimit === configuredLimit;
     await refreshOrderMaterialSpends(client,player,{enabled});
-    const initial = await readGuildOrderView(client, protocol, config, { player, settings: getSettings(), enabled });
+    const initial = await readGuildOrderView(client, protocol, config, { player, settings: getSettings(), enabled, dailyLimit });
     if (ledger && initial.accountKey) {
       for (const [savedKey, record] of Object.entries(ledger.keyRecords())) {
         const data = record.details;
@@ -182,6 +185,11 @@ export async function serviceGuildOrders(client, protocol, config, { player, get
           delay(180); return skip('上次联盟募兵结果尚未确认，持久记录保留，不重复提交');
         }
       }
+    }
+    const gameLimitReached = Number.isSafeInteger(initial.maxNum) && initial.maxNum >= 0 && initial.doneToday >= initial.maxNum;
+    if (Number.isSafeInteger(initial.doneToday) && (gameLimitReached || dailyLimit > 0 && initial.doneToday >= dailyLimit)) {
+      if (limitCurrent() && midnight) scheduler.defer('guildOrders:quota', midnight);
+      return skip(gameLimitReached ? '已达到游戏每日募兵上限 ' + initial.maxNum + ' 次' : configuredLimitReason(initial.doneToday, dailyLimit, 0));
     }
     if (dailyLimit > 0) {
       const reason = configuredLimitReason(initial.doneToday, dailyLimit, ledger?.snapshot().counters.guildRecruit ?? 0);
@@ -199,7 +207,7 @@ export async function serviceGuildOrders(client, protocol, config, { player, get
       return skip('上次联盟募兵结果尚未确认，暂不重复提交；请在游戏中核对');
     }
     // Re-read all competing requirements and inventory, not only the order.
-    const current = await readGuildOrderView(client, protocol, config, { player, settings: getSettings(), enabled });
+    const current = await readGuildOrderView(client, protocol, config, { player, settings: getSettings(), enabled, dailyLimit });
     if (!current.canFinish) { delay(180); return skip(current.reason); }
     if (initial.identity !== current.identity || initial.orderKey !== current.orderKey || initial.doneToday !== current.doneToday
       || initial.cityId !== current.cityId || initial.day !== current.day) return skip('订单、次数或联盟城市已变化，下一轮重新核对');
@@ -248,7 +256,10 @@ export async function serviceGuildOrders(client, protocol, config, { player, get
     ledger?.confirm(ticket);
     confirmOrderMaterialOperation(debit);
     await refreshOrderMaterialSpends(client,player,{enabled});
-    delay(60);
+    if (midnight && limitCurrent() && (dailyLimit > 0 && current.doneToday + 1 >= dailyLimit ||
+        current.maxNum >= 0 && current.doneToday + 1 >= current.maxNum)) {
+      scheduler.defer('guildOrders:quota', midnight);
+    } else delay(60);
     return finish({ ok: true, label: label + ' · 已完成 1 次，获得' + rewards.map(item => displayMaterial(config, item.id) + ' ×' + toNumber(item.num)).join('、') });
   } catch (error) {
     delay(180);

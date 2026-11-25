@@ -8,6 +8,7 @@ import { forgetReleasedResourceField } from './resource-field-history.mjs';
 
 const fleetKey = /^(?:fleet-speed|fleet-speed-wait|radar-send|world-boss|world-boss-lineup|pirate-lineup|pirate-first|cityWar|treasureRepair|treasureFollow|treasureSpeed|treasure|silicon|silicon-repair|silicon-retreat|silicon-speed|resource-field):(\d+):/;
 const repairKinds = new Set(['cityRepair', 'treasureRepair']);
+const fleetReadTimeoutMs = 8000;
 const integer = Number.isSafeInteger;
 const dayOf = (seconds) => Math.floor((seconds + 28800) / 86400);
 const zeroId = (value) =>
@@ -63,6 +64,23 @@ export function cityDispatchObserved(fleet, details) {
     (fleet.cityId === details.cityId && ([3, 5].includes(fleet.state) ||
       (fleet.state === 1 && fleet.curGridIdx > 0) ||
       (details.manualCityMove && details.origin > 0 && details.origin !== details.cityId && fleetAtHome(fleet))));
+}
+
+// 页面读取可能推迟实际发送。此时更新发送时间，使旧快照无法释放刚发出的派遣。
+export function markCityDispatchSending(ledger, key, ticket, sentAt) {
+  const record = ledger.keyRecords()[key];
+  if (record?.id !== ticket.id || record.confirmed || record.expired ||
+      (record.details.sentAt !== sentAt &&
+        !ledger.updateKeyDetails(key, { ...record.details, sentAt }, record)))
+    throw Error('城战派遣预留已变化，请重新检查舰队');
+}
+
+function petrolFromInventory(bag) {
+  if (!Array.isArray(bag?.items) || bag.items.some(item => !item?.itemId)) return null;
+  const rows = bag.items.filter(item => item.itemId === '汽油');
+  if (!rows.length) return 0;
+  const fuel = normalize(rows[0].num);
+  return rows.length === 1 && integer(fuel) && fuel >= 0 ? fuel : null;
 }
 
 // 服务端巨轮返航保留货轮 UID，起点是货轮格，目标城池与舰队所属城池一致。
@@ -167,9 +185,26 @@ export function outstandingFleets(records, worldId) {
   });
 }
 
-function personalBattleMatches(details, report) {
+function canMatchCityReport(details) {
+  return details.kind === 'cityDispatch' && details.intent !== 'relocate' &&
+    integer(details.sentAt) && details.sentAt > 0 && integer(details.cityId) && details.cityId > 0 &&
+    ['attack', 'defence'].includes(details.role);
+}
+
+function personalBattleMatches(details, report, now) {
   const at = normalize(report?.createTime);
   if (!integer(at)) return false;
+  if (details.kind === 'cityDispatch') {
+    const battle = report.cityWar;
+    if (!canMatchCityReport(details) || report.type !== 2 || !exactAutomationId(report.uid) ||
+        battle?.buildingId !== details.buildingId || battle.cityId !== details.cityId ||
+        battle.isAttack !== (details.role === 'attack') ||
+        (details.scenarioId != null && report.scenarioId !== details.scenarioId)) return false;
+    // 旧派遣只保存了发送时间，用北京时间的城战日期排除下一场同城战报。
+    return integer(now) && at > details.sentAt && at <= now &&
+      (details.warEndTime == null ? dayOf(at) === dayOf(details.sentAt)
+        : integer(details.warEndTime) && at <= details.warEndTime);
+  }
   if (details.kind === 'worldBoss')
     return (
       report.type === 5 &&
@@ -440,14 +475,20 @@ export function settleFleetSnapshot(
         const observed = repairKinds.has(d.kind)
           ? fleetRepairConfirmed(fleet, d, now)
           : cityDispatchObserved(fleet, d);
-        if (!observed) continue;
-        ledger.resolveKey(key, true);
+        const report = !observed && home && d.kind === 'cityDispatch' &&
+          reports?.find(row => personalBattleMatches(d, row, now));
+        if (!observed && !report) continue;
+        ledger.confirm({ id: r.id, day: ledger.snapshot().day });
         confirmed = true;
-        changes.push({ key, reason: d.postBattle ? (fleet.durability >= fleet.maxDura ? '维修复查已确认耐久补满' : '维修复查已确认正在维修') : '确认城战或维修',
-          ...(d.postBattle ? { repairRecovery:true, buildingId:d.buildingId } : {}) });
+        if (report) {
+          changes.push({ key, reason: '个人战报已确认城战派遣', reportId: exactAutomationId(report.uid) });
+        } else if (d.postBattle) {
+          changes.push({ key, reason: fleet.durability >= fleet.maxDura ? '维修复查已确认耐久补满' : '维修复查已确认正在维修',
+            repairRecovery: true, buildingId: d.buildingId });
+        } else changes.push({ key, reason: '确认城战或维修' });
       }
       if (confirmed && home) {
-        ledger.releaseCompletedKey(key);
+        ledger.releaseCompletedKey(key, { ...records[key], confirmed: true });
         changes.push({ key, reason: '已返航，释放舰队槽位' });
       }
     }
@@ -460,7 +501,7 @@ const reportCache = new WeakMap();
 export function invalidateFleetReports(client) {
   reportCache.delete(client);
 }
-async function completionReports(client, worldId, records) {
+async function completionReports(client, worldId, records, now) {
   const signature = JSON.stringify([worldId, ...records.map((r) => [r.id, r.details.battleAt])]);
   const previous = reportCache.get(client);
   if (previous?.signature === signature && previous.finishedAt !== null && Date.now() - previous.finishedAt < 60000)
@@ -491,7 +532,7 @@ async function completionReports(client, worldId, records) {
       const id = exactAutomationId(report?.uid);
       if (!id || scan.seenIds.has(id)) scan.consistent = false;
       else scan.seenIds.add(id);
-      if (records.some((r) => personalBattleMatches(r.details, report))) {
+      if (records.some((r) => personalBattleMatches(r.details, report, now))) {
         if (id) scan.found.set(id, report);
         else if (report.type === 5) scan.found.set('boss:' + report.worldBoss.bossId, report);
       }
@@ -505,8 +546,8 @@ async function completionReports(client, worldId, records) {
       !page.reports.length ||
       records.every(
         (r) =>
-          r.details.kind === 'worldBoss' &&
-          [...scan.found.values()].some((rep) => personalBattleMatches(r.details, rep))
+          r.details.kind !== 'pirateFirst' &&
+          [...scan.found.values()].some((rep) => personalBattleMatches(r.details, rep, now))
       )
     ) {
       scan.finishedAt = Date.now();
@@ -514,7 +555,7 @@ async function completionReports(client, worldId, records) {
     }
   }
   if (scan.pageNo >= 200) scan.finishedAt = Date.now();
-  scan.reports = [...scan.found.values()].filter((r) => r.type === 5 || scan.complete);
+  scan.reports = [...scan.found.values()].filter((r) => r.type !== 1 || scan.complete);
   return scan.reports;
 }
 
@@ -542,19 +583,28 @@ export async function checkFleetSettlement(client, player, ledger, { afterPush =
     const readErrors = [];
     const read = async (name) => {
       try {
-        return await client.request(name + 'Request', {}, name + 'Response', 8000);
+        return await client.request(name + 'Request', {}, name + 'Response', fleetReadTimeoutMs);
       } catch (error) {
         readErrors.push({ request: name + 'Request', error: error.message });
         return null;
       }
     };
     const readStartedAt = Date.now();
-    const [own, radar, pirate, cargo, fields] = await Promise.all([
+    const serverReadAt = readStartedAt + (client.serverClockOffsetMs || 0);
+    const citySlots = outstanding.filter(([key, record]) => {
+      if (!owner || record.confirmed || record.details.kind !== 'cityDispatch') return false;
+      const sentAt = record.details.sentAt;
+      if (integer(sentAt) && sentAt > 0) return serverReadAt - sentAt * 1000 >= fleetReadTimeoutMs;
+      const reservedAt = ledger.reservationTime(key);
+      return integer(reservedAt) && reservedAt > 0 && readStartedAt - reservedAt >= fleetReadTimeoutMs;
+    });
+    const [own, radar, pirate, cargo, fields, bag] = await Promise.all([
       read('MyFleets'),
       kinds.has('radarSend') ? read('RadarInfo') : null,
       kinds.has('pirateFirst') ? read('PirateKillRecord') : null,
       outstanding.some(([, r]) => r.details.kind === 'treasureDispatch' && !r.confirmed) ? read('TreasureLootList') : null,
-      kinds.has('resourceFieldDispatch') ? read('MyResFields') : null
+      kinds.has('resourceFieldDispatch') ? read('MyResFields') : null,
+      citySlots.length ? read('AllItem') : null
     ]);
     if (!Array.isArray(own?.fleets) || !sameOwner() || client.connected === false) {
       emitDiagnostic(client, 'fleet-settlement', { worldId, readErrors, changes: [],
@@ -579,6 +629,18 @@ export async function checkFleetSettlement(client, player, ledger, { afterPush =
     };
     // 先按本人归队状态释放舰队，再补读战果，历史战报分页不能延长舰队占用。
     const changes = settleFleetSnapshot(ledger, { ...snapshot, allowBossTimeout: false });
+    const petrol = petrolFromInventory(bag);
+    if (petrol !== null) {
+      for (const [key, record] of citySlots) {
+        const matches = own.fleets.filter(f => f.buildingId === record.details.buildingId);
+        if (matches.length !== 1) continue;
+        const [fleet] = matches;
+        if (!fleetAtHome(fleet) || fleet.targetGridIdx || fleet.targetCityId || fleet.moveEndTs > now ||
+            fleet.repairing?.endTs > now || (fleet.owner && exactAutomationId(fleet.owner.playerId) !== owner)) continue;
+        if (ledger.retireUnknownKey(key, baseline[key], { releaseSlot: true }))
+          changes.push({ key, reason: '服务器已确认舰队空闲，按最新汽油库存解除城战预留', petrol });
+      }
+    }
     if (history && changes.length && Array.isArray(snapshot.resourceFields)) {
       const records = ledger.keyRecords();
       let updated = false;
@@ -594,10 +656,12 @@ export async function checkFleetSettlement(client, player, ledger, { afterPush =
     }
     let reports;
     const needReport = outstanding
-      .map(([, r]) => r)
-      .filter((r) => {
-        if (!own.fleets.some((f) => f.buildingId === r.details.buildingId && fleetAtHome(f)))
-          return false;
+      .filter(([key, r]) => {
+        const fleet = own.fleets.find(f => f.buildingId === r.details.buildingId && fleetAtHome(f));
+        if (!fleet) return false;
+        if (r.details.kind === 'cityDispatch')
+          return !r.confirmed && !changes.some(change => change.key === key) &&
+            canMatchCityReport(r.details) && !cityDispatchObserved(fleet, r.details);
         if (r.details.kind === 'worldBoss') return !r.details.observed && (dayOf(now) === r.details.day || !r.confirmed && !r.details.dispatchAccepted);
         return (
           r.confirmed &&
@@ -606,10 +670,10 @@ export async function checkFleetSettlement(client, player, ledger, { afterPush =
           integer(r.details.battleAt) &&
           !pirate?.records?.some((k) => k.type === r.details.type && k.maxKilledLevel >= r.details.level)
         );
-      });
+      }).map(([, r]) => r);
     if (needReport.length) {
       try {
-        reports = await completionReports(client, worldId, needReport);
+        reports = await completionReports(client, worldId, needReport, now);
       } catch (error) {
         readErrors.push({ request: 'CampaignReportsRequest', error: error.message });
       }
@@ -631,7 +695,7 @@ export async function checkFleetSettlement(client, player, ledger, { afterPush =
           chipWarRewardTs: f.chipWar?.rewardTs })),
         kills: pirate?.records,
         reports: reports?.map(r => ({ uid: exactAutomationId(r.uid), type: r.type, createTime: normalize(r.createTime),
-          scenarioId: r.scenarioId, pirate: r.pirate, worldBoss: r.worldBoss, win: r.win }))
+          scenarioId: r.scenarioId, pirate: r.pirate, worldBoss: r.worldBoss, cityWar: r.cityWar, win: r.win }))
     });
     return changes;
   })();

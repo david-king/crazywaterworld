@@ -826,6 +826,9 @@ try {
       expected.merchant.speedUpMode = 'deadline';
       expected.merchant.fullCargoRoutes = value ?? defaultSettings().merchant.fullCargoRoutes;
       expected.merchant.periodPointerLimit = document.settings.merchant.periodPointerLimit ?? -1;
+      expected.merchant.knownPortChains = true;
+      expected.merchant.minPurchaseReturnPercent = 0;
+      expected.merchant.speedUpIntelPorts = 0;
       expected.guildShip.checkEverySeconds = 60;
       expected.afk = { claimIntervalHours: 0 };
       expected.seasonMerit = { enabled: false, targetRank: 0, leadMinutes: 0 };
@@ -833,6 +836,7 @@ try {
       Object.assign(expected.weeklyActivity, { antiqueRecruitTickets: false, antiqueTicketLimit: 0 });
       expected.museum.targetFragments = [];
       expected.museum.unlockCases = false;
+      Object.assign(expected.schedule, { monthCardDaily: false, seasonCardDaily: false });
       Object.assign(expected.pet, { levelUp: false, levelUids: [] });
       expected.treasure.chasePlayerIds = [];
       expected.alliance.memberIds = [];
@@ -929,8 +933,21 @@ try {
     settings.alliance.memberIds = ['9e15'];
     assert.throws(() => validateSettings(settings), error => !!error.fields['alliance.memberIds']);
   });
+  test('70 版升级后默认关闭月卡和赛季卡日领，并保留已有显式选择', () => {
+    const settings = defaultSettings();
+    delete settings.schedule.monthCardDaily;
+    delete settings.schedule.seasonCardDaily;
+    settings.museum.unlockCases = true;
+    const from70 = () => importAutomationSettings({ format: SETTINGS_FORMAT, version: 70, settings });
+    const migrated = from70();
+    assert.equal(migrated.schedule.monthCardDaily, false);
+    assert.equal(migrated.schedule.seasonCardDaily, false);
+    assert.equal(migrated.museum.unlockCases, true);
+    settings.schedule.seasonCardDaily = true;
+    assert.equal(from70().schedule.seasonCardDaily, true);
+  });
   test('版本1升级后重复迁移保持一致，保留有效的用户值', () => {
-    assert.equal(SETTINGS_SCHEMA_VERSION, 68);
+    assert.equal(SETTINGS_SCHEMA_VERSION, 71);
     const settings = legacySettings();
     settings.factory.checkEverySeconds = 270;
     settings.resources.diamondDailyLimit = 1234;

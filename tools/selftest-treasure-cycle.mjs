@@ -22,6 +22,25 @@ const low = f => { f.state.fleets[0].durability = 1500; };
 const check = async (name, work) => { try { await work(); results.push({ name, passed: true }); console.log('通过：' + name); } catch (error) { results.push({ name, passed: false, error: error.stack }); console.error('失败：' + name + '\n' + error.stack); } };
 
 try {
+  await check('打满且舰队空闲后整轮跳过巨轮刷新，手动查看和改为持续参与仍可读', async () => {
+    const f = treasureCycleFixture(), s = treasureCycleSettings(), usage = ledger();
+    f.state.stats.todayRewardTimes = 3;
+    const round = () => runLoop(f.client, f.protocol, { config: f.config, player: f.player, rounds: 1,
+      allowMutate: true, isEnabled: () => false, getSettings: () => s, usageLedger: usage });
+    await round();
+    assert(f.calls.some(row => row.name === 'TreasureLootStatsRequest'));
+    assert(!f.calls.some(row => row.name === 'TreasureLootDefenceRequest'));
+    f.calls.length = 0;
+    f.client.emit('message', {name:'SCTreasureLootRefresh',body:{}});
+    const fleetPush = buildingId => f.client.emit('message', {name:'SCMyFleetUpdate',body:{fleets:[{buildingId,treasureLootUid:72,state:2}]}});
+    fleetPush('2远征船');
+    await round(); assert(!f.calls.some(row => row.name.startsWith('TreasureLoot')));
+    fleetPush('1远征船');
+    await round(); assert(f.calls.some(row => row.name === 'TreasureLootStatsRequest'));
+    await read(f, s); assert(f.calls.some(row => row.name === 'TreasureLootDefenceRequest'));
+    f.calls.length = 0; s.treasure.participationMode = 'always'; await round();
+    assert(f.calls.some(row => row.name === 'TreasureLootStatsRequest'));
+  });
   await check('旧配置原值与文件不变，新增行为默认值及导入校验正确', () => {
     const old = defaultSettings(); old.treasure.minDurabilityPercent = 91; old.treasure.followNames = ['原有名单'];
     for (const key of ['avoidPlayerIds', 'participationMode', 'repeatAttack', 'autoRepair', 'maxRepairCost', 'dailyRepairPetrolLimit']) delete old.treasure[key];

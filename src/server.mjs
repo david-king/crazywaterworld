@@ -71,11 +71,11 @@ import { challengeTrial, trialProgress, createTrialTask, readRaid, trialStageSum
 import { readTrialSweeps, executeTrialSweep } from './trial-sweeps.mjs';
 import { readHeroEquipment, equipHeroEmptySlots, enhanceHeroEquipment, uidText } from './hero-equipment.mjs';
 import { readEquipmentCrafting, startEquipmentCraft, collectEquipmentCraft } from './equipment-crafting.mjs';
-import { readLineups, applyLineup, editorLineupRecommendations } from './lineups.mjs';
+import { readLineups, applyLineup, editorLineupRecommendations, readGameLineups, applyGameLineup } from './lineups.mjs';
 import { moveLeagueTeam, readManualLeagueOrder, recoverLeagueOrder } from './league-order.mjs';
 import { describePets, getLineupCatalog, normalizeFormation, readLineupEditor, validateLineupSettings } from './saved-lineups.mjs';
 import { readPetLevelRoster } from './pet-leveling.mjs';
-import { readLineupRuntime, recoverLineup } from './lineup-runtime.mjs';
+import { lineupRecoveryView, readLineupRuntime, recoverLineup } from './lineup-runtime.mjs';
 import { createLineupExecutor, lineupRole, selectedSavedLineup } from './lineup-execution.mjs';
 import { lineupArt } from './lineup-art.mjs';
 import { pirateBoard } from './pirate-board.mjs';
@@ -91,6 +91,7 @@ import { listWorlds, enterWorld, describeRole } from './worlds.mjs';
 import { collectState, summarize, formatState, ENTRY_QUERIES } from './game.mjs';
 import { claimRewards } from './claim-rewards.mjs';
 import { readAfkUpgrade } from './afk-upgrade.mjs';
+import { dailyCardKeys } from './daily-card-rewards.mjs';
 import { newbieView } from './collections.mjs';
 import { normalize } from './worlds.mjs';
 import { pirateTracker, pirateHuntOptions, startPirateHunt } from './pirates.mjs';
@@ -808,6 +809,7 @@ export function createConsole({ host = '127.0.0.1', port = 17321, onLog, recover
       productionSyncRequired: saved?.productionSyncRequired === true,
       productionSyncDrain: null,
       syncingProduction: null,
+      materialRestock: {},
       generation: 0,
       hostingPauseRevision: 0,
       client: null,
@@ -837,6 +839,7 @@ export function createConsole({ host = '127.0.0.1', port = 17321, onLog, recover
       shops: createShopState(),
       loop: {
         running: false,
+        factoryReportReplayPending: true,
         autoStart: detailed.recovery ? false : saved?.autoStart ?? saved?.enabled ?? false,
         rounds: preferences?.loop.rounds ?? saved?.rounds ?? 0,
         completed: 0,
@@ -887,12 +890,6 @@ export function createConsole({ host = '127.0.0.1', port = 17321, onLog, recover
       session.operations = createOperationJournal((level, message, data, quiet) => emit(session, level, message, data, quiet), LOG_LIMIT);
       sessions.set(id, session);
       if (session.settingsRecovery) emit(session, 'error', session.settingsRecovery.message);
-      if (!session.paused) {
-        try {
-          const audit = JSON.parse(fs.readFileSync(factoryReportFile(id), 'utf8'));
-          if (audit.lines?.length) emit(session, 'info', '上次工厂检查 · ' + audit.time, { diagnostic: audit.lines.join('\n') });
-        } catch { /* 新账号没有历史核对记录 */ }
-      }
     }
     return sessions.get(id);
   }
@@ -1001,7 +998,7 @@ export function createConsole({ host = '127.0.0.1', port = 17321, onLog, recover
 
   function lineupPresetsView(session) {
     const current = settingsView(session);
-    const recovery = readLineupRuntime(session.id);
+    const recovery = lineupRecoveryView(session.id);
     syncLineupRecoveryState(session, recovery);
     return { ...current.settings.lineups, revision: current.revision,
       trialRaids: current.catalog.trialRaids, catalog: getLineupCatalog(loadConfigSafe()),
@@ -1227,7 +1224,7 @@ export function createConsole({ host = '127.0.0.1', port = 17321, onLog, recover
   async function refreshFleetReservations(session) {
     if (!session.loop.running) return;
     await refreshCityWarReservations(session.client, protocolFor(session.client), loadConfigSafe(), session.player,
-      () => session.preferences);
+      () => session.preferences, usageFor(session));
   }
   function actionGuard(session, client, config) {
     const generation = session.generation;
@@ -1312,10 +1309,11 @@ export function createConsole({ host = '127.0.0.1', port = 17321, onLog, recover
           for (const [id, entry] of entries) {
             if (!running()) return;
             const task = entry.jobs[0]?.crop ? 'farm' : 'startProduce';
-            const enabled = () => running() && session.loop.tasks[task] && nativePreferenceEnabled(session.preferences, task);
+            const settings = session.preferences;
+            const enabled = () => running() && settings === session.preferences && session.loop.tasks[task] && nativePreferenceEnabled(settings, task);
             if (!enabled()) continue;
             const message = await advanceFactoryInsertion(instance, protocolFor(instance),
-              { player, enabled, config:loadConfigSafe(), settings:session.preferences }, id);
+              { player, enabled, config:loadConfigSafe(), settings }, id);
             if (message) emit(session,'warn',message,{ worldUpdated:true });
           }
         }, '执行排产插单');
@@ -2060,7 +2058,7 @@ export function createConsole({ host = '127.0.0.1', port = 17321, onLog, recover
       orderNum,
       rewardedNum: Number(order.rewardedNum ?? 0),
       tier: tier.tier,
-      reqNums: tier.reqNums,
+      reqNums: tier.maxTier === null ? [] : tier.reqNums,
       claimable: tier.claimable,
       baseMax,
       bonus: cap === null ? null : cap - baseMax,
@@ -2080,7 +2078,7 @@ export function createConsole({ host = '127.0.0.1', port = 17321, onLog, recover
     const settings = session.preferences;
     const usage = usageFor(session).snapshot();
     const extra = settings && (!buildingsView || survey.orders.length) ? await surveyBaseAutomation(instance, protocolFor(instance), config, session.player, settings, survey, { ledger: usageFor(session), enabled: () => session.client === instance && instance.connected !== false }) : null;
-    const planOptions = { config, settings, usage,
+    const planOptions = { config, settings, usage, materialRestock: { ...session.materialRestock },
       extraDemand: extra ? baseDemands(extra, config, settings) : [],
       allowSpeedUp: allowAccelerators && (!settings || session.loop.tasks.speedUp),
       ...(settings ? { enabled: kind => session.loop.tasks[worldTaskKey(kind)] === true, allowReroll: settings.resident.reroll, minOrderExp: settings.resident.minExp } : {}) };
@@ -2896,7 +2894,7 @@ export function createConsole({ host = '127.0.0.1', port = 17321, onLog, recover
             const own=await client.request('MyFleetsRequest',{},'MyFleetsResponse');
             if(!Array.isArray(own.fleets))throw Error('舰队状态未同步');
             const table=fleetDispatchView(client,settings,usageFor(session),own.fleets,exactAutomationId(session.player.worldId));
-            return {...output({actions:[],notes:['任务顺序：'+settings.fleetDispatch.priority.map(k=>dispatchLabels[k]).join(' → '),'意向仅表示配置允许；派遣前仍核对目标和费用，正在执行的任务不抢占。']},{fleets:table.length},'舰队调度'),viewOnly:true,dispatch:{fleets:table.map(f=>({name:f.buildingId,reason:[f.reason,...f.reserved.map(r=>'预留给'+r),'允许顺序：'+(f.intents.map(i=>i.label).join(' → ')||'无'),'当前目标：'+(f.targetGrid??'主城')].filter(Boolean).join('；')}))}};
+            return {...output({actions:[],notes:['任务顺序：'+settings.fleetDispatch.priority.map(k=>dispatchLabels[k]).join(' → '),'意向仅表示配置允许；派遣前仍核对目标和费用，正在执行的任务不抢占。']},{fleets:table.length},'舰队调度'),viewOnly:true,dispatch:{fleets:table.map(f=>({name:f.buildingId,reason:[f.reason,...f.reservationNotes,'允许顺序：'+(f.intents.map(i=>i.label).join(' → ')||'无'),'当前目标：'+(f.targetGrid??'主城')].filter(Boolean).join('；')}))}};
           }
           if(category==='pirateSweep'){
             const state=await readPirateSweeps(client,config,session.player,settings,usageFor(session)),notes=[];
@@ -3033,6 +3031,7 @@ export function createConsole({ host = '127.0.0.1', port = 17321, onLog, recover
               }
               for (const action of daily.chests?.actions ?? []) if (action.request === 'DrawWeeklyRewardRequest' ? settings.dailies.claimWeeklyChest : settings.dailies.claimDailyChest) actions.push({ ...action, kind: 'reward', label: action.note });
               if (settings.dailies.claimGift) for (const action of daily.gift?.actions ?? []) actions.push({ ...action, kind: 'reward', label: action.note });
+              for (const card of daily.cards) if (card.state === 'claimable') actions.push({ kind: 'reward', label: card.text });
             }
             if (settings.trials.paid || settings.trials.ads) {
               const account = scoped_(parsed).account, ledger = usageFor(session);
@@ -3052,7 +3051,7 @@ export function createConsole({ host = '127.0.0.1', port = 17321, onLog, recover
             }
             const checked = budgetPreview(actions, new Map([['RUBY', daily.ruby]]), settings, usage);
             const dailyNotes = daily.tasks.filter(entry => entry.reason).map(entry => entry.task.title + '：' + entry.reason);
-            const rewardNotes = [...tasks.notes];
+            const rewardNotes = [...tasks.notes, ...daily.cards.filter(card => card.state !== 'claimable').map(card => card.text)];
             if (settings.schedule.afkUpgrade) {
               const upgrade = await readAfkUpgrade(client, config, session.player, usageFor(session));
               if (upgrade.action) {
@@ -3067,7 +3066,7 @@ export function createConsole({ host = '127.0.0.1', port = 17321, onLog, recover
           const survey = await surveyWorld(client, protocolFor(client), { config, player: session.player, includeCargo: settings.cargo.enabled || settings.factory.demandPriority.includes('cargo') });
           const extra = await surveyBaseAutomation(client, protocolFor(client), config, session.player, settings, survey, { ledger: usageFor(session), enabled: () => session.client === client && client.connected !== false });
           const flags = nativeTaskValues(settings, session.loop.tasks);
-          const worldPlan = planWorld(survey, { config, settings, usage, extraDemand: baseDemands(extra, config, settings),
+          const worldPlan = planWorld(survey, { config, settings, usage, materialRestock: { ...session.materialRestock }, extraDemand: baseDemands(extra, config, settings),
             enabled: kind => flags[worldTaskKey(kind)] === true, allowSpeedUp: flags.speedUp, allowReroll: settings.resident.reroll, minOrderExp: settings.resident.minExp });
           const extraPlan = planBaseAutomation(extra, config, settings, usage);
           const nativePlan = await previewNativeAutomation(client, config, session.player, settings, flags, survey, usage, worldPlan.cargoLoadLimits);
@@ -4199,11 +4198,13 @@ export function createConsole({ host = '127.0.0.1', port = 17321, onLog, recover
       }
       if (route === 'GET /api/lineup-editor') {
         const { session, account } = scoped_(parsed);
-        json(await progressionJob(session, account, route, '读取布阵信息', async client => {
+        const scope = parsed.searchParams.get('scope');
+        const includeMainline = scope !== 'game' && scope !== 'fleet';
+        json(await progressionJob(session, account, route + ':' + scope, '读取布阵信息', async client => {
           const config = loadConfigSafe();
-          const editor = await readLineupEditor(client, config, session.player);
+          const editor = await readLineupEditor(client, config, session.player, { includeMainline, includePets: scope !== 'fleet' });
           return { ...editor, recommendations: editorLineupRecommendations(config, editor), ...lineupPresetsView(session) };
-        }));
+        }, { read: true }));
         return;
       }
       if (route === 'POST /api/lineup-presets/save') {
@@ -4254,6 +4255,22 @@ export function createConsole({ host = '127.0.0.1', port = 17321, onLog, recover
           await recoverSessionLineup(session, { resolution: payload.resolution, expectedTransactionId: payload.expectedTransactionId });
           return lineupPresetsView(session);
         }, '核对待恢复阵容', { recoverFormation: false }));
+        return;
+      }
+      if (route === 'GET /api/lineups/game') {
+        const { account, session } = scoped_(parsed);
+        json(await progressionJob(session, account, route, null, client => readGameLineups(client, loadConfigSafe(), session.player), { read: true }));
+        return;
+      }
+      if (route === 'POST /api/lineups/game/apply') {
+        const { account, session } = scoped_(parsed), payload = jsonBody();
+        needConfirm(payload);
+        const key = JSON.stringify([route, payload.targetKey, payload.version, payload.formation]);
+        json(await progressionJob(session, account, key, operationLabels[parsed.pathname], async (client, enabled) => {
+          const result = await applyGameLineup(client, loadConfigSafe(), session.player, payload, enabled);
+          emit(session, 'info', result.label);
+          return result;
+        }));
         return;
       }
       if (route === 'GET /api/lineups') {
@@ -4706,6 +4723,7 @@ export function createConsole({ host = '127.0.0.1', port = 17321, onLog, recover
             let result = planProduction(snapshot, config, settings, { pendingMaterials });
             const anchors = new Map();
             const forecast = await forecastProductionDay(snapshot, config, settings, result.orders, {
+              materialRestock: session.materialRestock,
               anchors, insertions, pendingMaterials, checkCurrent() { if (!accountCurrent()) throw new Error('账号已变化，请重新计算'); },
             });
             if (forecast.initialQueueChanges?.length) {
@@ -5054,8 +5072,13 @@ export function createConsole({ host = '127.0.0.1', port = 17321, onLog, recover
           if (session.overviewRead) await session.overviewRead;
           const instance = await ensureConnected(session, account);
           emit(session, 'info', '开始一键领取');
-          const results = await claimRewards(instance, protocolFor(instance), loadConfigSafe(), ({ label, ok, error }) =>
-            emit(session, ok ? 'info' : 'error', ok ? `领取 · ${label}` : `领取 · ${label}失败：${error}`), undefined, undefined, undefined, session.player, { settings: session.preferences });
+          const results = await claimRewards(instance, protocolFor(instance), loadConfigSafe(), ({ id, label, ok, skipped, status, error, taskKey }) =>
+            emit(session, ok || skipped ? 'info' : status === 'pending' ? 'warn' : 'error',
+              taskKey === 'orderDaily' && status === 'pending' ? error :
+                ok || skipped || status === 'pending' || dailyCardKeys.includes(id) ? `领取 · ${label}` : `领取 · ${label}失败：${error}`),
+            key => !dailyCardKeys.includes(key) || (!session.paused && session.client === instance && instance.connected), undefined, undefined, session.player,
+            { settings: session.preferences, getSettings: () => session.preferences, ledger: usageFor(session),
+              orderSelected: () => !session.paused && session.client === instance && instance.connected });
           try { await claimReportRewards(instance,loadConfigSafe(),{enabled:()=>!session.paused&&instance.connected,ledger:usageFor(session),report:entry=>{results.push(entry);emit(session,entry.ok||entry.skipped?'info':'error','战报 · '+(entry.reason||entry.error||entry.label));}}); }
           catch(error){results.push({label:'战报奖励',ok:false,error:error.message});}
           const failed = results.filter((entry) => !entry.ok&&!entry.skipped).length;
@@ -5130,8 +5153,13 @@ export function createConsole({ host = '127.0.0.1', port = 17321, onLog, recover
         const results = await runDailies(instance, protocolFor(instance), survey, {
           allowMutate: true,
           allowPaid: payload.paid === true, ledger: usageFor(session),
+          rewardEnabled: () => !session.paused && session.client === instance && instance.connected,
           settings: session.preferences, getSettings: () => session.preferences, beforeAction: guard.before, afterAction: guard.after, cancelAction: guard.cancel,
           onStep: (entry) => {
+            if (dailyCardKeys.includes(entry.id)) {
+              emit(session, entry.status === 'pending' ? 'warn' : entry.error ? 'error' : 'info', entry.label);
+              return;
+            }
             if (reportOperationStep(session, entry, entry.ok ? 'info' : entry.skipped ? 'warn' : 'error', formatLoopStep(entry))) return;
             if (entry.skipped) emit(session, 'warn', `日常「${entry.title}」跳过：${entry.reason}`);
             else emit(session, entry.ok ? 'info' : 'error', entry.ok ? `日常「${entry.title}」${entry.note}` : `日常「${entry.title}」${entry.note ?? ''}失败：${entry.error}`,
@@ -5142,7 +5170,7 @@ export function createConsole({ host = '127.0.0.1', port = 17321, onLog, recover
         await new Promise((resolve) => setTimeout(resolve, 1200));
         const after = await surveyDailies(instance, protocolFor(instance), { config, player: session.player, settings: session.preferences, ledger: usageFor(session) });
         const claimed = results
-          .filter((entry) => entry.ok && (entry.request === 'DrawDailyTaskRewardRequest' || entry.id === 'activityChest' || entry.id === 'freeDailyPack'))
+          .filter((entry) => entry.ok && (entry.request === 'DrawDailyTaskRewardRequest' || entry.id === 'activityChest' || entry.id === 'freeDailyPack' || dailyCardKeys.includes(entry.id)))
           .map((entry) => entry.note);
         json({ results, claimed, ms: Date.now() - started, ...addDailyOptions(after, session.dailySingle) });
         return;
@@ -5155,15 +5183,17 @@ export function createConsole({ host = '127.0.0.1', port = 17321, onLog, recover
         const survey = await tasks(session, account);
         const results = await runTasks(instance, protocolFor(instance), survey, {
           allowMutate: true,
-          settings: session.preferences,
+          settings: session.preferences, getSettings: () => session.preferences,
+          enabled: () => !session.paused && session.client === instance && instance.connected,
           onStep: (entry) => {
-            if (entry.skipped) emit(session, 'warn', `任务「${entry.step.label}」跳过：${entry.error}`);
+            if (entry.pending) emit(session, 'warn', entry.error);
+            else if (entry.skipped) emit(session, 'warn', `任务「${entry.step.label}」跳过：${entry.error}`);
             else emit(session, entry.ok ? 'info' : 'error', entry.ok ? `领取 ${entry.step.label}` : `领取 ${entry.step.label} 失败：${entry.error}`);
           },
         });
         await new Promise((resolve) => setTimeout(resolve, 1200));
         const after = await tasks(session, account);
-        json({ results: results.map((r) => ({ label: r.step.label, ok: r.ok, skipped: r.skipped, error: r.error })), plan: after.plan, text: after.text });
+        json({ results: results.map((r) => ({ label: r.step.label, ok: r.ok, status: r.status, skipped: r.skipped, error: r.error })), plan: after.plan, text: after.text });
         return;
       }
       if (route === 'POST /api/world/run') {
@@ -5179,7 +5209,7 @@ export function createConsole({ host = '127.0.0.1', port = 17321, onLog, recover
         const settings = session.preferences;
         const usage = usageFor(session).snapshot();
         const extra = settings ? await surveyBaseAutomation(instance, protocolFor(instance), config, session.player, settings, survey, { ledger: usageFor(session), enabled: () => session.client === instance && instance.connected !== false }) : null;
-        const plan = planWorld(survey, { config, settings, usage, trackRefills:true, extraDemand: extra ? baseDemands(extra, config, settings) : [],
+        const plan = planWorld(survey, { config, settings, usage, materialRestock: session.materialRestock, trackRefills:true, extraDemand: extra ? baseDemands(extra, config, settings) : [],
           allowSpeedUp: allowAccelerators && (!settings || session.loop.tasks.speedUp), allowReroll: settings ? settings.resident.reroll : payload.reroll === true,
           ...(settings ? { enabled: kind => session.loop.tasks[worldTaskKey(kind)] === true, minOrderExp: settings.resident.minExp } : {}) });
         plan.actions = plan.actions.filter(step => allowAccelerators || !(step.costs ?? []).some(cost => cost.id === '加速器' && cost.num > 0));
@@ -5502,10 +5532,18 @@ export function createConsole({ host = '127.0.0.1', port = 17321, onLog, recover
       session.loginBlocked = false;
     }
     saveAutomation(account.id, { enabled: rounds === 0, autoStart: rounds === 0, rounds, everySeconds, loginBlocked: session.loginBlocked });
+    session.materialRestock = {};
     Object.assign(loop, { running: true, rounds, completed: 0, everyMs: everySeconds * 1000,
       history: [], error: null, recovery: null, connectionFailure: null, fleetMaintenance: null, challengeRun: createChallengeRun(), controller: new AbortController() });
     const { signal } = loop.controller;
     emit(session, 'info', `自动挂机开始，${rounds === 0 ? '持续运行' : '共 ' + rounds + ' 轮'}，每 ${everySeconds} 秒检查一次；关闭网页后继续运行，请保留启动窗口`);
+    if (loop.factoryReportReplayPending) {
+      loop.factoryReportReplayPending = false;
+      try {
+        const audit = JSON.parse(fs.readFileSync(factoryReportFile(session.id), 'utf8'));
+        if (audit.lines?.length) emit(session, 'info', '上次工厂检查 · ' + audit.time, { diagnostic: audit.lines.join('\n') });
+      } catch { /* 历史报告缺失或损坏时仍可启动挂机。 */ }
+    }
     trace(session, 'automation-run', { startedAt: RUN_VERSION, settingsRevision: session.preferencesRevision,
       rounds, everySeconds, tasks: loop.tasks, reconnect: reconnectPolicy(session), settings: effectiveSettings(session) });
     let credentialFailed = false, recoveryAttempts = 0;
@@ -5539,6 +5577,7 @@ export function createConsole({ host = '127.0.0.1', port = 17321, onLog, recover
         const completedBefore = loop.completed;
         const { appId, channelId, originVersion } = currentAccount.login?.eworldClientInfo ?? {};
         await runLoop(client, protocolFor(client), { config: loadConfigSafe(), refreshConfig: loadConfigSafe, player: session.player,
+          materialRestock: session.materialRestock,
           adChannel: { clientInfo: { appId, channelId, originVersion }, language: currentAccount.login?.language },
           rounds: rounds === 0 ? 0 : rounds - completedBefore, everyMs: loop.everyMs, allowMutate: true, stop: attemptController.signal,
           schedule: work => enqueue(session, work),

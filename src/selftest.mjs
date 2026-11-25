@@ -767,7 +767,7 @@ roundTrip(Buffer.from('RequestResponse'.repeat(200)), 'text');
   const noPirates = DAILY_DRIVERS[1010].evaluate({ task: { id: 1010, progress: 0, targetProgress: 5 }, probe: () => ({ pirates: [] }), items: new Map(), ruby: 0, now: 0, config });
   assert.equal(noPirates.status, 'waiting', 'daily task panel delegates free pirate sweeps to the independent service');
   assert.equal(noPirates.actions?.length ?? 0, 0, 'legacy daily task driver must not send unfiltered pirate sweeps');
-  assert.match(noPirates.reason, /游戏剩余次数/);
+  assert.match(noPirates.reason, /海盗.*每日免费扫荡/);
   assert.equal(noPirates.actions, undefined);
 
   const stage = DAILY_DRIVERS[1003].evaluate({ task: { id: 1003, progress: 0, targetProgress: 1 }, probe: () => null, items: new Map(), ruby: 0, now: 0, config, player: { mainlineStage: 41, level: 11 } });
@@ -1196,12 +1196,18 @@ roundTrip(Buffer.from('RequestResponse'.repeat(200)), 'text');
     'BuildBuildingRequest', 'GotFreeDailyPackRequest',
     'DenyOrderRequest', 'SpeedUpFactoryProduceRequest', 'SetBuildingAutoWorkRequest',
     'QuickGotReadEmailRequest', 'DrawDailyRewardRequest', 'DrawWeeklyRewardRequest', 'MonthCardDailyRewardRequest',
-    'ChallengeResFieldRequest', 'GiveUpResFieldRequest',
+    'ChallengeResFieldRequest', 'GiveUpResFieldRequest', 'SeasonCardGotDailyRequest',
   ]);
   const sent = [];
   const client = {
     request: async (name) => {
       sent.push({ via: 'request', name });
+      if (name === 'MonthCardRequest') return { cardItem: [
+        { type: 1, endTime: -1, gotDailyReward: sent.some(row => row.name === 'MonthCardDailyRewardRequest') },
+      ] };
+      if (name === 'SeasonCardRequest') return {
+        isPaid: true, customId: [1, 2, 3], gotDaily: sent.some(row => row.name === 'SeasonCardGotDailyRequest'),
+      };
       if (name === 'EmailBoxRequest') {
         const got = sent.some(row => row.name === 'QuickGotReadEmailRequest');
         return { total: 1, email: [{ emailId: '1', attachment: {}, status: got ? 1 : 2, got }] };
@@ -1224,7 +1230,7 @@ roundTrip(Buffer.from('RequestResponse'.repeat(200)), 'text');
     const writes = sent.filter(row => row.name === action.request);
     assert.equal(writes.length, 1, `${id} sends exactly one action message`);
     assert.equal(writes[0].via, action.response ? 'request' : 'watch', `${id} must go through ${action.response ? 'request' : 'watch'}`);
-    assert.equal(sent.length, id === 'emailQuickGet' ? 3 : 1, `${id} only adds required confirmation reads`);
+    assert.equal(sent.length, ['emailQuickGet', 'monthCardDaily', 'seasonCardDaily'].includes(id) ? 3 : 1, `${id} only adds required confirmation reads`);
   }
   checked += 1;
 }

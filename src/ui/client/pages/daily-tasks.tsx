@@ -21,6 +21,7 @@ import {
 } from "../../table";
 import {
   type DailyTask,
+  parseCardRewards,
   parseDailyOutcome,
   parseDailyTasks,
 } from "../contracts/daily-tasks";
@@ -51,6 +52,7 @@ function statusLabel(task: DailyTask) {
 
 function TaskList({ account }: { account: string }) {
   const [tasks, setTasks] = useState<DailyTask[] | null>(null);
+  const [cardRewards, setCardRewards] = useState<string[]>([]);
   const [busy, setBusy] = useState(true);
   const [revision, setRevision] = useState(0);
   const [notice, setNotice] = useState("");
@@ -67,10 +69,14 @@ function TaskList({ account }: { account: string }) {
         const data = await createAccountRequest(account)("/api/dailies", {
           signal,
         });
-        if (!signal.aborted) setTasks(parseDailyTasks(data));
+        if (!signal.aborted) {
+          setTasks(parseDailyTasks(data));
+          setCardRewards(parseCardRewards(data));
+        }
       } catch (err) {
         if (!signal.aborted) {
           setTasks(null);
+          setCardRewards([]);
           setError(err instanceof Error ? err.message : "读取日常任务失败");
         }
       } finally {
@@ -160,6 +166,16 @@ function TaskList({ account }: { account: string }) {
           {notice || (busy ? "正在读取任务进度…" : "")}
         </p>
         {error && <p role="alert">{error}</p>}
+        {cardRewards.length > 0 && (
+          <section className="mb-3" aria-label="每日领奖">
+            <h3 className="font-medium">每日领奖</h3>
+            <ul>
+              {cardRewards.map((reward) => (
+                <li key={reward}>{reward}</li>
+              ))}
+            </ul>
+          </section>
+        )}
         {tasks?.length === 0 && <p className="dim">当前账号暂无日常任务</p>}
         {tasks && tasks.length > 0 && (
           <div className="table-stack">

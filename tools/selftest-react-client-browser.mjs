@@ -482,6 +482,10 @@ try {
       }
       return route.fulfill({
         json: {
+          cards: [
+            { text: "普通月卡今日奖励已领取" },
+            { text: "赛季卡自选奖励已选 2/3，请在游戏内选满三项" },
+          ],
           tasks: [
             {
               task: {
@@ -528,6 +532,11 @@ try {
     );
     await panel.getByText("已完成 1 / 3").waitFor();
     const table = panel.getByRole("table", { name: "日常任务进度" });
+    const rewards = panel.getByRole("region", { name: "每日领奖" });
+    await rewards.getByText("普通月卡今日奖励已领取").waitFor();
+    await rewards
+      .getByText("赛季卡自选奖励已选 2/3，请在游戏内选满三项")
+      .waitFor();
     const names = table.locator("tbody tr td:first-child > span");
     const order = ["登录游戏", "领取挂机收益", "折扣商店购买"];
     assert.deepEqual(await names.allTextContents(), order);

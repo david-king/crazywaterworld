@@ -620,14 +620,16 @@ test('a game update waits for current purchases to settle before discarding thei
   const settled = await f.read('discount'); assert.equal(settled.gameRefresh.canRefresh, true); assert.equal(f.ledger.snapshot().uncertain, 0);
   assert.equal((await updateGameShop(f)).status, 'completed');
 });
-const autoShop = f => runDiscountShop(f.client, f.config, { ...f.options, report() {} });
+const autoShop = (f, report = () => {}) => runDiscountShop(f.client, f.config, { ...f.options, report });
 const blueprintRule = { id: '建筑蓝图', maxPercent: 50, maxDiamonds: null };
 test('old shop switches migrate without granting rules or refreshes', async () => {
   const f = fixture(), old = defaultSettings();
   old.schedule.shop = true; delete old.discountShop;
   const upgraded = importAutomationSettings({ ...exportAutomationSettings(defaultSettings()), settings: old, version: 40 });
   Object.assign(f.settings, upgraded);
-  await autoShop(f);
+  const reports = [];
+  await autoShop(f, entry => reports.push(entry));
+  assert.deepEqual(reports, [{ skipped: true, reason: '检查时该账号的购买清单为 0 项' }]);
   assert.equal(f.calls.length, 0);
   for (const rule of [{ ...blueprintRule, maxPercent: null }, { ...blueprintRule, maxPercent: 101 }, { ...blueprintRule, maxDiamonds: -1 }]) {
     f.settings.discountShop.rules = [rule]; assert.throws(() => validateSettings(f.settings), /购买|上限/);
@@ -657,7 +659,12 @@ test('rotation buys from the new shelf after the last free refresh and stops at 
   const item = f.discounts[0]; item.reward.asset[0].id = '木材';
   f.shared.refreshCount = 1;
   f.hooks.DiscountShopRefreshRequest = () => { item.id = 905; item.reward.asset[0].id = '建筑蓝图'; };
-  await autoShop(f); await autoShop(f);
+  await autoShop(f);
+  const reports = [];
+  await autoShop(f, entry => reports.push(entry));
+  assert.equal(reports.length, 1);
+  assert.equal(reports[0].skipped, true);
+  assert.match(reports[0].reason, /购买清单 1 项.*没有符合条件的待购商品.*下次刷新需 50 钻石/);
   assert.equal(f.shared.refreshCount, 2); assert.equal(refreshWrites(f).length, 1);
   assert.deepEqual(sent(f).map(([, body]) => body.id), [905]);
   assert.equal(f.ledger.confirmedCounters().discountShopDiamonds, 51);

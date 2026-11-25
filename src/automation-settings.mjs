@@ -17,13 +17,14 @@ import { fleetSpeedDefaults, fleetSpeedEnabled, FLEET_SPEED_NUMBERS, validateFle
 import { cityWarFleetStrategy, cityWarUsesGlobalStrategy, validateCityWarFleetStrategies } from './city-war-settings.mjs';
 import { WEEKLY_ACTIVITY_DEFAULTS, WEEKLY_ACTIVITY_CONSTRAINTS, validateWeeklyActivitySettings, migrateWeeklyActivitySettings } from './weekly-activity-settings.mjs';
 import { resourceFieldIds, defaultResourceFieldAmounts } from './resource-field-allocation.mjs';
+import { migrateMerchantPreset } from './merchant-preset-settings.mjs';
 
 // 设置与登录凭据分开保存。导出只包含设置，不包含账号、凭据或用量账本。
 export const settingsFile = () => path.join(dataDirectory(), 'automation-settings.json');
 export const SETTINGS_FORMAT = 'crazywaterworld-automation';
 // 文件 version / 账号 settingsVersion 是格式编号，只随结构迁移调整；
 // revision 是每次保存递增的修订号，仅用于并发冲突检查，不能用作格式版本。
-export const SETTINGS_SCHEMA_VERSION = 68;
+export const SETTINGS_SCHEMA_VERSION = 71;
 const LEGACY_SETTINGS_FORMAT = 'crazywaterword-automation';
 const treasureQualityLabels = { ORANGE: '万吨货轮', PURPLE: '中型货轮', BLUE: '小型货轮' };
 const treasureChaseDefaults = {
@@ -61,9 +62,9 @@ export const DEFAULT_SETTINGS = {
   weeklyActivity: WEEKLY_ACTIVITY_DEFAULTS,
   weekOrder: { enabled: false, allowDiamonds: false },
   merchant: { enabled: false, fullCargoRoutes: false, autoShareIntel: false, quoteMaxAgeSeconds: 300, estimateDiscountPercent: 0, refreshWaitSeconds: 120, liquidationMinutes: 120,
-    maxLossPercent: 0, minExpectedProfit: 1, autoSpeedUp: false, keepPointers: 0,
+    maxLossPercent: 0, minExpectedProfit: 1, knownPortChains: true, minPurchaseReturnPercent: 0, autoSpeedUp: false, keepPointers: 0,
     speedUpMode: 'deadline', guardLastPointer: false, speedUpMaxPerLeg: 4, monitorSeconds: 60,
-    refreshWindowMinutes: 8, dailyPointerLimit: 28, periodPointerLimit: -1, autoBuyPointers: false, pointerDailyDiamondLimit: 0,
+    refreshWindowMinutes: 8, dailyPointerLimit: 28, periodPointerLimit: -1, speedUpIntelPorts: 0, autoBuyPointers: false, pointerDailyDiamondLimit: 0,
     profitLimit: 0, firstDepartureMode: 'smart', firstDepartureTime: '10:00', firstDepartureWaitMinutes: 29,
     autoUpgrade: false },
   loop: { rounds: 0, everySeconds: 60, tasks: false, dailies: false, world: false, heroes: false },
@@ -135,10 +136,11 @@ const constraints = {
   'login.quietStart': { kind: 'time' }, 'login.quietEnd': { kind: 'time' },
   'eventActions.compassThreshold':int(999999,1), 'eventActions.compassDrawCount':int(50,1),
   'merchant.quoteMaxAgeSeconds': int(86400, 1), 'merchant.estimateDiscountPercent': int(100),
+  'merchant.minPurchaseReturnPercent': int(100),
   'merchant.refreshWaitSeconds': int(3600), 'merchant.liquidationMinutes': int(1440), 'merchant.maxLossPercent': int(100),
   'merchant.minExpectedProfit': int(1000000000, 1), 'merchant.keepPointers': int(1000000),
-  'merchant.speedUpMode': { kind: 'choice', values: ['deadline', 'refresh', 'arrival', 'race', 'full', 'goal', 'eventFree'] }, 'merchant.speedUpMaxPerLeg': int(100, 1),
-  'merchant.refreshWindowMinutes': int(30, 1), 'merchant.dailyPointerLimit': int(1000), 'merchant.periodPointerLimit': int(1000000, -1), 'merchant.pointerDailyDiamondLimit': int(100000),
+  'merchant.speedUpMode': { kind: 'choice', values: ['deadline', 'refresh', 'arrival', 'race', 'full', 'goal', 'targetFirst', 'eventFree'] }, 'merchant.speedUpMaxPerLeg': int(100, 1),
+  'merchant.refreshWindowMinutes': int(30, 1), 'merchant.dailyPointerLimit': int(1000), 'merchant.periodPointerLimit': int(1000000, -1), 'merchant.speedUpIntelPorts': int(100), 'merchant.pointerDailyDiamondLimit': int(100000),
   'merchant.profitLimit': int(1000000000), 'merchant.firstDepartureMode': { kind: 'choice', values: ['smart', 'time'] },
   'merchant.firstDepartureTime': { kind: 'time' }, 'merchant.firstDepartureWaitMinutes': int(120),
   'merchant.monitorSeconds': int(300, 10),
@@ -288,7 +290,7 @@ export function settingsFromLegacyNative(tasks, options) {
     'building.enabled': ['collect', 'finishUpgrade', 'build', 'buildSupply', 'upgrade', 'speedUp', 'adSpeedUpBuilding'],
     'factory.enabled': ['collect', 'startProduce', 'buildSupply', 'speedUp', 'adSpeedUpProduce'],
     'gather.enabled': ['autoFish', 'fishEnhance', 'floaters', 'antiqueFloaters', 'autoDive', 'diveEnhance', 'autoSalvage', 'salvageEnhance'],
-    'dailies.enabled': ['dailyRewards', 'chests', 'gift', 'freeGold', 'freeRecruit', 'arena'],
+    'dailies.enabled': ['dailyRewards', 'chests', 'gift', 'monthCardDaily', 'seasonCardDaily', 'freeGold', 'freeRecruit', 'arena'],
     'loop.dailies': ['freeGold', 'freeRecruit', 'arena', 'paidGold'],
     'museum.runEnabled': ['museumCollect', 'museumExplore', 'museumRevenue', 'museumAchievements'],
     'radar.runEnabled': ['radarAuto', 'radarRepair'],
@@ -333,10 +335,10 @@ export function hasExtraWork(settings) {
   return !!settings && ((settings.loop.world && (settings.museum.runEnabled !== false && ['enabled', 'upgrade', 'revenue', 'achievements', 'display', 'unlockCases'].some(key => settings.museum[key]) || settings.events.enabled || settings.pet.enabled || (settings.gather.enabled !== false && settings.gather.diving && settings.gather.keyOpen))) || (settings.loop.heroes && settings.heroes.enabled)
     || (settings.progression?.enabled && (settings.progression.mainline || settings.progression.trials)) || (settings.pirate?.enabled && (settings.schedule.pirate || settings.pirateHunt.enabled)));
 }
-export function hasBaseWork(settings) {
+export function hasBaseWork(settings, { includeGold = true } = {}) {
   return !!settings && ((settings.loop.world && (settings.museum.runEnabled !== false && ['enabled', 'upgrade', 'revenue', 'achievements', 'display', 'unlockCases'].some(key => settings.museum[key]) || settings.events.enabled ||
     settings.pet.enabled || (settings.gather.enabled !== false && settings.gather.diving && settings.gather.keyOpen))) ||
-    (settings.loop.dailies && settings.gold.enabled));
+    (includeGold && settings.loop.dailies && settings.gold.enabled));
 }
 export function settingsUiRules() {
   return { moduleControls: idleAutomationControls, controlFields: idleControlFields, controlGroups: Object.fromEntries(automationControls.flatMap(c=>c.fields.map(path=>[path,c.idleGroup??c.group]))), mappedTasks: [...Object.keys(nativeFields), ...retiredAutomationTasks], numbers: Object.fromEntries(Object.entries(constraints).filter(([, rule]) => rule.kind === 'number').map(([key, rule]) => [key, { min: rule.min, max: rule.max }])) };
@@ -387,8 +389,14 @@ function validateCurrentSettings(input, { partial = false, catalog = null } = {}
   input = migrateVersion60Settings(input);
   input = migrateVersion61Settings(input);
   input = migrateVersion62Settings(input);
+  input = migrateVersion70Settings(input);
+  input = migrateMerchantPreset(input, DEFAULT_SETTINGS.merchant);
   if (plain(input?.merchant) && !Object.hasOwn(input.merchant, 'periodPointerLimit')) {
     input = { ...input, merchant: { ...input.merchant, periodPointerLimit: DEFAULT_SETTINGS.merchant.periodPointerLimit } };
+  }
+  // 新增的情报门槛默认关闭，已保存的用针策略保持原样。
+  if (plain(input?.merchant) && !Object.hasOwn(input.merchant, 'speedUpIntelPorts')) {
+    input = { ...input, merchant: { ...input.merchant, speedUpIntelPorts: DEFAULT_SETTINGS.merchant.speedUpIntelPorts } };
   }
   if (plain(input?.resourceFields) && !Object.hasOwn(input.resourceFields, 'refillAfterLoss')) {
     input = { ...input, resourceFields: { ...input.resourceFields, refillAfterLoss: false } };
@@ -797,6 +805,10 @@ settingsMigrations.set(66, settings => plain(settings?.weeklyActivity)
   ? { ...settings, weeklyActivity: migrateWeeklyActivitySettings(settings.weeklyActivity) } : settings);
 settingsMigrations.set(67, settings => plain(settings?.guildShip) && !Object.hasOwn(settings.guildShip, 'checkEverySeconds')
   ? { ...settings, guildShip: { ...settings.guildShip, checkEverySeconds: DEFAULT_SETTINGS.guildShip.checkEverySeconds } } : settings);
+settingsMigrations.set(68, settings => migrateMerchantPreset(settings, DEFAULT_SETTINGS.merchant));
+// 新增可选的达标优先模式，已保存的策略及预算继续按原值执行。
+settingsMigrations.set(69, settings => settings);
+settingsMigrations.set(70, migrateVersion70Settings);
 const supportedSettingsVersion = version => Number.isSafeInteger(version) && version >= 1;
 const entrySettingsVersion = entry => Object.hasOwn(entry, 'settingsVersion') ? entry.settingsVersion : 1;
 function newestSettingsVersion(store) {
@@ -1243,6 +1255,12 @@ function migrateVersion60Settings(settings) {
 function migrateVersion61Settings(settings) {
   if (!plain(settings?.schedule) || Object.hasOwn(settings.schedule, 'afkUpgrade')) return settings;
   return { ...settings, schedule: { ...settings.schedule, afkUpgrade: false } };
+}
+
+function migrateVersion70Settings(settings) {
+  const schedule = settings?.schedule;
+  if (!plain(schedule) || (Object.hasOwn(schedule, 'monthCardDaily') && Object.hasOwn(schedule, 'seasonCardDaily'))) return settings;
+  return { ...settings, schedule: { monthCardDaily: false, seasonCardDaily: false, ...schedule } };
 }
 
 function migrateVersion57Settings(settings) {

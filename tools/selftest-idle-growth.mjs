@@ -235,7 +235,10 @@ try {
   assert.match(await reasonFor({ ...treasurePlayer, guildId: 0 }), /未加入联盟/);
   assert.match(await reasonFor(treasurePlayer, { GuildInfoRequest: { myTitle: 1 } }), /职级不能占领/);
   assert.match(await reasonFor(treasurePlayer, { TreasureLootStatsRequest: { todayRewardTimes: 3 } }), /已用完/);
-  assert.match(await reasonFor(treasurePlayer, { AllItemRequest: { items: [{ itemId: '汽油', num: 10400 }] } }), /保留 10000 汽油/);
+  assert.match(await reasonFor(treasurePlayer, { AllItemRequest: { items: [{ itemId: '汽油', num: 499 }] } }), /需要 500 汽油，当前 499/);
+  const exactFuel = treasureWorld({ AllItemRequest: { items: [{ itemId: '汽油', num: 500 }] } });
+  await serviceTreasureLoot(exactFuel.client, treasureConfig, { player: treasurePlayer, protocol, enabled: () => true, report: collect().report });
+  assert.equal(exactFuel.client.sent('TreasureLootSendFleetsRequest').length, 1);
   assert.match(await reasonFor(treasurePlayer, { TreasureLootListRequest: { treasure: [{ uid: 7, color: 5, progress: 10, ownerGuildIdx: 9 }] } }), /无主或本盟/);
   assert.match(await reasonFor(treasurePlayer, { MyFleetsRequest: { fleets: [idleFleet('1远征船', { durability: 50 })] } }), /耐久/);
   assert.match(await reasonFor(treasurePlayer, { MyFleetsRequest: { fleets: [idleFleet('1远征船', { treasureLootUid: 3 }), idleFleet('2远征船', { treasureLootUid: 4 }), idleFleet('3远征船', { treasureLootUid: 5 })] } }), /足够领完/);

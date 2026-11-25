@@ -98,6 +98,7 @@ function fixture(rows = [
     const saveLoopInterval = async () => env.onIntervalSave ? env.onIntervalSave() : true;
     const refreshProgression = () => env.effects.push('progression');
     const refreshSavedLineups = async () => {};
+    const syncGameLineupPage = () => {};
     const refreshManualWorld = () => env.effects.push('world');
     const refreshActivities = () => env.effects.push('activities');
     const refreshStages = () => env.effects.push('stages');

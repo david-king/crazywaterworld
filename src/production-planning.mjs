@@ -3,7 +3,7 @@ import { planStockRefills, scheduleRankedStock } from './production-restock.mjs'
 import { nativeMaterialReceipts, simulateNativeFactoryStarts } from './factory-native-simulation.mjs';
 import { refillGoal, snapshotRefills } from './factory-refill.mjs';
 import { createProductionTiming } from './production-timing.mjs';
-import { resourceReserve, worldPreferenceEnabled } from './automation-policy.mjs';
+import { productionDemandConsumes, resourceReserve, worldPreferenceEnabled } from './automation-policy.mjs';
 import { activityProductionEnabled } from './activity-automation.mjs';
 import { createProductionEligibility } from './production-eligibility.mjs';
 import { cropRelatedMaterialIds, residentMaterialRule, residentMaterialReasons } from './resident-materials.mjs';
@@ -223,13 +223,14 @@ export function buildProductionModel(snapshot, config, settings, { pendingMateri
   }
   const orders = activeOrderRows.map(order => ({ id: order.id, source: order.source, priority: order.priority,
     requirements: order.requirements.map(item => ({ itemId: item.id, quantity: item.num })),
-    consumeOnCompletion: order.kind === 'order' && (order.source === 'merchant'
-      ? activityProductionEnabled(settings, 'merchant') && settings.schedule?.weekOrderSubmit === true : order.metadata?.enabled === true),
+    consumeOnCompletion: productionDemandConsumes(order, settings),
+    populationGain: order.metadata?.populationGain ?? 0,
     ...(order.deadline ? { deadline: order.deadline - now } : {}),
   }));
   return {
     input: { snapshotTime: now, complete: snapshot.complete && !missingReads.length, missingReads: unique(missingReads),
-      inventory, orders, recipes, machines, incoming, stockCaps, stockCapMode: 'start-projected' },
+      inventory, orders, recipes, machines, incoming, stockCaps, stockCapMode: 'start-projected',
+      populationRoom: Math.max(0, (snapshot.population?.max ?? 0) - (snapshot.population?.future ?? 0)) },
     orderRows, activeOrderRows, skippedOrders, waitingSupply, timingByJob, machineNames, fixedTimeline, notes, capacityEstimated, priorityLabels, stockPriority,
   };
 }
@@ -365,7 +366,8 @@ export function planProduction(snapshot, config, settings, options = {}) {
     assumptions: [
       '以需求优先级列表为顺序，先优化高级需求及其上游材料，再逐级优化后续需求的齐套时间',
       '范围包括活动总开关允许的当前订单与已开启来源的消费备料，未列入优先级列表的当前订单置于最后一级',
-      '建筑等消费备料齐套后独占保留。按需优先生产时，工厂补料按其配置位置参与排产，每种加工品最多补至账号仓容与设置水位中的较小值',
+      '建筑材料备齐、每轮开工数量大于零且人口空间足够时，按立即开工扣料估算，实际开工随挂机轮次执行。其余建筑、博物馆和海兽的备料继续占仓',
+      '按需优先生产时，工厂补料按其配置位置参与排产，每种加工品最多补至账号仓容与设置水位中的较小值',
       '每座工厂预览最多一轮补货队列。已安排的补货占用对应原料和生产位，产物完工后可供后续需求使用',
       '固定当前生产加成、现有设施等级和已排队任务，新增任务按原料到齐立即开工估算',
       '生产、收获和已启用订单提交按零操作延迟计算，关闭提交的订单材料独占保留',

@@ -23,6 +23,7 @@ const protocol = Object.fromEntries(names.flatMap(name => [[name + 'Request', tr
 let serial = 80000;
 
 function fixture() {
+  const orderRefreshTime = now() + 86400;
   const f = {
     player: { playerId: ++serial, worldId: 2000001, guildId: 123, level: 28 },
     actualStock: 10, visibleStock: 10, stale: true, done: 0, writes: [], reports: [], calls: [],
@@ -33,7 +34,7 @@ function fixture() {
       let result;
       switch (name) {
         case 'GuildInfoRequest': result = { guild: { guildId: this.player.guildId } }; break;
-        case 'GuildOrderRequest': result = { order: { requirements: [asset(5)], nextRefreshTime: now() + 86400 } }; break;
+        case 'GuildOrderRequest': result = { order: { requirements: [asset(5)], nextRefreshTime: orderRefreshTime } }; break;
         case 'GuildCityInfoRequest': result = { cities: [{ cityId: 1, recommended: true }] }; break;
         case 'CounterInfoRequest': result = { counters: [{ type: 'DAILY_FINISH_GUILD_ORDER', num: this.done }] }; break;
         case 'OnWaterRequest': result = { building: [{ buildingId: 'museum', level: 1 }], workerOrder: [{ index: 1, workerId: 1, requirements: [asset(5)] }] }; break;

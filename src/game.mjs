@@ -200,7 +200,7 @@ export function summarize(state, { now = Date.now() / 1000, config = null } = {}
     worldBoss: q.WorldBossInfoRequest?.info ?? null,
     season: q.SeasonRankInfoRequest ?? null,
     week: asArray(q.WeekInfoRequest?.activityTime),
-    monthCard: monthCard.map((card) => ({ type: card.type, active: card.endTime > now, endTime: card.endTime, gotDailyReward: card.gotDailyReward })),
+    monthCard: monthCard.map((card) => ({ type: card.type, active: card.endTime === -1 || card.endTime > now, endTime: card.endTime, gotDailyReward: card.gotDailyReward })),
     guide: q.GuideInfoRequest?.guide ?? null,
     cargo: asArray(q.CargoShipsRequest?.ship).length,
     fish: q.FishEncyclopediaRequest ?? null,

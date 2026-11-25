@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import { readGuildOrderView, serviceGuildOrders } from '../src/guild-orders.mjs';
+import { rewardSchedule } from '../src/reward-schedule.mjs';
 import { beginOrderMaterialSpend, cancelOrderMaterialSpend, pendingOrderMaterialSpends } from '../src/order-reservations.mjs';
 
 const stamp = Math.floor(Date.now() / 1000);
@@ -255,7 +256,11 @@ export async function testGuildOrders() {
 
   const cap = fixture();
   cap.bodies.CounterInfoRequest.counters = [{ type: 'DAILY_FINISH_GUILD_ORDER', num: 10 }];
-  assert.match((await cap.run()).reason, /每日募兵上限 10 次/);
+  const capSchedule = rewardSchedule(cap.client);
+  assert.match((await cap.run({scheduler:capSchedule})).reason, /每日募兵上限 10 次/);
+  cap.calls.length = 0;
+  await cap.run({scheduler:capSchedule});
+  assert.equal(cap.calls.length, 0);
   assert.equal(cap.writes().length, 0);
   const high = fixture(); high.player.level = 25;
   high.bodies.CounterInfoRequest.counters = [{ type: 'DAILY_FINISH_GUILD_ORDER', num: 20 }];

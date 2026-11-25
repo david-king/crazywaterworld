@@ -18,7 +18,8 @@ const retiredKeys = [
 ];
 const hiddenFields = [...retiredKeys.map(key => 'schedule.' + key), 'eventActions.compassThreshold', 'eventActions.compassDrawCount'];
 const dataFor = (hidden = hiddenFields, tasks = automationTasks) => ({
-  settings: { schedule: Object.fromEntries(retiredKeys.map(key => [key, true])), eventActions: { compassThreshold: 21, compassDrawCount: 5 } },
+  settings: { schedule: Object.fromEntries(retiredKeys.map(key => [key, true])), eventActions: { compassThreshold: 21, compassDrawCount: 5 },
+    factory: { demandPriority: [] } },
   tasks, rules: { hiddenFields: hidden, mappedTasks: [] }, catalog: {}, revision: 7, baseRevision: 'base-7',
   usage: { rounds: 0 }, pendingUsage: {},
 });

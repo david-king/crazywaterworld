@@ -1,5 +1,6 @@
 import {createHash} from 'node:crypto';
 import { normalize } from './worlds.mjs';
+import { seasonRows } from './season-config.mjs';
 import { claimOnce } from './extra-free-rewards.mjs';
 import { exactAutomationId, automationWireId } from './automation-policy.mjs';
 import { weeklyActivityEnabled } from './activity-automation.mjs';
@@ -10,7 +11,6 @@ const rows=(config,name)=>config?.tables?.[name]?.data??[];
 const now=c=>Math.floor((Date.now()+(c.serverClockOffsetMs||0))/1000);
 const day=c=>Math.floor((now(c)+28800)/86400);
 const integer=n=>Number.isSafeInteger(n)&&n>=0;
-const season=p=>Math.floor(Number(exactAutomationId(p?.worldId))/1e6)%1000;
 // protobuf 默认的0/false位于原型上；保留这些值，编号始终保持精确字符串。
 export function rewardData(value,key=''){
  if(value==null||typeof value!=='object')return value;
@@ -33,8 +33,8 @@ export async function claimOpenRank(client,config,{player,enabled,ledger,report}
  const state=await readState();
  if(!integer(state.progress)||!Array.isArray(state.gotRewardId)||!integer(state.endTime))throw Error(label+'状态未完整返回');
  if(now(client)>=state.endTime)return wait(report,label,'本期活动未开放或已结束');
- const all=rows(config,table),s=season(player),chosen=all.some(r=>r.season===s)?s:Math.max(0,...all.map(r=>r.season??0));
- const eligible=all.filter(r=>(r.season===undefined||r.season===chosen)&&integer(r.score)&&r.score<=state.progress&&!state.gotRewardId.includes(r.score));
+ const tiers=seasonRows(config,table,player,{includeCommon:true});
+ const eligible=tiers.filter(r=>integer(r.score)&&r.score<=state.progress&&!state.gotRewardId.includes(r.score));
  if(!eligible.length)return wait(report,label,'当前进度 '+state.progress+'，暂无未领取的达标档位');
  for(const tier of eligible){
   if(!enabled()||now(client)>=state.endTime)break;
@@ -167,18 +167,34 @@ export async function claimLeaguePass(client,config,{enabled,ledger,report}){
   const after=await read(client,'LeagueBattlePassInfo');return reward(r)&&claimable.every(t=>{const got=after.got?.find(g=>g.id===t.rwdId);return (!t.freeReward?.length||got?.freeGot)&&(!state.activePay||!t.payReward?.length||got?.payGot);});
  }});
 }
-export async function claimWeekSupply(client,config,{enabled,ledger,report,getSettings}){
- const calendar=await readWeekCalendar(client),open=calendar.filter(e=>e.stage==='进行中'&&[4,6,7].includes(e.type));
- if(!open.length)return wait(report,'周活动补给免费礼包','当前没有开放的转盘、芯片或翻牌补给');
+export async function claimWeekSupply(client,config,{enabled,ledger,report,getSettings,scheduler}){
+ const midnight=scheduler?.nextDay();
+ const calendar=(await readWeekCalendar(client)).filter(e=>[4,6,7].includes(e.type)&&weeklyActivityEnabled(getSettings?.(),e.type));
+ const open=calendar.filter(e=>e.stage==='进行中');
+ const nextStart=Math.min(...calendar.filter(e=>e.stage==='即将开始').map(e=>e.startTime));
+ if(!open.length){
+  scheduler?.defer('weekSupplyFree',Math.min(midnight,Number.isFinite(nextStart)?nextStart:now(client)+600));
+  return wait(report,'周活动补给免费礼包','当前没有开放的转盘、芯片或翻牌补给');
+ }
+ const deadlines=[midnight,nextStart];
  for(const event of open){
   if(!enabled())return;
   const allowed = () => enabled() && weeklyActivityEnabled(getSettings?.(), event.type) && now(client) < event.endTime;
-  if(!allowed())continue;
+  if(!allowed())return;
+  const task='weekSupplyFree:'+event.type+':'+event.startTime;
+  if(scheduler&&!scheduler.due(task)){deadlines.push(scheduler.scheduledAt(task));continue;}
   const [info,table,request]=event.type===4?['WeekLotteryInfo','WeekLotteryPackCfg','WeekLotteryFreePackRequest']:event.type===6?['WeekChipInfo','WeekChipPackCfg','WeekChipGotFreeRequest']:['WeekUniqueLottery','WeekUniquePackCfg','GotUniqueLotteryFreeRequest'];
   const cfg=rows(config,table).find(r=>r.price===0&&(event.type===6?(r.buyLimit??r.limitedTimes):r.limitedTimes)>0);if(!cfg)throw Error(event.name+'免费礼包配置未确认');
   const got=s=>event.type===7?s.gotFree===true:event.type===6?(s.gifts?.find(g=>g.giftId===cfg.packId)?.paidTimes??0)>=(cfg.buyLimit??cfg.limitedTimes):(s.gift?.find(g=>g.giftId===cfg.packId)?.gotTimes??0)>=cfg.limitedTimes;
   const before=await read(client,info);if(event.type===7?typeof before.gotFree!=='boolean':!Array.isArray(event.type===6?before.gifts:before.gift))throw Error('补给礼包领取状态未完整返回');
-  const label=event.name+' · 补给免费礼包';if(got(before)){wait(report,label,'本期当前免费礼包已领取');continue;}
-  await claimOnce(client,{ledger,key:'week-supply:'+event.type+':'+event.startTime+':'+day(client),title:label,request,enabled:allowed,report,verify:async r=>reward(r)&&got(await read(client,info))});
+  const label=event.name+' · 补给免费礼包',key='week-supply:'+event.type+':'+event.startTime+':'+day(client);
+  let complete=got(before);
+  if(complete){
+   if(ledger?.keyRecords()[key]?.confirmed===false)ledger.resolveKey(key,true);
+   wait(report,label,'本期当前免费礼包已领取');
+  }else complete=await claimOnce(client,{ledger,key,title:label,request,enabled:allowed,report,verify:async r=>reward(r)&&got(await read(client,info))});
+  if(complete&&allowed())scheduler?.defer(task,Math.min(midnight,event.endTime));
+  deadlines.push(scheduler?.scheduledAt(task)??0);
  }
+ scheduler?.defer('weekSupplyFree',Math.min(...deadlines));
 }

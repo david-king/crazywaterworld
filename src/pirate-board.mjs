@@ -1,4 +1,5 @@
 import { normalize } from './worlds.mjs';
+import { seasonRows } from './season-config.mjs';
 import { displayMaterial } from './config.mjs';
 import { pirateTracker, pirateHuntOptions, pirateHuntFlights } from './pirates.mjs';
 import { readFleetFormations } from './fleet-formation.mjs';
@@ -6,7 +7,6 @@ import { readFleetFormations } from './fleet-formation.mjs';
 const RECHECK = 600;
 const RANK_TOP = 3;
 const clock = client => (Date.now() + (client.serverClockOffsetMs || 0)) / 1000;
-const seasonOf = player => Math.floor(normalize(player?.worldId) / 1e6) % 1000;
 const assets = (config, rows = []) => rows.map(item => displayMaterial(config, item.id ?? item[0]) + ' ×' + normalize(item.num ?? item[1])).join('、');
 
 export const openRanks = [
@@ -29,7 +29,7 @@ function hasReward(row) {
 export async function campaignReportState(client, config, player) {
   const reply = normalize(await client.request('CampaignReportsRequest', { pageNo: 0 }, 'CampaignReportsResponse'));
   const reports = reply.reports ?? [];
-  const pirateRows = config?.tables?.WorldPirateCfg?.data?.filter(row => Number(row.season) === seasonOf(player)) ?? [];
+  const pirateRows = seasonRows(config, 'WorldPirateCfg', player);
   const pending = reports.filter(row => !row.received && hasReward(row));
   const pirates = reports.filter(row => row.pirate).slice(0, 5).map(row => ({
     name: (pirateRows.find(cfg => cfg.type === row.pirate.type && cfg.level === row.pirate.level)?.showName ?? '海盗') + ' ' + row.pirate.level + ' 级',
@@ -50,15 +50,6 @@ export async function claimCampaignReports(client, config, player, allowed, repo
   scheduler?.defer('campaignReports', scheduler.now() + RECHECK);
 }
 
-function rankTasks(config, player, table) {
-  const rows = config?.tables?.[table]?.data ?? [];
-  if (!rows.some(row => row.season !== undefined)) return rows;
-  const season = seasonOf(player);
-  const seasons = rows.map(row => row.season);
-  const use = seasons.includes(season) ? season : Math.max(...seasons);
-  return rows.filter(row => row.season === use);
-}
-
 export async function openRankState(client, config, player, rank) {
   let reply;
   try {
@@ -69,7 +60,7 @@ export async function openRankState(client, config, player, rank) {
     return { ...rank, open: false, endTime: 0, progress: 0, ready: [], next: null, got: 0, total: 0, top: [], me: null };
   }
   const progress = reply.progress ?? 0, got = reply.gotRewardId ?? [];
-  const tasks = [...rankTasks(config, player, rank.table)].sort((a, b) => a.score - b.score);
+  const tasks = seasonRows(config, rank.table, player, { includeCommon: true }).sort((a, b) => a.score - b.score);
   const ready = tasks.filter(task => progress >= task.score && !got.includes(task.score));
   const next = tasks.find(task => progress < task.score);
   const board = reply.leaderBoard ?? {};

@@ -1,4 +1,5 @@
 import { displayMaterial } from './config.mjs';
+import { seasonRows } from './season-config.mjs';
 import { normalize } from './worlds.mjs';
 
 const rewardKey = 'heroRecruitRewards';
@@ -17,13 +18,7 @@ async function readRecruit(client) {
 
 // 按游戏客户端规则，使用不高于角色赛季的最新招募奖励配置。
 function rewardTiers(config, player) {
-  const world = normalize(player?.worldId);
-  if (!Number.isSafeInteger(world) || world <= 0) return [];
-  const season = Math.floor(world / 1e6) % 1000;
-  const rows = config.tables.HeroRecruitTaskCfg?.data ?? [];
-  const eligible = rows.filter(row => row.season > 0 && row.season <= season);
-  const applicable = Math.max(0, ...eligible.map(row => row.season));
-  return eligible.filter(row => row.season === applicable).sort((a, b) => a.id - b.id);
+  return seasonRows(config, 'HeroRecruitTaskCfg', player).sort((a, b) => a.id - b.id);
 }
 
 async function claimRewards(client, state, config, player, enabled, report, scheduler) {

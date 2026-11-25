@@ -74,19 +74,27 @@ export function fleetDispatchView(client,settings,ledger,fleets,worldId){
    if(!p?.enabled||k==='follow'&&!p.follow||k==='treasure'&&p.follow)return false;
    return p.fleetIds?.includes(f.buildingId)||k==='worldBoss'&&!p.fleetIds?.length;
   });
-  const held=[...(dispatchStates.get(client)??[])].filter(([,r])=>r.until>time&&r.ids.includes(f.buildingId)).map(([k])=>dispatchLabels[k]);
+  const held=[...(dispatchStates.get(client)??[])].filter(([owner,record])=>record.until>time && record.ids.includes(f.buildingId)
+    && (owner!=='cityWar' || cityWarReservationEnabled(settings,f.buildingId)));
+  const reservationNotes=held.map(([owner,record])=>owner==='cityWar' ? cityWarReservationNote(record.notes[f.buildingId]) : '预留给'+dispatchLabels[owner]);
   const hold=fleetRecordHold(records,f.buildingId,worldId);
   const reason=hold?.reason|| (f.state!==1||f.curGridIdx||f.treasureLootUid||f.chipWar?.rewardTs?'舰队已有在途或驻守任务':'');
-  return {buildingId:f.buildingId,intents:intents.map(k=>({key:k,label:dispatchLabels[k]})),reserved:held,reason,recordNote:hold?.note??'',targetGrid:f.state===2?f.targetGridIdx:f.curGridIdx||null};
+  return {buildingId:f.buildingId,intents:intents.map(k=>({key:k,label:dispatchLabels[k]})),reserved:held.map(([owner])=>dispatchLabels[owner]),reservationNotes,reason,recordNote:hold?.note??'',targetGrid:f.state===2?f.targetGridIdx:f.curGridIdx||null};
  });
 }
 export const dispatchOrder = settings => [...new Set([...(settings?.fleetDispatch?.priority ?? []),'cityWar','pirateHunt','worldBoss','follow','treasure','radar','silicon','resourceFields'])];
-export function reserveDispatch(client, task, ids, until = Date.now()+60000) {
+export function reserveDispatch(client, task, ids, until = Date.now()+60000, notes = {}) {
  const state=dispatchStates.get(client)??new Map();dispatchStates.set(client,state);
- state.set(task,{ids:[...ids],until});
+ state.set(task,{ids:[...ids],until,notes:{...notes}});
 }
 export function legacyFleetReservationReason(client,id) {
  return isFleetReserved(client,id,migrationOwner) ? '舰队有原自动任务尚未确认结束' : '';
+}
+export function cityWarReservationNote(reason) {
+ return reason ? '已为城战留队。上次检查时，' + reason : '已为城战留队，暂不参与其他任务';
+}
+function cityWarReservationEnabled(settings,id) {
+ return settings?.cityWar?.enabled && settings.cityWar.reserveDuringWar && settings.cityWar.fleetIds.includes(id);
 }
 export function dispatchReservationReason(client,settings,task,id,{ignoreOwners=[],ignoreLegacy=false}={}) {
  const legacyReason=ignoreLegacy?'':legacyFleetReservationReason(client,id);
@@ -94,10 +102,10 @@ export function dispatchReservationReason(client,settings,task,id,{ignoreOwners=
  const order=dispatchOrder(settings);
  for(const [owner,record] of dispatchStates.get(client)??[]) {
   if(ignoreOwners.includes(owner))continue;
-  if(owner==='cityWar'&&(!settings?.cityWar?.enabled||!settings.cityWar.reserveDuringWar))continue;
-  if(owner==='cityWar'&&!settings.cityWar.fleetIds.includes(id))continue;
+  if(owner==='cityWar'&&!cityWarReservationEnabled(settings,id))continue;
   if(owner===task || record.until<=Date.now() || !record.ids.includes(id))continue;
-  if(owner==='maintenance'||owner==='cityWar' || order.indexOf(owner)<(order.includes(task)?order.indexOf(task):order.length))return '舰队预留给'+({maintenance:'战后维修',cityWar:'城战时段',pirateHunt:'正在运行的首杀',treasure:'巨轮普通参战',follow:'巨轮跟随',worldBoss:'世界Boss首战',radar:'联盟情报',silicon:'硅矿采集',resourceFields:'资源田占领'}[owner]);
+  if(owner==='cityWar')return cityWarReservationNote(record.notes[id]);
+  if(owner==='maintenance' || order.indexOf(owner)<(order.includes(task)?order.indexOf(task):order.length))return '舰队预留给'+({maintenance:'战后维修',pirateHunt:'正在运行的首杀',treasure:'巨轮普通参战',follow:'巨轮跟随',worldBoss:'世界Boss首战',radar:'联盟情报',silicon:'硅矿采集',resourceFields:'资源田占领'}[owner]);
  }
  return '';
 }

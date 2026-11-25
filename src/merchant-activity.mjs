@@ -76,8 +76,9 @@ async function readMerchantPlan(config, event, state, time, ask, voyage, options
   const inputs = { ...options, preferredPort: voyage.preferredPort, plannedOpening: voyage.plannedOpening,
     openingCargoPids: voyage.openingCargoPids }, policy = merchantSettings(options.settings);
   let plan = planMerchant(config, event, state, marketSnapshot, effective, plannedAt, voyage.visited, inputs);
-  if (!voyage.openingCargoPids?.length && (plan.kind === 'wait' || plan.exploration) && policy.autoSpeedUp && merchantSpeedMode(policy.speedUpMode) === 'goal' && !policy.fullCargoRoutes &&
-    timing.tradingOpen && positive(timing.travelSeconds) && positive(per) && event.endTime <= timing.tradeStartTime + 2 * 86400 &&
+  // 当天来不及自然跑完一程时，试一程用针赶在收盘前成交的航次。库存或额度核对不过就照原计划隔夜或等待。
+  if (!voyage.openingCargoPids?.length && (plan.kind === 'wait' || plan.exploration || plan.mode === 'OVERNIGHT') && policy.autoSpeedUp && merchantSpeedMode(policy.speedUpMode) === 'goal' && !policy.fullCargoRoutes &&
+    timing.tradingOpen && positive(timing.travelSeconds) && positive(per) &&
     state.player?.profit < Math.min(MERCHANT_PROFIT_GOAL, policy.profitLimit || Infinity) &&
     plannedAt + timing.travelSeconds + (1 + 2 * (marketSnapshot.goods?.length ?? 0) + (state.player.goods?.length ?? 0)) * step >= timing.tradeEndTime) {
     let budget;
@@ -479,6 +480,7 @@ async function runMerchantActivity(client, config, ctx, quoteRevision) {
   const expected = { request: 'TradeMoveRequest', city: plan.city, destination: plan.destination, goodsId: plan.goodsId,
     start: clock(client), marketEpoch: currentEpoch, cargoSignature: cargoSignature(fresh), exploration: !!plan.exploration,
     ...(verified.plannedOpening && { plannedOpening: verified.plannedOpening }),
+    ...(positive(verified.accelerationRequired) && { accelerationRequired: verified.accelerationRequired }),
     ...(!verified.exploration && { estimatedProfit: verified.expectedProfit, priceNote: verified.priceNote }),
     ...(natural(verified.discountedProfit) && { discountedProfit: verified.discountedProfit }) };
   return checkedAction(ctx, { ...common, expected,

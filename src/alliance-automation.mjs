@@ -48,11 +48,12 @@ export function allianceRecruitDemand(view, settings, usage = {}) {
     reserved: view.requirements.map(row => ({ id: row.id, num: row.reserved ?? 0 })) }];
 }
 
-export async function readAllianceRecruitDemand(client, protocol, config, player, settings, { enabled = () => true, ledger } = {}) {
+export async function readAllianceRecruitDemand(client, protocol, config, player, settings, { enabled = () => true, ledger, scheduler } = {}) {
   const p = settings?.alliance;
   if (!p?.enabled || !p.recruit || !p.recruitProduction || !enabled()) return [];
+  if (scheduler && !scheduler.due('guildOrders:quota')) return [];
   let view;
-  try { view = await readGuildOrderView(client, protocol, config, { player, settings, enabled }); }
+  try { view = await readGuildOrderView(client, protocol, config, { player, settings, enabled, dailyLimit: p.recruitDailyLimit }); }
   catch (error) { if (error.code === 'ORDER_MATERIAL_SPEND_PENDING') return []; throw error; }
   const roleKey = exactAutomationId(player.worldId) + ':' + exactAutomationId(player.playerId);
   if (ledger && Object.values(ledger.keyRecords()).some(record => record.details?.kind === 'allianceRecruit' && (record.details.accountKey === view.accountKey || record.details.roleKey === roleKey) &&
@@ -223,7 +224,7 @@ async function runMutual(client, protocol, config, player, { getSettings, ledger
   }
 }
 
-export async function runAllianceAutomation(client, protocol, config, player, { getSettings, ledger, enabled = () => true, report = () => {} } = {}) {
+export async function runAllianceAutomation(client, protocol, config, player, { getSettings, ledger, scheduler, enabled = () => true, report = () => {} } = {}) {
   if (!getSettings?.()?.alliance?.enabled || !enabled() || busy.has(client)) return [];
   if (!ledger) throw Error('联盟自动化需要持久账本');
   const original = stamp(player), policy = JSON.stringify(getSettings().alliance), records = [];
@@ -232,7 +233,7 @@ export async function runAllianceAutomation(client, protocol, config, player, { 
   const run = async (label, work, key = 'alliance') => { try { if (active()) await work(); } catch (error) { emit({ key, label, error: error.message, skipped: error.code === 'ORDER_MATERIAL_SPEND_PENDING' }); } };
   busy.add(client);
   try {
-    if (getSettings().alliance.recruit) await run('联盟募兵', () => serviceGuildOrders(client, protocol, config, { player, getSettings, ledger,
+    if (getSettings().alliance.recruit && (!scheduler || scheduler.due('guildOrders:quota'))) await run('联盟募兵', () => serviceGuildOrders(client, protocol, config, { player, getSettings, ledger, scheduler,
       dailyLimit: getSettings().alliance.recruitDailyLimit, enabled: () => active() && getSettings().alliance.recruit, report: emit }));
     if (getSettings().alliance.mutual) await run('联盟互助', () => runMutual(client, protocol, config, player, { getSettings, ledger, enabled: () => active() && getSettings().alliance.mutual, report: emit }));
     if (getSettings().alliance.collectGifts) await run('联盟福利礼包', async () => {

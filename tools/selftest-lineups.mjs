@@ -1,7 +1,8 @@
 import assert from 'node:assert/strict';
 import { getConfig } from '../src/config.mjs';
 import { loadProtocol } from '../src/proto.mjs';
-import { applyLineup, lineupCatalog, readLineups, editorLineupRecommendations } from '../src/lineups.mjs';
+import { applyLineup, lineupCatalog, readLineups, editorLineupRecommendations, readGameLineups, applyGameLineup } from '../src/lineups.mjs';
+import { uidText, wireUid } from '../src/hero-equipment.mjs';
 
 const protocol = loadProtocol();
 const form = (id, formInfo, formId, heros, stances, pet = '') => ({
@@ -10,7 +11,8 @@ const form = (id, formInfo, formId, heros, stances, pet = '') => ({
 });
 const slots = (id, positions) => positions.map(position => ({ id, position }));
 const config = { tables: {
-  ModuleOpenCfg: { data: [{ moduleId: '世界', playerLevel: 16 }, { moduleId: '远征', playerLevel: 30 }, { moduleId: '跨服积分赛', playerLevel: 25 }] },
+  ModuleOpenCfg: { data: [{ moduleId: '世界', playerLevel: 16 }, { moduleId: '远征', playerLevel: 30 }, { moduleId: '跨服积分赛', playerLevel: 25 }, { moduleId: '极限试炼', playerLevel: 20 }] },
+  TournamentParamCfg: { data: [{ param: '小组赛第1轮战力固定', value: 3600 }] },
   LeagueDanCfg: { data: [{ dan: 1, teamCount: 2 }] },
   FormationHeroNumCfg: { data: [{ heroNum: 3, mainlineStage: 0 }] },
   FormationTypeUnlockCfg: { data: [{ id: 7, name: '攻速增强' }] },
@@ -27,6 +29,7 @@ const config = { tables: {
   ] },
 } };
 const player = { level: 30, mainlineStage: 5 };
+const largeUid = '9007199254741053', teamUid = '9007199254741081';
 
 function fixture(overrides = {}) {
   const f = {
@@ -41,19 +44,28 @@ function fixture(overrides = {}) {
       formation: { presetId: 1, heroPositions: [], petUid: 0 } },
     league: { roomDan: 1, ownFormations: [{ index: 1, presetId: 1, heroPositions: [{ heroId: 'h5', pos: { x: 1, y: 1 } }], petUid: 0 }] },
     writes: [], names: [], failing: new Set(), staleSave: false,
-    async request(name, body, response) {
+    ultra: [], tournamentTeams: [{ uid: wireUid(teamUid) }],
+    tournament: { qualified: true, stageId: 2, nextMatchTimeId: 1, nextMatchTime: Math.floor(Date.now() / 1000) + 4000 },
+    async request(name, body, response, timeout, beforeSend) {
       assert(protocol[name], name);
       assert(protocol[response], response);
       this.names.push(name);
       if (this.failing.has(name)) throw new Error('服务端拒绝');
+      beforeSend?.();
       const replies = {
         AllHeroRequest: () => ({ heroes: this.heroes }),
         MyFormationPresetRequest: () => ({ ids: this.presets }),
+        AllPetRequest: () => ({ pets: [{ uid: wireUid(largeUid), petId: 'p1' }] }),
         GetFormationRequest: () => ({ formation: this.mainline }),
         OnWaterRequest: () => ({ building: this.water }),
         MyFleetsRequest: () => ({ fleets: this.fleets }),
         ExpeditionInfoRequest: () => this.expedition,
         LeagueInfoRequest: () => this.league,
+        UltraOpenRequest: () => ({ raidId: 8701 }),
+        UltraInfoRequest: () => ({ forms: this.ultra }),
+        UltraSaveFormationRequest: () => { this.write(name, body); return { formations: [body.formation] }; },
+        TournamentFormationRequest: () => ({ team: this.tournamentTeams }),
+        TournamentSaveFormationRequest: () => { this.write(name, body); return { team: [body] }; },
         SaveFormationRequest: () => { this.write(name, body); return { formation: this.staleSave ? this.mainline : body.formation }; },
         ExpeditionSaveFormationRequest: () => { this.write(name, body); return { formation: body.formation }; },
         LeagueSaveFormationRequest: () => { this.write(name, body); return { formations: [...this.league.ownFormations.filter(t => t.index !== body.formation.index), body.formation] }; },
@@ -243,6 +255,52 @@ function fixture(overrides = {}) {
       assert(lineup.members.every(m => allowed.get(lineup.presetId).includes(m.x + ',' + m.y)), lineup.labels.join());
     }
   }
+}
+
+{
+  const f = fixture(), { targets } = await readGameLineups(f, config, player);
+  assert.deepEqual(targets.map(row => row.key), ['mainline', 'fleet:1远征船', 'fleet:2远征船', 'expedition:3',
+    'league:1', 'league:2', 'ultra:8701:1', 'ultra:8701:2', 'ultra:8701:3', 'tournament:' + teamUid]);
+  assert.equal(f.writes.length, 0);
+  const payload = (key, heroId = 'h1', petUid = '0') => ({ targetKey: key, version: targets.find(team => team.key === key).version,
+    formation: { presetId: 1, heroPositions: [{ heroId, pos: { x: 2, y: 2 } }], petUid } });
+  for (const [key, request] of [['mainline', 'SaveFormationRequest'], ['fleet:1远征船', 'FleetSaveFormationRequest'],
+    ['expedition:3', 'ExpeditionSaveFormationRequest'], ['league:2', 'LeagueSaveFormationRequest'],
+    ['ultra:8701:3', 'UltraSaveFormationRequest'], ['tournament:' + teamUid, 'TournamentSaveFormationRequest']]) {
+    const fleet = key.startsWith('fleet:');
+    await applyGameLineup(f, config, player, payload(key, 'h1', fleet ? '0' : largeUid));
+    const write = f.writes.at(-1);
+    assert.equal(write.name, request);
+    const decoded = protocol[request].decode(protocol[request].encode(write.body).finish());
+    if (fleet) assert(!Object.hasOwn(write.body.formation, 'petUid'));
+    else assert.equal(uidText(decoded.formation.petUid), largeUid);
+    if (key.startsWith('ultra:')) assert.equal(decoded.formation.index, 3);
+    if (key.startsWith('tournament:')) assert.equal(uidText(decoded.uid), teamUid);
+  }
+  const reject = (body, reason) => assert.rejects(applyGameLineup(f, config, player, body), reason);
+  const count = f.writes.length;
+  f.mainline.petUid = wireUid(largeUid);
+  await reject(payload('mainline'), /游戏阵容已变化/);
+  await reject(payload('expedition:3', 'h2'), /已阵亡/);
+  await reject(payload('league:2', 'h5'), /在第 1 队/);
+  f.ultra.push({ index: 1, petUid: wireUid(largeUid), heroPositions: [], presetId: 1 });
+  await reject(payload('ultra:8701:3', 'h1', largeUid), /海兽在第 1 队/);
+  await reject(payload('league:2', 'h1', '999'), /海兽已不存在/);
+  f.tournament.nextMatchTime -= 3600;
+  await reject(payload('tournament:' + teamUid), /截止/);
+  f.fleets[0].state = 3;
+  await reject(payload('fleet:1远征船'), /其他任务/);
+  await assert.rejects(applyGameLineup(f, config, player, payload('league:2'), () => false), /暂停/);
+  assert.equal(f.writes.length, count);
+  f.staleSave = true;
+  const main = payload('mainline', 'h3');
+  main.version = (await readGameLineups(f, config, player)).targets[0].version;
+  main.formation.heroPositions = f.mainline.heroPositions;
+  await reject(main, /未确认/);
+  f.failing.add('GetFormationRequest');
+  const partial = await readGameLineups(f, config, player);
+  assert.match(partial.targets[0].reason, /拒绝/);
+  assert(partial.targets.find(team => team.key === 'league:2').version);
 }
 
 console.log('lineups ok: catalog cleanup, per-mode targets, hero conflicts, preset fallback, stale previews, write confirmation');

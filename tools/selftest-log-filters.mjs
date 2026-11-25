@@ -19,7 +19,7 @@ let connections = 0;
 GameClient.prototype.connect = async () => { connections++; throw new Error('日志验收禁止连接游戏'); };
 saveStore({ version: 1, activeId: 'logs-a', accounts: ['logs-a', 'logs-b'].map(id => ({
   id, label: '日志测试', url: 'wss://fixture.invalid', login: {},
-  automation: { enabled: false, autoStart: false, paused: true },
+  automation: { enabled: false, autoStart: false, paused: id === 'logs-a' },
 })) });
 const terminal = [];
 const app = createConsole({ port: 0, protocol: {}, onLog: entry => terminal.push(formatConsoleLog(entry)) });
@@ -62,9 +62,11 @@ const clear = async query => {
 };
 
 try {
-  fs.writeFileSync(path.join(directory, 'factory-report-logs-a.json'), JSON.stringify({
-    time: '2026/11/23 18:33:27', lines: ['工厂历史记录'],
-  }));
+  for (const id of ['logs-a', 'logs-b']) {
+    fs.writeFileSync(path.join(directory, 'factory-report-' + id + '.json'), JSON.stringify({
+      time: '2026/11/23 18:33:27', lines: ['工厂历史记录'],
+    }));
+  }
   base = await app.listen();
   await fetch(base + '/api/accounts');
   const a = app.sessions.get('logs-a'), b = app.sessions.get('logs-b');
@@ -73,6 +75,7 @@ try {
   const all = await subscribe('?scope=all'), scoped = await subscribe('?account=logs-a'), system = await subscribe();
   await waitFor(() => messages(all).includes('乙账号旧记录') && messages(scoped).includes('甲账号旧记录') && messages(system).includes('共享系统旧记录'), '历史回放');
   assert(!messages(scoped).some(message => message.includes('上次工厂检查')), '暂停托管账号首次加载时不应将旧工厂报告作为新日志回放');
+  assert(!messages(all).some(message => message.includes('上次工厂检查')), '账号未暂停但未开启挂机时，首次加载也不应回放旧工厂报告');
   assert(!messages(scoped).includes('乙账号旧记录'));
   assert(!messages(system).includes('甲账号旧记录'));
   assert(all.events.some(event => event.data.account === 'logs-b' && event.data.level === 'warn'));
@@ -185,6 +188,13 @@ try {
   assert.notEqual(planned.rowId, accelerated.rowId);
   assert.equal(batch('adSpeedUpProduce').count, 2);
   console.log('通过：同分类下的不同功能分别累计等待和批次记录');
+
+  const shopTask = { taskKey: 'shop' };
+  const emptyList = app.emit(a, 'info', '检查时该账号的购买清单为 0 项', shopTask);
+  const paidRefresh = app.emit(b, 'info', '该账号购买清单 3 项，挂机只使用免费刷新', shopTask);
+  assert.equal(emptyList.category, 'daily');
+  assert.equal(paidRefresh.category, 'daily');
+  assert.deepEqual([emptyList.account, paidRefresh.account], ['logs-a', 'logs-b']);
 
   for (let index = 0; index < 450; index++) app.emit(index % 2 ? a : b, 'info', '容量测试' + index);
   const bounded = await subscribe('?scope=all');

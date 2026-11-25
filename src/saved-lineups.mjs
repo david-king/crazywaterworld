@@ -139,28 +139,21 @@ export function getLineupCatalog(config) {
   return { heroes, formations };
 }
 
-export async function readLineupEditor(client, config, player) {
+export async function readLineupEditor(client, config, player, { includeMainline = true, includePets = true } = {}) {
   // PromptResponse has no request ID. Keep these reads sequential.
-  const formationReply = await client.request('GetFormationRequest', { module: 1 }, 'GetFormationResponse');
+  const formationReply = includeMainline && await client.request('GetFormationRequest', { module: 1 }, 'GetFormationResponse');
   const heroReply = await client.request('AllHeroRequest', {}, 'AllHeroResponse');
   const presetReply = await client.request('MyFormationPresetRequest', {}, 'MyFormationPresetResponse');
   // V76 LoginProxy reads AllPetRequest unconditionally during login.
   // ModuleOpenCfg has no pet module. An unreadable inventory must remain an error.
-  const petReply = await client.request('AllPetRequest', {}, 'AllPetResponse');
+  const petReply = includePets ? await client.request('AllPetRequest', {}, 'AllPetResponse') : { pets: [] };
   const roster = requireList(heroReply.heroes, '英雄列表');
   const unlocked = new Set(requireList(presetReply.ids, '已解锁阵型'));
   unlocked.add(1);
   const petList = requireList(petReply.pets, '海兽列表');
-  const formation = normalizeFormation(formationReply.formation, { allowEmpty: true });
+  const formation = includeMainline ? normalizeFormation(formationReply.formation, { allowEmpty: true }) : null;
   const catalog = getLineupCatalog(config);
-  const heroConfig = new Map(catalog.heroes.map(hero => [hero.heroId, hero]));
-  const heroes = roster.map(hero => {
-    const definition = heroConfig.get(hero.heroId);
-    if (!definition) throw new Error('缺少英雄配置 ' + hero.heroId);
-    const skinIcon = hero.skinId > 0 ? iconEntry('hero_head_' + hero.skinId) : null;
-    return { ...definition, icon: skinIcon ?? definition.icon, name: hero.showName || definition.name,
-      level: hero.level ?? 0, power: toNumber(hero.power ?? 0) };
-  });
+  const heroes = describeLineupHeroes(roster, catalog);
   const positions = rows(config, 'FormationTypePositionCfg');
   if (!positions.length || !rows(config, 'FormationHeroNumCfg').length) throw new Error('缺少阵型站位或人数配置');
   const formations = catalog.formations.map(definition => ({ ...definition, unlocked: unlocked.has(definition.presetId) }));
@@ -169,6 +162,17 @@ export async function readLineupEditor(client, config, player) {
     player?.mainlineStage > row.mainlineStage ? Math.max(maximum, row.heroNum) : maximum, 0);
   if (!Number.isSafeInteger(capacity) || capacity < 1) throw new Error('无法确认当前可上阵人数');
   return { formation, heroes, formations, pets, capacity };
+}
+
+export function describeLineupHeroes(roster, catalog) {
+  const heroConfig = new Map(catalog.heroes.map(hero => [hero.heroId, hero]));
+  return roster.map(hero => {
+    const definition = heroConfig.get(hero.heroId);
+    if (!definition) throw new Error('缺少英雄配置 ' + hero.heroId);
+    const skinIcon = hero.skinId > 0 ? iconEntry('hero_head_' + hero.skinId) : null;
+    return { ...definition, icon: skinIcon ?? definition.icon, name: hero.showName || definition.name,
+      level: hero.level ?? 0, power: toNumber(hero.power ?? 0) };
+  });
 }
 
 export function describePets(petList, config) {

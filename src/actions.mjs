@@ -6,6 +6,7 @@
 // answered by a push or a generic OkResponse instead, so they are sent fire-and-forget.
 
 import { claimMail } from './mail.mjs';
+import { dailyCardKeys, dailyCardRewards, monthCardBody } from './daily-card-rewards.mjs';
 
 // SpeedUpCost.SPEED_UP_ITEM=2（1=钻石 2=加速器 3=广告）。本工具只允许 2。
 export const SPEED_UP_ITEM_TYPE = 2;
@@ -141,7 +142,14 @@ export const ACTIONS = {
     request: 'MonthCardDailyRewardRequest',
     response: null,
     mutate: true,
-    desc: '领取月卡每日奖励',
+    desc: '领取月卡每日奖励（默认 type=1 普通月卡，type=2 高级月卡）',
+    body: ({ type }) => monthCardBody(type),
+  },
+  seasonCardDaily: {
+    request: 'SeasonCardGotDailyRequest',
+    response: null,
+    mutate: true,
+    desc: '领取赛季卡每日奖励，需已在游戏内选满三项奖励',
     body: () => ({}),
   },
   taskDrawMain: {
@@ -280,10 +288,16 @@ export function buildBody(action, params = {}) {
 
 // Runs one action. Mutating calls are refused unless the caller explicitly opts in, so a
 // stray command line cannot change the account by accident.
-export async function runAction(client, protocol, id, params = {}, { allowMutate = false, timeout = 15000 } = {}) {
+export async function runAction(client, protocol, id, params = {}, { allowMutate = false, timeout = 15000, ledger, enabled } = {}) {
   const action = assertAllowed(id, { allowMutate });
   const body = buildBody(action, params);
   if (!protocol[action.request]) throw new Error(`protocol has no type ${action.request}`);
+
+  if (dailyCardKeys.includes(id)) {
+    const [row] = await dailyCardRewards(client, protocol, id, { type: body.type, claim: true, ledger, timeout, enabled });
+    if (['pending', 'error'].includes(row.state)) throw Error(row.text);
+    return { id, sent: row.claimedNow ? action.request : null, response: null, body: { status: row.state, note: row.text } };
+  }
 
   if (id === 'emailQuickGet') {
     const result = await claimMail(client);

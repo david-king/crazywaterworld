@@ -3,7 +3,7 @@ import { planWorld, displayBuilding } from './world.mjs';
 import { insertionRecipeReady, readyCargoOrdersFirst } from './production-eligibility.mjs';
 import { snapshotRefills } from './factory-refill.mjs';
 import { createProductionTiming, nextFactoryLane, commitFactoryLane } from './production-timing.mjs';
-import { resourceReserve } from './automation-policy.mjs';
+import { productionDemandConsumes, resourceReserve } from './automation-policy.mjs';
 import { consumeInsertionUnit, insertionYieldsToProduction, nextInsertionIndex } from './factory-insertion-queue.mjs';
 import { factoryProductionSnapshot } from './spend-evidence.mjs';
 import { observedSchedule, scheduleMaterials, unscheduledBatches } from './production-sequence.mjs';
@@ -119,7 +119,7 @@ export async function forecastProductionDay(
   config,
   settings,
   orders,
-  { pendingMaterials = [], checkCurrent = () => {}, insertions: savedInsertions = {}, anchors } = {},
+  { pendingMaterials = [], checkCurrent = () => {}, insertions: savedInsertions = {}, anchors, materialRestock: initialRestock } = {},
 ) {
   const startAt = snapshot.serverNow,
     endAt = startAt + day;
@@ -266,6 +266,7 @@ export async function forecastProductionDay(
     },
   };
   const slots = snapshot.factories[0]?.capacity ?? 0;
+  const materialRestock = { ...initialRestock };
   const {history:refillHistory} = snapshotRefills(snapshot, config, settings);
   const waitHistory = new Map(),
     occupied = new Map();
@@ -301,22 +302,35 @@ export async function forecastProductionDay(
     const reserved = new Map();
     const free = id => Math.max(0, have(id) - (resourceReserve(settings, id) || 0) - (reserved.get(id) ?? 0));
     const autoCargo = order => order.source === 'cargo' && order.metadata?.enabled;
-    let cargo;
+    const ready = order => order.requirements.every(r => free(r.id) >= r.num);
+    const canSpend = order => productionDemandConsumes(order, settings)
+      && (order.metadata?.populationGain ?? 0) <= Math.max(0, survey.maxPopulation - survey.futurePopulation);
+    function* buildingsInStartOrder() {
+      const waiting = [];
+      for (const order of remainder.filter(o => o.source === 'building')) {
+        if (canSpend(order) && ready(order)) yield order;
+        else waiting.push(order);
+      }
+      yield* waiting;
+    }
+    let cargo, buildings;
     for (const entry of [...remainder]) {
       let order = entry;
       if (autoCargo(entry)) {
         cargo ??= readyCargoOrdersFirst(remainder.filter(autoCargo), free).values();
         order = cargo.next().value;
+      } else if (entry.source === 'building') {
+        buildings ??= buildingsInStartOrder();
+        order = buildings.next().value;
       }
       const expiry = order.metadata?.refreshAt;
       if ((expiry && now >= expiry) || (order.deadline && now > order.deadline)) {
         remainder.splice(remainder.indexOf(order), 1);
         continue;
       }
-      if (order.requirements.every(r => free(r.id) >= r.num)) {
-        const consume =
-          order.kind === 'order' &&
-          (order.source === 'merchant' ? settings.schedule?.weekOrderSubmit : order.metadata?.enabled);
+      if (ready(order)) {
+        const consume = canSpend(order);
+        if (consume) survey.futurePopulation += order.metadata?.populationGain ?? 0;
         for (const { id, num } of order.requirements) consume ? add(stock, id, -num) : add(held, id, num);
         result.completions.push({ id: order.id, at: now });
         remainder.splice(remainder.indexOf(order), 1);
@@ -380,6 +394,7 @@ export async function forecastProductionDay(
       settings: dispatchSettings,
       extraDemand,
       factoryWaitHistory: waitHistory,
+      materialRestock,
       refillHistory,
       enabled: kind => settings.loop.world && ['startProduce', 'gainFactory', 'farm'].includes(kind),
     });

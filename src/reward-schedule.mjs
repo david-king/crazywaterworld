@@ -16,20 +16,22 @@ export function rewardSchedule(client) {
   const deadlines = new Map();
   const observations = new Map();
   const expected = new Map();
+  const preferences = new Map();
   const redPoints = new Map();
   const now = () => Math.floor((Date.now() + (client.serverClockOffsetMs || 0)) / 1000);
-  function clearTask(key) {
+  function clearTask(key, keep = []) {
+    const matches = saved => (saved === key || saved.startsWith(key + ':')) && !keep.includes(saved);
     for (const saved of deadlines.keys()) {
-      if (saved === key || saved.startsWith(key + ':')) deadlines.delete(saved);
+      if (matches(saved)) deadlines.delete(saved);
     }
     for (const saved of expected.keys()) {
-      if (saved === key || saved.startsWith(key + ':')) expected.delete(saved);
+      if (matches(saved)) expected.delete(saved);
     }
   }
-  const clearTasks = keys => keys.forEach(clearTask);
+  const clearTasks = keys => keys.forEach(key => clearTask(key));
   const schedule = {
     now,
-    observe(key, text, state='waiting') { observations.set(key,{text,state,checkedAt:now()}); },
+    observe(key, text, state='waiting', details) { observations.set(key,{text,state,checkedAt:now(),...details}); },
     expect(key, until) { if(Number.isFinite(until))expected.set(key,Math.ceil(until)); },
     status: key => observations.get(key) ?? null,
     scheduledAt: key => deadlines.get(key),
@@ -43,7 +45,7 @@ export function rewardSchedule(client) {
     defer(key, until) {
       if (Number.isFinite(until) && until > now()) {
         deadlines.set(key, Math.ceil(until));
-        if (!observations.has(key)) schedule.observe(key, '已检查，等待下次开放');
+        if (!observations.has(key)) schedule.observe(key, '已安排下次检查');
       }
     },
     clear(key) {
@@ -52,9 +54,17 @@ export function rewardSchedule(client) {
       return removed;
     },
     clearTask,
+    syncPreference(key, value) {
+      const signature = JSON.stringify(value);
+      if (preferences.has(key) && preferences.get(key) !== signature) clearTask(key);
+      preferences.set(key, signature);
+    },
     redPoint: type => redPoints.get(type) ?? 0,
     clearRedPoint: type => redPoints.delete(type),
   };
+  client.on?.('login', () => {
+    deadlines.clear(); observations.clear(); expected.clear(); redPoints.clear();
+  });
   client.on?.('message', ({ name, body }) => {
     switch (name) {
       case 'SCServerTimeChanged':
@@ -72,6 +82,7 @@ export function rewardSchedule(client) {
         clearTask('weekGift');
         break;
       case 'SCNewEmail': clearTask('mail'); break;
+      case 'MonthCardDelivery': clearTasks(['monthCardDaily', 'trialPaidSweep', 'pirate']); break;
       case 'SCRedPoint':
         for (const { type, num } of body?.redPoint ?? []) {
           redPoints.set(type, num ?? 0);
@@ -84,12 +95,19 @@ export function rewardSchedule(client) {
       case 'SCTreasureLootRefresh': clearTask('treasureLoot'); break;
       case 'SCJoinGuild':
       case 'SCLeaveGuild':
-        clearTasks(['guildOrders', 'radarAuto', 'radarRepair', 'guildWelfare', 'guildAidCollect', 'guildAidHelp', 'guildTitleReward', 'treasureLoot']);
+        clearTasks(['guildOrders', 'guildFort', 'radarAuto', 'radarRepair', 'guildWelfare', 'guildAidCollect', 'guildAidHelp', 'guildTitleReward', 'treasureLoot', 'treasureDaily']);
         break;
-      case 'SCGuildOrder': clearTask('guildOrders'); break;
+      case 'SCGuildOrder': clearTask('guildOrders', ['guildOrders:quota', 'guildOrders:factoryGameLimit']); break;
       case 'SCRadarUpdate':
       case 'SCRadarEventState': clearTasks(['radarAuto', 'radarRepair']); break;
-      case 'SCMyFleetUpdate': clearTasks(['radarAuto', 'radarRepair', 'treasureLoot']); break;
+      case 'SCMyFleetUpdate': {
+        clearTasks(['radarAuto', 'radarRepair', 'treasureLoot']);
+        const fleetIds = observations.get('treasureDaily')?.fleetIds;
+        if (deadlines.has('treasureDaily') && body?.fleets?.some(fleet => fleet.treasureLootUid > 0 && fleetIds?.includes(fleet.buildingId))) {
+          clearTask('treasureDaily');
+        }
+        break;
+      }
       case 'SCUpdateEquip':
       case 'SCEquipDelete': clearTasks(['equipmentCollect', 'equipmentCraft']); break;
       case 'SCPetsUpdate':
@@ -102,12 +120,17 @@ export function rewardSchedule(client) {
       case 'SCMuseumRevenueUpdate': clearTasks(['museumRevenue', 'museum.revenue']); break;
       case 'SCTradeGuildTask': clearTask('tradeTasks'); break;
       case 'SCNewGuildWelfarePack': clearTask('guildWelfare'); break;
-      case 'SCOrderOfTheDay': clearTask('orderDaily'); break;
+      case 'SCOrderOfTheDay': {
+        const completed = schedule.status('orderDaily');
+        if (completed?.state !== 'completed' || body?.orderOfTheDay?.rewardedNum !== completed.maxTier || schedule.due('orderDaily')) clearTask('orderDaily');
+        break;
+      }
       case 'SCActivityActiveScoreUpdate': clearTask('festivalActive'); break;
       case 'SCNewCampaignReport': clearTask('campaignReports'); break;
       case 'SCOpenRankRedDot': clearTask('openRankRewards'); break;
       case 'SCAllActivity':
         clearTasks(activityTimeTasks);
+        clearTask('weeklyActivity');
         break;
       case 'SCNewbieActivityUpdate': clearTask('newbieLogin'); break;
       case 'SCTrialRaidUpdate':
@@ -115,7 +138,9 @@ export function rewardSchedule(client) {
         if (body?.raid?.raidId) schedule.clear('trialSweep:' + body.raid.raidId);
         break;
       case 'SCVipUpdate':
-        clearTask('pirate');
+        clearTasks(['pirate', 'vipDaily', 'limitedFreeGifts', 'trialPaidSweep', 'gold.enabled']);
+        clearTask('adShop');
+        break;
       case 'SCActivityPaidMoneyUpdate':
         clearTask('adShop');
         break;

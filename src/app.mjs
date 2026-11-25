@@ -16,6 +16,7 @@ import { normalize } from './worlds.mjs';
 import { getConfig } from './config.mjs';
 import { readHeroGrowthPlan, heroStepLabel, runHeroPlan, formatHeroPlan } from './heroes.mjs';
 import { surveyDailies, runDailies, formatSurvey, planChests, planDailyGift } from './dailies.mjs';
+import { cardRewardEnabled, dailyCardKeys, dailyCardRewards } from './daily-card-rewards.mjs';
 import { surveyTasks, runTasks, formatTaskPlan } from './tasks.mjs';
 import { surveyWorld, planWorld, runWorld, runWorldRound, formatWorldPlan, formatFieldReport, loadMapAsset, planFieldOccupy, planFieldGiveUp, SPEED_UP_ITEM, makeTypeResolver as resolveBuildingType, upgradeRow } from './world.mjs';
 import { runLoop, formatLoopRound, formatLoopStep } from './loop.mjs';
@@ -90,6 +91,10 @@ function loadConfigSafe() {
     console.log(`warn: 未加载配置表 (${error.message})`);
     return null;
   }
+}
+
+function cardSelection(account, protocol) {
+  return key => !dailyCardKeys.includes(key) || cardRewardEnabled(key, loadAutomationSettings(account.id).settings, protocol);
 }
 
 async function headless({ seconds = 60, probes = true }) {
@@ -218,7 +223,7 @@ const asArray = (value) => (Array.isArray(value) ? value : []);
 
 // 一键领取：先采集状态判定哪些能领，再逐个执行，最后重新采集做前后对比。
 // 只包含领取类动作，不改动任何需要消耗资源的东西。
-function planLoot(ok, now, config = null, level = 1, afkClaimHours) {
+function planLoot(ok, now, config, player, afkClaimHours) {
   const plan = [];
   const claimable = (list) => asArray(list).filter((task) => task.progress >= task.targetProgress && !task.rewardClaimed);
 
@@ -228,7 +233,7 @@ function planLoot(ok, now, config = null, level = 1, afkClaimHours) {
   for (const task of claimable(daily?.dailyTask)) plan.push({ id: 'dailyTaskDraw', params: { id: task.id }, why: `每日任务 ${task.id}` });
 
   // 活跃度宝箱排在任务奖励之后：任务奖励本身会加活跃度，顺序反了会白跑一轮。
-  for (const action of planChests(daily, config).actions) {
+  for (const action of planChests(daily, config, player).actions) {
     plan.push({
       id: action.request === 'DrawWeeklyRewardRequest' ? 'weeklyRewardDraw' : 'dailyRewardDraw',
       params: { index: action.body.index },
@@ -273,7 +278,7 @@ function planLoot(ok, now, config = null, level = 1, afkClaimHours) {
     if (building.level === 0 && !finishing && config) {
       const type = resolveBuildingType(config)(building.buildingId);
       const row = type ? upgradeRow(config, type, 1) : null;
-      if (row && asArray(row.condition).length === 0 && row.playerLevel <= level) {
+      if (row && asArray(row.condition).length === 0 && row.playerLevel <= (player?.level ?? 1)) {
         plan.push({ id: 'buildBuilding', params: { buildingId: building.buildingId }, why: `建造 ${building.buildingId}（需等级 ${row.playerLevel}）` });
       }
     }
@@ -299,6 +304,7 @@ const KEY_FIELDS = (ok) => {
 // 领取类动作：先判定后执行，最后重新采集对比。即发即弃的请求在断开前留出排空时间。
 async function loot({ allowMutate, dryRun = false }) {
   const { url, login, account } = loadCredentials();
+  const ledger = createUsageLedger(account.id);
   const protocol = loadProtocol();
   const client = new GameClient({ url, protocol });
   client.on('warn', (message) => console.log(`warn: ${message}`));
@@ -311,7 +317,15 @@ async function loot({ allowMutate, dryRun = false }) {
   try {
     const before = (await collectState(client, protocol)).ok;
     const now = (Date.now() + (client.serverClockOffsetMs || 0)) / 1000;
-    const plan = planLoot(before, now, config, loginRole?.level ?? 1, loadAutomationSettings(account.id).settings.afk.claimIntervalHours);
+    const plan = planLoot(before, now, config, response.playerInfo, loadAutomationSettings(account.id).settings.afk.claimIntervalHours);
+    const cardEnabled = cardSelection(account, protocol);
+    for (const key of dailyCardKeys) {
+      if (!cardEnabled(key)) continue;
+      for (const row of await dailyCardRewards(client, protocol, key, { ledger })) {
+        if (row.state === 'claimable') plan.push({ id: key, params: row.body, why: row.text });
+        else console.log(row.text);
+      }
+    }
 
     console.log(`\n可领取 ${plan.length} 项:`);
     for (const step of plan) console.log(`  ${step.id} ${JSON.stringify(step.params)} — ${step.why}`);
@@ -323,10 +337,16 @@ async function loot({ allowMutate, dryRun = false }) {
 
     console.log('\n执行:');
     let failed = 0;
+    let skipped = 0;
     for (const step of plan) {
       try {
         assertAllowed(step.id, { allowMutate });
-        const result = await runAction(client, protocol, step.id, step.params, { allowMutate });
+        const result = await runAction(client, protocol, step.id, step.params, { allowMutate, ledger, enabled: () => cardEnabled(step.id) });
+        if (dailyCardKeys.includes(step.id) && !result.sent) {
+          console.log('  - ' + result.body.note);
+          skipped++;
+          continue;
+        }
         const detail = result.body ? ` ${JSON.stringify(normalize(result.body)).slice(0, 200)}` : ' 即发即弃';
         console.log(`  . ${result.sent} ${JSON.stringify(step.params)}${detail}`);
       } catch (error) {
@@ -338,7 +358,7 @@ async function loot({ allowMutate, dryRun = false }) {
 
     await new Promise((resolve) => setTimeout(resolve, 1500));
     const after = (await collectState(client, protocol)).ok;
-    console.log(`\n执行 ${plan.length - failed} 项成功，${failed} 项失败`);
+    console.log(`\n执行 ${plan.length - failed - skipped} 项成功，${skipped} 项跳过，${failed} 项失败`);
     console.log('\n前后对比:');
     const a = KEY_FIELDS(before);
     const b = KEY_FIELDS(after);
@@ -356,7 +376,7 @@ async function loot({ allowMutate, dryRun = false }) {
 async function act({ id, params, allowMutate }) {
   assertAllowed(id, { allowMutate });
   buildBody(ACTIONS[id], params);
-  const { url, login } = loadCredentials();
+  const { url, login, account } = loadCredentials();
   const protocol = loadProtocol();
   const client = new GameClient({ url, protocol });
   client.on('warn', (message) => console.log(`warn: ${message}`));
@@ -364,8 +384,8 @@ async function act({ id, params, allowMutate }) {
 
   await client.connect(login);
   try {
-    const result = await runAction(client, protocol, id, params, { allowMutate });
-    console.log(`${result.sent}${result.response ? ` -> ${result.response}` : ' (无响应，回包走推送或 OkResponse)'}`);
+    const result = await runAction(client, protocol, id, params, { allowMutate, ledger: createUsageLedger(account.id) });
+    if (result.sent) console.log(`${result.sent}${result.response ? ` -> ${result.response}` : ' (无响应，回包走推送或 OkResponse)'}`);
     if (result.body) console.log(JSON.stringify(normalize(result.body), null, 2));
   } finally {
     client.stop();
@@ -427,7 +447,9 @@ async function heroes({ allowMutate, dryRun, allowUniversal }) {
 // 日常：先只读探一遍（--dry 到这里就够），--yes 才执行，--paid 才允许花钻石的动作。
 async function dailies({ allowMutate, dryRun, allowPaid }) {
   const { url, login, account } = loadCredentials();
+  const ledger = createUsageLedger(account.id);
   const protocol = loadProtocol();
+  const includeCard = cardSelection(account, protocol);
   const client = new GameClient({ url, protocol });
   client.on('warn', (message) => console.log(`warn: ${message}`));
   client.on('fatal', (info) => console.log(`fatal: ${JSON.stringify(info)}`));
@@ -437,7 +459,7 @@ async function dailies({ allowMutate, dryRun, allowPaid }) {
   try {
     const loginRole = describeRole(response.playerInfo);
     console.log(`login ok: ${loginRole?.nickname} world=${loginRole?.worldName ?? loginRole?.worldId}`);
-    const surveyOptions = { config, player: response.playerInfo, afkClaimHours: loadAutomationSettings(account.id).settings.afk.claimIntervalHours };
+    const surveyOptions = { config, player: response.playerInfo, ledger, includeCard, afkClaimHours: loadAutomationSettings(account.id).settings.afk.claimIntervalHours };
     const survey = await surveyDailies(client, protocol, surveyOptions);
     console.log(`\n${formatSurvey(survey)}\n`);
     for (const entry of survey.tasks) {
@@ -451,7 +473,7 @@ async function dailies({ allowMutate, dryRun, allowPaid }) {
 
     console.log('\n执行:');
     await runDailies(client, protocol, survey, {
-      allowMutate,
+      allowMutate, ledger, rewardEnabled: includeCard,
       allowPaid,
       onStep: (entry) => {
         if (entry.skipped) console.log(`  - ${entry.title} 跳过: ${entry.reason}`);
@@ -472,6 +494,7 @@ async function dailies({ allowMutate, dryRun, allowPaid }) {
     }
     // runDailies 已经把任务奖励、活跃度宝箱与每日赠礼收尾了，这里只把剩下的状态摆出来。
     console.log(`\n${formatSurvey(after).split('\n').filter((line) => line.startsWith('活跃奖励') || line.startsWith('每日赠礼')).join('\n')}`);
+    for (const card of after.cards) console.log(card.text);
     if (after.ruby !== survey.ruby) console.log(`\n钻石 ${survey.ruby} -> ${after.ruby}`);
   } finally {
     client.stop();
@@ -507,7 +530,8 @@ async function tasks({ allowMutate, dryRun }) {
     await runTasks(client, protocol, survey, {
       allowMutate,
       onStep: (entry) => {
-        if (entry.skipped) console.log(`  - ${entry.step.label} 跳过: ${entry.error}`);
+        if (entry.pending) console.log(`  ? ${entry.error}`);
+        else if (entry.skipped) console.log(`  - ${entry.step.label} 跳过: ${entry.error}`);
         else console.log(entry.ok ? `  . ${entry.step.label}` : `  x ${entry.step.label} 失败: ${entry.error}`);
       },
     });
@@ -673,6 +697,7 @@ async function loopCli({ allowMutate, rounds, everySeconds, allowSpeedUp, allowR
       getAfkSettings: () => loadAutomationSettings(account.id).settings,
       getBlockedCollectionTypes: () => loadAutomationSettings(account.id).settings.factory.blockedCollectionTypes,
       heroUsageLedger: createUsageLedger(account.id),
+      includeCard: cardSelection(account, protocol),
       refreshConfig: loadConfigSafe,
       player,
       rounds,

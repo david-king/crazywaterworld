@@ -9,6 +9,9 @@
 // PromptResponse，所以一律走 client.sendWatch()，见 docs/gameplay.md 第 11.3 节。
 
 import { normalize } from './worlds.mjs';
+import { worldOpenDays } from './extra-rewards.mjs';
+import { rowsForSeason, seasonOf } from './season-config.mjs';
+import { clock, dayOf } from './activity-actions.mjs';
 
 // 客户端 TaskUtil.taskProgress 的第二组：目标值取 params[1]（params[0] 是物品名或类型名）。
 const TARGET_FROM_PARAM1 = new Set([
@@ -45,28 +48,43 @@ export function taskTarget(row) {
   return Number.isFinite(n) ? n : null;
 }
 
-// WorkerOrderUtil uses RewardUtil.seasonCfgList: within the season take the
-// most recent group unlocked by the world's age, counting Beijing calendar days.
-export function nextOrderTier(config, { orderNum = 0, rewardedNum = 0, player, now = Date.now() / 1000 } = {}) {
-  let rows = config?.tables?.OrderDailyRewardCfg?.data ?? [];
-  if (rows.some(row => row.season != null)) {
-    const { worldId, worldOpenTime } = normalize(player ?? {});
-    const season = Math.floor(worldId / 1e6) % 1000;
-    const maxSeason = Math.max(...rows.map(row => row.season));
-    rows = rows.filter(row => row.season === Math.min(season, maxSeason));
-    const days = [...new Set(rows.map(row => row.worldOpenDays))].sort((a, b) => a - b);
-    const age = worldOpenTime > 0 && now >= worldOpenTime
-      ? Math.floor((now + 28800) / 86400) - Math.floor((worldOpenTime + 28800) / 86400) + 1 : null;
-    const group = season > maxSeason ? days.at(-1) : days.length === 1 ? days[0]
-      : age === null ? null : days.filter(day => day <= age).at(-1) ?? days[0];
-    rows = rows.filter(row => row.worldOpenDays === group);
+// 同一赛季按开服天数切档，超过配置表的最后赛季时使用其最后一组。
+function orderRewardDay(group, player, now, pastLastSeason) {
+  const days = [...new Set(group.map(row => row.worldOpenDays))].sort((a, b) => b - a);
+  let day = days[0];
+  if (!pastLastSeason && days.length > 1) {
+    const age = worldOpenDays(player, now);
+    if (age === null) return null;
+    day = days.find(unlock => unlock <= age) ?? days.at(-1);
   }
-  const reqNums = [...new Set(rows.map(row => row.reqNum))].filter(num => Number.isFinite(num)).sort((a, b) => a - b);
-  const tier = reqNums.find((num) => num > rewardedNum) ?? null;
-  if (tier === null) return { tier: null, reqNums, claimable: false };
-  return { tier, reqNums, claimable: orderNum >= tier };
+  return group.filter(row => row.worldOpenDays === day);
 }
 
+function orderRewardTiers(config, player, now) {
+  const rows = config?.tables?.OrderDailyRewardCfg?.data ?? [];
+  const season = seasonOf(player);
+  const seasonal = rows.some(row => row.season != null);
+  const candidates = seasonal && season ? rowsForSeason(rows, season) : rows;
+  let group = candidates;
+  if (seasonal) {
+    const pastLastSeason = rows.every(row => Number(row.season) < season);
+    group = season ? orderRewardDay(candidates, player, now, pastLastSeason) : null;
+  }
+  const reqNums = [...new Set((group ?? candidates).map(row => row.reqNum))].filter(num => Number.isFinite(num)).sort((a, b) => a - b);
+  const maxTier = group && reqNums.length ? reqNums.at(-1) : null;
+  return { reqNums, maxTier };
+}
+
+function orderProgress({ reqNums, maxTier }, { orderNum = 0, rewardedNum = 0 }) {
+  const tier = reqNums.find(num => num > rewardedNum) ?? null;
+  return { tier, reqNums, maxTier, claimable: tier !== null && orderNum >= tier };
+}
+
+export function nextOrderTier(config, { orderNum, rewardedNum, player, now = Date.now() / 1000 } = {}) {
+  return orderProgress(orderRewardTiers(config, player, now), { orderNum, rewardedNum });
+}
+
+// 主线、支线和成就共用任务页面，居民订单单独读取。
 export async function surveyTaskRewards(client, { config = null, timeout = 8000 } = {}) {
   const main = normalize(await client.request('MainTaskInfoRequest', {}, 'MainTaskInfoResponse', timeout));
   const achievement = normalize(await client.request('AchievementInfoRequest', {}, 'AchievementInfoResponse', timeout));
@@ -161,46 +179,54 @@ export async function surveyTaskRewards(client, { config = null, timeout = 8000 
   return { main: mainView, branch: branchView, achievement: achievementView, plan, notes };
 }
 
-// 每日订单档位奖励：空体请求，服务端按 reqNum 发下一档。
-export async function surveyOrderDaily(client, { config, water, timeout = 8000, scheduler, player } = {}) {
-  const summary = { orderOfTheDay: null, plan: [], notes: [] };
+export async function surveyOrderDaily(client, { config, player, water, timeout = 8000, scheduler, tiers } = {}) {
+  const plan = [], notes = [];
+  const summary = { orderOfTheDay: null, plan, notes };
   if (scheduler && !scheduler.due('orderDaily')) return summary;
-  function note(text, state = 'waiting') {
-    summary.notes.push('每日订单：' + text);
-    scheduler?.observe?.('orderDaily', text, state);
-  }
   let order;
   try {
-    const waterBody = normalize(water ?? await client.request('OnWaterRequest', {}, 'OnWaterResponse', timeout));
-    order = waterBody?.orderOfTheDay;
+    const waterBody = water ?? await client.request('OnWaterRequest', {}, 'OnWaterResponse', timeout);
+    order = normalize(waterBody?.orderOfTheDay);
   } catch (error) {
     summary.orderError = error.message;
-    note('读取订单进度失败：' + error.message, 'error');
+    notes.push('未能查询每日订单：' + error.message);
+    scheduler?.observe?.('orderDaily', error.message, 'error');
     return summary;
   }
   if (!order) {
-    note('今日订单进度尚未同步', 'unsynced');
+    scheduler?.observe?.('orderDaily', '今日订单进度未同步', 'unsynced');
     return summary;
   }
-  const now = scheduler?.now() ?? Math.floor((Date.now() + (client.serverClockOffsetMs || 0)) / 1000);
-  const tier = nextOrderTier(config, { ...order, player, now });
+  const now = scheduler?.now() ?? clock(client);
+  const tier = orderProgress(tiers ?? orderRewardTiers(config, player, now), order);
   const orderView = {
     orderNum: order.orderNum ?? 0,
     rewardedNum: order.rewardedNum ?? 0,
     tier: tier.tier,
+    maxTier: tier.maxTier,
+    reqNums: tier.reqNums,
     claimable: tier.claimable,
   };
   summary.orderOfTheDay = orderView;
-  if (!tier.reqNums.length) note('未能确认当前赛季的奖励档位', 'unsynced');
-  else if (tier.tier === null) {
-    note(`已领完本日全部档位，最高 ${orderView.rewardedNum} 单档`);
+  const delivered = `今日已交 ${orderView.orderNum} 单`;
+  const limit = tier.maxTier === null ? '最高档未知' : `最高 ${tier.maxTier} 单档`;
+  if (tier.tier === null && tier.maxTier === null) {
+    const text = `${delivered}，已领至 ${orderView.rewardedNum} 单档，${limit}`;
+    notes.push('每日订单：' + text);
+    scheduler?.observe?.('orderDaily', text, 'unsynced');
+  } else if (tier.tier === null) {
+    const text = `今日 ${tier.reqNums.length} 档奖励已全部领取，${limit}`;
+    notes.push('每日订单：' + text);
+    scheduler?.observe?.('orderDaily', text, 'completed', { maxTier: tier.maxTier });
     scheduler?.defer('orderDaily', scheduler.nextDay());
   } else if (!tier.claimable) {
-    const claimed = orderView.rewardedNum > 0 ? `已领至 ${orderView.rewardedNum} 单档，` : '';
-    note(`${claimed}今日已交 ${orderView.orderNum} 单，下一档需 ${tier.tier} 单`);
+    const text = `${delivered}，下一档 ${tier.tier} 单，${limit}`;
+    notes.push('每日订单：' + text);
+    scheduler?.observe?.('orderDaily', text, 'inProgress');
     scheduler?.defer('orderDaily', Math.min(now + 180, scheduler.nextDay()));
   } else {
-    summary.plan.push({
+    scheduler?.observe?.('orderDaily', `${delivered}，可领取 ${tier.tier} 单档奖励，${limit}`, 'claimable');
+    plan.push({
       kind: 'orderDaily',
       id: tier.tier,
       request: 'GetNextOrderOTDRewardRequest',
@@ -213,20 +239,88 @@ export async function surveyOrderDaily(client, { config, water, timeout = 8000, 
   return summary;
 }
 
-// 手动查询和 CLI 计划仍同时展示普通任务与订单进度。
 export async function surveyTasks(client, protocol, options = {}) {
-  const tasks = await surveyTaskRewards(client, options);
+  let tasks;
+  try {
+    tasks = await surveyTaskRewards(client, options);
+  } catch (error) {
+    tasks = { main: null, branch: [], achievement: [], plan: [], taskError: error.message,
+      notes: ['未能查询任务与成就：' + error.message] };
+  }
   const order = await surveyOrderDaily(client, options);
   return { ...tasks, ...order, plan: [...tasks.plan, ...order.plan], notes: [...tasks.notes, ...order.notes] };
 }
 
+const activeOrderClaims = new WeakSet();
+
+export async function claimOrderDaily(client, protocol, { allowMutate = false, enabled = () => true, onStep,
+  scheduler, window = 400, timeout = 8000, config, player, tiers } = {}) {
+  if (!allowMutate) throw new Error('领取订单奖励需要 --yes');
+  const results = [];
+  if (activeOrderClaims.has(client) || !enabled()) return results;
+  const now = () => scheduler?.now() ?? clock(client);
+  const day = dayOf(now());
+  const active = () => enabled() && client.connected !== false && dayOf(now()) === day;
+  const report = (step, outcome) => {
+    const entry = { step, taskKey: 'orderDaily', ...outcome };
+    results.push(entry);
+    onStep?.(entry);
+  };
+  activeOrderClaims.add(client);
+  try {
+    let water;
+    while (active()) {
+      const survey = await surveyOrderDaily(client, { config, player, tiers, water, scheduler, timeout });
+      if (survey.orderError) {
+        report({ kind: 'orderDaily', label: '每日订单进度' }, { ok: false, error: survey.orderError });
+        break;
+      }
+      const step = survey.plan[0];
+      if (!step || !active()) break;
+      try {
+        if (!protocol[step.request]) throw new Error('协议表里没有 ' + step.request);
+        await client.sendWatch(step.request, step.body, { window, beforeSend() {
+          if (!active()) throw new Error('订单领奖已暂停或已跨日');
+        } });
+      } catch (error) {
+        report(step, { ok: false, error: error.message });
+        scheduler?.observe?.('orderDaily', error.message, 'error');
+        break;
+      }
+      // 请求体没有档号，只有回读的已领档位才证明可以继续发下一次。
+      let rewarded;
+      try {
+        water = await client.request('OnWaterRequest', {}, 'OnWaterResponse', timeout);
+        rewarded = normalize(water?.orderOfTheDay?.rewardedNum);
+        if (dayOf(now()) !== day || !(rewarded >= step.id)) {
+          throw new Error('服务端尚未确认已领档位');
+        }
+      } catch (error) {
+        const note = step.label + '领取待确认：' + error.message;
+        report(step, { ok: false, pending: true, status: 'pending', error: note });
+        scheduler?.observe?.('orderDaily', note, 'pending');
+        break;
+      }
+      report(step, { ok: true, status: 'confirmed', note: '已领至 ' + rewarded + ' 单档' });
+    }
+    return results;
+  } finally {
+    activeOrderClaims.delete(client);
+  }
+}
+
 // 逐条领取。同一条被服务端拒过就记下来，本轮之后不再重发——否则循环模式里会每轮骚扰一次。
-export async function runTasks(client, protocol, survey, { allowMutate = false, window = 400, onStep, enabled = () => true, settings = null } = {}) {
+export async function runTasks(client, protocol, survey, { allowMutate = false, window = 400, onStep, enabled = () => true, settings = null, getSettings = () => settings } = {}) {
   if (!allowMutate) throw new Error('领取任务奖励会改变账号状态，需要 --yes');
   const results = [];
   const rejected = new Set();
   for (const step of selectTaskSettings(survey, settings).plan) {
     if (!enabled()) break;
+    if (step.kind === 'orderDaily') {
+      results.push(...await claimOrderDaily(client, protocol, { allowMutate, window, onStep, tiers: survey.orderOfTheDay,
+        enabled: () => enabled() && orderRewardsEnabled(getSettings()) }));
+      continue;
+    }
     const key = `${step.kind}:${step.id}`;
     if (rejected.has(key)) {
       const entry = { step, ok: false, skipped: true, error: '刚被服务端拒过，跳过' };
@@ -255,9 +349,11 @@ export async function runTasks(client, protocol, survey, { allowMutate = false, 
   return results;
 }
 
+export const orderRewardsEnabled = settings => !settings || (settings.loop.world && settings.resident.rewards);
+
 export function selectTaskSettings(survey, settings) {
   if (!settings) return survey;
-  const enabled = kind => kind === 'orderDaily' ? settings.loop.world && settings.resident.rewards : settings.loop.tasks &&
+  const enabled = kind => kind === 'orderDaily' ? orderRewardsEnabled(settings) : settings.loop.tasks &&
     (kind === 'main' ? settings.tasks.main : kind === 'branch' ? settings.tasks.branch : kind === 'achievement' ? settings.tasks.achievements : true);
   const paused = survey.plan.filter(step => !enabled(step.kind));
   return { ...survey, plan: survey.plan.filter(step => enabled(step.kind)), notes: [...survey.notes, ...paused.map(step => `${step.label}：已在设置中暂停领取`)] };
@@ -279,7 +375,7 @@ export function formatTaskPlan(survey) {
     lines.push(`${mark(!a.claimed && a.progress >= (a.target ?? Infinity))} 成就 ${String(a.id).padEnd(6)}${a.progress}/${a.target ?? '?'}${a.claimed ? ' 已领' : ''}`);
   }
   const o = survey.orderOfTheDay;
-  if (o) lines.push(`${mark(o.claimable)} 订单 今日 ${o.orderNum} 单，已领档位 ${o.rewardedNum}，下一档 ${o.tier ?? '无'}`);
+  if (o) lines.push(`${mark(o.claimable)} 订单 今日 ${o.orderNum} 单，已领档位 ${o.rewardedNum}，下一档 ${o.tier ?? (o.maxTier == null ? '未知' : '无')}，最高档 ${o.maxTier ?? '未知'}`);
   for (const note of survey.notes) lines.push(`跳过 ${note}`);
   return lines.join('\n');
 }

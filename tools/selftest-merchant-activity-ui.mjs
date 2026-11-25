@@ -1056,7 +1056,9 @@ await test('海商王显示三套四天方案，免费针居中，一次点击�
   assert.deepEqual(choices().map(b => b.dataset.merchantPreset), ['free', 'eventFree', 'sprint']);
   assert.equal(panel.querySelector('.merchant-manual-settings').open, false);
   const cards = panel.querySelectorAll('.merchant-preset');
-  assert.deepEqual(cards.map(card => card.querySelector('.merchant-preset-budget').textContent), ['总针数上限0 根', '总针数上限按实领', '总针数上限139 根']);
+  assert.deepEqual(cards.map(card => card.querySelector('.merchant-preset-budget').textContent), ['总针数上限0 根', '总针数上限按实领', '总针数上限220 根']);
+  assert.equal(panel.querySelector('.merchant-preset-forecast'), null);
+  assert.equal(panel.querySelector('.merchant-model-note'), null);
   assert.equal(choices()[1].getAttribute('aria-label'), '套用方案 · 仅用本期免费针');
   await choices()[1].onclick();
   assert.equal(choices()[1].disabled, true);

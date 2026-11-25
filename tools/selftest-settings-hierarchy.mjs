@@ -687,6 +687,12 @@ test('任务与领奖沿用图鉴偏好，VIP 全部档位共用一个开关', (
   draft.schedule.fishBook = true;
   f.renderPage();
   const rewards = f.editor.groups.get('rewards');
+  for (const key of ['schedule.monthCardDaily', 'schedule.seasonCardDaily']) {
+    const cards = rewards.fields.filter(field => field.key === key);
+    assert.equal(cards.length, 1);
+    assert.equal(cards[0].kind, 'switch');
+  }
+  assert.equal(rewards.fields.find(field => field.key === 'dailies.enabled').label, '每日任务与奖励总开关');
   for (const key of ['schedule.fishBook', 'activityAutomation.vip']) {
     assert.equal(rewards.fields.filter(field => field.key === key).length, 1);
   }

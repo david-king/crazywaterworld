@@ -15,7 +15,7 @@ const categoryByModule = {
 };
 for (const { key, label, group } of automationTasks) {
   const category = classifyLog(label);
-  const fallback = { '日常': 'daily', '领奖': 'daily', '周期活动': 'activity', '限时活动': 'activity', '船只': 'gather',
+  const fallback = { '日常': 'daily', '领奖': 'daily', '折扣商店': 'daily', '周期活动': 'activity', '限时活动': 'activity', '船只': 'gather',
     '英雄': 'heroes', '联盟': 'alliance', '海面': 'building' }[group];
   features.set(key, { key, label, category: category !== 'system' ? category : fallback });
 }

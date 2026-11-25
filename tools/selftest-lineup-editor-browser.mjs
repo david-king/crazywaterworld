@@ -35,6 +35,7 @@ settings.progression.trials = true;
 settings.lineups = { presets: [{ id: 'qa-lineup', name: '主线突击', formation }], mainlinePresetId: '', trialPresets: [] };
 saveAutomationSettings(accountId, settings, { revision: 0 });
 const requests = [], gameWrites = [], challengePayloads = [], pageErrors = [], recommendationRequests = [];
+let gameMainline = structuredClone(formation);
 let leagueTeams = owned.slice(0, 3).map((hero, index) => ({ index: index + 1, presetId: 1,
   heroPositions: [{ heroId: hero.id, pos: seats[0] }] }));
 const leagueWrites = [];
@@ -50,7 +51,17 @@ Object.assign(client, {
       leagueTeams = body.index.map((index, i) => ({ ...leagueTeams[index - 1], index: i + 1 }));
       return { formations: leagueTeams };
     }
-    if (name === 'GetFormationRequest') return { formation: structuredClone(formation) };
+    if (name === 'GetFormationRequest') return { formation: structuredClone(gameMainline) };
+    if (name === 'SaveFormationRequest') {
+      assert.equal(body.module, 1);
+      gameWrites.push(name); gameMainline = structuredClone(body.formation);
+      return { formation: structuredClone(gameMainline) };
+    }
+    if (name === 'OnWaterRequest') return { building: [{ buildingId: '1远征船', level: 1, fleet: { formation } }] };
+    if (name === 'MyFleetsRequest') return { fleets: [{ buildingId: '1远征船', state: 1 }] };
+    if (name === 'ExpeditionInfoRequest') return { raidId: 2, hero: owned.map(hero => ({ heroId: hero.id, hp: 10 })), formation };
+    if (name === 'UltraOpenRequest') return { raidId: 1 };
+    if (name === 'UltraInfoRequest') return { forms: [] };
     if (name === 'AllHeroRequest') return { heroes: owned.map((hero, index) => ({ heroId: hero.id, level: 60 + index, power: 10000 + index * 1234 })) };
     if (name === 'MyFormationPresetRequest') return { ids: config.tables.FormationTypeUnlockCfg.data.slice(0, 10).map(row => row.id) };
     if (name === 'AllPetRequest') return { pets: config.tables.PetBreedCfg.data.slice(0, 3).map((pet, index) => ({ petId: pet.petId, uid: String(9007199254741000n + BigInt(index)), star: 2, level: 30 })) };
@@ -124,8 +135,52 @@ try {
       await tab.tap();
     } else await tab.click();
     const panel = page.locator('#tab-lineups');
+    await panel.getByRole('button', { name: '编辑主线闯关', exact: true }).waitFor();
+    const mainlineCard = panel.locator('[data-game-team="mainline"]');
+    const heading = mainlineCard.locator('.game-lineup-heading');
+    const summary = await heading.getByText(/人上阵/).boundingBox();
+    const hint = await heading.getByText(/普通试炼.*竞技场防守/).boundingBox();
+    const members = await mainlineCard.locator('.game-lineup-members').boundingBox();
+    const actions = await mainlineCard.locator('.game-lineup-actions').boundingBox();
+    assert(hint && hint.x === summary.x && hint.y >= summary.y + summary.height - 1, '共用说明应紧跟阵型信息');
+    assert(mobile ? members.y >= hint.y + hint.height && actions.x >= hint.x + hint.width
+      : members.x >= hint.x + hint.width && actions.x >= members.x + members.width, '说明、英雄和按钮应各自完整显示');
+    assert.equal(await panel.locator('[data-game-team^="ultra:"]').count(), 3);
+    assert.equal(await panel.getByRole('heading', { name: '阵容', exact: true }).count(), 0);
+    const segments = await panel.getByRole('group', { name: '阵容来源' }).boundingBox();
+    const refresh = await panel.getByRole('button', { name: '刷新游戏阵容' }).boundingBox();
+    assert(segments.x + segments.width <= refresh.x && Math.abs(segments.y + segments.height / 2 - refresh.y - refresh.height / 2) <= 1,
+      '刷新按钮和来源切换应在同一行');
+    const rows = await panel.locator('.game-lineup-category').evaluateAll(groups => groups.map(group => {
+      const cards = [...group.querySelectorAll('[data-game-team]')];
+      const { top, bottom } = group.getBoundingClientRect();
+      return { modes: [...new Set(cards.map(card => card.dataset.gameTeam.split(':')[0]))], top, bottom };
+    }));
+    assert.deepEqual(rows.map(row => row.modes), [['mainline'], ['fleet'], ['expedition'], ['league'], ['ultra'], ['tournament']]);
+    assert(rows.every((row, i) => !i || row.top >= rows[i - 1].bottom), '各玩法应分行排列');
+    if (!mobile) await page.screenshot({ path: path.join(output, 'lineup-game-desktop.png'), animations: 'disabled' });
+    else {
+      assert(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth + 1));
+      await page.screenshot({ path: path.join(output, 'lineup-game-mobile.png'), animations: 'disabled' });
+    }
+    await panel.getByRole('button', { name: '我的预设', exact: true }).click();
     await panel.locator('#saved-lineup-view').getByRole('button', { name: '编辑阵容 ' + savedName, exact: true }).waitFor();
-    assert.deepEqual(await panel.locator('#saved-lineup-view > .bar button').allTextContents(), ['新建阵容', '保存游戏当前阵容']);
+    const presetActions = panel.getByRole('group', { name: '预设操作' });
+    assert.deepEqual(await presetActions.getByRole('button').allTextContents(), ['新建阵容', '保存当前主线阵容']);
+    const preset = loadAutomationSettings(accountId).settings.lineups.presets.find(item => item.name === savedName);
+    const card = panel.locator('[data-lineup-preset="' + preset.id + '"]');
+    const heroNames = preset.formation.heroPositions.map(slot => owned.find(hero => hero.id === slot.heroId).name);
+    assert.deepEqual(await card.locator('.game-lineup-member > span:last-child').allTextContents(), heroNames);
+    assert.equal(await card.getByRole('button', { name: '查看阵容 ' + savedName, exact: true }).innerText(), savedName);
+    const toolsBox = await presetActions.boundingBox();
+    assert(mobile ? toolsBox.y >= segments.y + segments.height : toolsBox.x >= segments.x + segments.width);
+    assert(await panel.evaluate(element => element.scrollWidth <= element.clientWidth));
+    if (savedName === '主线突击') {
+      await panel.screenshot({ path: path.join(output, 'lineup-presets-' + (mobile ? 'mobile' : 'desktop') + '.png'), animations: 'disabled' });
+      await card.getByRole('button', { name: '删除阵容 ' + savedName, exact: true }).click();
+      await page.getByRole('dialog', { name: '删除阵容' }).getByRole('button', { name: '取消' }).click();
+      assert(await card.isVisible());
+    }
     assert.equal(await panel.locator('#lineup-view, #lineup-refresh, #saved-lineup-refresh').count(), 0);
     assert.equal(await panel.getByText('推荐阵容', { exact: true }).count(), 0);
     assert.equal(await tab.getAttribute('aria-current'), 'page');
@@ -150,6 +205,23 @@ try {
   console.log('通过：积分赛队序接口换位回读、过期队序防重');
   const modal = page.locator('#saved-lineup-dialog');
   const editorRequests = () => requests.filter(name => name === 'GetFormationRequest').length;
+  const checkNameField = async targetPage => {
+    const name = targetPage.locator('#saved-lineup-editor .lineup-name-field input');
+    const metrics = await name.evaluate(async input => {
+      const settle = () => Promise.all(input.getAnimations().map(animation => animation.finished));
+      input.blur(); await settle();
+      const idleShadow = getComputedStyle(input).boxShadow;
+      input.focus(); await settle();
+      const style = getComputedStyle(input), box = input.getBoundingClientRect();
+      const footer = input.closest('.lineup-editor-footer').getBoundingClientRect();
+      return { focused: input.matches(':focus-visible'), outline: style.outlineStyle,
+        ring: style.boxShadow !== idleShadow, inside: box.left >= footer.left && box.right <= footer.right,
+        widthRem: box.width / parseFloat(getComputedStyle(document.documentElement).fontSize), desktop: innerWidth > 700 };
+    });
+    assert(metrics.focused && metrics.ring, '名称输入框应显示主题焦点环');
+    assert.equal(metrics.outline, 'none', '主题焦点环外不应再绘制一层轮廓');
+    assert(metrics.inside && (!metrics.desktop || metrics.widthRem <= 20.01), '名称输入框应适应底栏宽度');
+  };
   const openEditor = async (targetPage, name) => {
     await targetPage.getByRole('button', { name: '编辑阵容 ' + name, exact: true }).click();
     await targetPage.locator('#saved-lineup-dialog[open][data-lineup-mode="editor"] .lineup-hero').first().waitFor();
@@ -233,6 +305,7 @@ try {
   const recommendation = available[3];
   await modal.locator('.lineup-hero').first().waitFor();
   await page.setViewportSize({ width: 1366, height: 720 });
+  await checkNameField(page);
   await assertRosterScroll('新建阵容');
   const unlockedFormations = await page.getByLabel('阵型', { exact: true }).locator('option:enabled').evaluateAll(options => options.map(option => ({ id: option.value, name: option.textContent })));
   const layoutIssues = [];
@@ -524,6 +597,7 @@ try {
   console.log('通过：手机连续触摸打开、关闭编辑和查看弹窗');
   await openEditor(mobile.page, '主线突击');
   await mobile.page.getByLabel('阵容名称', { exact: true }).fill('手机验证阵容');
+  await checkNameField(mobile.page);
   await mobile.page.locator('.lineup-hero').nth(7).tap();
   await mobile.page.locator('.lineup-slot').first().tap();
   await saveEditor(mobile.page, true);
@@ -596,6 +670,43 @@ try {
   console.log('通过：390px手机弹窗编辑、触摸换位、保存和只读查看，无横向溢出');
   assert.deepEqual(gameWrites, []); assert.deepEqual(pageErrors, []);
   assert.deepEqual(recommendationRequests, [], '阵容页不再请求推荐阵容');
+  await page.locator('#tabs [data-tab="lineups"]').click();
+  await page.getByRole('button', { name: '游戏阵容', exact: true }).click();
+  await page.locator('#theme-trigger').click();
+  await page.locator('[data-theme-option="dark"]').click();
+  await page.locator('html[data-theme="dark"] .game-lineup-card').first().waitFor();
+  await page.screenshot({ path: path.join(output, 'lineup-game-dark.png'), animations: 'disabled' });
+  await page.getByRole('button', { name: '编辑主线闯关', exact: true }).click();
+  await modal.getByLabel('载入预设').selectOption('qa-lineup');
+  const revision = loadAutomationSettings(accountId).revision;
+  const applied = page.waitForResponse(response => new URL(response.url()).pathname === '/api/lineups/game/apply');
+  await modal.getByRole('button', { name: '应用到游戏', exact: true }).click();
+  assert.equal((await applied).status(), 200);
+  await modal.waitFor({ state: 'detached' });
+  await page.waitForFunction(() => !document.querySelector('#game-lineup-refresh').disabled);
+  assert.equal(await page.locator('#game-lineup-status').textContent(), '', '应用成功后直接刷新队伍');
+  assert.deepEqual(gameWrites, ['SaveFormationRequest']);
+  assert.equal(loadAutomationSettings(accountId).revision, revision);
+  await page.getByRole('button', { name: '编辑主线闯关', exact: true }).click();
+  await modal.getByLabel('预设名称').fill('从主队另存');
+  await checkNameField(page);
+  await modal.getByRole('button', { name: '另存为预设', exact: true }).click();
+  await modal.waitFor({ state: 'detached' });
+  assert(loadAutomationSettings(accountId).settings.lineups.presets.some(preset => preset.name === '从主队另存'));
+  assert.deepEqual(gameWrites, ['SaveFormationRequest']);
+  await page.getByRole('button', { name: '我的预设', exact: true }).click();
+  await page.getByRole('button', { name: '保存当前主线阵容', exact: true }).click();
+  const captureDialog = page.getByRole('dialog', { name: '保存当前主线阵容' });
+  await captureDialog.getByRole('textbox').fill('工具栏保存');
+  await captureDialog.getByRole('button', { name: '确认' }).click();
+  const captured = page.getByRole('button', { name: '删除阵容 工具栏保存', exact: true });
+  await captured.click();
+  await page.getByRole('dialog', { name: '删除阵容' }).getByRole('button', { name: '确认' }).click();
+  await captured.waitFor({ state: 'detached' });
+  assert(!loadAutomationSettings(accountId).settings.lineups.presets.some(preset => preset.name === '工具栏保存'));
+  assert.deepEqual(gameWrites, ['SaveFormationRequest']);
+  assert.deepEqual(pageErrors, []);
+  console.log('通过：载入预设并应用到游戏，另存游戏阵容仅写入本地配置');
   console.log('阵容浏览器验收通过，截图目录 ' + output);
   await desktop.context.close(); await mobile.context.close();
 } finally {

@@ -16,7 +16,7 @@ const config = { tables: {
     { season, score: 200, reward: [['RUBY', 30]] },
     { season, score: 900, reward: [['RUBY', 40]] },
   ] },
-  OpenRankWarTaskCfg: { data: [{ season: 3, score: 50, reward: [['GOLD', 1]] }] },
+  OpenRankWarTaskCfg: { data: [{ season: 8, score: 5, reward: [['GOLD', 9]] }, { season: 3, score: 50, reward: [['GOLD', 1]] }] },
 } };
 const later = Date.now() / 1000 + 1000;
 
@@ -106,7 +106,7 @@ const info = rows => body => {
 {
   const client = game({ OpenRankInfoRequest: info({ 4: { endTime: later, progress: 60, gotRewardId: [] } }) });
   await claimOpenRanks(client, config, player, allow, collect());
-  assert.deepEqual(client.sent, [['GotOpenRankRewardRequest', { type: 4, id: 50 }]], '当前赛季没有配置时退回最高赛季，与客户端一致');
+  assert.deepEqual(client.sent, [['GotOpenRankRewardRequest', { type: 4, id: 50 }]], 'S4 缺档时取 S3 的 50 分奖励');
 }
 
 console.log('pirate board ok: report paging, pending filter, confirmed collect-all, open rank seasons, ended ranks and tier ids');

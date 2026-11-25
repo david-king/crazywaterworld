@@ -6,6 +6,15 @@ import { loadProtocol } from '../src/proto.mjs';
 import { rewardSchedule } from '../src/reward-schedule.mjs';
 
 const protocol = loadProtocol();
+{
+  const client = new EventEmitter(), schedule = rewardSchedule(client);
+  const limits = ['guildOrders:quota', 'guildOrders:factoryGameLimit'];
+  for (const key of limits) schedule.defer(key, schedule.nextDay());
+  client.emit('message', { name: 'SCGuildOrder', body: {} });
+  assert(limits.every(key => !schedule.due(key)));
+  client.emit('message', { name: 'SCJoinGuild', body: {} });
+  assert(limits.every(key => schedule.due(key)));
+}
 const wakeups = [
   ['SCNewGuildAidAsk', ['guildAidHelp']],
   ['SCGuildAidHelp', ['guildAidCollect', 'guildAidHelp']],

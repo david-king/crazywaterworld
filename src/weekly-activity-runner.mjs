@@ -89,9 +89,9 @@ export function weeklyActivityActionSettings(context, config) {
 }
 
 export async function runWeeklyActivity(client, protocol, config, player, {
-  getSettings, ledger, enabled = () => true, report = () => {},
+  getSettings, ledger, scheduler, enabled = () => true, report = () => {},
 } = {}) {
-  const context = await createWeeklyActivityContext(client, config, player, { getSettings, enabled, report });
+  const context = await createWeeklyActivityContext(client, config, player, { getSettings, enabled, report, scheduler });
   if (!context) return { kind: null, results: [], notes: [] };
   const settings = weeklyActivityActionSettings(context, config);
   const scope = weeklyActionClient(client, name => context.beforeAction(name));

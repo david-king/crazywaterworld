@@ -12,6 +12,7 @@ const cases = [
   ['selftest-afk-upgrade.mjs'],
   ['selftest-campaign-report-rewards.mjs'],
   ['selftest-daily-schedule.mjs'],
+  ['selftest-daily-card-rewards.mjs'],
   ['selftest-world-boss-fleets.mjs'],
   ['selftest-world-boss-lineups.mjs'],
   ['selftest-league-challenge.mjs'],

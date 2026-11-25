@@ -1,4 +1,5 @@
 import {normalize} from './worlds.mjs';
+import { rowsForSeason } from './season-config.mjs';
 import {exactAutomationId} from './automation-policy.mjs';
 
 const rows=(config,name)=>config?.tables?.[name]?.data??[];
@@ -22,7 +23,7 @@ function effectText(config,cfg,level){
 export function guildTechView(config,{season,stage,tech,items}){
  if(!valid(season)||season<1||!valid(stage)||!Array.isArray(tech)||!Array.isArray(items))throw Error('科技等级、阶段或库存未同步，请刷新重试');
  if(tech.some(t=>!valid(t.techId)||t.techId<1||!valid(t.level))||new Set(tech.map(t=>t.techId)).size!==tech.length)throw Error('科技等级数据不完整，请刷新重试');
- const definitions=rows(config,'GuildTechCfg').filter(r=>r.season===season),levels=new Map(tech.map(t=>[t.techId,t.level]));
+ const definitions=rowsForSeason(rows(config,'GuildTechCfg'),season),levels=new Map(tech.map(t=>[t.techId,t.level]));
  if(!definitions.length)throw Error('当前赛季科技配置未找到');
  const balances=['公会科技点','联盟职级科技点'].map(id=>{const matches=items.filter(r=>r.itemId===id);return{id,name:id==='公会科技点'?'科技点':'职级科技点',value:matches.every(r=>valid(r.num))?matches.reduce((n,r)=>n+r.num,0):null};});
  const result=definitions.map(cfg=>{

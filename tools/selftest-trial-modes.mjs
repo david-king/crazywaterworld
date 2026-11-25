@@ -91,6 +91,136 @@ try{
  await check('明确拒绝释放预约，未确认次数不报成功，跨日未知不重发',async()=>{const f=trialModesFixture(),l=ledger();f.state.failure='reject';await run(f,l);assert.equal(l.snapshot().counters.diamonds,0);f.state.failure='stale';assert.equal((await run(f,l)).pending,true);f.client.serverClockOffsetMs=86400000;await run(f,l);assert.equal(f.state.writes.length,2);});
  await check('同账号并发只消费一次，大额不精确钻石余额拒绝付费',async()=>{const f=trialModesFixture(),l=ledger();await Promise.all([run(f,l),run(f,l)]);assert.equal(f.state.writes.length,1);const g=trialModesFixture();g.state.ruby='9007199254740993';await run(g,ledger());assert.equal(g.state.writes.length,0);});
  await check('整轮挂机能独立执行新增扫荡，先免广告后钻石',async()=>{const f=trialModesFixture(),l=ledger();await runLoop(f.client,f.protocol,{config:f.config,player:f.player,adChannel:f.channel,allowMutate:true,rounds:1,everyMs:0,getSettings:()=>f.settings,isEnabled:key=>['trialPaidSweep','trialAdSweep'].includes(key),usageLedger:l});assert.equal(f.state.writes.filter(x=>x.name==='TrialRaidBuySweepRequest').length,6);assert.equal(f.state.writes[0].name,'WatchAdvRequest');});
+ await check('海兽广告次数耗尽后，连续轮询、暂停恢复及重新连接均无重复请求和日志', async () => {
+  const file = path.join(dir, 'exhausted-raid.json');
+  async function idle(f, rounds) {
+   f.settings.trials.raidIds = [3];
+   const logs = [];
+   await runLoop(f.client, f.protocol, {
+    config: f.config, player: f.player, adChannel: f.channel, allowMutate: true, rounds, everyMs: 0,
+    getSettings: () => f.settings, isEnabled: key => key === 'trialAdSweep',
+    usageLedger: createUsageLedger('qa', { file }), includeRepeatedWaits: true,
+    onStep: entry => { if (entry.taskKey === 'trialAdSweep:3') logs.push(entry); },
+   });
+   return logs;
+  }
+  const first = trialModesFixture();
+  first.state.adv.find(row => row.id === 5).gotTimes = 1;
+  const logs = await idle(first, 3);
+  assert.equal(logs.length, 1);
+  assert.match(logs[0].reason, /次数已用完.*次日 00:00/);
+  assert.equal(first.state.reads.filter(row => row.name === 'TrialRaidInfoRequest').length, 1);
+  first.state.reads.length = 0;
+  assert.deepEqual(await idle(first, 1), []);
+  const reconnect = trialModesFixture();
+  assert.deepEqual(await idle(reconnect, 2), []);
+  for (const f of [first, reconnect]) {
+   const trialReads = ['TrialRaidInfoRequest', 'MonthCardRequest', 'AllResourceRequest', 'FirstChargeRequest', 'OnWaterRequest'];
+   assert.deepEqual(f.state.reads.filter(row => trialReads.includes(row.name)), []);
+   assert.deepEqual(f.state.writes, []);
+   const schedule = rewardSchedule(f.client);
+   assert.equal(schedule.nextCheck('trialAdSweep:3'), schedule.nextDay());
+   assert.match(schedule.status('trialAdSweep').text, /海兽经验副本.*次日 00:00/);
+  }
+ });
+ await check('最后一次广告扫荡回读即生效，次日北京时间零点恢复', async () => {
+  const f = trialModesFixture();
+  const midnight = Date.parse('2026-11-26T00:00:00+08:00');
+  const setClock = time => { f.client.serverClockOffsetMs = time - Date.now(); };
+  const l = createUsageLedger('qa', { file: path.join(dir, 'midnight.json'), now: () => Date.now() + f.client.serverClockOffsetMs });
+  setClock(midnight - 30_000);
+  const last = await run(f, l, 'ad');
+  assert.equal(last.ok, true);
+  assert.equal(last.nextCheckAt, midnight / 1000);
+  f.state.reads.length = 0;
+  assert.equal((await run(f, l, 'ad')).cached, true);
+  assert.deepEqual(f.state.reads, []);
+  const manual = await run(f, l, 'ad', { manual: true });
+  assert.equal(manual.skipped, true);
+  assert(f.state.reads.some(row => row.name === 'OnWaterRequest'));
+  setClock(midnight);
+  f.state.adv.find(row => row.id === 4).gotTimes = 0;
+  assert.equal((await run(f, l, 'ad')).ok, true);
+  assert.equal(f.state.writes.filter(row => row.name === 'TrialRaidBuySweepRequest').length, 2);
+ });
+ await check('耗尽记录按账号、区服、角色、副本和扫荡方式隔离', async () => {
+  const file = path.join(dir, 'trial-scopes.json');
+  const l = createUsageLedger('qa', { file });
+  const f = trialModesFixture();
+  f.state.adv.find(row => row.id === 4).gotTimes = 1;
+  assert.match((await run(f, l, 'ad')).reason, /次数已用完/);
+  assert.equal((await run(f, l, 'paid')).ok, true);
+  assert.equal((await executeTrialSweep(f.client, f.protocol, f.config, f.player, 2, 'ad', {
+   getSettings: () => f.settings, ledger: l, channel: f.channel,
+  })).ok, true);
+  for (const identity of ['account', 'worldId', 'playerId']) {
+   const g = trialModesFixture();
+   if (identity !== 'account') g.player[identity] = '9007199254740995';
+   const scoped = identity === 'account' ? createUsageLedger('another', { file }) : l;
+   assert.equal((await run(g, scoped, 'ad')).ok, true, identity);
+  }
+ });
+ await check('查询失败、未决发送和跨日回包继续核对', async () => {
+  const f = trialModesFixture(), l = ledger();
+  f.state.onRead = name => { if (name === 'OnWaterRequest') throw Error('模拟超时'); };
+  assert.match((await run(f, l, 'ad')).reason, /超时/);
+  f.state.onRead = null;
+  f.state.failure = 'unknown';
+  assert.equal((await run(f, l, 'ad')).pending, true);
+  f.state.reads.length = 0;
+  assert.match((await run(f, l, 'ad')).reason, /待确认/);
+  assert(f.state.reads.some(row => row.name === 'OnWaterRequest'));
+  f.state.adv.find(row => row.id === 4).gotTimes = 1;
+  assert.match((await run(f, l, 'ad')).reason, /次日/);
+  assert.equal(l.snapshot().uncertain, 0);
+  assert.equal((await run(f, l, 'ad')).cached, true);
+  const g = trialModesFixture(), other = ledger();
+  g.state.adv.find(row => row.id === 4).gotTimes = 1;
+  g.state.onRead = name => { if (name === 'OnWaterRequest') g.client.serverClockOffsetMs = 86400_000; };
+  assert.equal((await run(g, other, 'ad')).nextCheckAt, undefined);
+  g.state.onRead = null;
+  g.state.adv.find(row => row.id === 4).gotTimes = 0;
+  assert.equal((await run(g, other, 'ad')).ok, true);
+ });
+ await check('已知广告用尽仍可核对后来产生的未决钻石扫荡', async () => {
+  const f = trialModesFixture(), l = ledger();
+  assert.equal((await run(f, l, 'ad')).ok, true);
+  f.state.failure = 'unknown';
+  assert.equal((await run(f, l, 'paid', { manual: true })).pending, true);
+  assert.match((await run(f, l, 'ad')).reason, /待确认/);
+  f.state.raids.get(1).buySweepTimes++;
+  assert.match((await run(f, l, 'ad')).reason, /次日/);
+  assert.equal(l.snapshot().uncertain, 0);
+  assert.equal(l.confirmedCounters().trialPaid1, 1);
+  f.state.reads.length = 0;
+  assert.equal((await run(f, l, 'ad')).cached, true);
+  assert.deepEqual(f.state.reads, []);
+ });
+ await check('保存耗尽记录失败时保留实际扫荡结果，下轮只复查次数', async () => {
+  const f = trialModesFixture(), l = ledger();
+  const failed = { ...l, markDailyCompletion() { throw Error('模拟写盘失败'); } };
+  const result = await run(f, failed, 'ad');
+  assert.equal(result.ok, true);
+  assert.match(result.note, /保存当日耗尽记录失败/);
+  assert.equal(l.snapshot().uncertain, 0);
+  assert.match((await run(f, l, 'ad')).reason, /次日/);
+  assert.equal(f.state.writes.filter(row => row.name === 'TrialRaidBuySweepRequest').length, 1);
+  assert.equal((await run(f, l, 'ad')).cached, true);
+ });
+ await check('单副本广告和钻石扫荡分别休眠，调高钻石限额只恢复付费检查',async()=>{
+  const f=trialModesFixture(), l=ledger();
+  Object.assign(f.settings.trials,{raidIds:['1'],paidPerRaidLimit:1});
+  const round=()=>runLoop(f.client,f.protocol,{config:f.config,player:f.player,adChannel:f.channel,
+    allowMutate:true,rounds:1,getSettings:()=>f.settings,isEnabled:key=>['trialAdSweep','trialPaidSweep'].includes(key),usageLedger:l});
+  await round();
+  assert.equal(f.state.writes.filter(row=>row.name==='TrialRaidBuySweepRequest').length,2);
+  f.state.reads.length=0; await round();
+  assert(!f.state.reads.some(row=>['TrialRaidInfoRequest','MonthCardRequest','OnWaterRequest'].includes(row.name)));
+  f.settings.trials.paidPerRaidLimit=2; await round();
+  assert(f.state.reads.some(row=>row.name==='MonthCardRequest'));
+  assert(!f.state.reads.some(row=>row.name==='OnWaterRequest'));
+  assert.equal(f.state.writes.filter(row=>row.name==='TrialRaidBuySweepRequest').length,3);
+ });
  await check('三种扫荡分别保留每个副本的跳过原因，检查本身不消耗次数',async()=>{
   const f=trialModesFixture(), l=ledger();
   f.state.raids.get(1).buySweepTimes=3;

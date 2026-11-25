@@ -9,14 +9,16 @@ import {
   loadAutomationSettings, saveAutomationSettings, settingsUiRules
 } from '../src/automation-settings.mjs';
 import { MERCHANT_DEFAULTS, merchantSettings } from '../src/merchant-planner.mjs';
+import { merchantPresetSettings } from '../src/merchant-preset-settings.mjs';
 
 const defaults = {
   fullCargoRoutes: false,
+  knownPortChains: true, minPurchaseReturnPercent: 0,
   autoShareIntel: false,
   quoteMaxAgeSeconds: 300, estimateDiscountPercent: 0, refreshWaitSeconds: 120, liquidationMinutes: 120,
   maxLossPercent: 0, minExpectedProfit: 1, autoSpeedUp: false, keepPointers: 0,
   speedUpMode: 'deadline', guardLastPointer: false, speedUpMaxPerLeg: 4, monitorSeconds: 60,
-  refreshWindowMinutes: 8, dailyPointerLimit: 28, periodPointerLimit: -1, autoBuyPointers: false, pointerDailyDiamondLimit: 0,
+  refreshWindowMinutes: 8, dailyPointerLimit: 28, periodPointerLimit: -1, speedUpIntelPorts: 0, autoBuyPointers: false, pointerDailyDiamondLimit: 0,
   profitLimit: 0, firstDepartureMode: 'smart', firstDepartureTime: '10:00', firstDepartureWaitMinutes: 29,
   autoUpgrade: false
 };
@@ -34,6 +36,30 @@ test('保守默认值与独立开关，不因新增策略开启走商或指针�
   assert.deepEqual(validateSettings(settings).merchant, settings.merchant);
   settings.merchant.maxLossPercent = 12;
   assert.equal(defaultSettings().merchant.maxLossPercent, 0);
+});
+
+test('版本 68 原样预设升级，自定义用针和未开启的日程保留', () => {
+  const base = defaultSettings(), current = merchantPresetSettings(base.merchant, 'v70');
+  for (const [id, old] of Object.entries(merchantPresetSettings(base.merchant, true))) {
+    const document = { ...exportAutomationSettings(base), version: 68 };
+    delete old.knownPortChains;
+    delete old.minPurchaseReturnPercent;
+    delete old.speedUpIntelPorts; // 旧文件没有后来新增的情报门槛。
+    Object.assign(document.settings.schedule, { merchantTrade: true, merchantRewards: true, tradeTasks: true });
+    document.settings.merchant = old;
+    const expected = id === 'sprint' ? { ...current.sprint, speedUpMode: 'goal', dailyPointerLimit: 45, periodPointerLimit: 139 } : current[id];
+    assert.deepEqual(importAutomationSettings(document).merchant, expected);
+    const version69 = id === 'sprint' ? { ...expected, periodPointerLimit: 104 } : expected;
+    assert.deepEqual(importAutomationSettings({ ...document, version: 69, settings: { ...document.settings, merchant: version69 } }).merchant, version69);
+    document.settings.schedule.merchantRewards = false;
+    assert.equal(importAutomationSettings(document).merchant.firstDepartureWaitMinutes, 29);
+    document.settings.schedule.merchantRewards = true;
+    old.dailyPointerLimit = 2;
+    const custom = importAutomationSettings(document).merchant;
+    assert.equal(custom.dailyPointerLimit, 2);
+    assert.equal(custom.minPurchaseReturnPercent, 0);
+    assert.equal(custom.firstDepartureWaitMinutes, 29);
+  }
 });
 
 test('旧版导入补齐策略参数，保留走商及领奖的显式开关', () => {
@@ -155,7 +181,7 @@ test('海商王活动配置完整接线，并说明估算、默认不亏卖和�
   assert.match(byKey.get('merchant.autoShareIntel').help, /已有共享直接跳过/);
   assert.match(byKey.get('merchant.autoShareIntel').help, /失败不阻塞买卖/);
   assert.equal(byKey.has('merchant.speedUpMinProfit'), false);
-  assert.deepEqual(byKey.get('merchant.speedUpMode').options.map(([mode]) => mode), ['deadline', 'refresh', 'arrival', 'race', 'full', 'goal', 'eventFree']);
+  assert.deepEqual(byKey.get('merchant.speedUpMode').options.map(([mode]) => mode), ['deadline', 'refresh', 'arrival', 'race', 'full', 'goal', 'targetFirst', 'eventFree']);
   const when = byKey.get('merchant.keepPointers').when;
   assert.equal(when(defaultSettings()), false);
   const enabled = defaultSettings();

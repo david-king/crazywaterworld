@@ -81,7 +81,7 @@ export function isActivityTaskAvailable(taskKey, client = null) {
 
 const weeklyTasks = {
   1: ['weekPass'], 2: ['weekCharge'], 3: ['weekHeroStar'],
-  4: ['weekGift', 'weekTimes', 'weekLotterySpin'], 5: ['weekOrderSubmit', 'weekOrderFinal'],
+  4: ['weekGift', 'weekTimes', 'weekLotterySpin', 'weekSupplyFree'], 5: ['weekOrderSubmit', 'weekOrderFinal'],
   6: ['weekChipFree', 'weekSupplyFree'], 7: ['weekUniqueFree', 'weekSupplyFree'],
 };
 const timedTasks = {

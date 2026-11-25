@@ -17,7 +17,8 @@ const tables = {
     { eventId: 40001, type: '解救难民', eventName: '救助' },
   ],
   WorldParamCfg: [{ paramName: '情报事件消耗汽油', paramValue: 500 }],
-  WorldPirateCfg: [{ season: '1', type: 1, level: 1, power: 100 }, { season: '2', type: 1, level: 1, power: 1000 }],
+  WorldPirateCfg: [{ season: '1', type: 1, level: 1, power: 100 }, { season: '2', type: 1, level: 1, power: 1000 },
+    { season: '4', type: 1, level: 1, power: 2000 }],
 };
 const config = { tables: Object.fromEntries(Object.entries(tables).map(([key, data]) => [key, { data }])) };
 const event = n => ({ uid: long(n), eventId: 10001, color: 3, gridIdx: n, state: 1, startTime: 0, pirate: { type: 1, level: 1 } });
@@ -120,6 +121,9 @@ export async function testRadar() {
 
   const season = mock({ fleets: [fleet(1, { power: 500 })] });
   await run(season); assert.equal(sends(season).length, 0, '不能误用第一赛季的较低战力');
+  const gap = mock({ fleets: [fleet(1)] });
+  await run(gap, { player: { ...player, worldId: 3_000_001 } });
+  assert.equal(sends(gap).length, 1, 'S3 缺档时以 S2 的 1000 战力完成选舰与派遣');
   const unknownSeason = mock();
   assert((await run(unknownSeason, { player: { ...player, worldId: 0 } })).some(e => /赛季/.test(e.reason)));
   assert.equal(sends(unknownSeason).length, 0);

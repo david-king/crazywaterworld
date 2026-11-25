@@ -4,6 +4,7 @@ import {openRankWindows} from './activity-rankings.mjs';
 import {exactAutomationId,automationWireId} from './automation-policy.mjs';
 import {merchantProgress, merchantJournalSummary} from './merchant-activity.mjs';
 import {fishView,newbieView} from './collections.mjs';
+import { seasonRows } from './season-config.mjs';
 import { weekChipProgress } from './week-chip.mjs';
 
 const rows=(c,n)=>c?.tables?.[n]?.data??[];
@@ -28,7 +29,6 @@ export function activityPeriodName(config,event){
 
 export async function readActivityStatistics(client,config,player,ledger,settings){
  const checkedAt=Math.floor((Date.now()+(client.serverClockOffsetMs||0))/1000),items=[],notes=[],cache=new Map();
- const season=Math.floor(Number(exactAutomationId(player.worldId))/1e6)%1000;
  const ask=(name,body={})=>{
   const key=name+JSON.stringify(body);
   if(!cache.has(key))cache.set(key,client.request(name+'Request',body,name+'Response',8000).then(rewardData));
@@ -99,7 +99,7 @@ export async function readActivityStatistics(client,config,player,ledger,setting
   await capture(row,async()=>{
    const s=await ask('OpenRankInfo',{type:window.type});if(!valid(s.progress)||!Array.isArray(s.gotRewardId))throw Error('冲榜进度未完整返回');
    row.progress=text(s.progress)+(window.type===2?' 关':' 分');row.rank=ranking(s.leaderBoard?.myItem?.rank);
-   const all=rows(config,table),chosen=all.some(t=>t.season===season)?season:Math.max(0,...all.map(t=>t.season??0)),tiers=all.filter(t=>t.season==null||t.season===chosen);
+   const tiers=seasonRows(config,table,player,{includeCommon:true});
    row.rewards=activityRewardState(tiers,t=>t.score<=s.progress,t=>s.gotRewardId.includes(t.score));
   });
  }
@@ -123,7 +123,7 @@ export async function readActivityStatistics(client,config,player,ledger,setting
  if(unlocked('世界')){
   const boss=add('boss','世界Boss');boss.rankKey='world-boss';
   await capture(boss,async()=>{const s=(await ask('WorldBossInfo')).info;if(!s?.bossId){boss.status='未开放';boss.progress='—';return;}boss.progress='最高伤害 '+text(s.bestDamage);
-   boss.rewards=valid(s.bestDamage)&&valid(s.gotRewardLevel)?activityRewardState(rows(config,'WorldBossDamageRewardCfg').filter(t=>t.season===season&&t.bossId===s.bossId),t=>s.bestDamage>=t.damage,t=>t.level<=s.gotRewardLevel):'未同步';
+   boss.rewards=valid(s.bestDamage)&&valid(s.gotRewardLevel)?activityRewardState(seasonRows(config,'WorldBossDamageRewardCfg',player).filter(t=>t.bossId===s.bossId),t=>s.bestDamage>=t.damage,t=>t.level<=s.gotRewardLevel):'未同步';
    boss.rank=ranking((await ask('WorldBossPlayerRank')).myRank?.rank);});
   const war=add('city-war','联盟城战');
   await capture(war,async()=>{const s=await ask('WarDeclaration'),guild=exactAutomationId(player.guildId);if(!Array.isArray(s.declarations))throw Error('宣战列表未完整返回');war.startTime=s.startTime;war.endTime=s.endTime;war.status=stateAt(s.startTime,s.endTime,checkedAt);war.progress='我盟宣战 '+s.declarations.filter(t=>guild&&t.attackGuildIdx===Number(BigInt(guild)%1000n)).length+' 城';war.rewards='未同步';});
@@ -146,7 +146,7 @@ export async function readActivityStatistics(client,config,player,ledger,setting
    const signCfg=rows(config,'LinkageLSRSignCfg').find(t=>t.signDay===day(checkedAt)-day(signSub.openTime||event.startTime)+1);
    row.progress='活跃 '+text(daily.activeScore)+' · 已签到 '+(signed?signed.length:'未同步')+' 天';
    row.rewards=valid(daily.activeScore)&&valid(daily.claimedRewardId)?activityRewardState(rows(config,'LinkageLSRActiveRewardCfg'),t=>daily.activeScore>=t.score,t=>t.rewardId<=daily.claimedRewardId):'未同步';
-   const gifts=event.subActivity?.find(s=>s.subActivityType===6)?.dailyCombGift,all=rows(config,'LinkageLSRDailyDealCfg').filter(t=>t.season>0&&t.season<=season),chosen=Math.max(0,...all.map(t=>t.season)),free=all.filter(t=>t.season===chosen&&t.price===0&&!t.chargeId);
+   const gifts=event.subActivity?.find(s=>s.subActivityType===6)?.dailyCombGift,free=seasonRows(config,'LinkageLSRDailyDealCfg',player).filter(t=>t.price===0&&!t.chargeId);
    row.welfare=(signed&&signCfg?signed.includes(signCfg.rewardId)?'今日签到已领':'今日签到未领':'签到状态未同步')+' · '+(Array.isArray(gifts?.boughtGiftId)&&free.length?free.every(t=>gifts.boughtGiftId.includes(t.packId))?'免费礼包已领':'免费礼包未领':'免费礼包未同步');
   }
   else row.progress='子活动 '+(event.subActivity?.length??0)+' 项';

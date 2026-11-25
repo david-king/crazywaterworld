@@ -40,6 +40,8 @@ export const operationLabels = {
   '/api/lineups': '查看推荐阵容',
   '/api/league/order': '积分赛出战顺序',
   '/api/lineups/apply': '应用推荐阵容',
+  '/api/lineups/game': '读取游戏阵容',
+  '/api/lineups/game/apply': '应用游戏阵容',
   '/api/lineup-presets': '读取保存的阵容',
   '/api/lineup-editor': '读取布阵信息',
   '/api/settings/stationed-pets': '读取值守海兽',

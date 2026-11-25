@@ -1,6 +1,8 @@
 import { displayMaterial } from './config.mjs';
 import { toNumber } from './client.mjs';
 import { normalize } from './worlds.mjs';
+import { seasonRows, seasonOf } from './season-config.mjs';
+export { seasonRows, seasonOf };
 
 export const extraRewardKeys = ['tradeTasks', 'guildTitleReward', 'guildAidCollect', 'heroRecruitRewards',
   'seasonTasks', 'crossRankDaily', 'worldBossDamage', 'passStageRewards'];
@@ -24,19 +26,6 @@ const startOfDay = time => Math.floor((time + BEIJING) / DAY) * DAY - BEIJING;
 const replyAssets = (config, reward) => (normalize(reward)?.asset ?? []).map(item => displayMaterial(config, item.id) + ' ×' + item.num).join('、');
 const withReward = (label, text) => (text ? label + ' · 获得 ' + text : label);
 const moduleLevel = (config, id) => rows(config, 'ModuleOpenCfg').find(row => row.moduleId === id)?.playerLevel;
-
-export function seasonOf(player) {
-  const world = normalize(player?.worldId);
-  return Number.isSafeInteger(world) && world > 0 ? Math.floor(world / 1e6) % 1000 : 0;
-}
-
-// 与客户端 seasonCfgList 一致：使用不超过当前赛季的最新配置。
-export function seasonRows(config, table, player) {
-  const season = seasonOf(player);
-  const eligible = rows(config, table).filter(row => row.season > 0 && row.season <= season);
-  const applicable = Math.max(0, ...eligible.map(row => row.season));
-  return eligible.filter(row => row.season === applicable);
-}
 
 export function gameplayOpenDay(config, player, gameplay) {
   const days = rows(config, 'GameplayOpenCfg').find(row => row.gameplay === gameplay)?.openDays;

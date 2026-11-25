@@ -3,7 +3,7 @@ import { cityPetrolCost } from './city-war.mjs';
 import { toNumber } from './client.mjs';
 import { pendingPetrol } from './dispatch-preview.mjs';
 import { dispatchReservationReason, fleetRecordHold, fleetStateName } from './fleet-availability.mjs';
-import { cityDispatchObserved, fleetAtHome, recordsInWorld, settleFleetSnapshot } from './fleet-settlement.mjs';
+import { cityDispatchObserved, fleetAtHome, markCityDispatchSending, recordsInWorld, settleFleetSnapshot } from './fleet-settlement.mjs';
 import { loadMapAsset } from './world.mjs';
 
 const moveRequest = 'MoveFleetsToCityRequest';
@@ -165,7 +165,10 @@ export async function runWorldCityDispatch(client, protocol, config, player, set
     cost: view.cost, role: view.role, intent: view.intent, origin: fleet.origin, sentAt: nowOf(client) };
   const ticket = ledger.reserve({ cityWarPetrol: view.cost, manualCityDispatches: 1 }, {}, {}, { uniqueKey, details });
   try {
-    await client.sendWatch(moveRequest, { buildingId: [buildingId], cityId }, { window: 600, beforeSend: validate });
+    await client.sendWatch(moveRequest, { buildingId: [buildingId], cityId }, { window: 600, beforeSend() {
+      validate();
+      markCityDispatchSending(ledger, uniqueKey, ticket, nowOf(client));
+    } });
   } catch (error) {
     if (error.notSent || (error.prompt && error.request === moveRequest)) {
       ledger.cancel(ticket);
@@ -184,5 +187,6 @@ export async function runWorldCityDispatch(client, protocol, config, player, set
       return { status: 'confirmed', message: fleet.name + '已派往' + view.cityName + (view.intent === 'reinforce' ? '增援防守' : '') };
     }
   } catch { /* 回读失败不撤销已经发出的调动。 */ }
-  return { status: 'unknown', message: '派遣结果待确认，已保留舰队和汽油记录' };
+  return { status: 'unknown', message: ledger.keyRecords()[uniqueKey]?.id === ticket.id
+    ? '派遣结果待确认，已保留舰队和汽油记录' : '原派遣结果未确认，请以最新舰队状态为准' };
 }

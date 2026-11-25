@@ -9,7 +9,7 @@ const workerMode = process.argv[2];
 const worker = workerMode === '--hold-owner' || workerMode === '--probe-owner';
 const directory = worker ? process.argv[3] : fs.mkdtempSync(path.join(os.tmpdir(), 'cw-lineup-runtime-'));
 process.env.CW_DATA_DIR = directory;
-const { withTemporaryLineup, recoverLineup, readLineupRuntime } = await import('../src/lineup-runtime.mjs');
+const { withTemporaryLineup, recoverLineup, readLineupRuntime, lineupRecoveryView } = await import('../src/lineup-runtime.mjs');
 const { normalizeFormation, formationSignature } = await import('../src/saved-lineups.mjs');
 const { createLineupExecutor } = await import('../src/lineup-execution.mjs');
 const role = { playerId: '9007199254740993', worldId: '31' };
@@ -234,6 +234,7 @@ try {
     const client = fixture(accountId);
     client.current = structuredClone(target);
     assert.equal(readLineupRuntime(accountId).phase, 'battling', '持有者运行时仍可读取恢复状态');
+    assert.equal(lineupRecoveryView(accountId).phase, 'battling');
     await assert.rejects(client.recover(), /正在使用共享阵容/);
     await assert.rejects(client.run(async () => {}), /正在使用共享阵容/);
     assert.equal(client.reads, 0, '另一进程的自动恢复不能查询或修改活跃阵容');
@@ -242,6 +243,7 @@ try {
     await fixture().run(async () => {}, { formation: null });
     job.child.kill('SIGKILL');
     await job.done;
+    assert.equal(lineupRecoveryView(accountId).phase, 'pending', '进程退出后仍提供手动恢复入口');
     await client.recover();
     assert.deepEqual(client.current, original, '所有者退出后接管并恢复原阵容');
     assert.equal(readLineupRuntime(accountId).pending, false);

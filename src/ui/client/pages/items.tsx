@@ -1060,7 +1060,7 @@ function ItemsPanel({ account }: { account: string }) {
 
 function ItemsPage() {
   const store = getConsoleStore();
-  const active = useStore(store, (state) => state.view.page === "items");
+  const active = useStore(store, (state) => state.view.page === "heroes");
   const account = useStore(store, (state) => state.currentAccountId);
   const hint = useStore(store, (state) => {
     const id = state.currentAccountId;

@@ -1,6 +1,7 @@
 import { exactAutomationId } from './automation-policy.mjs';
 import { toNumber } from './client.mjs';
 import { readCityOfficer } from './world-city-authority.mjs';
+import { seasonRows } from './season-config.mjs';
 import { loadMapAsset } from './world.mjs';
 
 // CityMenuPop / GuildUtil: up to three simultaneous declarations per alliance.
@@ -69,8 +70,7 @@ async function inspectDeclaration(client, protocol, config, player, target, {
     const { stage } = await get('SeasonTaskStageRequest');
     if (!Number.isSafeInteger(stage) || stage < 0) return blocked('赛季阶段未同步');
     if (stage > 0) {
-      const season = Number(BigInt(exactAutomationId(player.worldId)) / 1000000n % 1000n);
-      const cap = rows(config, scenarioId + '_SeasonTaskCfg').find(row => Number(row.season) === season && row.stage === stage)?.maxCityLevel;
+      const cap = seasonRows(config, scenarioId + '_SeasonTaskCfg', player).find(row => row.stage === stage)?.maxCityLevel;
       if (!positive(cap)) return blocked('当前赛季的城池等级上限未同步');
       if (definition.level > cap) return blocked('当前赛季阶段尚未解锁该城池');
     }

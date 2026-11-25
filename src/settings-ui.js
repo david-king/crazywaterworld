@@ -71,6 +71,8 @@ const configZeroHints={
 };
 const merchantActivityFields = [
     configField('merchant.enabled','开启自动挂机'),
+    configField('merchant.knownPortChains','比较下一程已知销路','switch',{help:'灵活配货时，按到港可用本金、舱位和当日紧缺情报比较下一程。到港后重新核价。'}),
+    configField('merchant.minPurchaseReturnPercent','日间采购最低预计回报','number',{unit:'%',help:'以本港实际进价为分母，优先按风险折后的售价筛选。没有合适组合时，已知紧缺且折后可保本的货可按参考价补货。0 沿用原薄利规则。'}),
     configField('schedule.merchantTrade','按整船收益自动走商','switch',{help:'按实时买价、舱位、资金和库存配货，到港重读实价。没有成员共享时可在总览补录港口情报。本港可盈利的持货仍可出售。'}),
     configField('merchant.fullCargoRoutes','满舱双向特产航线','switch',{help:'默认关闭，按预计净收益灵活配货和选港。开启后，日间只跑两港特产互为紧缺货的航线，按折扣、每格价差和品质补满再出发。库存不足时等刷新，本金不足以装满时留港。空余航次时间用于对准刷新，指针留到活动收尾或收盘救航。隔夜航次按现货和本金尽量装满，次日开市先清舱。'}),
     configField('merchant.autoShareIntel','到港自动共享情报','switch',{help:'默认关闭，手动开启后随已开启的走商及所属分组执行。确认到港后共享本港尚未共享的紧缺情报，已有共享直接跳过；每日紧缺更新后重新检查，不按每次价格刷新重复发送。回读确认后才记为已共享，未知结果保留防重记录，失败不阻塞买卖；达到利润上限仍可共享当前港口。'}),
@@ -84,11 +86,12 @@ const merchantActivityFields = [
     configField('merchant.liquidationMinutes','活动结束前清仓窗口','number',{unit:'分钟',help:'默认120分钟，0关闭提前清仓。窗口内优先处理持货；无论此值多少，都不采购无法在交易截止前卖出的货物。'}),
     configField('merchant.maxLossPercent','清仓最大亏损率','number',{unit:'%',help:'普通清仓默认 0，不自动亏损卖出。平时可按原价卖出，为收益更高的现货腾出本金和舱位。填正数后，清仓期可按每批买价接受所设比例内的亏损。隔夜船货在次日开市按实价全部卖出，即使亏损超过此比例。'}),
     configField('merchant.autoSpeedUp','允许使用指南针加速','switch',{help:'按账号保存，跨期生效。关闭时按自然航程走商。开启后按所选策略、用量上限和保留数量用针，达到 5000 万或更低的自设利润上限后停止用针。'}),
-    configField('merchant.speedUpMode','跑船与加速策略','choice',{options:[['deadline','稳定模式：平时省针，最后一船加速卖货'],['refresh','刷新窗口加速'],['arrival','刷新窗口加速：每刷新最多一程'],['race','同港抢先（领先时省针）'],['full','全程加速'],['goal','冲刺目标：前期省针，收尾追赶'],['eventFree','仅用本期免费针']],help:'仅用本期免费针模式按实领额度加速，钻石补购始终关闭。冲刺目标模式按本船折后利润估算剩余自然航次。前期能多跑一程或多卖货时才用针。最后两个交易日按利润缺口、库存和各日额度安排加速，有时间买货并在收盘前卖出时可继续出航。同等预计进度优先少用针。稳定模式在最后一个交易日收盘前的一段航程内（当前为两小时），按每日和每程剩余额度及可用库存核算。能一次到港且收盘前来得及逐批卖完时才用针。余针暂时不够就先自然航行，到点复查。其他交易日若次日仍能卖货会留针。同港抢先比较可见同盟船的预计到港时间。落后或并列时，用刚好能超过最早一艘的根数。全程加速按剩余航时尽快到港，针不足时可部分加速。这两种模式按到港时间决定用针。刷新窗口模式会比较同盟船到港顺序与历史库存。能提前买到更赚钱的组合时才为抢货用针，到港重新核价。每刷新最多一程模式还会限制出航次数。'}),
+    configField('merchant.speedUpMode','跑船与加速策略','choice',{options:[['deadline','稳定模式：平时省针，最后一船加速卖货'],['refresh','刷新窗口加速'],['arrival','刷新窗口加速：每刷新最多一程'],['race','同港抢先（领先时省针）'],['full','全程加速'],['goal','前期省针，收尾追赶'],['targetFirst','5,000 万达标优先'],['eventFree','仅用本期免费针']],help:'仅用本期免费针模式按实领额度加速，钻石补购始终关闭。达标优先模式在解锁满级船前和最后一个交易日加速有可售货物的航次，其他时间按目标缺口安排用针。前期省针模式按本船折后利润估算剩余自然航次。前期能多跑一程或多卖货时才用针。最后两个交易日按利润缺口、库存和各日额度安排加速，有时间买货并在收盘前卖出时可继续出航。同等预计进度优先少用针。稳定模式在最后一个交易日收盘前的一段航程内（当前为两小时），按每日和每程剩余额度及可用库存核算。能一次到港且收盘前来得及逐批卖完时才用针。余针暂时不够就先自然航行，到点复查。其他交易日若次日仍能卖货会留针。同港抢先比较可见同盟船的预计到港时间。落后或并列时，用刚好能超过最早一艘的根数。全程加速按剩余航时尽快到港，针不足时可部分加速。这两种模式按到港时间决定用针。刷新窗口模式会比较同盟船到港顺序与历史库存。能提前买到更赚钱的组合时才为抢货用针，到港重新核价。每刷新最多一程模式还会限制出航次数。'}),
     configField('merchant.guardLastPointer','最后一根防抢','switch',{ parent: 'merchant.autoSpeedUp',when:d=>d.merchant?.autoSpeedUp,help:'默认关闭。开启后，每程进入一根指南针可直接到港的时间（当前 30 分钟），即使领先或未见同港船也尝试用一根。仍遵守保留量和用量上限，补购须单独开启。'}),
     configField('merchant.refreshWindowMinutes','刷新后加速窗口','number',{ parent: 'merchant.speedUpMode',unit:'分钟',when:d=>['refresh','arrival'].includes(d.merchant.speedUpMode),help:'仅在真实配置刷新时刻之后的此窗口内加速，窗口外等待；交易截止前仍可补救。'}),
     configField('merchant.dailyPointerLimit','每日指针使用上限','number',{ parent: 'merchant.autoSpeedUp',unit:'根',when:d=>d.merchant.autoSpeedUp,help:'默认28，0 禁止使用；跨重启保留已用和未确认用量。'}),
     configField('merchant.periodPointerLimit','本期自动用针总上限','number',{ parent:'merchant.autoSpeedUp',unit:'根',help:'整期累计扣除自动使用的指南针，切换方案或重启后继续计数。0 全程零针，-1 表示仅按每日上限和库存执行。'}),
+    configField('merchant.speedUpIntelPorts','用针所需紧缺情报','number',{ parent:'merchant.autoSpeedUp',unit:'个港',when:d=>d.merchant?.autoSpeedUp,help:'默认 0，不限制。填写后，已知紧缺港少于此数就先自然航行，情报补齐后再用针。每天 10:00 至 22:00 交易，开市后照常自然走商，这里只限制用针。收盘前 7 小时即 15:00 起不再受限。手动情报一并计入。'}),
     configField('merchant.autoBuyPointers','允许用钻石补购指南针','switch',{help:'按账号保存，跨期生效。开启指南针加速后，只补当前加速方案缺少的数量。购买前核对实际钻石余额、补购预算和游戏购买次数。'}),
     configField('merchant.pointerDailyDiamondLimit','每日购买指针钻石上限','number',{ parent: 'merchant.autoBuyPointers',when:d=>d.merchant.autoBuyPointers,help:'只用于补购指南针，填 0 停止补购。'}),
     configField('merchant.profitLimit','本期累计利润上限','number',{unit:'商会币',help:'0 表示不额外限制。5000 万利润对应 50000000 商会币。达到上限后停止新航次、采购、升级与加速。已到港的隔夜货会继续清舱。共享情报和领奖按各自开关执行。'}),
@@ -291,15 +294,15 @@ const configGroups = [
     configField('factory.enabled', '总开关'), configField('factory.gain', '自动领取产品'),
     configField('factory.blockedCollectionTypes', '禁止自动领取', 'multi', { catalog: 'collectionBuildings', empty: '未禁止任何建筑类型', help: '按类型选择要保留产物的建筑。挂机会跳过该类型所有建筑的产出、工厂成品或成熟作物。' }),
     configField('factory.produce', '自动生产', 'switch', { editChildrenWhenOff:true, help: '按原料、库存、在产和待收数量填充空余队列格。已建成的工厂升级时仍可生产当前等级的配方。' }),
-    configField('factory.strategy', '排产策略', 'choice', { parent:'factory.produce', options: [['smart','智能排产（默认）'],['nativeSimulation','模拟游戏原生自动生产']], help: '智能排产使用账号加成、需求和备货水位。模拟原生按空闲生产位逐件选品，最多补到游戏仓容。' }),
+    configField('factory.strategy', '排产策略', 'choice', { parent:'factory.produce', options: [['smart','智能排产（默认）'],['nativeSimulation','模拟游戏原生自动生产']], help: '智能排产按账号工时和生产位排队。开启按需生产、工厂补料及收取后，订单期间可先补 10 秒内能凑齐的一批短缺材料。模拟原生按空闲生产位逐件选品，最多补到游戏仓容。' }),
     configField('factory.simulatedTargets', '模拟原生主产物', 'multi', { parent:'factory.produce', catalog: 'factoryProducts', empty: '使用工厂已设目标或首个解锁配方', when: d => d.factory.strategy === 'nativeSimulation', help: '每厂优先生产主产物。缺料或满仓时，先选实际耗时不超过 5 秒的候补，同档选库存最少的。下游开工扣料、成品收取后都会重新判断主产物缺口。' }),
     configField('factory.refillRules', '强制补库', 'refillRules', { parent:'factory.produce', wide:true, help:'同厂可开工的补库物品从上到下优先生产。缺少可加工的原料时，上游先做自己的补库物品，再按缺口补料。拖动手柄或使用上移、下移调整顺序。' }),
     configField('factory.refillSpeedUp', '强制补库时使用加速器', 'switch', { parent:'factory.produce', help:'补库品已排队或原料够做一件时，先撤下其他等待项。再用保留量以外的加速器加速占位的旧品，单生产位一件，双生产位最多两件。关闭时等待自然完工。' }),
     configField('factory.cooperateNative', '按需求调整游戏自动生产目标', 'switch', { when: d => d.factory.strategy !== 'nativeSimulation', help:'只控制游戏中已开启的原生自动生产目标；关闭后，普通排产仍由“自动生产”和“按需优先生产”控制。开启时补齐种子及上游需求，保留正在生产队列，目标调整后回读确认并间隔至少60秒，不购买材料。' }),
     configField('factory.disabledTypes', '禁用工厂', 'multi', { catalog: 'factories', empty: '未选择，允许全部工厂', help: '控制台不再新增生产或加速，已完成产品仍按领取开关处理。游戏内已有的原生自动生产设置保持原状。' }),
-    configField('factory.keepStock', '备货水位', 'number', { when: d => d.factory.strategy !== 'nativeSimulation', unit: '件 / 产品', help: '计入库存、待领取与在产数量，实际不超过游戏仓库上限。0 表示只为需求生产。' }),
+    configField('factory.keepStock', '备货水位', 'number', { when: d => d.factory.strategy !== 'nativeSimulation', unit: '件 / 产品', help: '计入仓库、待领取和在产数量，上限取账号仓容。普通材料厂先按缺口补布匹、长绳、粗纸，首次达到水位后恢复常规备货。设为 0 时只为需求生产。' }),
     configField('factory.checkEverySeconds', '兜底检查间隔', 'number', { unit: '秒', help: '优先按服务端完工时间和建筑状态推送领取、补产；没有可靠完工时间、缺料、满仓或发生错误时，按此间隔复查。独立于主循环间隔；账号队列占用时等待。' }),
-    configField('factory.demandFirst', '按需优先生产', 'switch', { help: '库存变化后按需求优先级重新排产。游戏队列中尚未开工的任务也可调整，已开工的继续生产。同级需求先选耗时短的产品，有效月卡开启双生产位时可调整同批顺序以缩短工期。关闭后按备货水位从短到长补库存。联盟募兵、红船的独立备料开关仍各自生效。' }),
+    configField('factory.demandFirst', '按需优先生产', 'switch', { help: '库存变化后按需求优先级重新排产。已进游戏队列的等待项也可调整，已开工的继续生产。同级优先短件，双生产位可调整同批顺序。订单期间，启用工厂补料和收取后可提前补一批短缺品，排队加加工最多 10 秒，并给正常派单留一个空位。需求清空后优先补不足下游一批的品种。关闭后，除材料厂首次补齐基础料外，常规备货按耗时从短到长。联盟募兵、红船的独立备料开关分别生效。' }),
     configField('factory.demandPriority', '需求优先级', 'sortableOrder', { wide: true, catalog: 'demandSources', help: '开启按需优先生产后，智能排产按列表顺序分配原料和生产位。「工厂补料」排在某项需求前时，优先补至备货水位。海兽进阶、培育喂养和博物馆也按相对顺序使用材料。勾选“工厂加速”后，会加速该来源仍缺少的在产物品。移除的来源不会自动补回。' }),
     configField('factory.speedUp', '自动加速生产', 'switch', { help: '与按来源加速独立；两种方式都遵守加速器保留量。' }),
     configField('factory.speedUpItems', '加速物品', 'multi', { parent: 'factory.speedUp', catalog: 'materials', empty: '未选择，允许全部在产物品', when: d => d.factory.speedUp }),
@@ -557,6 +560,8 @@ const configGroups = [
     configField('tasks.main', '领取主线奖励'), configField('tasks.branch', '领取支线奖励'), configField('tasks.achievements', '领取成就奖励'),
     configField('dailies.enabled', '日常总开关', 'switch', { help: '控制本组每日任务与奖励。基地页的付费点金独立设置。' }), configField('dailies.claimTasks', '领取其他每日任务奖励', 'switch', {help:'竞技场和积分赛的每日任务奖励在各自页签设置。'}),
     configField('dailies.claimDailyChest', '领取每日活跃宝箱'), configField('dailies.claimWeeklyChest', '领取每周活跃宝箱'), configField('dailies.claimGift', '领取每日免费赠礼'),
+    configField('schedule.monthCardDaily', '领取月卡每日奖励', 'switch', { parent: 'dailies.enabled', help: '普通月卡和高级月卡分别领取，有效期内每天各领一次。' }),
+    configField('schedule.seasonCardDaily', '领取赛季卡每日奖励', 'switch', { parent: 'dailies.enabled', help: '开通赛季卡后，请先在游戏内选满三项自选奖励。' }),
     configField('schedule.afk', '闯关挂机收益', 'switch', { editChildrenWhenOff: true, help: '自动领取本段挂机收益和已达到的等级奖励。' }),
     configField('afk.claimIntervalHours', '领取间隔', 'number', { parent: 'schedule.afk', unit: '小时', help: '填 0 表示存满再领。填 6 表示本段挂机累计 6 小时就领取，领取后重新计时。游戏收益先存满时会提前领取。' }),
     configField('schedule.afkUpgrade', '自动升级挂机等级', 'switch', { parent: 'schedule.afk', help: '连续用定位芯片升级，每次选当前能升的最高档（1、5 或 10 级），直到芯片用完或达到主线允许的等级。升级可独立开启，领取间隔只控制收益领取。' }),
@@ -1695,7 +1700,7 @@ function configRenderUsage() {
   if (themes) body.append(el('p', 'runtime-message', '已选 '+themes+' 个活动主题'));
   if (!items.length && !themes) body.append(el('p', 'dim runtime-message', '此分组暂无独立运行记录'));
   const latest = relevant.reduce((best, control, index) => {
-    if (!['waiting','sent','ok','unsynced'].includes(items[index].state)) return best;
+    if (!['waiting','sent','ok','unsynced','completed','inProgress','claimable'].includes(items[index].state)) return best;
     return best < 0 || (control.observation?.checkedAt ?? 0) > (relevant[best].observation?.checkedAt ?? 0) ? index : best;
   }, -1);
   const featured = issues.length ? issues.slice(0, 2) : latest >= 0 ? [items[latest]] : [];
