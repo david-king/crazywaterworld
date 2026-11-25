@@ -22,7 +22,7 @@ export const settingsFile = () => path.join(dataDirectory(), 'automation-setting
 export const SETTINGS_FORMAT = 'crazywaterworld-automation';
 // 文件 version / 账号 settingsVersion 是格式编号，只随结构迁移调整；
 // revision 是每次保存递增的修订号，仅用于并发冲突检查，不能用作格式版本。
-export const SETTINGS_SCHEMA_VERSION = 63;
+export const SETTINGS_SCHEMA_VERSION = 64;
 const LEGACY_SETTINGS_FORMAT = 'crazywaterword-automation';
 const treasureQualityLabels = { ORANGE: '万吨货轮', PURPLE: '中型货轮', BLUE: '小型货轮' };
 const treasureChaseDefaults = {
@@ -47,6 +47,7 @@ function savedSchedule({ vipDaily, ...schedule }) { return schedule; }
 // 新账号的功能开关和执行细项全部关闭，必须由用户逐项开启。
 // ads.noPrivilege 是固定的旧格式兼容字段，不是自动执行开关。
 export const DEFAULT_SETTINGS = {
+  seasonMerit: { enabled: false, targetRank: 0, leadMinutes: 0 },
   ...EXTENDED_DEFAULTS,
   // 连接被顶号后，挂机可按当前账号的策略自动恢复连接。
   // 时间使用北京时间（HH:mm）；深夜窗口支持跨午夜配置。
@@ -122,6 +123,7 @@ export const DEFAULT_SETTINGS = {
 const int = (max = 1_000_000_000, min = 0) => ({ kind: 'number', min, max });
 const strings = (max = 300) => ({ kind: 'list', max });
 const constraints = {
+  'seasonMerit.targetRank': int(2147483647), 'seasonMerit.leadMinutes': int(),
   ...WEEKLY_ACTIVITY_CONSTRAINTS,
   'fleetSpeed.fleets': { kind: 'fleetSpeeds' },
   ...Object.fromEntries([0,1,2].flatMap(index => Object.entries(FLEET_SPEED_NUMBERS).map(([key, rule]) => ['fleetSpeed.fleets.' + index + '.' + key, rule]))),
@@ -321,6 +323,7 @@ export function nativeTaskValues(settings, current) {
 }
 
 export function hasExtraWork(settings) {
+  if (settings?.seasonMerit?.enabled) return true;
   if (settings?.radar?.runEnabled && (settings.radar.enabled || settings.radar.repairIdle)) return true;
   if (settings?.weeklyActivity?.enabled && ['farm', 'pet', 'antique', 'order', 'forge', 'hero'].some(kind => settings.weeklyActivity[kind + 'Enabled'])) return true;
   if (fleetSpeedEnabled(settings) || settings?.appointments?.enabled || settings?.alliance?.enabled || settings?.guildShip?.enabled || settings?.heroRaid?.enabled || settings?.silicon?.enabled || settings?.resourceFields?.enabled) return true;
@@ -484,6 +487,8 @@ function validateCurrentSettings(input, { partial = false, catalog = null } = {}
   validateWeeklyActivitySettings(output.weeklyActivity, errors);
   if (output.heroes.heroIds.length) output.heroes.needsSelection = false;
   if (output.progression.trials && !output.progression.raidIds.length) errors['progression.raidIds'] = '请选择自动推关的试炼副本';
+  if (output.seasonMerit.enabled && !output.seasonMerit.targetRank) errors['seasonMerit.targetRank'] = '请填写目标名次';
+  if (output.seasonMerit.enabled && !output.seasonMerit.leadMinutes) errors['seasonMerit.leadMinutes'] = '请填写结算前多少分钟开始检查';
   if (output.pirateHunt.enabled && !output.pirateHunt.fleetIds.length) errors['pirateHunt.fleetIds'] = '请至少选择一支首杀舰队';
   if(!output.forge.nativeAuto && output.forge.decompose && !output.forge.decomposeQualities.length)errors['forge.decomposeQualities']='请选择可自动分解的装备品质';
   if(output.pet.release && !output.pet.releaseQualities.length)errors['pet.releaseQualities']='请选择可自动放生的海兽品质';
@@ -755,6 +760,8 @@ settingsMigrations.set(59, migrateVersion59Settings);
 settingsMigrations.set(60, migrateVersion60Settings);
 settingsMigrations.set(61, migrateVersion61Settings);
 settingsMigrations.set(62, migrateVersion62Settings);
+settingsMigrations.set(63, settings => plain(settings) && !Object.hasOwn(settings, 'seasonMerit')
+  ? { ...settings, seasonMerit: { ...DEFAULT_SETTINGS.seasonMerit } } : settings);
 const supportedSettingsVersion = version => Number.isSafeInteger(version) && version >= 1;
 const entrySettingsVersion = entry => Object.hasOwn(entry, 'settingsVersion') ? entry.settingsVersion : 1;
 function newestSettingsVersion(store) {

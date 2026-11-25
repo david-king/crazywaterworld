@@ -1,5 +1,7 @@
 // Operation names shared by the server journal and the browser's network errors.
 export const operationLabels = {
+  '/api/season/rank': '读取赛季排名', '/api/season/mail': '预览邮件物品',
+  '/api/season/guild': '读取所在联盟赛季排名',
   '/api/shops': '读取商店商品',
   '/api/shops/purchase': '购买商店商品',
   '/api/shops/game-refresh': '刷新折扣商店',

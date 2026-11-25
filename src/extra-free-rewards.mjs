@@ -10,14 +10,14 @@ export function watchFreeRewardClock(client){if(!clocks.has(client)){clocks.set(
 const assets=reply=>normalize(reply?.reward)?.asset;
 const hasReward=reply=>Array.isArray(assets(reply))&&assets(reply).some(a=>a.num>0);
 const rows=(c,n)=>c?.tables?.[n]?.data??[];
-export async function claimOnce(client,{ledger,key,title,request,body={},response='GotRewardResponse',enabled,verify=hasReward,report,details={}}){
+export async function claimOnce(client,{ledger,key,title,request,body={},response='GotRewardResponse',enabled,verify=hasReward,report,details={},beforeSend}){
  if(!enabled())return false;
  if(!ledger){report({label:title,skipped:true,reason:'领取记录不可用'});return false;}
  if(ledger.hasKey(key)){report({label:title,skipped:true,status:ledger.keyRecords()[key].confirmed?'confirmed':'pending',reason:ledger.keyRecords()[key].confirmed?'该领取记录已确认，等待服务器状态同步':'前次领取结果待确认，未重复提交'});return false;}
  const ticket=ledger.reserve({},{},{},{uniqueKey:key,details:{...details,kind:'freeReward',request}});
  if(!enabled()){ledger.cancel(ticket);return false;}
- try{const reply=await client.request(request,body,response);if(!await verify(reply))throw Error('服务器尚未确认领取成功');ledger.confirm(ticket);report({label:title,ok:true,status:'confirmed'});return reply;}
- catch(error){if(error.prompt&&error.request===request)ledger.cancel(ticket);report({label:title,ok:false,status:error.prompt&&error.request===request?'rejected':'unknown',error:error.message});return false;}
+ try{const reply=await client.request(request,body,response,undefined,beforeSend);if(!await verify(reply))throw Error('服务器尚未确认领取成功');ledger.confirm(ticket);report({label:title,ok:true,status:'confirmed'});return reply;}
+ catch(error){if(error.notSent||error.prompt&&error.request===request)ledger.cancel(ticket);report({label:title,ok:false,status:error.notSent||error.prompt&&error.request===request?'rejected':'unknown',error:error.message});return false;}
 }
 export async function claimVipDaily(client, config, { player, enabled, ledger, report }) {
   if (!enabled()) return;

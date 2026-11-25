@@ -1,0 +1,312 @@
+.page {
+  display: grid;
+  gap: 16px;
+  min-width: 0;
+  font-variant-numeric: tabular-nums;
+}
+.sidebar,
+.meritForm {
+  display: grid;
+  gap: 12px;
+  min-width: 0;
+}
+.meritHeading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+.meritForm p {
+  color: var(--muted-foreground);
+  font-size: 0.8125rem;
+  line-height: 1.55;
+}
+.meritFields {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+}
+.meritFields label {
+  display: grid;
+  gap: 5px;
+  font-size: 0.8125rem;
+}
+.meritFields input {
+  width: 100%;
+  min-width: 0;
+}
+.meritForm .meritWarning {
+  padding: 8px 10px;
+  border-radius: var(--radius);
+  background: var(--warning-muted);
+  color: var(--warning);
+}
+.meritForm [role="alert"] {
+  color: var(--destructive);
+}
+.titlebar,
+.titlebar > div,
+.heading,
+.filter {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.titlebar,
+.heading {
+  justify-content: space-between;
+}
+.page .titlebar h2 {
+  margin: 0;
+  font-size: 1.375rem;
+  letter-spacing: -0.025em;
+}
+.layout {
+  display: grid;
+  grid-template-columns: minmax(15rem, 0.42fr) minmax(0, 1fr);
+  align-items: start;
+  gap: 16px;
+}
+.summary,
+.content {
+  gap: 0;
+  padding: 20px;
+}
+.summary h3,
+.heading h3 {
+  margin: 0;
+  font-size: 1rem;
+  font-weight: 650;
+}
+.stats {
+  margin-top: 6px;
+}
+.stat {
+  padding: 13px 0;
+  overflow-wrap: anywhere;
+}
+.stat + .stat,
+.dates,
+.attachments details + details {
+  border-top: 1px solid var(--border);
+}
+.stat dt {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--muted-foreground);
+  font-size: 0.8125rem;
+}
+.stat dd {
+  margin-top: 3px;
+  font-size: 1.125rem;
+  font-weight: 600;
+  line-height: 1.35;
+}
+.stat .statDetail,
+.dates,
+.heading p,
+.heading > span,
+.attachments small {
+  font-size: 0.8125rem;
+  font-weight: 400;
+  color: var(--muted-foreground);
+}
+.dates {
+  display: grid;
+  gap: 5px;
+  padding-top: 12px;
+}
+.dates > div {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 3px 8px;
+}
+.segments {
+  display: inline-grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  align-self: start;
+  padding: 3px;
+  gap: 2px;
+  border-radius: var(--radius);
+  background: var(--muted);
+  max-width: 100%;
+  min-width: 0;
+}
+.segments button {
+  min-width: 0;
+  padding-inline: 15px;
+  color: var(--muted-foreground);
+}
+.segments button[aria-pressed="true"] {
+  background: var(--card);
+  color: var(--foreground);
+  box-shadow: 0 1px 3px color-mix(in srgb, var(--foreground) 15%, transparent);
+}
+.heading {
+  margin: 18px 0 10px;
+  flex-wrap: wrap;
+}
+.heading p {
+  margin-top: 3px;
+}
+.board th {
+  height: 32px;
+  font-size: 0.75rem;
+  font-weight: 500;
+  color: var(--muted-foreground);
+  background: var(--muted);
+}
+.board th:first-child {
+  border-radius: 7px 0 0 7px;
+  width: 4rem;
+}
+.board th:last-child {
+  border-radius: 0 7px 7px 0;
+}
+.board th:last-child,
+.board td:last-child {
+  text-align: end;
+}
+.board td {
+  height: 42px;
+  overflow-wrap: anywhere;
+}
+.board td:nth-child(2) {
+  font-weight: 500;
+}
+.board tr[data-own] {
+  background: var(--muted);
+}
+.place {
+  display: inline-grid;
+  place-content: center;
+  min-width: 1.6rem;
+  height: 1.6rem;
+  color: var(--muted-foreground);
+}
+.place[data-top] {
+  border-radius: 7px;
+  background: var(--secondary);
+  color: var(--secondary-foreground);
+  font-weight: 600;
+}
+.board tbody tr:first-child .place {
+  background: var(--primary);
+  color: var(--primary-foreground);
+}
+.filter {
+  min-height: 36px;
+  font-size: 0.8125rem;
+  cursor: pointer;
+}
+.attachments {
+  min-width: 0;
+  border-block: 1px solid var(--border);
+}
+.attachments summary {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, auto) auto;
+  gap: 10px;
+  padding: 10px 3px;
+  min-height: 44px;
+}
+.attachments strong,
+.attachments li {
+  overflow-wrap: anywhere;
+}
+.attachments strong {
+  font-size: 0.875rem;
+  font-weight: 550;
+}
+.totals {
+  display: grid;
+  gap: 2px;
+  text-align: end;
+  font-size: 0.875rem;
+  overflow-wrap: anywhere;
+}
+.attachments ul {
+  padding: 3px 12px;
+  margin-bottom: 10px;
+  border-radius: var(--radius);
+  background: var(--muted);
+}
+.attachments li {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: 12px;
+  padding: 9px 0;
+  font-size: 0.8125rem;
+}
+.attachments li + li {
+  border-top: 1px solid var(--border);
+}
+.attachments li > div {
+  display: grid;
+  gap: 2px;
+}
+.attachments li > span {
+  text-align: end;
+}
+.notice,
+.disconnected {
+  padding: 24px 8px;
+  text-align: center;
+  font-size: 0.875rem;
+  color: var(--muted-foreground);
+}
+.disconnected {
+  align-items: center;
+  gap: 10px;
+}
+@container main (max-width: 700px) {
+  .page,
+  .layout {
+    gap: 12px;
+  }
+  .layout {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  .summary,
+  .content {
+    padding: 14px;
+  }
+  .stats {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    column-gap: 16px;
+  }
+  .stat {
+    padding: 9px 0;
+  }
+  .stat:nth-child(2) {
+    border-top: 0;
+  }
+  .dates {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 4px 16px;
+    padding-top: 8px;
+  }
+  .segments {
+    align-self: stretch;
+  }
+  .segments button {
+    padding-inline: 6px;
+  }
+  .board th:first-child {
+    width: 3rem;
+  }
+  .heading {
+    margin-top: 12px;
+  }
+}
+@media (pointer: coarse) {
+  .filter,
+  .segments button {
+    min-height: 44px;
+  }
+}

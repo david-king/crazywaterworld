@@ -28,13 +28,13 @@ export async function readMailbox(client, enabled = () => true) {
   throw Error('邮箱分页超过检查上限，未执行领取');
 }
 
-export async function claimMail(client, { enabled = () => true } = {}) {
+export async function claimMail(client, { enabled = () => true, beforeSend } = {}) {
   const before = await readMailbox(client, enabled);
   if (!before || !enabled()) return paused();
   const targets = [...before].filter(([, mail]) => needsAction(mail));
   if (!targets.length) return { taskKey: 'mail', label: '邮件附件', skipped: true, status: 'empty', reason: '当前没有未读邮件或未领邮件附件', scanned: before.size };
   let sendError;
-  try { await client.sendWatch('QuickGotReadEmailRequest', { all: true }, { window: 400 }); }
+  try { await client.sendWatch('QuickGotReadEmailRequest', { all: true }, { window: 400, beforeSend }); }
   catch (error) {
     if (error.notSent || error.prompt && error.request === 'QuickGotReadEmailRequest') throw error;
     sendError = error;

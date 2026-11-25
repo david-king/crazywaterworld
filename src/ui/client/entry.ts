@@ -74,6 +74,9 @@ lazyPage("items-root", "items", "装备与徽章", async (host) =>
 lazyPage("shops-root", "shops", "商店", async (host) =>
   (await import("./pages/shops")).mountShops(host),
 );
+lazyPage("season-preview-root", "season-preview", "赛季预览", async (host) =>
+  (await import("./pages/season-preview")).mountSeasonPreview(host),
+);
 
 const hostElement = document.getElementById("login-settings-root");
 const dialogElement = document.getElementById("account-login-dialog");

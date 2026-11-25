@@ -56,6 +56,7 @@ ${chrome()}
     <button type="button" data-resource-tab="giftcodes">礼包兑换</button>
     <button type="button" data-resource-tab="dailies">日常任务</button>
     <button type="button" data-resource-tab="shops">商店</button>
+    <button type="button" data-resource-tab="season-preview">赛季预览</button>
     <button type="button" data-resource-tab="chat">聊天</button>
   </nav>
   <section id="tab-overview">
@@ -99,6 +100,7 @@ ${chrome()}
   <section id="tab-giftcodes" class="hidden">
     ${giftCodesPage()}
   </section>
+  <section id="tab-season-preview" class="hidden" aria-label="赛季预览"><div id="season-preview-root"></div></section>
   <section id="tab-account" class="hidden">
     ${accountPage()}
   </section>
@@ -3004,7 +3006,7 @@ new ResizeObserver(() => {
 async function boot() {
   // 显式链接优先，否则恢复当前历史记录的页面；配置分组由 configApplyHash 恢复。
   const previousView = history.state?.consoleView;
-  const savedView = ['chat', 'items'].includes(previousView?.tab)
+  const savedView = ['chat', 'items', 'season-preview'].includes(previousView?.tab)
     ? { tab: 'resources', resource: previousView.tab } : previousView;
   const initialTab = location.hash.startsWith('#config-group-') ? 'settings'
     : location.hash === '#pirate-first-kill' ? 'stages' : location.hash === '#journal' ? 'overview'
@@ -3013,7 +3015,7 @@ async function boot() {
   try {
     // 恢复账号页时先显示保存的角色资料，由该页按连接状态决定是否读取资源。
     await loadAccounts(true, initialTab !== 'account'
-      && !(initialTab === 'resources' && ['shops', 'chat', 'items'].includes(savedView?.resource)));
+      && !(initialTab === 'resources' && ['shops', 'season-preview', 'chat', 'items'].includes(savedView?.resource)));
   } catch (error) {
     reportError(error);
     return;

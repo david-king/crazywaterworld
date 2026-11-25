@@ -17,6 +17,7 @@ import {readGuildTech,upgradeGuildTech} from './guild-tech.mjs';
 import {resourceFieldRows,resourceFieldTotals} from './resource-fields.mjs';
 import { readResourceFieldsOverview, previewResourceField, runResourceFieldShortcut, previewResourceFieldPlan, previewResourceFieldGiveUp, runResourceFieldGiveUp } from './resource-field-automation.mjs';
 import {activityRankCatalog,readActivityRanking} from './activity-rankings.mjs';
+import { readSeasonRanking, readSeasonMail, readSeasonGuildRank } from './season-preview.mjs';
 import {readActivityStatistics} from './activity-statistics.mjs';
 import { merchantActivity, readMerchantStatus, readMerchantOverview, readMerchantJournal, merchantJournalSummary } from './merchant-activity.mjs';
 import { saveMerchantIntel } from './merchant-intel.mjs';
@@ -2262,7 +2263,7 @@ export function createConsole({ host = '127.0.0.1', port = 17321, onLog, recover
         '/api/guild/mutual/stop', '/api/trials/stop'].includes(parsed.pathname)) assertSettingsReady(found.session);
       if (req.method === 'POST' && found.session.syncingProduction
         && !['/api/accounts/pause', '/api/disconnect', '/api/loop/stop', '/api/stages/stop', '/api/pirates/advance/stop',
-          '/api/guild/mutual/stop', '/api/loop/auto-start', '/api/loop/interval', '/api/settings', '/api/settings/validate', '/api/login-settings', '/api/week-order/settings', '/api/hero-raid/settings', '/api/merchant/settings', '/api/guild-ship/settings', '/api/activities/settings', '/api/appointments/settings', '/api/logs/clear',
+          '/api/guild/mutual/stop', '/api/loop/auto-start', '/api/loop/interval', '/api/settings', '/api/settings/validate', '/api/login-settings', '/api/week-order/settings', '/api/hero-raid/settings', '/api/merchant/settings', '/api/guild-ship/settings', '/api/activities/settings', '/api/season/merit-settings', '/api/appointments/settings', '/api/logs/clear',
           '/api/lineup-presets/save', '/api/lineup-presets/delete', '/api/lineup-presets/bind'].includes(parsed.pathname)) {
         throw new Error('正在自动同步手动操作后的生产状态，请等待同步完成后操作');
       }
@@ -2315,6 +2316,22 @@ export function createConsole({ host = '127.0.0.1', port = 17321, onLog, recover
           }); } catch { /* 读取失败保留上次已确认名单；从未同步时不展示虚构舰队。 */ }
         }
         json(settingsView(session));
+        return;
+      }
+      if (route === 'GET /api/season/merit-settings' || route === 'POST /api/season/merit-settings') {
+        if (!parsed.searchParams.get('account')) throw Error('请选择赛季预览账号');
+        const { session } = scoped_(parsed);
+        let current = settingsView(session);
+        if (req.method === 'POST') {
+          const payload = jsonBody();
+          needConfirm(payload);
+          if (payload.revision !== current.revision || !current.revision && payload.baseRevision !== current.baseRevision)
+            throw new SettingsError({ revision: '挂机配置已变化，请重新读取再保存' });
+          const next = { ...current.settings, seasonMerit: payload.seasonMerit };
+          adoptPreferences(session, saveAutomationSettings(session.id, next, { revision: current.revision }));
+          current = settingsView(session);
+        }
+        json({ ...current.settings.seasonMerit, revision: current.revision, baseRevision: current.baseRevision });
         return;
       }
       if (route === 'GET /api/activities/settings') {
@@ -3723,6 +3740,37 @@ export function createConsole({ host = '127.0.0.1', port = 17321, onLog, recover
           const value=await readActivityStatistics(client,loadConfigSafe(),session.player,usageFor(session),session.preferences);
           session.activityStatistics={client,at:Date.now(),value};return value;
         },{read:true});json(result);return;
+      }
+      if (['GET /api/season/rank', 'GET /api/season/mail', 'GET /api/season/guild'].includes(route)) {
+        if (!parsed.searchParams.get('account')) throw Error('请选择赛季预览账号');
+        const { session } = scoped_(parsed);
+        const { client, player, generation } = session;
+        const current = () => client?.connected && !session.paused && player && session.player === player
+          && session.client === client && session.generation === generation;
+        if (!current()) throw Error('请先连接当前账号，再读取赛季预览');
+        const verifyConnection = () => {
+          if (!current()) throw Error('账号连接已变化，请刷新赛季预览');
+        };
+        if (parsed.pathname === '/api/season/mail') {
+          // A long mailbox scan yields the read slot between pages.
+          const reader = { request: (...args) => readJob(session, async () => {
+            verifyConnection();
+            return client.request(...args);
+          }, { recoverFormation: false }) };
+          const mail = await readSeasonMail(client, player, loadConfigSafe({ allowStale: true }), reader);
+          verifyConnection();
+          json(mail);
+          return;
+        }
+        json(await readJob(session, async () => {
+          verifyConnection();
+          const result = route.endsWith('/rank')
+            ? await readSeasonRanking(client, player, parsed.searchParams.get('kind'))
+            : await readSeasonGuildRank(client, player);
+          verifyConnection();
+          return result;
+        }, { recoverFormation: false }));
+        return;
       }
       if(route==='GET /api/activity-ranks'||route==='GET /api/activity-ranks/view'){
         const {account,session}=scoped_(parsed);

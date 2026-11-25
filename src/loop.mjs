@@ -49,6 +49,7 @@ import { surveyDailies, runDailies } from './dailies.mjs';
 import { surveyWorld, planWorld, runWorldRound, displayBuilding } from './world.mjs';
 import { createFactorySchedule } from './factory-schedule.mjs';
 import { createLoopScheduler } from './loop-scheduler.mjs';
+import { checkSeasonMerit } from './season-merit.mjs';
 import { createActionGuard, nativePreferenceEnabled, needsCargoDemand, exactAutomationId } from './automation-policy.mjs';
 import { surveyBaseAutomation, planBaseAutomation, observeBaseAutomationPlan, runBaseAutomation, baseDemands } from './base-automation.mjs';
 import { hasBaseWork } from './automation-settings.mjs';
@@ -185,6 +186,9 @@ export async function runLoop(client, protocol, {
     && isEnabled('merchantTrade'));
   const merchantActive = () => merchantSelected() && runtimeActive();
   const serverNowSeconds = () => Math.floor((Date.now() + (client.serverClockOffsetMs || 0)) / 1000);
+  let meritCheckAt = 0;
+  const meritNext = () => getSettings()?.seasonMerit?.enabled && !stop.aborted
+    ? meritCheckAt * 1000 - (client.serverClockOffsetMs || 0) : Infinity;
   const worldOnlineNext = () => {
     if (!isEnabled?.('worldOnlineRewards')) return Infinity;
     return (rewards.scheduledAt('worldOnlineRewards') ?? 0) * 1000 - (client.serverClockOffsetMs || 0);
@@ -313,6 +317,7 @@ export async function runLoop(client, protocol, {
   const fleetScans = { treasure: treasureScan, cityWar: cityWarScan, radar: radarScan };
   const scanOptions = new Map(Object.keys(fleetScans).map(key => [key, JSON.stringify(getSettings()?.[key])]));
   const settingsWake = () => { fleetSpeedAt = 0; siliconAt = 0; resourceFieldsAt = 0; extendedAt = 0; siliconVersion++;
+    meritCheckAt = 0;
     const settings = getSettings();
     dispatchSettingsPending = Boolean((cityWarState && !cityWarEnabled(settings)) || watchFleetMaintenance(client).held().length);
     for (const [key, scan] of Object.entries(fleetScans)) {
@@ -414,6 +419,20 @@ export async function runLoop(client, protocol, {
       return scheduledAfkHours === getSettings()?.afk?.claimIntervalHours ? afkDeadline : 0;
     };
     const logReward = (entry, category = '领奖') => stepLog('tasks')({ title: entry.label, ...entry, taskKey:entry.taskKey||entry.key, category });
+    async function checkMeritDue() {
+      if (meritNext() > Date.now()) return;
+      meritCheckAt = serverNowSeconds() + 15;
+      try {
+        const pref = getSettings().seasonMerit;
+        const result = await checkSeasonMerit(client, player, { ledger: usageLedger,
+          getPreference: () => getSettings()?.seasonMerit,
+          enabled: () => !stop.aborted && client.connected && runtimeActive() });
+        if (getSettings()?.seasonMerit === pref) meritCheckAt = result.nextAt;
+        const entry = { ...result, taskKey: 'seasonMerit', label: '赛季自动偷榜' };
+        summary.tasks.results.push(entry);
+        logReward(entry, '赛季');
+      } catch (error) { phaseFailure('tasks', '赛季自动偷榜', error, 'seasonMerit'); }
+    }
     const reportTrial = (key, raids, entry, raidId) => {
       if (entry.pending) entry = { ...entry, status: 'pending' };
       summary.dailies.results.push(entry);
@@ -1433,8 +1452,9 @@ export async function runLoop(client, protocol, {
       await checkDispatch();
     }
     await scheduler.runSteps(mainSteps(), {
-      nextAt: () => Math.min(mainScanNext(), worldOnlineNext()),
+      nextAt: () => Math.min(mainScanNext(), worldOnlineNext(), meritNext()),
       runPending: async () => {
+        await checkMeritDue();
         if (mainScanNext() <= Date.now()) await checkDispatch();
         await checkWorldOnline();
       },
@@ -1456,7 +1476,7 @@ export async function runLoop(client, protocol, {
           const weeklyAt = nextWeeklyActivityBoundary(client, getWeeklySettings(), roundStartedMs);
           const activityAt = activityVersion !== roundActivityVersion ? 0
             : nextActivityBoundary(client, activityConfigured, roundStartedMs);
-          const wakeAt = Math.min(nextRound, activityAt, weeklyAt, factorySchedule.nextAt(), dispatchNext(), extendedNext(), merchantNext(), appointmentNext(), worldOnlineNext(),
+          const wakeAt = Math.min(nextRound, activityAt, weeklyAt, factorySchedule.nextAt(), dispatchNext(), extendedNext(), merchantNext(), appointmentNext(), worldOnlineNext(), meritNext(),
             isEnabled && enabled('upgrade') ? upgradeAt : Infinity,
             antiqueEnabled(getSettings()) ? antiqueAt : Infinity, nextAfkCheck());
           if (wakeAt > Date.now()) await scheduler.waitUntil(wakeAt);
@@ -1468,6 +1488,7 @@ export async function runLoop(client, protocol, {
           // 推送或保存设置可能早于原定时间唤醒；必须重读当前到期时间与开关。
           await scheduler.runDue('dispatch', dispatchNext, checkDispatch);
           await scheduler.runDue('worldOnlineRewards', worldOnlineNext, checkWorldOnline);
+          await scheduler.runDue('seasonMerit', meritNext, checkMeritDue);
           const checkUpgrade = !!isEnabled && enabled('upgrade') && upgradeAt <= Date.now();
           if (factorySchedule.due() || checkUpgrade) {
             await scheduler.runDue('factory', () => Math.min(factorySchedule.nextAt(),

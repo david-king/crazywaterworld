@@ -9,6 +9,7 @@ function quickNavigationEntries(includeContent) {
   const entries = [];
   const nav = id => document.querySelector('#tabs [data-tab="' + id + '"]');
   const aliases = { overview: '总览 资源田 城池 地图', settings: '挂机配置 历史配置 导入 导出',
+    'season-preview': '世界 赛季目标 最强个人 科技霸主 功勋榜 科技榜 邮件物品 自动偷榜',
     manual: '工厂 生产 建筑 农田', lineups: '舰队 预设 编队', account: '登录 账号 微信 支付宝 手机号',
     activities: '活动 奖励', stages: '试炼 海盗 关卡', inventory: '仓库 背包 库存' };
   for (const button of document.querySelectorAll('#tabs [data-tab]')) {
