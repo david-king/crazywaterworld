@@ -23,6 +23,11 @@ for (const [key,label] of [
  add(key,label,'基地',{gates});
 }
 add('forge.enabled','装备自动锻造','装备');
+add('homeland.enabled','家园总开关','基地',{gates:['loop.world'],configuredFields:['freeStamina','freeBox','submitOrders','unlockFloors','clean','tech','upgrade'].map(key=>'homeland.'+key)});
+add('homeland.mergeOrders','按订单需求自动合成','基地',{gates:['loop.world','homeland.enabled','homeland.submitOrders']});
+add('homeland.warehouseBuffer','使用仓库中转腾位','基地',{gates:['loop.world','homeland.enabled','homeland.submitOrders','homeland.mergeOrders','homeland.takeWarehouse']});
+for (const [key,label] of [['freeStamina','每日免费工坊体力'],['freeBox','工坊免费宝箱'],['submitOrders','工坊订单交单'],['takeWarehouse','取出订单所需仓库物品'],['unlockFloors','开放家园楼层'],['clean','打扫家园'],['tech','家园科技升级'],['upgrade','家园升级']])
+ add('homeland.'+key,label,'基地',{gates:['loop.world','homeland.enabled',...(key==='takeWarehouse'?['homeland.submitOrders']:[])]});
 add('gather.enabled','采集总开关','采集',{gates:['loop.world'],help:'在游戏配置 → 采集选择钓鱼、潜水、拾荒、漂浮物和工具养成。关闭总开关会暂停这些项目，保留已选细项。'});
 for (const [key,label] of [['fishing','自动钓鱼'],['floaters','拾取海面原料漂浮物'],['antiqueFloaters','打捞海面藏品宝箱'],['diving','潜水打捞原料'],['salvage','拾荒船自动拾荒'],['upgradeFishing','钓具强化与升级'],['upgradeDiving','潜水船坞强化与升级'],['upgradeSalvage','拾荒船强化与升级']]) add('gather.'+key,label,'采集',{gates:['loop.world','gather.enabled']});
 for (const [key,label] of [['claimTasks','领取其他每日任务奖励'],['claimDailyChest','领取每日活跃宝箱'],['claimWeeklyChest','领取每周活跃宝箱'],['claimGift','每日免费赠礼']]) add('dailies.'+key,label,'任务与领奖',{gates:['dailies.enabled']});
@@ -74,6 +79,7 @@ add('schedule.'+task.key,task.label,task.key === 'shop' ? '折扣商店' : comba
 }
 // 模块主控与细项在同一配置分组编辑；主控仍保留独立的保存字段。
 const idleModules = {
+ 'homeland.enabled':['基地','homeland','家园'],
  'alliance.enabled':['世界','alliance','联盟募兵与互助'],
  'guildFort.enabled':['世界','guildFort','联盟工事'], 'silicon.enabled':['世界','silicon','硅矿'],
  'resourceFields.enabled':['世界','resourceFields','资源田'],

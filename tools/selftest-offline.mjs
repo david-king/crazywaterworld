@@ -7,6 +7,11 @@ import { spawnSync } from 'node:child_process';
 const root = path.resolve(import.meta.dirname, '..');
 const temporary = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), 'cw-offline-'));
 const cases = [
+  ['selftest-homeland.mjs'],
+  ['selftest-homeland-merge.mjs'],
+  ['selftest-homeland-buffer.mjs'],
+  ['selftest-homeland-search.mjs'],
+  ['selftest-homeland-http.mjs'],
   ['selftest-start-console.mjs'],
   ['selftest-pet-leveling.mjs'],
   ['selftest-afk-upgrade.mjs'],
@@ -39,6 +44,7 @@ const cases = [
   ['selftest-console-version-http.mjs'],
   ['selftest-console-version-ui.mjs'],
   ['selftest-protocol-updates.mjs'],
+  ['selftest-protocol-v77.mjs'],
   ['selftest-protocol-dropin.mjs'],
   ['selftest-protocol-refresh-http.mjs'],
   ['selftest-resource-version.mjs'],

@@ -56,6 +56,7 @@ import { hasResidentMaterialRules } from './resident-materials.mjs';
 import { surveyBaseAutomation, planBaseAutomation, observeBaseAutomationPlan, runBaseAutomation, baseDemands } from './base-automation.mjs';
 import { hasBaseWork } from './automation-settings.mjs';
 import { runMuseumDisplay } from './museum-display.mjs';
+import { runHomeland } from './homeland.mjs';
 import { validateRuntimeSettings, guardRuntimeActions } from './settings-runtime.mjs';
 import { assertResourcesReady } from './resource-store.mjs';
 import { treasureAutomationEnabled, runTreasureLoot } from './treasure-loot.mjs';
@@ -516,6 +517,7 @@ export async function runLoop(client, protocol, {
     const attemptedOrders = new Set();
     const harvestOptions = { config, player, attemptedOrders, cargoEnabled: () => (!!isEnabled && enabled('cargo')) || (needsCargoDemand(getSettings()) && runtimeActive()),
       finishEnabled: () => allowWorld('finishOrder'), getSettings, getBlockedCollectionTypes, getUsage: usage,
+      expectFactoryStockChange: factorySchedule.expectStockChange,
       beforeStep: guard.before, afterStep: guard.after, cancelStep: guard.cancel };
     function phaseFailure(phase, title, error, taskKey) {
       if (!client.connected || error.code === 'SETTINGS_STALE' || error.code === 'RESOURCE_STALE') throw error;
@@ -1529,6 +1531,20 @@ export async function runLoop(client, protocol, {
           }
           rewards?.expect('museum.display', rewards.now() + Math.ceil(getEveryMs() / 1000));
         } catch (error) { phaseFailure('world', '博物馆自动上架', error); }
+      }
+      yield;
+      if (allowMutate && getSettings()?.loop.world && getSettings()?.homeland?.enabled) {
+        try {
+          await runHomeland(client, config, { player, getSettings, ledger: usageLedger,
+            enabled: () => !stop.aborted && runtimeActive() && client.connected,
+            report(entry) {
+              summary.world.results.push(entry);
+              if (entry.status === 'confirmed') summary.world.planned++;
+              stepLog('world')({ ...entry, title: entry.message });
+              rewards?.observe('homeland.enabled', entry.message, entry.status === 'pending' ? 'pending' : entry.status === 'confirmed' ? 'ok' : 'waiting');
+              rewards?.expect('homeland.enabled', rewards.now() + (getSettings()?.homeland?.checkEverySeconds ?? 300));
+            } });
+        } catch (error) { phaseFailure('world', '家园', error, 'homeland.enabled'); }
       }
       yield;
       const heroSettings = getHeroSettings();

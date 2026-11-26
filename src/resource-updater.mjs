@@ -5,7 +5,7 @@ import { extractTables } from './config.mjs';
 import { validateGameplayConfig } from './config-contracts.mjs';
 import { decodeUuid } from '../tools/sync-art.mjs';
 import { activeResources, resourceDirectory, resourceUpdatePolicy, selectResourceTarget, RESOURCE_SERVER,
-  readResourceCheck, writeResourceCheck, resourceReadiness } from './resource-store.mjs';
+  readResourceCheck, writeResourceCheck, resourceReadiness, validResourceScenarioId } from './resource-store.mjs';
 import { compareResourceVersions, resolveResourceVersion } from './resource-version.mjs';
 
 const digest = data => createHash('sha256').update(data).digest('hex');
@@ -33,7 +33,7 @@ function validateConfig(tables) {
   }
   const scenarios = rows(tables, 'WorldScenarioCfg').map(row => row.id);
   if (scenarios.length > 16 || new Set(scenarios).size !== scenarios.length
-    || scenarios.some(id => !Number.isSafeInteger(id) || id < 1 || id > 100)) throw new Error('远程场景列表无效');
+    || scenarios.some(id => !validResourceScenarioId(id))) throw new Error('远程场景列表无效');
   for (const id of scenarios) {
     const cities = rows(tables, id + '_CityCfg'), costs = rows(tables, id + '_AttackCityConsumeCfg');
     if (!cities.length || !cities.some(city => city.guildIndex > 0)
@@ -160,11 +160,19 @@ export function createResourceUpdater({ root = resourceDirectory(), policy, fetc
     for (const id of packIds) packs.push(await getJson(importUrl('config_cn', configIndex, id), 64 * 1024 * 1024));
     const raw = packs.length === 1 ? packs[0] : packs, tables = extractTables(raw), scenarios = validateConfig(tables);
     const mapIndex = await getJson(RESOURCE_SERVER + 'remote/world_map/config.' + mapVersion + '.json');
-    const files = { 'config.json': JSON.stringify(raw) };
+    const files = { 'config.json': JSON.stringify(raw) }, downloadedMaps = new Map();
     for (const id of scenarios) {
-      const entry = Object.entries(mapIndex.paths ?? {}).find(([, row]) => row[0] === 'world_map' + id && mapIndex.types?.[row[1]] === 'cc.JsonAsset');
-      if (!entry) throw new Error('远程地图索引缺少场景 ' + id);
-      const map = await getJson(importUrl('world_map', mapIndex, Number(entry[0])), 64 * 1024 * 1024);
+      // Scenario IDs and map asset IDs are independent: v77 scenario 202 uses
+      // world_map2. Keep a validated snapshot per scenario for downstream reads.
+      const scenario = rows(tables, 'WorldScenarioCfg').find(row => row.id === id);
+      const mapName = scenario.map === undefined ? 'world_map' + id : scenario.map;
+      if (typeof mapName !== 'string' || !/^world_map[1-9]\d{0,9}$/.test(mapName))
+        throw new Error('场景 ' + id + ' 的地图资源名称无效');
+      const entry = Object.entries(mapIndex.paths ?? {}).find(([, row]) => row[0] === mapName && mapIndex.types?.[row[1]] === 'cc.JsonAsset');
+      if (!entry) throw new Error('远程地图索引缺少场景 ' + id + ' 引用的 ' + mapName);
+      if (!downloadedMaps.has(mapName))
+        downloadedMaps.set(mapName, await getJson(importUrl('world_map', mapIndex, Number(entry[0])), 64 * 1024 * 1024));
+      const map = downloadedMaps.get(mapName);
       validateMap(map, tables, id);
       files['world_map' + id + '.json'] = JSON.stringify(map);
     }

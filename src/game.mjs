@@ -1,4 +1,5 @@
 import { normalize } from './worlds.mjs';
+import { chatChannelType, publicChatChannel } from './chat-protocol.mjs';
 
 // The read-only state queries the real client fires immediately after login, in the
 // order it sends them. Taken verbatim from a capture of the game entering its main UI.
@@ -24,7 +25,7 @@ export const ENTRY_QUERIES = [
   { name: 'FishEncyclopediaRequest' },
   { name: 'CargoShipsRequest' },
   { name: 'AppointInfoRequest' },
-  { name: 'ChatRecordRequest', body: { channel: 1 } },
+  { name: 'ChatRecordRequest', body: { channel: { type: 1 } } },
   { name: 'GameEffectRequest' },
   { name: 'AllGuildAbstractionRequest' },
   { name: 'MyFleetsRequest' },
@@ -81,9 +82,12 @@ export async function collectState(client, protocol, { timeout = 15000, onResult
       failed[query.name] = `no protocol type for ${protocol[query.name] ? response : query.name}`;
       continue;
     }
+    const body = query.name === 'ChatRecordRequest'
+      ? { ...query.body, channel: publicChatChannel(protocol, chatChannelType(query.body?.channel)) }
+      : query.body || {};
     waiting.push(
       client
-        .request(query.name, query.body || {}, response, timeout)
+        .request(query.name, body, response, timeout)
         .then((body) => {
           ok[query.name] = normalize(body);
           if (onResult) onResult(query.name, body, null);

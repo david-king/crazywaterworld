@@ -6,6 +6,7 @@ import { accountKey, dataDirectory } from './usage-ledger.mjs';
 import { validPlayerIdText } from './extended-settings.mjs';
 import { exactAutomationId } from './automation-policy.mjs';
 import { playerPowerText } from './opponent-power.mjs';
+import { publicChatChannel } from './chat-protocol.mjs';
 
 const historyFile = account => path.join(dataDirectory(), 'player-names', createHash('sha256').update(accountKey(account)).digest('hex') + '.json');
 
@@ -53,7 +54,7 @@ export async function readWorldListPlayers(client, player, check, rankType, prev
   if (!previous) {
     await read('世界舰队', 'WorldInfoRequest', { screenCenter: { x: 0, y: 0 } }, reply => reply.fleets.map(fleet => fleet.owner));
     await read('黑名单', 'BlackListRequest', {}, reply => reply.list);
-    await read('世界聊天', 'ChatRecordRequest', { channel: 1 }, reply => reply.message
+    await read('世界聊天', 'ChatRecordRequest', { channel: publicChatChannel(client.protocol, 1) }, reply => reply.message
       .filter(message => message.content && !message.content.systemMsgId)
       .sort((a, b) => b.timestamp - a.timestamp).map(message => message.sender));
     await read('私聊联系人', 'PrivateChatListRequest', {}, reply => reply.chats.map(chat => chat.peer));

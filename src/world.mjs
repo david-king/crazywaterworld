@@ -851,6 +851,7 @@ export function planWorld(survey, {
         request: 'GainFactoryProduceRequest',
         response: 'GainFactoryProduceResponse',
         body: { buildingId: b.buildingId },
+        expectedGains: b.factory.finishedProducts.map(({ id, num }) => ({ id, num: Number(num) })),
         label: `收取${buildingName(b)}的成品：${b.factory.finishedProducts.map(item => name(item.id) + ' ×' + item.num).join('、')}`,
       });
     }
@@ -2299,7 +2300,7 @@ export async function runWorld(client, protocol, plan, {
   onStep,
   enabled = () => true,
   config, player, cargoEnabled = () => false,
-  settings = null, getSettings, getBlockedCollectionTypes, usage, getUsage, beforeStep, afterStep, cancelStep, factoryPlanCurrent = () => true,
+  settings = null, getSettings, getBlockedCollectionTypes, usage, getUsage, beforeStep, afterStep, cancelStep, factoryPlanCurrent = () => true, expectFactoryStockChange,
 } = {}) {
   if (!allowMutate) throw new Error('海面自动化会改变账号状态，需要 --yes');
   const results = [];
@@ -2356,7 +2357,7 @@ export async function runWorld(client, protocol, plan, {
       }
       const result = await runFactoryProductionBatch(client, protocol, batch, {
         config, player, settings, getSettings, enabled, beforeStep, afterStep, cancelStep, window,
-        beforeDispatch: checkDemandPlan,
+        beforeDispatch: checkDemandPlan, expectFactoryStockChange,
         checkStep(action) {
           if (action.demandDriven === false && results.some(entry => !entry.ok && entry.step.demandDriven === true
             && entry.step.request === action.request && entry.step.body.buildingId === action.body.buildingId)) {
@@ -2391,7 +2392,7 @@ export async function runWorld(client, protocol, plan, {
       const finishAction = localGuard?.after ?? afterStep;
       const cancelAction = localGuard?.cancel ?? cancelStep;
       let ticket = null, prepared = false, dispatched = false, writePending = false;
-      let materialRefresh;
+      let materialRefresh, releaseStockChange;
       let actual = step;
       let queueChanged = false;
       const observeQueue = ({name, body}) => {
@@ -2511,7 +2512,11 @@ export async function runWorld(client, protocol, plan, {
             if (actual.body.buildingId.some(id => entries[id]?.flight)) throw new AutomationSkip('插单播种待确认，稍后收获');
           }
           dispatched = writePending = true;
-          const body = await client.request(step.request, actual.body, response, timeout);
+          const body = await client.request(step.request, actual.body, response, timeout, () => {
+            if (step.kind === 'gainFactory' && step.expectedGains) {
+              releaseStockChange = expectFactoryStockChange?.(new Map(step.expectedGains.map(({ id, num }) => [id, num])));
+            }
+          });
           writePending = false;
           if (step.kind === 'finishOrder' && !body?.reward?.asset?.length) throw new Error('服务端尚未返回居民订单的交付奖励');
           for (const item of actual.weeklyBorrowed ?? []) confirmedBorrow.set(item.id, (confirmedBorrow.get(item.id) ?? 0) + item.num);
@@ -2562,6 +2567,7 @@ export async function runWorld(client, protocol, plan, {
         }
       }
       finally {
+        releaseStockChange?.();
         if (step.queueReplan || step.refillRule) client.off?.('message',observeQueue);
       }
       linkOperationResult(entry, ticket);

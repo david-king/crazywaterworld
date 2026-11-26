@@ -24,17 +24,18 @@ const policy = { enabled: true, intervalMinutes: 30, appVersion: '1.14.5', disab
 
 function fixture() {
   const root = path.join(directory, 'case-' + ++sequence), calls = [], events = [];
-  const f = { root, calls, events, revision: 1, release: 1, appVersion: '1.14.5', hook: null };
+  const f = { root, calls, events, revision: 1, release: 1, appVersion: '1.14.5', hook: null,
+    scenarios: [{ id: 1 }, { id: 2 }] };
   const pack = () => {
     const data = { ResourceCfg: [{ id: 'GOLD', show_name: '金币' }], ItemCfg: [{ id: '汽油' }],
       ModuleOpenCfg: [{ moduleId: '世界', playerLevel: 16 }], WorldParamCfg: [{ paramName: '攻城战消耗耐久', paramValue: 100 }],
-      WorldScenarioCfg: [{ id: 1 }, { id: 2 }], MarkerCfg: [{ revision: f.revision }],
+      WorldScenarioCfg: f.scenarios, MarkerCfg: [{ revision: f.revision }],
       BuildingProduceCfg: [{ buildType: '工厂', itemId: '产品', unlockLevel: 1, produceTime: 60, costItem: [['木材', 1]] }],
       FarmlandPlantCfg: [{ id: '小麦', time: 60, produceNum: 5, material: ['种子', 1] }],
       MuseumExpeditionStageCfg: [{ stageId: 1, exploreTime: 60 }],
       MuseumExploreTimeFactorCfg: [{ factor: 1, playerLevel: 1 }],
       MuseumExpeditionTeamCfg: [{ teamCount: 1, playerLevel: 1 }] };
-    for (const id of [1, 2]) {
+    for (const { id } of f.scenarios) {
       data[id + '_CityCfg'] = [{ id: 1, guildIndex: 7 }, { id: 2, guildIndex: 8 }];
       data[id + '_AttackCityConsumeCfg'] = [{ dist: 1, cost: f.revision * 0.4 }];
     }
@@ -200,6 +201,56 @@ try {
     assert.equal((await f.updater.check()).status, 'current'); assert.equal(f.calls.length, 7);
     assert.equal(f.events.filter(event => event.level === 'info').length, 1);
     await f.updater.stop();
+  });
+  await check('场景202复用world_map2，下载去重且每个场景保持独立校验和读取身份', async () => {
+    const f = fixture(); process.env.CW_RESOURCE_DIR = f.root;
+    f.scenarios = [{ id: 1, map: 'world_map1' }, { id: 2, map: 'world_map2' }, { id: 202, map: 'world_map2' }];
+    try {
+      assert.equal((await f.updater.check()).status, 'updated');
+      const before = getConfig(), active = activeResources({ root: f.root });
+      assert.deepEqual(active.scenarios, [1, 2, 202]);
+      assert.equal(f.calls.filter(url => url.includes('/world_map/import/')).length, 2);
+      assert.equal(f.updater.view().ready, true);
+      assert.notEqual(active.mapFiles[2], active.mapFiles[202]);
+      assert.deepEqual(fs.readFileSync(active.mapFiles[2]), fs.readFileSync(active.mapFiles[202]));
+      const { loadMapAsset } = await import('../src/world.mjs');
+      assert.equal((await loadMapAsset(2, active)).scenarioId, 2);
+      assert.equal((await loadMapAsset(202, active)).scenarioId, 202);
+      assert.equal((await f.updater.check()).status, 'current');
+      assert.equal(f.calls.filter(url => url.includes('/world_map/import/')).length, 2);
+      // Sharing an asset cannot skip validation of the alias scenario's cities.
+      f.revision = f.release = 2;
+      f.hook = (url, value) => {
+        if (url.includes('config_cn/import/')) value.find(row => row[1] === '202_CityCfg')[2].data.push({ id: 3, guildIndex: 9 });
+      };
+      assert.equal((await f.updater.check()).status, 'error');
+      assert.match(f.updater.view().error, /场景 202 地图与城市配置不匹配/);
+      assert.equal(activeResources({ root: f.root }).generation, active.generation);
+      assert.equal(f.updater.view().ready, false);
+      f.hook = null;
+      assert.equal((await f.updater.check()).status, 'updated');
+      assert.equal((await loadMapAsset(202, getConfig().resources)).tileWidth, 200);
+      assert.equal((await loadMapAsset(202, before.resources)).tileWidth, 100);
+      fs.writeFileSync(activeResources({ root: f.root }).mapFiles[202], '{}');
+      assert.equal((await f.updater.check()).status, 'updated');
+      assert.equal(f.updater.view().ready, true);
+    } finally { await f.updater.stop(); }
+  });
+  await check('非法场景编号、重复编号及错误地图引用仍阻止启用新版资源', async () => {
+    const cases = [0, -1, 1.5, '202', 2147483648].map(id => [{ id, map: 'world_map2' }]);
+    cases.push([{ id: 1 }, { id: 1 }], Array.from({ length: 17 }, (_, i) => ({ id: i + 1, map: 'world_map2' })));
+    for (const map of ['../world_map2', 'world_map2/../x', '', null, 2, 'world_map999']) cases.push([{ id: 202, map }]);
+    for (const scenarios of cases) {
+      const f = fixture();
+      try {
+        await f.updater.check();
+        const before = activeResources({ root: f.root }).generation;
+        f.revision = f.release = 2; f.scenarios = scenarios;
+        assert.equal((await f.updater.check()).status, 'error');
+        assert.equal(activeResources({ root: f.root }).generation, before);
+        assert.equal(f.updater.view().ready, false);
+      } finally { await f.updater.stop(); }
+    }
   });
   await check('获取配置时只读取一次当前资源指针和检查记录', async () => {
     const f = fixture(); process.env.CW_RESOURCE_DIR = f.root;

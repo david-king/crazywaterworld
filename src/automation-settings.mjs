@@ -18,13 +18,14 @@ import { cityWarFleetStrategy, cityWarUsesGlobalStrategy, validateCityWarFleetSt
 import { WEEKLY_ACTIVITY_DEFAULTS, WEEKLY_ACTIVITY_CONSTRAINTS, validateWeeklyActivitySettings, migrateWeeklyActivitySettings } from './weekly-activity-settings.mjs';
 import { resourceFieldIds, defaultResourceFieldAmounts } from './resource-field-allocation.mjs';
 import { migrateMerchantPreset } from './merchant-preset-settings.mjs';
+import { HOMELAND_DEFAULTS, homelandEnabled } from './homeland-settings.mjs';
 
 // 设置与登录凭据分开保存。导出只包含设置，不包含账号、凭据或用量账本。
 export const settingsFile = () => path.join(dataDirectory(), 'automation-settings.json');
 export const SETTINGS_FORMAT = 'crazywaterworld-automation';
 // 文件 version / 账号 settingsVersion 是格式编号，只随结构迁移调整；
 // revision 是每次保存递增的修订号，仅用于并发冲突检查，不能用作格式版本。
-export const SETTINGS_SCHEMA_VERSION = 71;
+export const SETTINGS_SCHEMA_VERSION = 74;
 const LEGACY_SETTINGS_FORMAT = 'crazywaterword-automation';
 const treasureQualityLabels = { ORANGE: '万吨货轮', PURPLE: '中型货轮', BLUE: '小型货轮' };
 const treasureChaseDefaults = {
@@ -49,6 +50,7 @@ function savedSchedule({ vipDaily, ...schedule }) { return schedule; }
 // 新账号的功能开关和执行细项全部关闭，必须由用户逐项开启。
 // ads.noPrivilege 是固定的旧格式兼容字段，不是自动执行开关。
 export const DEFAULT_SETTINGS = {
+  homeland: { ...HOMELAND_DEFAULTS },
   seasonMerit: { enabled: false, targetRank: 0, leadMinutes: 0 },
   ...EXTENDED_DEFAULTS,
   // 连接被顶号后，挂机可按当前账号的策略自动恢复连接。
@@ -171,6 +173,8 @@ const constraints = {
   'pet.levelUids': strings(),
   'forge.decomposeQualities': { ...strings(5), values: ['GREEN','BLUE','PURPLE','ORANGE','RED'] },
   'cargo.dailyLoadLimit': int(), 'pet.species': strings(), 'pet.quality': { kind: 'choice', values: ['BLUE', 'PURPLE', 'ORANGE', 'RED'] },
+  'homeland.keepCoins': int(), 'homeland.dailyCoinLimit': int(),
+  'homeland.targetLevel': int(1000, 1), 'homeland.targetTech': int(10000), 'homeland.checkEverySeconds': int(86400, 30),
   'museum.factorMode': { kind: 'choice', values: ['materials', 'recommended'] },
   'museum.fullRecommendedFactor': int(3, 1), 'museum.partialRecommendedFactor': int(3, 1), 'museum.noRecommendedFactor': int(3, 1),
   'museum.maxDispatches': int(100), 'museum.factor': int(3, 1), 'museum.factorMaterials': strings(), 'museum.stockThreshold': int(), 'museum.matchedFactor': int(3, 1),
@@ -328,6 +332,7 @@ export function nativeTaskValues(settings, current) {
 }
 
 export function hasExtraWork(settings) {
+  if (homelandEnabled(settings)) return true;
   if (settings?.seasonMerit?.enabled) return true;
   if (settings?.radar?.runEnabled && (settings.radar.enabled || settings.radar.repairIdle)) return true;
   if (settings?.weeklyActivity?.enabled && ['farm', 'pet', 'antique', 'order', 'forge', 'hero'].some(kind => settings.weeklyActivity[kind + 'Enabled'])) return true;
@@ -352,6 +357,9 @@ export function validateSettings(input, options = {}) {
 }
 
 function validateCurrentSettings(input, { partial = false, catalog = null } = {}) {
+  if (plain(input) && !Object.hasOwn(input, 'homeland')) input = { ...input, homeland: { ...HOMELAND_DEFAULTS } };
+  if (plain(input?.homeland) && !Object.hasOwn(input.homeland, 'mergeOrders')) input = { ...input, homeland: { ...input.homeland, mergeOrders: false } };
+  if (plain(input?.homeland) && !Object.hasOwn(input.homeland, 'warehouseBuffer')) input = { ...input, homeland: { ...input.homeland, warehouseBuffer: false } };
   // An already-open settings page can still submit the retired fields.
   // Ignore only these known fields; every other setting remains strict.
   input = migrateVersion10Settings(migrateVersion9Settings(migrateVersion8Settings(migrateVersion7Settings(migrateVersion6Settings(migrateVersion5Settings(migrateVersion4Settings(migrateVersion3Settings(migrateVersion2Settings(input)))))))));
@@ -809,6 +817,12 @@ settingsMigrations.set(68, settings => migrateMerchantPreset(settings, DEFAULT_S
 // 新增可选的达标优先模式，已保存的策略及预算继续按原值执行。
 settingsMigrations.set(69, settings => settings);
 settingsMigrations.set(70, migrateVersion70Settings);
+settingsMigrations.set(71, settings => plain(settings) && !Object.hasOwn(settings, 'homeland')
+  ? { ...settings, homeland: { ...HOMELAND_DEFAULTS } } : settings);
+settingsMigrations.set(72, settings => plain(settings?.homeland) && !Object.hasOwn(settings.homeland, 'mergeOrders')
+  ? { ...settings, homeland: { ...settings.homeland, mergeOrders: false } } : settings);
+settingsMigrations.set(73, settings => plain(settings?.homeland) && !Object.hasOwn(settings.homeland, 'warehouseBuffer')
+  ? { ...settings, homeland: { ...settings.homeland, warehouseBuffer: false } } : settings);
 const supportedSettingsVersion = version => Number.isSafeInteger(version) && version >= 1;
 const entrySettingsVersion = entry => Object.hasOwn(entry, 'settingsVersion') ? entry.settingsVersion : 1;
 function newestSettingsVersion(store) {

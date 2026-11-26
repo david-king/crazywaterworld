@@ -2,6 +2,7 @@ import { exactAutomationId, automationWireId } from './automation-policy.mjs';
 import { iconEntry } from './art.mjs';
 import { toNumber } from './client.mjs';
 import { createGuildNameResolver } from './guild-name.mjs';
+import { chatChannelType, publicChatChannel } from './chat-protocol.mjs';
 
 const LIMIT = 100; // 游戏每个频道保留最近 100 条。
 const channels = new Set(['world', 'system', 'private', 'guild']);
@@ -58,7 +59,7 @@ function systemText(content, config, player, protocol, guildName) {
 }
 
 // A connection owns its history, including pushes arriving during the initial read.
-// The game has no message ID. Match history/push overlap by occurrence count so
+// Older protocols have no message ID. Match history/push overlap by occurrence count so
 // two equal messages from one player in the same second can both survive.
 function mergeHistory(history, pushes) {
   const counts = new Map();
@@ -188,9 +189,10 @@ export function createGameChat(client, { player, config, changed }) {
       append('private/' + id, privateRow(chat.peer, chat.record, false), dirty);
     } else if (name === 'SCChatReceive' || name === 'SCBatchChatReceive') {
       for (const { channel, message } of name === 'SCChatReceive' ? [body] : body.messages ?? []) {
-        if (channel !== 1 && channel !== 2) continue;
+        const channelType = chatChannelType(channel);
+        if (channelType !== 1 && channelType !== 2) continue;
         const system = message?.content?.systemMsgId;
-        const key = channel === 2 ? 'guild' : system ? 'system' : 'world';
+        const key = channelType === 2 ? 'guild' : system ? 'system' : 'world';
         if (!feeds.has(key)) continue;
         if (system && config?.tables?.SystemChatMsgCfg?.data?.find(row => row.id === system)?.needCache === '否') continue;
         append(key, publicRow(message), dirty);
@@ -249,7 +251,7 @@ export function createGameChat(client, { player, config, changed }) {
       blocked = new Set((reply.list ?? []).map(row => exactAutomationId(row.playerId)).filter(Boolean));
       current();
     }
-    const reply = await client.request('ChatRecordRequest', { channel: channel === 'guild' ? 2 : 1 }, 'ChatRecordResponse');
+    const reply = await client.request('ChatRecordRequest', { channel: publicChatChannel(client.protocol, channel === 'guild' ? 2 : 1) }, 'ChatRecordResponse');
     return (reply.message ?? []).filter(message => channel === 'guild' || Boolean(message.content?.systemMsgId) === (channel === 'system')).map(publicRow);
   }
 
@@ -308,7 +310,7 @@ export function createGameChat(client, { player, config, changed }) {
     const wireChannel = channel === 'guild' ? 2 : 1;
     const name = privateChat ? 'PrivateChatSendRequest' : 'SendChatRequest';
     const body = privateChat ? { type, peerPlayerId: automationWireId(peer), ...(isEmoji ? { message: '', emoji } : { message: text }) }
-      : { channel: wireChannel, content: isEmoji ? { type, attachment: { emoji } } : { type, text, attachment: {} } };
+      : { channel: publicChatChannel(client.protocol, wireChannel), content: isEmoji ? { type, attachment: { emoji } } : { type, text, attachment: {} } };
     return schedule(async () => {
       if (item?.actId) await loadUnlocks(current);
       let attempted = false, echoed = false;
@@ -320,7 +322,7 @@ export function createGameChat(client, { player, config, changed }) {
             && (isEmoji ? record.emoji === emoji : record.message === text)) echoed = true;
         } else if (!privateChat && (event === 'SCChatReceive' || event === 'SCBatchChatReceive')) {
           const messages = event === 'SCChatReceive' ? [data] : data.messages ?? [];
-          if (messages.some(row => row.channel === wireChannel && ownId && exactAutomationId(row.message?.sender?.playerId) === ownId
+          if (messages.some(row => chatChannelType(row.channel) === wireChannel && ownId && exactAutomationId(row.message?.sender?.playerId) === ownId
             && row.message?.content?.type === type
             && (isEmoji ? row.message.content.attachment?.emoji === emoji : row.message.content.text === text))) echoed = true;
         }

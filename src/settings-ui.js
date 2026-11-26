@@ -9,6 +9,7 @@ const activityOwnedSettings = new Set(['weekOrder.enabled', 'schedule.weekOrderS
   'heroRaid.enabled', 'heroRaid.challenge', 'heroRaid.retryTimes', 'heroRaid.orders', 'heroRaid.lottery', 'heroRaid.rewards']);
 const baseFamilies = [
   { id: 'construction', title: '建筑', groups: ['building'] },
+  { id: 'homeland', title: '家园', groups: ['homeland'] },
   { id: 'production', title: '生产', groups: ['factory', 'farm', 'pet', 'museum', 'gather'] },
   { id: 'events', title: '事件', groups: ['resident', 'cargo', 'events'] },
   { id: 'foundation', title: '基础', groups: ['resources', 'gold'] },
@@ -367,6 +368,24 @@ const configGroups = [
     configField('forge.recipeIds', '配方优先顺序', 'multi', { parent: 'forge.craft', when: d => !d.forge.nativeAuto && d.forge.craft, catalog: 'forgeRecipes', empty: '请选择锻造配方', help: '按勾选先后依次尝试，使用首个符合当前赛季且材料和金币足够的配方。产出装备和星级遵守游戏随机规则。' }),
     configField('forge.universal', '允许万能材料补足', 'switch', { parent: 'forge.craft', when: d => !d.forge.nativeAuto && d.forge.craft, help: '普通材料不足时，使用对应品质的万能材料补足差额。' }),
     configField('forge.universalReserve', '万能材料保留量', 'number', { parent: 'forge.universal', unit: '每种', when: d => !d.forge.nativeAuto && d.forge.craft && d.forge.universal }),
+  ] },
+  { id: 'homeland', title: '家园', category: 'base', fields: [
+    configField('homeland.enabled', '家园总开关', 'switch', { help: '同时受基地执行总开关控制。手动查看与操作在杂项 → 家园。' }),
+    configField('homeland.freeStamina', '领取每日免费工坊体力'),
+    configField('homeland.freeBox', '领取工坊免费宝箱', 'switch', { help: '只领取价格确认为免费的每日商品，宝箱进入工坊奖励区。' }),
+    configField('homeland.submitOrders', '自动提交工坊订单', 'switch', { help: '棋盘物品齐备后自动提交订单；开启下方自动合成可用已有棋子补齐订单缺口。' }),
+    configField('homeland.mergeOrders', '按订单需求自动合成', 'switch', { parent: 'homeland.submitOrders', help: '优先限时订单，搜索当前订单所需合成、存入和取出的最少总步数。其他订单的已备成品保留，同一订单内统一分配用料；生产器与体力瓶不参与合成。页面区分已证明最少与尚未证明最少的可行方案。每步回读确认，不自动生产或购买棋子。' }),
+    configField('homeland.warehouseBuffer', '使用仓库中转腾位', 'switch', { parent: 'homeland.mergeOrders', help: '同时开启仓库取料后，缺格子时暂存闲置普通棋子或稍后才用的中间产物，再按合成与交单需要取回。逐步核对棋盘和仓库容量，整单可完成才搬运；暂时用不到的物品留在仓库。生产器、体力瓶和锁定棋子保持原位，不购买容量。' }),
+    configField('homeland.takeWarehouse', '取出订单所需仓库物品', 'switch', { parent: 'homeland.submitOrders', help: '棋盘有空位时，逐件取出当前订单缺少的物品。' }),
+    configField('homeland.unlockFloors', '自动开放楼层'),
+    configField('homeland.clean', '自动打扫', 'switch', { help: '打扫消耗家园币，计入本工具每日预算，不计入游戏的累计消费升级条件。' }),
+    configField('homeland.tech', '按顺序升级科技'),
+    configField('homeland.targetTech', '科技目标等级', 'number', { parent: 'homeland.tech', help: '达到目标后停止；科技按游戏既定顺序升级。' }),
+    configField('homeland.upgrade', '条件达标后升级家园'),
+    configField('homeland.targetLevel', '家园目标等级', 'number', { parent: 'homeland.upgrade' }),
+    configField('homeland.keepCoins', '保留家园币', 'number'),
+    configField('homeland.dailyCoinLimit', '每日家园币上限', 'number', { help: '手动和自动打扫、科技共用此预算。0 禁止花费家园币；免费领取和达标升级仍可执行。重启或保存配置不会清零。' }),
+    configField('homeland.checkEverySeconds', '检查间隔', 'number', { unit: '秒', help: '至少 30 秒，每轮最多执行 20 个动作。结果待确认时暂停后续家园操作。' }),
   ] },
   { id: 'museum', title: '博物馆探宝', category: 'base', fields: [
     configField('museum.runEnabled', '博物馆探宝总开关', 'switch', { help: '统一暂停博物馆升级、领奖、藏品上架和探宝，保留细项选择。未选择任何执行动作时不会操作。' }),
@@ -929,8 +948,7 @@ function configUpdateVisibility() {
       const enabled = configSwitchValue(spec);
       const blocked = (spec.gates ?? []).filter(path => !configGet(path));
       const labels = blocked.map(path => configEditor.fields.get(path)?.label || path);
-      widget.moduleNote.textContent = enabled && spec.configuredFields?.length && !spec.configuredFields.some(path => configGet(path))
-        ? '尚未选择执行动作，请在下方设置。' : enabled && labels.length ? '需先开启：' + labels.join('、') : '';
+      widget.moduleNote.textContent = enabled && labels.length ? '需先开启：' + labels.join('、') : '';
       widget.moduleNote.hidden = !widget.moduleNote.textContent;
     }
     if (['lineup', 'trialLineups', 'fleetLineups'].includes(widget.spec.kind)) widget.control?.refresh?.();
@@ -2845,7 +2863,7 @@ async function configPreview() {
   clear($('config-preview-result'));
   configRenderUsage();
   try {
-    const dedicated={museum:'museum','discount-shop':'discountShop',arena:'arena',league:'league',alliance:'alliance',guildShip:'guildShip',guildFort:'guildFort',silicon:'silicon',resourceFields:'resourceFields','hero-raid':'heroRaid',treasure:'world',radar:'radar','fleet-dispatch':'fleetDispatch','pirate-hunt':'pirateHunt',worldBoss:'worldBoss',cityWar:'cityWar',forge:'forge',antique:'antique',heroes:'heroes'};
+    const dedicated={homeland:'homeland',museum:'museum','discount-shop':'discountShop',arena:'arena',league:'league',alliance:'alliance',guildShip:'guildShip',guildFort:'guildFort',silicon:'silicon',resourceFields:'resourceFields','hero-raid':'heroRaid',treasure:'world',radar:'radar','fleet-dispatch':'fleetDispatch','pirate-hunt':'pirateHunt',worldBoss:'worldBoss',cityWar:'cityWar',forge:'forge',antique:'antique',heroes:'heroes'};
     const source=dedicated[selected.id];
     let data;
     if(selected.id==='pirate-hunt'){

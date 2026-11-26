@@ -270,6 +270,10 @@ test('建筑与多分组分类切换、键盘导航和旧链接都能定位同�
   assert.equal(f.editor.selectedGroups.base, 'building');
   assert.equal(f.env.hash, '#config-group-building');
   f.env.node('config-family-construction').onkeydown({ key: 'ArrowRight', preventDefault() {} });
+  assert(visible(f.env.node('config-group-homeland')), '建筑右侧可用键盘进入家园');
+  assert.equal(panel.querySelector('.config-subtabs').hidden, true);
+  assert.equal(f.env.focused, f.env.node('config-family-homeland'));
+  f.env.node('config-family-homeland').onkeydown({ key: 'ArrowRight', preventDefault() {} });
   assert(visible(f.env.node('config-group-farm')), '再次进入生产保留上次选择');
   const visibleTabs = () => panel.querySelectorAll('[data-config-group]').filter(visible).map(tab => tab.dataset.configGroup);
   assert.deepEqual(visibleTabs(), ['factory', 'farm', 'pet', 'museum', 'gather']);

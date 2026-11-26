@@ -120,6 +120,7 @@ function fixture() {
     const call = (...args) => env.call ? env.call(...args) : new Promise(() => {});
     const openConfirm = (title, body, confirm, label) => { env.dialog = { title, body, confirm, label }; };
     const snapshot = { paused: false, connected: true }, disconnected = new Set();
+    env.snapshot = snapshot;
     let current = 'account-a';
     let orderClockOffset = 0;
     ${script.slice(script.indexOf('function orderState('), start)}
@@ -130,6 +131,7 @@ function fixture() {
     ${script.slice(end, refreshEnd)}
     env.render = renderWorld;
     env.refresh = refreshManualWorld;
+    env.refreshChanged = refreshChangedManualWorld;
     env.worldUpdate = refreshWorldUpdate;
     env.openPlan = () => { stateActions.setView({ page: 'manual' }); return loadManualProductionPlan(); };
     env.updateTimers = updateWorldProductionTimers;
@@ -494,6 +496,48 @@ test('切换账号、暂停或断开后清理旧账号的展开状态', () => {
   assert.match(env.node('world-factories').textContent, /乙账号/);
   passed++;
   console.log('通过：建筑先于排产显示，读取中变更合并补读，迟到的旧账号快照不会覆盖新账号');
+}
+
+{
+  const env = fixture(), reads = [];
+  env.call = () => new Promise(resolve => reads.push(resolve));
+  const data = jobs => worldData(env, { factories: [factory(jobs)] });
+  env.snapshot.productionRevision = 1;
+  const initial = env.refresh();
+  reads[0](data([])); await initial;
+  assert.match(currentProductText(env.tables.at(-1).rows[0][3]), /空闲/);
+  env.snapshot.productionRevision = 2;
+  env.refreshChanged();
+  assert.equal(reads.length, 1, '连续推送应限流，不能每次库存变化都读取海面');
+  env.now += 3000;
+  const changed = env.refreshChanged();
+  env.snapshot.productionRevision = 3;
+  env.refreshChanged();
+  assert.equal(reads.length, 2, '读取期间的推送不能重入或使当前快照一直无法显示');
+  reads[1](data([{ productId: '面包', name: '面包', finishTime: env.now / 1000 + 120 }]));
+  await changed;
+  assert.match(currentProductText(env.tables.at(-1).rows[0][3]), /面包/);
+  env.now += 3000;
+  const followup = env.refreshChanged();
+  assert.equal(reads.length, 3, '读取期间收到新版本，下次检查继续刷新');
+  reads[2](data([])); await followup;
+  env.now += 3000;
+  env.refreshChanged();
+  assert.equal(reads.length, 3, '版本未变不重复读取');
+  env.snapshot.productionRevision = 0;
+  env.document.hidden = true; env.refreshChanged();
+  env.document.hidden = false; env.node('modal').open = true; env.refreshChanged();
+  env.node('modal').open = false;
+  env.node('tab-manual').classList.add('hidden'); env.node('tab-inventory').classList.add('hidden'); env.refreshChanged();
+  assert.equal(reads.length, 3, '后台页面、弹窗和未展示的海面不抢占刷新');
+  env.node('tab-inventory').className = '';
+  const restarted = env.refreshChanged();
+  assert.equal(reads.length, 4, '服务重启后版本归零也应更新库存页面');
+  reads[3](data([])); await restarted;
+  assert.match(script.slice(script.indexOf('function refreshAccountStatuses()'), script.indexOf('function refreshAccountStatuses()') + 900), /refreshChangedManualWorld\(\)/,
+    '账号状态轮询必须实际触发建筑刷新');
+  passed++;
+  console.log('通过：生产推送版本自动刷新建筑和库存，合并连续变化并处理服务重启');
 }
 
 test('当前产物区分等待开工、已完成和空闲，缺少队列显示未同步', () => {

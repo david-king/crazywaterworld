@@ -193,10 +193,11 @@ export async function prepareFactoryInterruption(client, protocol, step, {player
 // keep its writes serial, then reconcile it once against queue + finished stock.
 export async function runFactoryProductionBatch(client, protocol, steps, {
   config, player, settings = null, getSettings, enabled = () => true,
-  beforeStep, afterStep, cancelStep, window = 400, onStep, checkStep, checkSnapshot, beforeDispatch,
+  beforeStep, afterStep, cancelStep, window = 400, onStep, checkStep, checkSnapshot, beforeDispatch, expectFactoryStockChange,
 } = {}) {
   if (!Array.isArray(steps) || !steps.length) return { results: [] };
   const results = [], attemptedEntries = new Set(), current = () => getSettings?.() ?? settings;
+  const stockChangeReleases = [];
   let account, lock, batch, batchStep, ticket, prepared = false, acquired = false, actionGuard;
   const supply = steps[0].refillSupply;
   let supplyChanged = false;
@@ -317,6 +318,7 @@ export async function runFactoryProductionBatch(client, protocol, steps, {
         projected.set(input, (projected.get(input) ?? 0) - num);
       }
     }
+    const spendingStock = new Map(stock);
     let stopped = '';
     for (const step of selected) {
       if (stopped) { results.push(skipped(step, stopped)); continue; }
@@ -342,6 +344,10 @@ export async function runFactoryProductionBatch(client, protocol, steps, {
             if (entry && (entry.revision !== insertion?.revision || batch.attempted.length > 1 ||
               !insertionYieldsToProduction(entry, now, isFull, canMake))) throw new AutomationSkip('工厂正在执行排产清单中的插单');
           }
+          const changes = new Map(costsOf([step]).map(({ id, num }) => [id, -num]));
+          const release = expectFactoryStockChange?.(changes, spendingStock);
+          if (release) stockChangeReleases.push(release);
+          for (const [id, delta] of changes) spendingStock.set(id, (spendingStock.get(id) ?? 0) + delta);
         } });
         const entry = { step, ok: false, status: 'unknown', sent, reason: '批次已发送，等待统一核对' };
         results.push(entry); attemptedEntries.add(entry);
@@ -393,6 +399,7 @@ export async function runFactoryProductionBatch(client, protocol, steps, {
     }
     for (const step of steps) if (!results.some(entry => entry.step === step)) results.push({ ...skipped(step, error.message), failureError: error });
   } finally {
+    for (const release of stockChangeReleases) release();
     if (supply) client.off?.('message',observeSupply);
     if (acquired) busy.delete(lock);
   }

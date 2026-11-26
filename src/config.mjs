@@ -10,7 +10,7 @@ export const APPID = 'wx2ea52a972ea18e5e';
 export const CONFIG_PACK_PATH = path.resolve(import.meta.dirname, '../work/cdn/config_cn_pack.json');
 
 // 资源是服务端数字枚举，数字到字符串 id 的映射只存在于客户端的生成代码里。
-export const RESOURCE = { 1: 'EXP', 3: 'GOLD', 4: 'RUBY', 5: 'ARENA_POINT', 6: 'LEAGUE_POINT', 7: 'SNOWBALL_STAMINA' };
+export const RESOURCE = { 1: 'EXP', 3: 'GOLD', 4: 'RUBY', 5: 'ARENA_POINT', 6: 'LEAGUE_POINT', 7: 'SNOWBALL_STAMINA', 8: 'DUAL_COMBINE_STAMINA' };
 
 // 小文件是 bundle 描述；资源包更新后可能同样大甚至更小，不能用大小判断版本。
 // 同步副本仅作可离线保留的来源，不能永久遮蔽游戏刚下载的新缓存。

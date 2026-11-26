@@ -232,6 +232,35 @@ export async function captureSpendOperation(client, step, { waterSnapshot } = {}
   if (request === 'BuildBuildingRequest' && old && !integer(old.level)) return operation;
   const oldPets = ['PetBreedRequest', 'PetFeedRequest'].includes(request) ? petSpendSnapshot(buildings) : null;
   if (['PetBreedRequest', 'PetFeedRequest'].includes(request) && !oldPets) return operation;
+  if (request === 'PetFeedRequest') {
+    const prior = oldPets.jobs.find(job => job.idx === body.jobIdx);
+    if (!prior) return operation;
+    // Retain the exact room and job for a later, explicit manual handoff.
+    // This metadata does not itself prove that the feed succeeded.
+    operation.petFeedJob = structuredClone(prior);
+    let lastEvidence;
+    const record = (next, after, confirmed, reason) => {
+      const evidence = { jobIdx: body.jobIdx, before: oldPets, after, confirmed, reason };
+      const signature = JSON.stringify(evidence);
+      if (signature !== lastEvidence) emitDiagnostic(next, 'pet-feed-verification', evidence);
+      lastEvidence = signature;
+      return confirmed;
+    };
+    return probe(async next => {
+      let water;
+      try { water = await read(next, 'OnWater'); }
+      catch (error) { record(next, null, false, '读取培育状态失败：' + error.message); throw error; }
+      const rooms = buildingList(water), after = rooms && petSpendSnapshot(rooms);
+      const confirmed = confirmPetSpend(oldPets, after, request, body, next);
+      const current = after?.jobs.find(job => job.idx === body.jobIdx);
+      return record(next, after, confirmed, confirmed ? '已确认投喂缩短时间或提前成熟'
+        : !after ? '培育队列或待领取海兽数据不完整'
+          : !current ? '原队列已消失，无法证明是本次投喂提前成熟'
+            : current.buildingId !== prior.buildingId || jobKey(current) !== jobKey(prior)
+              ? '队列编号已由其他培育任务使用'
+              : '尚未观察到原培育任务完成时间缩短');
+    });
+  }
   const day = Math.floor((Date.now() + (client.serverClockOffsetMs || 0) + 28800000) / 86400000);
   return probe(async next => {
     const after = await read(next, 'OnWater'), currentBuildings = buildingList(after);
@@ -272,7 +301,7 @@ export async function captureSpendOperation(client, step, { waterSnapshot } = {}
     }
     if (request === 'FarmSpeedUpRequest') return !!old?.farm?.productId && current?.farm?.productId === old.farm.productId
       && current.farm.plantTime === old.farm.plantTime && integer(current.farm.ripeTime) && current.farm.ripeTime < old.farm.ripeTime;
-    if (request === 'PetBreedRequest' || request === 'PetFeedRequest') {
+    if (request === 'PetBreedRequest') {
       return confirmPetSpend(oldPets, petSpendSnapshot(currentBuildings), request, body, next);
     }
     const field = { FishingLevelUpRequest: 'fishingLevel', DivingLevelUpRequest: 'divingLevel', SalvageLevelUpRequest: 'salvageLevel' }[request];

@@ -27,10 +27,10 @@ try {
     'GuildInfoRequest', 'GuildInfoResponse', 'GainFactoryProduceRequest', 'GainFactoryProduceResponse',
     'StartFactoryProduceRequest', 'GameEffectRequest', 'GameEffectResponse',
     'CargoShipsRequest', 'CargoShipsResponse', 'FillCargoShipRequest', 'FillCargoShipResponse',
-    'WeekOrderInfoRequest', 'WeekOrderInfoResponse', 'DenyOrderRequest',
+    'WeekOrderInfoRequest', 'WeekOrderInfoResponse', 'DenyOrderRequest', 'SCUpdateItem', 'SCUpdateWaterBuilding',
   ]) : loadProtocol();
 
-  function integration({ rounds = 2, mainEveryMs = 3600000, cli = false, offset = 0, finishAfterMs = 5000, fallbackSeconds = 30 } = {}) {
+  function integration({ rounds = 2, mainEveryMs = 3600000, cli = false, offset = 0, finishAfterMs = 5000, fallbackSeconds = 30, pushUpdates = false } = {}) {
     const settings = defaultSettings();
     const disable = value => {
       for (const [key, item] of Object.entries(value)) {
@@ -95,12 +95,21 @@ try {
       protocolCalls.push({ method, name, body, at: wall, job: scheduled });
     };
     const leave = write => { if (write) writesInFlight--; else readsInFlight--; };
-    client.request = async (name, body = {}, response = name.replace(/Request$/, 'Response')) => {
+    const pushStock = ids => {
+      if (pushUpdates) client.emit('message', { name: 'SCUpdateItem', body: codec('SCUpdateItem', {
+        items: ids.map(itemId => ({ itemId, num: state.stock.get(itemId) ?? 0 })),
+      }) });
+    };
+    const pushFactory = building => {
+      if (pushUpdates) client.emit('message', { name: 'SCUpdateWaterBuilding', body: codec('SCUpdateWaterBuilding', { building: [building] }) });
+    };
+    client.request = async (name, body = {}, response = name.replace(/Request$/, 'Response'), timeout, beforeSend) => {
+      beforeSend?.();
       const write = ['GainFactoryProduceRequest', 'FillCargoShipRequest'].includes(name); enter('request', name, body, write);
       try {
         codec(name, body); await beforeRead?.(name); mature();
         let result;
-        if (name === 'OnWaterRequest') result = { building: [state.building], workerOrder: state.orders ?? [] };
+        if (name === 'OnWaterRequest') result = { building: [state.building, ...(state.otherBuildings ?? [])], workerOrder: state.orders ?? [] };
         else if (name === 'AllItemRequest') result = { items: [...state.stock].map(([itemId, num]) => ({ itemId, num })) };
         else if (name === 'AllResourceRequest') result = { list: [] };
         else if (name === 'GameEffectRequest') result = { effects: [{ id: 1, value: 0 }, { id: 2, value: 0 }] };
@@ -124,13 +133,17 @@ try {
           result = { products: { asset: structuredClone(assets) } };
           for (const row of assets) state.stock.set(row.id, (state.stock.get(row.id) ?? 0) + row.num);
           state.building.factory.finishedProducts = [];
+          pushStock(assets.map(row => row.id)); pushFactory(state.building);
           await afterWrite?.(name);
         } else throw new Error('禁止未声明协议：' + name);
-        return codec(response, result);
+        const reply = codec(response, result);
+        if (pushUpdates) client.emit('message', { name: response, body: reply });
+        return reply;
       } catch (error) { protocolErrors.push({ name, message: error.message }); throw error; }
       finally { leave(write); }
     };
-    client.sendWatch = async (name, body) => {
+    client.sendWatch = async (name, body, options = {}) => {
+      options.beforeSend?.();
       enter('sendWatch', name, body, true);
       try {
         const request = codec(name, body);
@@ -140,9 +153,14 @@ try {
         }
         assert.equal(name, 'StartFactoryProduceRequest');
         assert.deepEqual(Object.keys(request).sort(), ['buildingId', 'productId']);
-        assert.equal(state.building.factory.factoryQ.length, 0, '不能重复占用生产槽位');
-        state.stock.set('木材', state.stock.get('木材') - 1);
-        state.building.factory.factoryQ.push({ idx: 0, productId: request.productId, finishTime: Math.floor((wall + offset) / 1000) + 120 });
+        const building = [state.building, ...(state.otherBuildings ?? [])].find(row => row.buildingId === body.buildingId);
+        assert(building.factory.factoryQ.length < Number(config.tables.BuildingProduceParamCfg.data[0].paramValue), '不能重复占用生产槽位');
+        const costs = config.tables.BuildingProduceCfg.data.find(row => row.itemId === body.productId).costItem;
+        for (const [id, num] of costs) state.stock.set(id, (state.stock.get(id) ?? 0) - num);
+        building.factory.factoryQ.push({ idx: Math.max(-1, ...building.factory.factoryQ.map(row => row.idx ?? 0)) + 1,
+          productId: request.productId, ...(building.factory.factoryQ.length ? {} : { finishTime: Math.floor((wall + offset) / 1000) + 120 }) });
+        for (const [id] of costs) pushStock([id]);
+        pushFactory(building);
         await afterWrite?.(name); return { seq: protocolCalls.length };
       } catch (error) { protocolErrors.push({ name, message: error.message }); throw error; }
       finally { leave(true); }
@@ -186,6 +204,100 @@ try {
   };
   const writes = f => f.protocolCalls.filter(row => ['GainFactoryProduceRequest', 'StartFactoryProduceRequest'].includes(row.name));
   const stopAfterRefill = f => f.reportHook(row => { if (row.step?.kind === 'startProduce' && row.status === 'confirmed') f.abort(); });
+
+  for (const harvest of [false, true]) await test('真实扣料推送不打断同批和后续工厂，保留已开工任务' + (harvest ? '，收货后本轮续产' : ''), async () => {
+    const f = integration({ rounds: 1, pushUpdates: true, finishAfterMs: 600000 });
+    f.settings.factory.demandFirst = true;
+    f.settings.factory.demandPriority = ['factory'];
+    f.config.tables.BuildingProduceParamCfg.data[0].paramValue = 3;
+    const running = structuredClone(f.state.building.factory.factoryQ[0]);
+    const other = structuredClone(f.state.building); other.buildingId = '2材料厂';
+    f.state.otherBuildings = [other];
+    f.state.building.factory.factoryQ = [];
+    if (harvest) f.state.building.factory.finishedProducts = [{ type: 0, id: '产品甲', num: 1 }];
+    await f.run();
+    assert.equal(writes(f).filter(row => row.name === 'StartFactoryProduceRequest').length, 5, '空厂应填满三格，另一厂保留在产并补两格：' + JSON.stringify(f.reports.filter(row => row.error || row.skipped).map(row => row.error ?? row.reason)));
+    assert.equal(f.state.building.factory.factoryQ.length, 3);
+    assert.equal(other.factory.factoryQ.length, 3);
+    assert.deepEqual(other.factory.factoryQ[0], running, '既有开工项不得取消或改动');
+    assert.equal(f.state.stock.get('木材'), 95);
+    assert.equal(f.state.stock.get('产品甲') ?? 0, harvest ? 1 : 0);
+    assert(!f.reports.some(row => /库存或需求已变化/.test(row.error ?? row.reason ?? '')));
+    await f.clean();
+  });
+
+  await test('轮间巡检收货后多原料分包扣减仍连续补满生产格', async () => {
+    const f = integration({pushUpdates:true});
+    Object.assign(f.settings.factory,{demandFirst:true,demandPriority:['factory']});
+    f.config.tables.BuildingProduceParamCfg.data[0].paramValue = 3;
+    f.config.tables.BuildingProduceCfg.data[0].costItem = [['鱼',1],['木材',5]];
+    f.state.stock.set('鱼',5914); f.state.stock.set('木材',5630);
+    const running = f.state.building.factory.factoryQ[0];
+    f.state.building.factory.factoryQ = [0,1,2].map(idx => ({...running,idx}));
+    stopAfterRefill(f);
+    await f.run();
+    assert.equal(f.roundsDone.length,1,'应由轮间巡检续产，不等待下一主轮');
+    assert.deepEqual(writes(f).map(row=>row.name),['GainFactoryProduceRequest',...Array(3).fill('StartFactoryProduceRequest')]);
+    assert.equal(f.state.building.factory.factoryQ.length,3);
+    assert.equal(f.state.stock.get('鱼'),5911); assert.equal(f.state.stock.get('木材'),5615);
+    assert(!f.reports.some(row=>/库存或需求已变化/.test(row.error??'')));
+    await f.clean();
+  });
+
+  await test('收货途中新增完工产品时及时重新排产，保留在产并恢复补库', async () => {
+    const f = integration({pushUpdates:true,finishAfterMs:1000});
+    Object.assign(f.settings.factory,{demandFirst:true,demandPriority:['factory']});
+    f.config.tables.BuildingProduceParamCfg.data[0].paramValue = 3;
+    f.state.building.factory.finishedProducts = [{type:0,id:'产品甲',num:1}];
+    let extraFinished = false;
+    f.beforeRead(name=>{if(name==='GainFactoryProduceRequest'&&!extraFinished){extraFinished=true;wall+=1000;}});
+    stopAfterRefill(f);
+    await f.run();
+    assert.equal(f.state.stock.get('产品甲'),2,'收取规划后才完成的产品');
+    assert.equal(f.state.building.factory.factoryQ.length,3,'补足生产格，不因收货变化持续空闲');
+    assert.equal(writes(f).filter(row=>row.name==='StartFactoryProduceRequest').length,3);
+    assert(writes(f).at(-1).at<=base+3000,'新增收货使计划失效后应立即复查，不等下一主轮');
+    await f.clean();
+  });
+
+  for (const change of ['stock','order']) await test('正常扣料期间出现真实' + (change === 'stock' ? '额外消耗' : '订单变化') + '仍暂停旧排产', async () => {
+    const f = integration({rounds:1,pushUpdates:true});
+    Object.assign(f.settings.factory,{demandFirst:true,demandPriority:['factory']});
+    f.config.tables.BuildingProduceParamCfg.data[0].paramValue = 3;
+    f.state.building.factory.factoryQ = [];
+    f.afterWrite(name => {
+      if (name !== 'StartFactoryProduceRequest') return;
+      if (change === 'stock') {
+        f.state.stock.set('木材',f.state.stock.get('木材') - 10);
+        f.client.emit('message',{name:'SCUpdateItem',body:{items:[{itemId:'木材',num:f.state.stock.get('木材')}]}});
+      } else f.client.emit('message',{name:'SCWorkerOrder',body:{}});
+    });
+    await f.run();
+    assert.equal(writes(f).length,1);
+    assert.equal(f.state.building.factory.factoryQ.length,1,'已发送的生产保留');
+    assert(f.reports.some(row => /库存或需求已变化/.test(row.error ?? '')));
+    await f.clean();
+  });
+
+  await test('没有任何订单也补至库存水位，计入在产和待收，现货消耗后重新补库', async () => {
+    const f = integration({rounds:1,pushUpdates:true});
+    Object.assign(f.settings.factory,{demandFirst:true,demandPriority:['cargo','resident','factory'],keepStock:3});
+    f.config.tables.BuildingProduceParamCfg.data[0].paramValue = 6;
+    f.state.building.factory.factoryQ = [];
+    await f.run();
+    assert.equal(writes(f).length,3,'没有订单也应连续安排三件补库');
+    await f.run();
+    assert.equal(writes(f).length,3,'三件在产已经覆盖水位，不再生产');
+    f.finish();
+    await f.run();
+    assert.equal(writes(f).length,4,'只收取成品，待收和已入库都不能重复补');
+    assert.equal(f.state.stock.get('产品甲'),3);
+    f.state.stock.set('产品甲',1);
+    await f.run();
+    assert.equal(writes(f).length,6,'现货少两件后自动补两件');
+    assert.equal(f.state.building.factory.factoryQ.length,2);
+    await f.clean();
+  });
 
   await test('主循环一小时时仍按实际完工时间与服务端时差及时收货补产', async () => {
     const f = integration({ offset: 2000 }); stopAfterRefill(f);

@@ -57,6 +57,8 @@ export function createFactorySchedule(client, {
   let disposed = false, checkedOnce = false, checkedAt = now(), failed = false;
   let buildings = [], slots, progressed = false, version = 0, dirty = false, wakeAt = Infinity;
   let demandVersion = 0;
+  let stock = null;
+  const expectedStockChanges = new Set();
   let residentOrderChanged = false;
   let savedOffset = Number(client.serverClockOffsetMs) || 0;
   const signatures = new Map(), knownFactories = new Set();
@@ -120,8 +122,50 @@ export function createFactorySchedule(client, {
     dirty = true; wakeAt = Math.min(wakeAt, next);
     if (shouldNotify) notify();
   };
+  // Register only at the actual send boundary. Matching absolute balances
+  // are effects already budgeted by this plan, not new demand. Each caller
+  // releases unobserved expectations when its operation settles or fails.
+  const expectStockChange = (changes, baseline = stock) => {
+    const targets = new Map();
+    if (!disposed && baseline instanceof Map) for (const [id, delta] of changes) {
+      const before = baseline.get(id) ?? 0, after = before + delta;
+      if (typeof id !== 'string' || !id || !Number.isSafeInteger(before) || before < 0
+        || !Number.isSafeInteger(delta) || !Number.isSafeInteger(after) || after < 0) return () => {};
+      if (delta) targets.set(id, after);
+    }
+    if (targets.size) expectedStockChanges.add(targets);
+    return () => expectedStockChanges.delete(targets);
+  };
+  const observeStock = body => {
+    let unexpected = false;
+    for (const item of normalize(body)?.items ?? []) {
+      const id = item.itemId, amount = item.num ?? 0;
+      const pending = [...expectedStockChanges].filter(targets => targets.has(id));
+      const match = pending.findLastIndex(targets => targets.get(id) === amount);
+      let changed = false;
+      if (typeof id !== 'string' || !id || !Number.isSafeInteger(amount) || amount < 0) changed = true;
+      else {
+        changed = match < 0 && (!stock || (stock.get(id) ?? 0) !== amount);
+        stock?.set(id, amount);
+      }
+      unexpected ||= changed;
+      // A combined update can acknowledge several serial debits at once.
+      // Unexpected balances invalidate all outstanding expectations for it.
+      for (const targets of changed ? pending : pending.slice(0, match + 1)) targets.delete(id);
+    }
+    return unexpected;
+  };
   const onMessage = ({ name, body } = {}) => {
     if (disposed) return;
+    if (name === 'AllItemResponse') {
+      const items = normalize(body)?.items;
+      stock = Array.isArray(items) && items.every(item => typeof item.itemId === 'string' && item.itemId
+        && Number.isSafeInteger(item.num ?? 0) && (item.num ?? 0) >= 0)
+        && new Set(items.map(item => item.itemId)).size === items.length
+        ? new Map(items.map(item => [item.itemId, item.num ?? 0])) : null;
+      return;
+    }
+    if (name === 'SCUpdateItem' && !observeStock(body)) return;
     const recruitChanged = name === 'SCGuildOrder' || guildOrderCounterChanged(name, body);
     if (recruitChanged || productionDemandChanged(name, body)) {
       if (name === 'SCWorkerOrder' && watchResidentOrders()) {
@@ -159,7 +203,7 @@ export function createFactorySchedule(client, {
   };
   client.on?.('message', onMessage); client.on?.('automationSettingsChanged', onSettings); client.on?.('pong', onPong);
   return {
-    active, nextAt, due: () => nextAt() <= now(),
+    active, nextAt, expectStockChange, due: () => nextAt() <= now(),
     version: () => version, demandVersion: () => demandVersion, hasChecked: () => checkedOnce,
     checked(state, { version: readVersion = version, demandVersion: readDemand = demandVersion, replan = false,
       progressed: madeProgress = false, slots: observedSlots } = {}) {
@@ -188,6 +232,7 @@ export function createFactorySchedule(client, {
       const remove = client.off?.bind(client) ?? client.removeListener?.bind(client);
       remove?.('message', onMessage); remove?.('automationSettingsChanged', onSettings); remove?.('pong', onPong);
       signatures.clear(); knownFactories.clear(); buildings = []; wakeAt = Infinity;
+      stock = null; expectedStockChanges.clear();
     },
   };
 }

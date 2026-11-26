@@ -4,6 +4,7 @@ import { createGameItems } from './items.mjs';
 import { autoRerollStatus, normalizeRequirements, startAutoReroll, stopAutoReroll } from './reroll-runner.mjs';
 import { planDiscountShop } from './discount-shop-automation.mjs';
 import { SHOP_CATALOG, createShopState, readShop, buyShopProduct, refreshDiscountShop } from './shops.mjs';
+import { readHomeland, executeHomeland } from './homeland.mjs';
 import { serveClientAsset } from './ui-assets.mjs';
 import { normalizeConsoleHost, consoleAccessHints, consoleUrl } from './console-address.mjs';
 import { createConsoleVersion, renderVersionedPage, consoleVersionError } from './console-version.mjs';
@@ -2788,7 +2789,7 @@ export function createConsole({ host = '127.0.0.1', port = 17321, onLog, recover
         if (!config) throw new Error('缺少游戏配置表，暂时不能预览');
         const settings = validateSettings(payload.settings ?? settingsView(session).settings, { catalog: settingsCatalog(config) });
         const category = payload.category ?? 'base';
-        if (!['base', 'world', 'heroes', 'daily', 'arena', 'league', 'discountShop', 'runtime', 'cityWar', 'forge', 'antique', 'equipmentGrowth', 'activity', 'museum', 'radar', 'pirateHunt', 'fleetDispatch','fleetSpeed','worldBoss','pirateSweep','alliance','guildShip','guildFort','silicon','heroRaid','resourceFields'].includes(category)) throw new Error('不支持的预览分类');
+        if (!['base', 'world', 'heroes', 'daily', 'arena', 'league', 'discountShop', 'runtime', 'cityWar', 'forge', 'antique', 'equipmentGrowth', 'activity', 'museum', 'homeland', 'radar', 'pirateHunt', 'fleetDispatch','fleetSpeed','worldBoss','pirateSweep','alliance','guildShip','guildFort','silicon','heroRaid','resourceFields'].includes(category)) throw new Error('不支持的预览分类');
 
         if (category === 'runtime') {
           json({ checkedAt: new Date().toISOString(), usage: usageFor(session).snapshot(), actions: [], counts: {}, viewOnly: true, scopeLabel: '运行安排（仅查看，不执行）',
@@ -2797,6 +2798,32 @@ export function createConsole({ host = '127.0.0.1', port = 17321, onLog, recover
               '在对应配置页点击「只读预览」可查看该功能的检查结果。'] }); return;
         }
         if (!session.client?.connected || session.paused) throw new Error('请先连接当前账号，再读取真实游戏状态');
+        if (category === 'homeland') {
+          const client = session.client, player = session.player, generation = session.generation;
+          const enabled = () => session.client === client && session.player === player && generation === session.generation && client.connected && !session.paused;
+          const view = await readJob(session, () => readHomeland(client, config, { player, enabled, settings, ledger: usageFor(session) }), { recoverFormation: false });
+          const notes = [], actions = [];
+          if (!view.available) notes.push(view.reason);
+          else {
+            notes.push(`家园 ${view.level} 级，科技 ${view.techLevel} 级；家园币 ${view.coins}，累计消费 ${view.spent}。`);
+            if (!settings.loop.world || !settings.homeland.enabled) notes.push('基地执行总开关或家园总开关未开启');
+            else for (const action of view.actions) {
+              if (!settings.homeland[action.kind] || action.kind === 'takeWarehouse' && !settings.homeland.submitOrders) continue;
+              if (action.kind === 'mergeOrders' && !settings.homeland.submitOrders || action.forMerge && !settings.homeland.mergeOrders) continue;
+              if (action.kind === 'warehouseBuffer' && (!settings.homeland.submitOrders || !settings.homeland.takeWarehouse)) continue;
+              if (action.kind === 'tech' && view.techLevel >= settings.homeland.targetTech || action.kind === 'upgrade' && view.level >= settings.homeland.targetLevel) continue;
+              if (action.reason) notes.push(action.detail + '：' + action.reason);
+              else actions.push({ label: action.detail, kind: 'homeland', costs: action.coinCost ? [{ name: '家园币', num: action.coinCost }] : [] });
+            }
+            if (settings.loop.world && settings.homeland.enabled && settings.homeland.submitOrders && settings.homeland.mergeOrders)
+              for (const order of view.orders) {
+                if (order.synthesis?.reason) notes.push(`订单 ${order.slot + 1}：${order.synthesis.reason}`);
+                else if (order.synthesis?.steps > 0) notes.push(`订单 ${order.slot + 1}：${order.synthesis.status === 'optimal' ? '备料最少' : '可行方案'} ${order.synthesis.steps} 步${order.synthesis.status === 'feasible' ? '，尚未证明步数最少' : ''}`);
+              }
+          }
+          json({ checkedAt: new Date().toISOString(), usage: usageFor(session).snapshot(), scopeLabel: '家园', counts: {}, actions, notes: [...new Set(notes)] });
+          return;
+        }
         if (category === 'museum') {
           const client = session.client, player = session.player;
           const usage = usageFor(session).snapshot();
@@ -3876,6 +3903,40 @@ export function createConsole({ host = '127.0.0.1', port = 17321, onLog, recover
         }
         const result=await progressionJob(session,account,route+':'+(parsed.searchParams.get('key')||'catalog')+':'+(parsed.searchParams.get('page')||1),null,client=>route.endsWith('/view')?readActivityRanking(client,loadConfigSafe(),session.player,parsed.searchParams.get('key'),Number(parsed.searchParams.get('page')||1)):{tabs:activityRankCatalog(client,loadConfigSafe(),session.player).map(({key,label})=>({key,label}))},{read:true});
         json(result);return;
+      }
+      if (route === 'GET /api/homeland' || route === 'POST /api/homeland/action') {
+        const id = parsed.searchParams.get('account');
+        if (!id) throw Error('请选择家园账号');
+        const payload = req.method === 'POST' ? jsonBody() : null;
+        if (payload) {
+          needConfirm(payload);
+          if (typeof payload.id !== 'string' || payload.id.length > 128 || typeof payload.token !== 'string' || !/^[a-f0-9]{32}$/.test(payload.token)) throw Error('家园操作参数无效，请刷新后重试');
+        } else if (req.method === 'POST') throw Error('家园操作参数无效');
+        const { session } = scoped_(parsed);
+        if (session.id !== id) throw Error('家园账号不匹配');
+        const client = session.client, player = session.player, generation = session.generation;
+        const enabled = () => Boolean(client?.connected && player && session.client === client && session.player === player
+          && !session.paused && !session.loginBlocked && session.generation === generation && !closing && !session.connectionDrain);
+        const current = () => { if (!enabled()) throw Error('请先连接当前账号，再使用家园'); };
+        current();
+        const options = () => ({ player, enabled, getSettings: () => session.preferences, ledger: usageFor(session), protocol: protocolFor(client) });
+        res.setHeader('cache-control', 'no-store');
+        if (!payload) {
+          json(await readJob(session, async () => {
+            current();
+            const view = await readHomeland(client, loadConfigSafe(), options());
+            current(); return view;
+          }, { recoverFormation: false }));
+        } else {
+          json(await enqueue(session, async () => {
+            current();
+            const config = loadConfigSafe();
+            const outcome = await executeHomeland(client, config, { ...options(), id: payload.id, token: payload.token, guard: actionGuard(session, client, config) });
+            emit(session, outcome.status === 'confirmed' ? 'info' : 'warn', outcome.message, { module: 'homeland', status: outcome.status });
+            return outcome;
+          }, '家园操作', { recoverFormation: false }));
+        }
+        return;
       }
       if (route === 'GET /api/shops' || route === 'POST /api/shops/purchase' || route === 'POST /api/shops/game-refresh') {
         const id = parsed.searchParams.get('account');

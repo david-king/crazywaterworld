@@ -604,6 +604,7 @@ try {
       beginOrderMaterialSpend(player, [{ id: '面包', have: 21, need: 1 }], '喂养培育队列 1', { operation });
       const blocked = await f.api('world/production-plan');
       assert(blocked.missingReads.some(reason => reason.includes('喂养培育队列 1')));
+      assert(blocked.missingReads.some(reason => reason.includes('暂停托管后恢复')));
       room.petBreed = { breedQ: [], maturePets: [{ petId: '海兽', star: 2 }] };
       const items = f.state.responses.AllItemRequest;
       f.state.responses.AllItemRequest = {};

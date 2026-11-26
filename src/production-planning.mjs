@@ -219,7 +219,12 @@ export function buildProductionModel(snapshot, config, settings, { pendingMateri
   const candidateMaterials = new Set([...needed, ...recipes.filter(recipe => recipe.enabled)
     .flatMap(recipe => recipe.inputs.map(item => item.itemId))]);
   for (const pending of pendingMaterials) {
-    if ([...(pending.scope ?? [])].some(id => candidateMaterials.has(id))) missingReads.push('订单或候选配方材料存在待确认扣款 · ' + pending.label);
+    if ([...(pending.scope ?? [])].some(id => candidateMaterials.has(id))) {
+      const resyncFeed = pending.operation?.request === 'PetFeedRequest' && pending.operation.petFeedJob?.buildingId
+        && !pending.manualSyncBlocked && !pending.operation.onConfirmed;
+      missingReads.push('订单或候选配方材料存在待确认扣款 · ' + pending.label
+        + (resyncFeed ? '；可先刷新计划复核，仍未解除时暂停托管后恢复，重新同步培育队列和库存' : ''));
+    }
   }
   const orders = activeOrderRows.map(order => ({ id: order.id, source: order.source, priority: order.priority,
     requirements: order.requirements.map(item => ({ itemId: item.id, quantity: item.num })),

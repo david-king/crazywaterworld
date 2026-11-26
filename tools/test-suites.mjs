@@ -21,6 +21,7 @@ const config = [
   'tools/selftest-resource-updater.mjs',
   'tools/selftest-protocol-dropin.mjs',
   'tools/selftest-protocol-updates.mjs',
+  'tools/selftest-protocol-v77.mjs',
   'tools/selftest-protocol-refresh-http.mjs',
   'tools/selftest-settings-runtime.mjs',
   'tools/selftest-unified-action-migration.mjs',
@@ -147,6 +148,11 @@ const core = [
 ];
 
 const progression = [
+  'tools/selftest-homeland.mjs',
+  'tools/selftest-homeland-merge.mjs',
+  'tools/selftest-homeland-buffer.mjs',
+  'tools/selftest-homeland-search.mjs',
+  'tools/selftest-homeland-http.mjs',
   'tools/selftest-equipment-automation.mjs',
   'tools/selftest-items.mjs',
   'tools/selftest-items-http.mjs',
@@ -329,6 +335,7 @@ const regression = [
 ];
 
 export const suites = {
+  homeland: ['tools/selftest-homeland.mjs', 'tools/selftest-homeland-merge.mjs', 'tools/selftest-homeland-buffer.mjs', 'tools/selftest-homeland-search.mjs', 'tools/selftest-homeland-http.mjs'],
   accounts,
   macos,
   'world-boss': worldBoss,
@@ -352,6 +359,7 @@ export const suites = {
 };
 
 export const browserTests = {
+  homeland: 'tools/selftest-homeland-browser.mjs',
   'world-city': 'tools/selftest-world-city-actions-browser.mjs',
   'resource-fields': 'tools/selftest-resource-fields-browser.mjs',
   'shops': 'tools/selftest-shops-browser.mjs',

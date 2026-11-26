@@ -5,6 +5,7 @@ import { createCodec } from './codec.mjs';
 import { inspectGameFrame } from './frame-header.mjs';
 import { emitDiagnostic } from './trace-log.mjs';
 import { rememberTournament } from './tournament-state.mjs';
+import { chatChannelType } from './chat-protocol.mjs';
 
 export const MAX_SEQ = 2147483647;
 const HALF_SEQ = (MAX_SEQ - 1) / 2;
@@ -274,7 +275,7 @@ export class GameClient extends EventEmitter {
     return new Promise((resolve, reject) => {
       beforeSend?.();
       const entry = { name, responseName, resolve, reject, timer: null, order: this.sendOrder };
-      if (name === 'SendChatRequest' && body?.channel === 2) entry.requiresGuild = true;
+      if (name === 'SendChatRequest' && chatChannelType(body?.channel) === 2) entry.requiresGuild = true;
       entry.timer = setTimeout(() => {
         this.pending = this.pending.filter((item) => item !== entry);
         reject(new Error(`timeout waiting for ${[responseName].flat().join(' or ')} (sent ${name})`));

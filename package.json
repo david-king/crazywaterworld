@@ -5,6 +5,8 @@
   "type": "module",
   "main": "src/app.mjs",
   "scripts": {
+    "test:homeland": "node tools/run-tests.mjs homeland",
+    "test:homeland:browser": "npm run test:browser -- homeland",
     "build:ui": "npm run build:server-ui && npm run build:client",
     "bench:console": "node tools/bench-console-load.mjs",
     "start": "node src/app.mjs",

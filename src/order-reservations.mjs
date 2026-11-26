@@ -211,7 +211,8 @@ export function pendingMuseumMaterialSpends(player) {
 export function captureManualProductionMaterialState(player) {
   const account = accountKey(player), all = [...(materialSpends.get(account) ?? [])];
   const handles = all.filter(handle => !handle.manualSyncBlocked && !handle.operation?.onConfirmed
-    && (handle.farm || handle.operation?.factoryBuildingId));
+    && (handle.farm || handle.operation?.factoryBuildingId
+      || handle.operation?.request === 'PetFeedRequest' && handle.operation.petFeedJob?.buildingId));
   return { account, all, handles };
 }
 

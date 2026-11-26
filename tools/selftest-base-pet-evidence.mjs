@@ -12,6 +12,7 @@ const { defaultSettings } = await import('../src/automation-settings.mjs');
 const { runBaseAutomation } = await import('../src/base-automation.mjs');
 const { pendingOrderMaterialSpends, refreshOrderMaterialSpends } = await import('../src/order-reservations.mjs');
 const { pendingGoldSpend, refreshGoldSpend } = await import('../src/gold-reservations.mjs');
+const { createActionGuard } = await import('../src/automation-policy.mjs');
 const protocol = loadProtocol();
 const config = { tables: { BuildingUnlockCfg: { data: [{ buildingId: '1宠物培育室', buildingType: '宠物培育室' }] } } };
 let serial = 17900000, passed = 0;
@@ -62,10 +63,37 @@ function fixture(kind) {
       assert(pendingGoldSpend(player));
     }
   };
-  return { state, client, run, assertPending };
+  return { state, client, player, settings, step, run, assertPending };
 }
 
 try {
+  await test('缺少投喂前基线时不发送请求，也不遗留材料或金币占用', async () => {
+    const f = fixture('petFeed');
+    const guard = createActionGuard(f.client, () => f.settings, null, { player: f.player });
+    await assert.rejects(guard.before(f.step, { waterSnapshot: { building: [] } }), /无法完整确认投喂前的培育队列/);
+    assert.equal(f.state.writes.length, 0);
+    await f.assertPending(false);
+  });
+
+  await test('新连接记录投喂核对差异，重复状态不刷日志，状态变化后重新记录', async () => {
+    const f = fixture('petFeed');
+    assert.equal((await f.run())[0].ok, false);
+    const diagnostics = [];
+    const reconnect = { ...f.client, emit(event, data) { if (event === 'diagnostic') diagnostics.push(data); } };
+    await refreshOrderMaterialSpends(reconnect, f.player);
+    await refreshOrderMaterialSpends(reconnect, f.player);
+    assert.equal(diagnostics.length, 1);
+    assert.equal(diagnostics[0].event, 'pet-feed-verification');
+    assert.equal(diagnostics[0].confirmed, false);
+    assert.match(diagnostics[0].reason, /尚未观察到/);
+    f.state.room.petBreed.breedQ[0].finishTime -= 50;
+    await refreshOrderMaterialSpends(reconnect, f.player);
+    assert.equal(diagnostics.length, 2);
+    assert.equal(diagnostics[1].confirmed, true);
+    await refreshGoldSpend(reconnect, f.player);
+    await f.assertPending(false);
+  });
+
   await test('投喂后同星海兽提前进入待领取，回读库存后释放预留', async () => {
     const f = fixture('petFeed'), queue = f.state.room.petBreed;
     queue.breedQ[0].star = 2;

@@ -32,7 +32,7 @@ assert.deepEqual(fields('HeroRaidGotRewardResponse').filter(field => field.kind 
   { number: 2, name: 'reward', type: 'DisplayAssetPackage' },
 ]);
 assert.deepEqual(layout('FinishGuildOrderResponse'), ['1:reward:message:DisplayAssetPackage']);
-assert.deepEqual(layout('DispHeroRaid'), [
+assert.deepEqual(layout('DispHeroRaid').filter(field => !field.startsWith('8:')), [
   '1:raidId:scalar:int32',
   '2:passedStage:scalar:int32',
   '3:finishTime:scalar:int32',
@@ -42,12 +42,16 @@ assert.deepEqual(layout('DispHeroRaid'), [
   '7:startTime:scalar:int32',
 ]);
 
-assert.deepEqual(layout('LoginResponse'), [
+assert.deepEqual(layout('LoginResponse').filter(field => !field.startsWith('5:')), [
   '1:result:scalar:int32',
   '2:playerInfo:message:PlayerInfo',
   '3:errorMessage:scalar:string',
   '4:initSeqNo:scalar:int32',
 ]);
+const raidCustom = fields('DispHeroRaid').find(field => field.number === 8);
+if (raidCustom) assert.equal(layout('DispHeroRaid').at(-1), '8:custom:repeated:HeroRaidCustom');
+const churnNew = fields('LoginResponse').find(field => field.number === 5);
+if (churnNew) assert.equal(layout('LoginResponse').at(-1), '5:isChurnNew:scalar:bool');
 
 assert.deepEqual(layout('LoginRequest').filter(field => !field.startsWith('10:')), [
   '1:testAccount:scalar:string',

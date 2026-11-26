@@ -108,7 +108,9 @@ export function createFactoryDispatch(survey, timing, collectable, crops) {
   function fits(building, recipe, waiting, revisit) {
     const queue = queues.get(building), duration = seconds(building, recipe);
     const lane = nextFactoryLane(queue.finishes, queue.lanes.expiresAt, duration);
-    if ((!waiting.some(job => Number.isFinite(job.at)) && lane.start > now + revisit)
+    // Reserve time for actual waiting demand. Ordinary stock replenishment
+    // may fill cancellable queue slots even behind a long-running product.
+    if ((waiting.length && !waiting.some(job => Number.isFinite(job.at)) && lane.start > now + revisit)
       || (queue.missing.length && queue.count >= queue.lanes.count)) return false;
     const before = [...queue.finishes], after = [...before];
     commitFactoryLane(after, lane);

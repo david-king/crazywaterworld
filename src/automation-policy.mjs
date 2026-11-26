@@ -120,6 +120,7 @@ export function productionDemandConsumes(order, settings) {
 }
 
 export function resourceReserve(settings, id, step = null) {
+  if (id === '家园币') return settings?.homeland?.keepCoins ?? 0;
   if (!settings) return 0;
   if (id === '建筑蓝图') return settings.building.keepBlueprints;
   if (id === '加速器') return settings.resources.keepAccelerators;
@@ -260,6 +261,7 @@ export function createActionGuard(client, getSettings, ledger, { enabled = () =>
       const planting = step.request === 'FarmPlantRequest';
       const exploring = step.request === 'MuseumStartExploreRequest';
       const producing = step.request === 'StartFactoryProduceRequest';
+      const feeding = step.request === 'PetFeedRequest';
       const manualOrder = step.manualCheck === true && step.request === 'FinishWorkerOrderRequest';
       const serverChecksOrderStock = manualOrder && step.acceptStockWarning === true;
       if (planting && !player) throw new AutomationSkip('无法确认播种账号');
@@ -368,11 +370,13 @@ export function createActionGuard(client, getSettings, ledger, { enabled = () =>
           operation = !planting && !exploring ? await captureSpendOperation(client, step, { waterSnapshot }).catch(error => {
             // A production request without its baseline cannot be reconciled
             // later; do not send it and create a permanently unprovable lock.
-            if (producing) throw error;
+            if (producing || feeding) throw error;
             return { confirmed: false, request: step.request };
           }) : null;
           if (producing && (typeof operation?.verify !== 'function'
             || operation.factoryBuildingId !== step.body?.buildingId)) throw new AutomationSkip('无法完整确认排产前的队列和待收成品');
+          if (feeding && (typeof operation?.verify !== 'function'
+            || operation.petFeedJob?.idx !== step.body?.jobIdx)) throw new AutomationSkip('无法完整确认投喂前的培育队列，暂不消耗材料');
           if (!enabled() || goldAccountKey(player) !== account) throw new AutomationSkip('操作已暂停或账号已切换');
           if (operation && ticket) operation.onConfirmed = () => ledger.confirm(ticket);
           if (itemIds.length) materials = beginOrderMaterialSpend(player,

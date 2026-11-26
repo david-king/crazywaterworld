@@ -577,6 +577,21 @@ test('用于腾仓的候选配方同样遵守原料待确认扣款', () => {
   assert.match(model.input.missingReads.join(), /腾仓材料未结算/);
 });
 
+test('培育投喂只给无预算约束且有基线的记录提供恢复托管提示', () => {
+  const { snapshot, settings } = fixture();
+  for (const mode of ['plain', 'budget', 'callback', 'missing-baseline', 'breed']) {
+    const pending = { scope: new Set(['小麦']), label: '喂养培育队列 2',
+      operation: { request: 'PetFeedRequest', petFeedJob: { buildingId: '1宠物培育室' } } };
+    if (mode === 'budget') pending.manualSyncBlocked = true;
+    if (mode === 'callback') pending.operation.onConfirmed = () => {};
+    if (mode === 'missing-baseline') delete pending.operation.petFeedJob;
+    if (mode === 'breed') pending.operation.request = 'PetBreedRequest';
+    const model = buildProductionModel(snapshot, config, settings, { pendingMaterials: [pending] });
+    assert.equal(model.input.complete, false, '提示恢复途径不能放行未知库存');
+    assert.equal(model.input.missingReads.join().includes('暂停托管后恢复'), mode === 'plain');
+  }
+});
+
 test('零份待收成品不制造虚假未知任务，输入保持原样', () => {
   const { snapshot, plan } = fixture();
   snapshot.factories[0].finished.push({ id: '面包', num: 0 });

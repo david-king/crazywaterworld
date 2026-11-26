@@ -1,7 +1,7 @@
 import { normalize } from './worlds.mjs';
 import { goldAccountKey, pendingGoldSpend } from './gold-reservations.mjs';
 import { farmInventory } from './farm-planting.mjs';
-import { factoryProductionSnapshot } from './spend-evidence.mjs';
+import { factoryProductionSnapshot, petSpendSnapshot } from './spend-evidence.mjs';
 import { captureManualProductionMaterialState, assertManualProductionMaterialState,
   retireManualProductionMaterialState } from './order-reservations.mjs';
 import { captureManualFactoryProductionState, assertManualFactoryProductionState,
@@ -28,6 +28,7 @@ export async function reconcileManualProduction(client, protocol, { player, enab
   const factories = [...new Set([...factoryState.batches.map(row => row.buildingId),
     ...materialState.handles.map(handle => handle.operation?.factoryBuildingId).filter(Boolean)])];
   const farms = [...new Set(materialState.handles.flatMap(handle => handle.farm?.args.map(arg => arg.buildingId) ?? []))];
+  const petRooms = [...new Set(materialState.handles.map(handle => handle.operation?.petFeedJob?.buildingId).filter(Boolean))];
   try {
     const water = normalize(await client.request('OnWaterRequest', {}, 'OnWaterResponse'));
     check();
@@ -45,6 +46,9 @@ export async function reconcileManualProduction(client, protocol, { player, enab
         || farm.productId && (!integer(farm.plantTime) || farm.plantTime <= 0 || !integer(farm.ripeTime) || farm.ripeTime < farm.plantTime)
         || !farm.productId && ((farm.plantTime ?? 0) !== 0 || (farm.ripeTime ?? 0) !== 0))) throw new Error('无法完整读取农田 ' + id + ' 的当前作物');
     }
+    const rooms = petRooms.map(id => water.building.find(row => row.buildingId === id));
+    if (rooms.some(room => !(room?.level > 0) || !room.petBreed)
+      || rooms.length && !petSpendSnapshot(rooms)) throw new Error('无法完整读取海兽培育队列和待领取海兽，保留投喂材料记录');
     const stock = farmInventory(normalize(await client.request('AllItemRequest', {}, 'AllItemResponse')));
     check();
     assertManualProductionMaterialState(player, materialState);
@@ -53,16 +57,17 @@ export async function reconcileManualProduction(client, protocol, { player, enab
     // captured barriers retire, or any failed read leaves every record intact.
     retireManualFactoryProductionState(player, factoryState);
     retireManualProductionMaterialState(player, materialState);
-    const result = { factories, farms,
+    const result = { factories, farms, petRooms,
       released: { factoryBatches: factoryState.batches.length, materialReservations: materialState.handles.length },
       preserved: { materialReservations: materialState.all.length - materialState.handles.length,
         goldReservations: pendingGoldSpend(player) ? 1 : 0 },
-      message: '已按当前服务器状态同步手动生产；旧生产结果保留为未知，后续按新状态重新规划。其他玩法及金币、钻石、次数预算记录保持不变。' };
+      message: '已按当前服务器状态同步手动生产' + (petRooms.length ? '和海兽培育投喂材料' : '')
+        + '；旧操作结果保留为未知，后续按新状态重新规划。其他玩法及金币、钻石、次数预算记录保持不变。' };
     emitDiagnostic(client, 'manual-production-resync', { account, status: 'unknown', disposition: 'manual-handoff-sync',
       ...result, archivedMaterials: materialState.handles.map(handle => ({ label: handle.label, costs: handle.costs,
-        farm: handle.farm, factoryBuildingId: handle.operation?.factoryBuildingId })),
+        farm: handle.farm, factoryBuildingId: handle.operation?.factoryBuildingId, petFeedJob: handle.operation?.petFeedJob })),
       archivedBatches: factoryState.batches.map(({ buildingId, batch }) => ({ buildingId, attempted: batch.attempted })),
-      currentBuildings: water.building.filter(row => factories.includes(row.buildingId) || farms.includes(row.buildingId)),
+      currentBuildings: water.building.filter(row => factories.includes(row.buildingId) || farms.includes(row.buildingId) || petRooms.includes(row.buildingId)),
       currentStock: Object.fromEntries(stock) });
     return result;
   } catch (error) {

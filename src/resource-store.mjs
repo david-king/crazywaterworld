@@ -6,6 +6,7 @@ import { compareResourceVersions, discoverResourceVersion, WECHAT_RESOURCE_SERVE
 export const RESOURCE_SERVER = WECHAT_RESOURCE_SERVER;
 export const DEFAULT_RESOURCE_APP_VERSION = '1.14.5';
 export const DEFAULT_RESOURCE_MAX_AGE_MINUTES = 1440;
+export const validResourceScenarioId = id => Number.isSafeInteger(id) && id > 0 && id <= 2147483647;
 export const resourceDirectory = (env = process.env) => path.resolve(env.CW_RESOURCE_DIR || path.join(import.meta.dirname, '../work/cdn/resources'));
 
 // active.json 只指向已完整验证的不可变目录。持有旧快照的任务可以继续读旧地图。
@@ -14,7 +15,8 @@ export function activeResources({ root = resourceDirectory(), honorOverride = tr
   try {
     const data = JSON.parse(fs.readFileSync(path.join(root, 'active.json'), 'utf8'));
     if (!/^[a-f0-9]{16}-[a-f0-9-]{36}$/.test(data.generation) || !Array.isArray(data.scenarios) || !data.scenarios.length
-      || data.scenarios.some(id => !Number.isSafeInteger(id) || id < 1 || id > 100)) return null;
+      || data.scenarios.length > 16 || new Set(data.scenarios).size !== data.scenarios.length
+      || data.scenarios.some(id => !validResourceScenarioId(id))) return null;
     const directory = path.join(root, data.generation);
     const configFile = path.join(directory, 'config.json');
     const mapFiles = Object.fromEntries(data.scenarios.map(id => [id, path.join(directory, 'world_map' + id + '.json')]));

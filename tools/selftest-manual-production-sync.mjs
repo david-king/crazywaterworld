@@ -13,6 +13,7 @@ const { beginOrderMaterialSpend, pendingOrderMaterialSpends, pendingFarmMaterial
   refreshOrderMaterialSpends, captureManualProductionMaterialState } = await import('../src/order-reservations.mjs');
 const { reserveGold, pendingGoldSpend } = await import('../src/gold-reservations.mjs');
 const { assertFarmPlantingReady } = await import('../src/farm-planting.mjs');
+const { captureSpendOperation } = await import('../src/spend-evidence.mjs');
 const protocol = loadProtocol(), now = Math.floor(Date.now() / 1000);
 let serial = 41000000, passed = 0;
 const test = async (name, run) => { await run(); passed++; console.log('通过：' + name); };
@@ -73,7 +74,90 @@ async function fixture() {
   return { player, state, factory, farm, client, reconnect, factoryHandle, farmHandle, batch, sync, intact };
 }
 
+async function pendingFeed(f) {
+  const room = { buildingId: '1宠物培育室', level: 1, petBreed: { breedQ: [
+    { idx: 2, petId: '紫宠物3', star: 3, startTime: now - 600, finishTime: now + 3600 },
+  ], maturePets: [] } };
+  f.state.building.push(room);
+  const operation = await captureSpendOperation(f.client, { request: 'PetFeedRequest', body: { jobIdx: 2 } },
+    { waterSnapshot: { building: f.state.building } });
+  const handle = beginOrderMaterialSpend(f.player, [{ id: '其他材料', have: 20, need: 1 }], '喂养培育队列 2', { operation });
+  handle.onReconciled = () => assert.fail('交接不能将未知投喂标成成功');
+  return { room, handle, operation };
+}
+
 try {
+  for (const mode of ['unchanged', 'matured', 'collected', 'reused']) {
+    await test('培育投喂未知可经新登录交接同步，普通复核仍保留记录：' + mode, async () => {
+      const f = await fixture(), { room, handle, operation } = await pendingFeed(f);
+      if (mode !== 'unchanged') room.petBreed.breedQ = [];
+      if (mode === 'matured') {
+        room.petBreed.maturePets = [{ petId: '紫宠物3', star: 3 }];
+        f.reconnect.serverClockOffsetMs = 7200000; f.reconnect.latencyMs = 20;
+      }
+      if (mode === 'reused') room.petBreed.breedQ = [{ idx: 2, petId: '新海兽', startTime: now, finishTime: now + 100 }];
+      await refreshOrderMaterialSpends(f.reconnect, f.player, { request: 'PetFeedRequest' });
+      assert(pendingOrderMaterialSpends(f.player).includes(handle));
+      assert.equal(operation.confirmed, false);
+      const writes = f.state.writes.length, result = await f.sync();
+      assert.equal(f.state.writes.length, writes, '交接同步不重发投喂');
+      assert.deepEqual(result.petRooms, ['1宠物培育室']);
+      assert.equal(result.released.materialReservations, 3);
+      assert.equal(pendingOrderMaterialSpends(f.player).length, 0);
+      assert.equal(operation.confirmed, false, '重新建立库存基线，不宣称旧投喂成功');
+      const archive = f.state.diagnostics.find(row => row.event === 'manual-production-resync');
+      assert.equal(archive.status, 'unknown');
+      assert.equal(archive.archivedMaterials.find(row => row.petFeedJob)?.petFeedJob.idx, 2);
+      assert(archive.currentBuildings.some(row => row.buildingId === room.buildingId));
+      assert.equal(archive.currentStock['其他材料'], 20);
+    });
+  }
+
+  for (const failure of ['missing-room', 'missing-queue', 'missing-mature', 'duplicate-job', 'invalid-job', 'invalid-mature',
+    'inventory', 'identity', 'epoch', 'pause', 'new-handle']) {
+    await test('培育投喂同步失败保留所有材料占用：' + failure, async () => {
+      const f = await fixture(), { handle } = await pendingFeed(f), player = { ...f.player };
+      f.state.transform = (name, value) => {
+        if (name === 'OnWaterRequest') {
+          const room = value.building.find(row => row.buildingId === '1宠物培育室');
+          if (failure === 'missing-room') value.building = value.building.filter(row => row !== room);
+          if (failure === 'missing-queue') delete room.petBreed.breedQ;
+          if (failure === 'missing-mature') delete room.petBreed.maturePets;
+          if (failure === 'duplicate-job') room.petBreed.breedQ.push(room.petBreed.breedQ[0]);
+          if (failure === 'invalid-job') room.petBreed.breedQ[0].finishTime = -1;
+          if (failure === 'invalid-mature') room.petBreed.maturePets.push({ petId: '' });
+        } else if (failure === 'inventory') return {};
+        return value;
+      };
+      f.state.afterRead = name => {
+        if (name !== 'AllItemRequest') return;
+        if (failure === 'identity') f.player.playerId++;
+        if (failure === 'epoch') f.reconnect.connectionEpoch++;
+        if (failure === 'pause') f.state.active = false;
+        if (failure === 'new-handle') beginOrderMaterialSpend(f.player, [{ id: '新材料', have: 1, need: 1 }], '并发操作', { operation: {} });
+      };
+      await assert.rejects(f.sync());
+      f.intact(player);
+      assert(pendingOrderMaterialSpends(player).includes(handle));
+      assert.equal(f.state.writes.length, 1);
+      assert(!f.state.diagnostics.some(row => row.event === 'manual-production-resync'));
+    });
+  }
+
+  for (const mode of ['budget', 'callback', 'missing-baseline', 'breed']) {
+    await test('恢复托管不释放受预算约束或不属于普通培育投喂的记录：' + mode, async () => {
+      const f = await fixture(), { handle, operation } = await pendingFeed(f);
+      if (mode === 'budget') handle.manualSyncBlocked = true;
+      if (mode === 'callback') operation.onConfirmed = () => assert.fail('不能确认旧预算');
+      if (mode === 'missing-baseline') delete operation.petFeedJob;
+      if (mode === 'breed') operation.request = 'PetBreedRequest';
+      const result = await f.sync();
+      assert(pendingOrderMaterialSpends(f.player).includes(handle));
+      assert.deepEqual(result.petRooms, []);
+      assert.equal(result.preserved.materialReservations, 1);
+    });
+  }
+
   await test('人工收走成品并改种后新会话同步，旧结果未知而新计划可按当前材料生产', async () => {
     const f = await fixture();
     assert.equal(f.factoryHandle.operation.onConfirmed, undefined, '日志观察者保持原预算回调语义');

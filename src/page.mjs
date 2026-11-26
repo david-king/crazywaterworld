@@ -56,6 +56,7 @@ ${chrome()}
     <button type="button" data-resource-tab="giftcodes">礼包兑换</button>
     <button type="button" data-resource-tab="dailies">日常任务</button>
     <button type="button" data-resource-tab="shops">商店</button>
+    <button type="button" data-resource-tab="homeland">家园</button>
     <button type="button" data-resource-tab="season-preview">赛季预览</button>
     <button type="button" data-resource-tab="chat">聊天</button>
   </nav>
@@ -94,6 +95,7 @@ ${chrome()}
   <section id="tab-guild" class="hidden">${guildPage()}</section>
   <section id="tab-dailies" class="hidden" aria-label="日常任务"><div id="daily-tasks-root"></div></section>
   <section id="tab-shops" class="hidden" aria-label="商店"><div id="shops-root"></div></section>
+  <section id="tab-homeland" class="hidden" aria-label="家园"><div id="homeland-root"></div></section>
   <section id="tab-chat" class="hidden" aria-label="聊天"><div id="chat-root"></div></section>
 
   <section id="tab-giftcodes" class="hidden">
@@ -849,6 +851,7 @@ function refreshAccountStatuses() {
       accountStatusRevision++;
       stateActions.mergeStatuses(data.accounts);
       renderAccountSelect();
+      refreshChangedManualWorld();
       refreshChangedProductionPlan();
       if (!$('tab-account').classList.contains('hidden')) refreshAccountCards();
     } catch {
@@ -2274,7 +2277,15 @@ function renderWorld(data) {
 }
 
 let worldVersion = 0, worldRead = null, displayedWorldAccount;
+let displayedWorldProductionRevision = null, nextWorldRefresh = 0;
 const recentWorldUpdates = new Map();
+function refreshChangedManualWorld() {
+  if (document.hidden || $('modal').open || worldRead || !current || snapshot.paused || disconnected.has(current)
+    || $('tab-manual').classList.contains('hidden') && $('tab-inventory').classList.contains('hidden')
+    || Date.now() < nextWorldRefresh) return;
+  if (displayedWorldAccount !== current || !lastWorldData
+    || displayedWorldProductionRevision !== (snapshot.productionRevision ?? 0)) return refreshManualWorld(true);
+}
 function refreshWorldUpdate(id) {
   if (displayedWorldAccount === current && recentWorldUpdates.has(id)) return recentWorldUpdates.get(id);
   const job = refreshManualWorld(true);
@@ -2306,6 +2317,8 @@ function refreshManualWorld(force = false) {
     $('inventory-status').textContent = available ? '正在读取库存' : !account ? '请先选择账号'
       : snapshot.paused ? '账号已暂停' : '账号已断开连接';
     displayedWorldAccount = account;
+    displayedWorldProductionRevision = null;
+    nextWorldRefresh = 0;
     lastWorldData = null;
     recentWorldUpdates.clear();
     resetInventory();
@@ -2320,12 +2333,14 @@ function refreshManualWorld(force = false) {
     return worldRead.job;
   }
   const version = ++worldVersion;
+  nextWorldRefresh = Date.now() + 3000;
   const read = worldRead = { account, again: false };
   const isCurrent = () => version === worldVersion && current === account;
-  $('world-view').textContent = '正在读取海面数据…';
+  $('world-view').textContent = '';
   read.job = (async () => {
     while (isCurrent()) {
       read.again = false;
+      const requestedRevision = snapshot.productionRevision ?? 0;
       try {
         const data = await call('/api/world?view=buildings');
         if (!isCurrent()) break;
@@ -2334,6 +2349,7 @@ function refreshManualWorld(force = false) {
           if (state.account === account && state.settled) pendingProductionSpeeds.delete(key);
         }
         renderWorld(data);
+        displayedWorldProductionRevision = requestedRevision;
         return true;
       } catch (error) {
         if (!isCurrent()) break;
@@ -3185,7 +3201,7 @@ async function boot() {
   try {
     // 恢复账号页时先显示保存的角色资料，由该页按连接状态决定是否读取资源。
     await loadAccounts(true, initialTab !== 'account'
-      && !(initialTab === 'resources' && ['shops', 'season-preview', 'chat', 'heroes'].includes(savedResource)));
+      && !(initialTab === 'resources' && ['shops', 'homeland', 'season-preview', 'chat', 'heroes'].includes(savedResource)));
   } catch (error) {
     reportError(error);
     return;

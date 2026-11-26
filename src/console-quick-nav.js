@@ -10,6 +10,7 @@ function quickNavigationEntries(includeContent) {
   const nav = id => document.querySelector('#tabs [data-tab="' + id + '"]');
   const aliases = { overview: '总览 资源田 城池 地图', settings: '挂机配置 历史配置 导入 导出',
     'season-preview': '世界 赛季目标 最强个人 科技霸主 功勋榜 科技榜 邮件物品 自动偷榜',
+    homeland: '家园 工坊 合成订单 科技 打扫 楼层 家园币 免费体力',
     manual: '工厂 生产 建筑 农田', lineups: '舰队 预设 编队', account: '登录 账号 微信 支付宝 手机号',
     activities: '活动 奖励', stages: '试炼 海盗 关卡', inventory: '仓库 背包 库存',
     heroes: '英雄与装备 洗炼 装备制造' };

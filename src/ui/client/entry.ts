@@ -74,6 +74,9 @@ lazyPage("items-root", "heroes", "装备与徽章", async (host) =>
 lazyPage("shops-root", "shops", "商店", async (host) =>
   (await import("./pages/shops")).mountShops(host),
 );
+lazyPage("homeland-root", "homeland", "家园", async (host) =>
+  (await import("./pages/homeland")).mountHomeland(host),
+);
 lazyPage("season-preview-root", "season-preview", "赛季预览", async (host) =>
   (await import("./pages/season-preview")).mountSeasonPreview(host),
 );

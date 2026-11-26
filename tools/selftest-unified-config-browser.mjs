@@ -968,7 +968,7 @@ try {
   assert.equal(stored.heroes.enabled, false); assert.equal(stored.loop.heroes, false);
   assert.equal(stored.heroes.level, false); assert.equal(stored.heroes.star, true);
   await group('museum');
-  assert.match(await page.locator('#config-field-museum-runEnabled-note').textContent(), /尚未选择执行动作/);
+  assert.equal(await page.locator('#config-field-museum-runEnabled-note').isVisible(), false);
   const museum = page.locator('#config-group-museum');
   const autoExplore = museum.locator('#config-field-museum-enabled');
   for (const key of ['upgrade', 'revenue', 'achievements', 'display']) {
@@ -1088,7 +1088,7 @@ try {
     assert(await toggle.isVisible() && await toggle.isEnabled());
   }
   await antiqueMaster.click(); await saved();
-  assert.match(await antiques.locator('#config-field-antique-enabled-note').textContent(), /尚未选择执行动作/);
+  assert.equal(await antiques.locator('#config-field-antique-enabled-note').isVisible(), false);
   const masterLevel = antiques.locator('#config-field-antique-master');
   await masterLevel.click(); await saved();
   await antiqueMaster.click(); await saved();

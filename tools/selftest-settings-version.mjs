@@ -832,6 +832,9 @@ try {
       expected.guildShip.checkEverySeconds = 60;
       expected.afk = { claimIntervalHours: 0 };
       expected.seasonMerit = { enabled: false, targetRank: 0, leadMinutes: 0 };
+      expected.homeland = { enabled: false, freeStamina: false, freeBox: false, submitOrders: false, mergeOrders: false, warehouseBuffer: false,
+        takeWarehouse: false, unlockFloors: false, clean: false, tech: false, upgrade: false,
+        keepCoins: 0, dailyCoinLimit: 500, targetLevel: 30, targetTech: 180, checkEverySeconds: 300 };
       expected.schedule.afkUpgrade = false;
       Object.assign(expected.weeklyActivity, { antiqueRecruitTickets: false, antiqueTicketLimit: 0 });
       expected.museum.targetFragments = [];
@@ -947,7 +950,7 @@ try {
     assert.equal(from70().schedule.seasonCardDaily, true);
   });
   test('版本1升级后重复迁移保持一致，保留有效的用户值', () => {
-    assert.equal(SETTINGS_SCHEMA_VERSION, 71);
+    assert.equal(SETTINGS_SCHEMA_VERSION, 74);
     const settings = legacySettings();
     settings.factory.checkEverySeconds = 270;
     settings.resources.diamondDailyLimit = 1234;

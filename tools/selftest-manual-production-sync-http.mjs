@@ -17,7 +17,7 @@ const { saveStore, loadStore } = await import('../src/accounts.mjs');
 const { createConsole } = await import('../src/server.mjs');
 const { automationTasks } = await import('../src/automation.mjs');
 const { beginOrderMaterialSpend, pendingOrderMaterialSpends, pendingFarmMaterialSpends } = await import('../src/order-reservations.mjs');
-const { factoryProductionOperation } = await import('../src/spend-evidence.mjs');
+const { factoryProductionOperation, captureSpendOperation } = await import('../src/spend-evidence.mjs');
 const { createUsageLedger } = await import('../src/automation-settings.mjs');
 
 const live = new Set(), states = new Map(), apps = new Set();
@@ -162,6 +162,47 @@ function assertForgeSynchronized(forge) {
 const test = async (name, run) => { await run(); passed++; console.log('通过：' + name); };
 saveStore({ activeId: null, accounts: [] });
 try {
+  for (const failInventory of [false, true]) {
+    await test('暂停恢复通过新登录同步未知培育投喂，库存失败时保留占用：' + failInventory, async () => {
+      const f = await fixture();
+      try {
+        await f.api('connect', {});
+        const { client, player } = f.session(), now = Math.floor(Date.now() / 1000);
+        const room = { buildingId: '1宠物培育室', level: 1, petBreed: { maturePets: [], breedQ: [
+          { idx: 2, petId: '紫宠物3', star: 3, startTime: now - 600, finishTime: now + 3600 },
+        ] } };
+        f.state.water.building.push(room);
+        const operation = await captureSpendOperation(client, { request: 'PetFeedRequest', body: { jobIdx: 2 } },
+          { waterSnapshot: f.state.water });
+        const handle = beginOrderMaterialSpend(player, [{ id: '生鱼片', have: 10, need: 1 }], '喂养培育队列 2', { operation });
+        handle.onReconciled = () => assert.fail('同步不得报告投喂成功');
+        const ledger = createUsageLedger(f.id);
+        ledger.reserve({ diamonds: 3 }, {}, {}, { uniqueKey: 'unconfirmed-pet-handoff' });
+        const budget = ledger.keyRecords();
+        await f.api('accounts/pause', { paused: true });
+        await f.api('accounts/pause', { paused: false });
+        f.state.inventoryError = failInventory;
+        const result = await f.response('connect', {});
+        assert.equal(result.status, failInventory ? 400 : 200, JSON.stringify(result.data));
+        assert.notEqual(f.session().client, client);
+        assert.equal(client.connected, false);
+        assert.equal(f.state.logins, 2);
+        assert.equal(f.saved().productionSyncRequired, failInventory);
+        assert.equal(f.pending().includes(handle), failInventory);
+        assert.equal(operation.confirmed, false);
+        assert.deepEqual(ledger.keyRecords(), budget);
+        assert.deepEqual(f.state.sends, ['LoginFinishRequest', 'LoginFinishRequest']);
+        if (failInventory) {
+          f.state.inventoryError = false;
+          await f.api('overview');
+          assert.equal(f.pending().includes(handle), false);
+          assert.equal(f.saved().productionSyncRequired, false);
+          assert.equal(operation.confirmed, false);
+        }
+      } finally { await f.close(); }
+    });
+  }
+
   await test('恢复托管自动等待旧操作退出再同步手动生产，不增加额外点击且预算不变', async () => {
     const f = await fixture(), gate = deferred();
     try {

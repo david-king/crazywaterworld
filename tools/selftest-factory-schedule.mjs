@@ -121,6 +121,40 @@ test('募兵计数推送使按需生产和独立募兵备料重新检查，其�
     f.scheduler.dispose();
   }
 });
+
+test('本轮预期扣料和收货按绝对库存匹配，合并与重复推送不取消剩余排产', () => {
+  const f = fixture(); f.settings.factory.demandFirst = true;
+  const message = (name, items) => f.client.emit('message', {name, body: protocol[name].decode(protocol[name].encode({items}).finish())});
+  message('AllItemResponse', [{itemId:'木材',num:100}]);
+  const releaseFirst = f.scheduler.expectStockChange(new Map([['木材',-1]]));
+  const releaseSecond = f.scheduler.expectStockChange(new Map([['木材',-1]]), new Map([['木材',99]]));
+  message('SCUpdateItem', [{itemId:'木材',num:100}]); // Duplicate before either debit arrives.
+  message('SCUpdateItem', [{itemId:'木材',num:98}]); // Both serial debits coalesced.
+  assert.equal(f.scheduler.demandVersion(),0);
+  releaseFirst(); releaseSecond();
+  const releaseHarvest = f.scheduler.expectStockChange(new Map([['产品甲',2]]));
+  message('SCUpdateItem', [{itemId:'产品甲',num:2}]); releaseHarvest();
+  message('SCUpdateItem', [{itemId:'产品甲',num:2}]);
+  assert.equal(f.scheduler.demandVersion(),0);
+  message('SCUpdateItem', [{itemId:'产品甲',num:0}]);
+  assert.equal(f.scheduler.demandVersion(),1,'真实额外消费必须重新排产');
+  f.scheduler.dispose();
+});
+
+test('额外扣料、混合推送、订单变化及已结束操作的迟到推送仍使旧计划失效', () => {
+  for (const change of ['extra','mixed','order','released','unknown']) {
+    const f = fixture(); f.settings.factory.demandFirst = true;
+    if (change !== 'unknown') f.client.emit('message',{name:'AllItemResponse',body:{items:[{itemId:'木材',num:100}]}});
+    const release = f.scheduler.expectStockChange(new Map([['木材',-1]]));
+    if (change === 'released') release();
+    f.client.emit('message', change === 'order' ? {name:'SCWorkerOrder',body:{}} : {
+      name:'SCUpdateItem',body:{items:[{itemId:'木材',num:change === 'extra' ? 98 : 99},
+        ...(change === 'mixed' ? [{itemId:'产品甲',num:1}] : [])]},
+    });
+    assert.equal(f.scheduler.demandVersion(),1,change);
+    release(); f.scheduler.dispose();
+  }
+});
 test('满仓滞留成品无成功动作不热循环，检查失败沿用配置退避', () => {
   const f=fixture(); f.settings.factory.checkEverySeconds=11;
   f.scheduler.checked([factory([],[item(1)])],{version:0,progressed:false,slots:6});
